@@ -2,18 +2,23 @@ extern crate restson;
 
 #[macro_use]
 extern crate serde_derive;
+extern crate serde_json;
+
+use serde_json::{Value, Map};
+
+use std::collections::HashMap;
+use std::vec::Vec;
 
 use restson::{RestClient,RestPath,Error};
 
-#[derive(Deserialize)]
-struct BucketList {}
-
-#[derive(Deserialize)]
+#[derive(Deserialize,Debug)]
 pub struct Bucket {
     #[serde(default)]
     pub id: String,
-    #[serde(skip)]
-    pub name: Option<String>,
+    #[serde(default)]
+    pub created: String,
+    #[serde(default)]
+    pub name: Value,
     #[serde(rename = "type")]
     pub _type: String,
     #[serde(default)]
@@ -21,7 +26,14 @@ pub struct Bucket {
     #[serde(default)]
     pub hostname: String,
     #[serde(default)]
-    pub created: String,
+    pub last_updated: String,
+}
+
+#[derive(Deserialize,Debug)]
+#[serde(untagged)]
+pub enum BucketList {
+    // TODO: Inherit Bucket enum
+    Object(Map<String, Value>)
 }
 
 #[derive(Serialize)]
@@ -34,22 +46,48 @@ pub struct CreateBucket {
     pub hostname: String
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Event {
+    // FIXME: Make optional somehow
+    #[serde(skip)]
+    id: i64,
+    #[serde(default)]
+    timestamp: String,
+    #[serde(default)]
+    duration: f64,
+    #[serde(default)]
+    data: HashMap<String, Value>,
+}
+
+#[derive(Deserialize,Debug)]
+#[serde(untagged)]
+pub enum EventList {
+    Array(Vec<Event>)
+}
 #[derive(Deserialize)]
 pub struct Info {
   pub hostname: String,
   pub testing: bool,
 }
 
-impl RestPath<()> for BucketList {
-    fn get_path(_: ()) -> Result<String,Error> { Ok(String::from("/api/0/buckets/")) }
-}
-
 impl RestPath<String> for Bucket {
     fn get_path(bucket: String) -> Result<String,Error> { Ok(format!("/api/0/buckets/{}", bucket)) }
 }
 
+impl RestPath<()> for BucketList {
+    fn get_path(_: ()) -> Result<String,Error> { Ok(String::from("/api/0/buckets/")) }
+}
+
 impl RestPath<String> for CreateBucket {
     fn get_path(bucket: String) -> Result<String,Error> { Ok(format!("/api/0/buckets/{}", bucket)) }
+}
+
+impl RestPath<String> for Event {
+    fn get_path(bucket: String) -> Result<String,Error> { Ok(format!("/api/0/buckets/{}/events", bucket)) }
+}
+
+impl RestPath<String> for EventList {
+    fn get_path(bucket: String) -> Result<String,Error> { Ok(format!("/api/0/buckets/{}/events", bucket)) }
 }
 
 impl RestPath<()> for Info {
@@ -78,6 +116,10 @@ impl AwClient {
         return client.client.get(bucketname.clone()).unwrap();
     }
 
+    pub fn get_buckets(client: &mut AwClient) -> Result<BucketList, Error> {
+        return client.client.get(());
+    }
+
     pub fn create_bucket(client: &mut AwClient, bucketname: &String, buckettype: &String) -> bool {
         let hostname = String::from("Unknown"); // TODO: Implement this
         let data = CreateBucket {
@@ -87,6 +129,14 @@ impl AwClient {
         };
         client.client.post(bucketname.clone(), &data);
         return true;
+    }
+
+    pub fn get_events(client: &mut AwClient, bucketname: &String) -> Result<EventList, Error> {
+        return client.client.get(bucketname.clone());
+    }
+
+    pub fn insert_event(client: &mut AwClient, bucketname: &String, event: &Event) -> Result<(), Error> {
+        return client.client.post(bucketname.clone(), event.clone());
     }
 
     pub fn get_info(client: &mut AwClient) -> Info {

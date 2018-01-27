@@ -6,7 +6,6 @@ extern crate serde_json;
 
 use serde_json::{Value, Map};
 
-use std::collections::HashMap;
 use std::vec::Vec;
 
 use restson::{RestClient,RestPath,Error};
@@ -33,6 +32,8 @@ pub struct Bucket {
 #[serde(untagged)]
 pub enum BucketList {
     // TODO: Inherit Bucket enum
+    // Might be harder than expected
+    // https://serde.rs/deserialize-map.html
     Object(Map<String, Value>)
 }
 
@@ -50,13 +51,13 @@ pub struct CreateBucket {
 pub struct Event {
     // FIXME: Make optional somehow
     #[serde(skip)]
-    id: i64,
+    pub id: i64,
     #[serde(default)]
-    timestamp: String,
+    pub timestamp: String,
     #[serde(default)]
-    duration: f64,
+    pub duration: f64,
     #[serde(default)]
-    data: HashMap<String, Value>,
+    pub data: Map<String, Value>,
 }
 
 #[derive(Deserialize,Debug)]
@@ -120,15 +121,21 @@ impl AwClient {
         return client.client.get(());
     }
 
-    pub fn create_bucket(client: &mut AwClient, bucketname: &String, buckettype: &String) -> bool {
+    pub fn create_bucket(client: &mut AwClient, bucketname: &String, buckettype: &String) -> Result<(), Error> {
         let hostname = String::from("Unknown"); // TODO: Implement this
         let data = CreateBucket {
             client: client.name.clone(),
             _type: buckettype.clone(),
             hostname: hostname.clone()
         };
-        client.client.post(bucketname.clone(), &data);
-        return true;
+        // Ignore 304 responses (if bucket already exists)
+        if let Err(e) = client.client.post(bucketname.clone(), &data) {
+            match e {
+                Error::HttpError(304) => (),
+                _ => return Err(e),
+            };
+        }
+        Ok(())
     }
 
     pub fn get_events(client: &mut AwClient, bucketname: &String) -> Result<EventList, Error> {

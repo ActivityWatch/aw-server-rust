@@ -47,6 +47,8 @@ pub struct CreateBucket {
     pub hostname: String
 }
 
+pub struct DeleteBucket {}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Event {
     // FIXME: Make optional somehow
@@ -80,6 +82,10 @@ impl RestPath<()> for BucketList {
 }
 
 impl RestPath<String> for CreateBucket {
+    fn get_path(bucket: String) -> Result<String,Error> { Ok(format!("/api/0/buckets/{}", bucket)) }
+}
+
+impl RestPath<String> for DeleteBucket {
     fn get_path(bucket: String) -> Result<String,Error> { Ok(format!("/api/0/buckets/{}", bucket)) }
 }
 
@@ -136,6 +142,11 @@ impl AwClient {
             };
         }
         Ok(())
+    }
+
+    pub fn delete_bucket(client: &mut AwClient, bucketname: &String) -> Result<(), Error> {
+        /* NOTE: needs restson git master to work */
+        return client.client.delete::<String, DeleteBucket>(bucketname.clone());
     }
 
     pub fn get_events(client: &mut AwClient, bucketname: &String) -> Result<EventList, Error> {

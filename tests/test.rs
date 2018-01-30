@@ -39,10 +39,9 @@ mod test {
         let events = AwClient::get_events(&mut client, &bucketname).unwrap();
         println!("Events: {:?}", events);
 
+        AwClient::delete_bucket(&mut client, &bucketname).unwrap();
+
         // Uncomment to see stdout from "cargo test"
         // assert!(1==2);
-
-        // TODO:
-        // Delete bucket
     }
 }

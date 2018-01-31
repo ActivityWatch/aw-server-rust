@@ -145,7 +145,6 @@ impl AwClient {
     }
 
     pub fn delete_bucket(client: &mut AwClient, bucketname: &String) -> Result<(), Error> {
-        /* NOTE: needs restson git master to work */
         return client.client.delete::<String, DeleteBucket>(bucketname.clone());
     }
 

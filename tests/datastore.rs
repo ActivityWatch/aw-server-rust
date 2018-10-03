@@ -49,19 +49,28 @@ mod tests {
         };
         let mut e2 = e1.clone();
         e2.timestamp = Utc::now();
+        let mut e_replace = e2.clone();
+        e_replace.data = json!({"key": "value2"});
+        e_replace.duration = Duration::from_seconds(2.0);
+
         let mut event_list = Vec::new();
-        event_list.push(e1);
+        event_list.push(e1.clone());
         event_list.push(e2);
+
         datastore::insert_events(&conn, &bucket.id, &event_list).unwrap();
+
+        datastore::replace_last_event(&conn, &bucket.id, &e_replace).unwrap();
 
         // Get events
         let fetched_events = datastore::get_events(&conn, &bucket.id, None, None, None).unwrap();
+        let expected_fetched_events = vec![e1, e_replace];
         assert_eq!(fetched_events.len(), 2);
         for i in 0..fetched_events.len() {
-            let orig = &event_list[i];
+            let expected = &expected_fetched_events[i];
             let new = &fetched_events[i];
-            assert_eq!(new.timestamp,orig.timestamp);
-            assert_eq!(new.duration,orig.duration);
+            assert_eq!(new.timestamp,expected.timestamp);
+            assert_eq!(new.duration,expected.duration);
+            assert_eq!(new.data,expected.data);
         }
     }
 }

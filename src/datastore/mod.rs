@@ -117,6 +117,22 @@ pub fn insert_events(conn: &Connection, bucket_id: &str, events: &Vec<Event>) ->
     Ok(())
 }
 
+pub fn replace_last_event(conn: &Connection, bucket_id: &str, event: &Event) -> Result<(), rusqlite::Error> {
+    let mut stmt = try!(conn.prepare("
+        UPDATE events
+        SET starttime = ?2, endtime = ?3, data = ?4
+        WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1)
+            AND endtime = (SELECT max(endtime) FROM events)"));
+    let starttime_nanos : i64 = event.timestamp.timestamp_nanos();
+    let duration_nanos : i64 = event.duration.num_nanos() as i64;
+    let endtime_nanos : i64 = starttime_nanos + duration_nanos;
+    if endtime_nanos < starttime_nanos {
+        println!("SHIT!");
+    }
+    try!(stmt.execute(&[&bucket_id, &starttime_nanos, &endtime_nanos, &event.data]));
+    Ok(())
+}
+
 pub fn get_events(conn: &Connection, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, rusqlite::Error> {
     let mut list = Vec::new();
     let starttime_ns = match starttime_opt {

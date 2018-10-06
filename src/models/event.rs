@@ -12,3 +12,8 @@ pub struct Event {
     pub data: Value, /* TODO: force this to be a value::Object somehow */
 }
 
+impl Event {
+    pub fn calculate_endtime(&self) -> DateTime<Utc> {
+        self.timestamp + chrono::Duration::nanoseconds(self.duration.num_nanos() as i64)
+    }
+}

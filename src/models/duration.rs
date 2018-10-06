@@ -16,11 +16,11 @@ pub struct Duration {nanos: u64}
 
 impl Duration {
     pub fn from_seconds(seconds: f64) -> Duration {
-        Duration { nanos: (seconds*1000000f64) as u64 }
+        Duration { nanos: (seconds*1000000000f64) as u64 }
     }
 
     pub fn num_seconds(&self) -> f64 {
-        (self.nanos as f64)/1000000f64
+        (self.nanos as f64)/1000000000f64
     }
 
     pub fn from_nanos(nanos: u64) -> Duration {
@@ -45,7 +45,7 @@ use std::fmt;
 
 impl fmt::Debug for Duration {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}s", (self.nanos as f64)/1000000f64)
+        write!(f, "{}s", (self.nanos as f64)/1000000000f64)
     }
 }
 

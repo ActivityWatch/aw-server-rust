@@ -69,7 +69,7 @@ pub fn rocket() -> rocket::Rocket {
         .mount("/api/0/info", routes![server_info])
         .mount("/api/0/buckets", routes![
                bucket::bucket_new, bucket::bucket_delete, bucket::buckets_get, bucket::bucket_get,
-               bucket::bucket_events_get, bucket::bucket_events_create, bucket::bucket_event_count
+               bucket::bucket_events_get, bucket::bucket_events_create, bucket::bucket_events_heartbeat, bucket::bucket_events_count
         ])
         .catch(catchers![not_found])
         .manage(ServerStateMutex::new(server_state))

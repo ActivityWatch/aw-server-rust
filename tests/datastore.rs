@@ -63,7 +63,7 @@ mod tests {
 
         // Get events
         let fetched_events = datastore::get_events(&conn, &bucket.id, None, None, None).unwrap();
-        let expected_fetched_events = vec![e1, e_replace];
+        let expected_fetched_events = vec![e_replace, e1];
         assert_eq!(fetched_events.len(), 2);
         for i in 0..fetched_events.len() {
             let expected = &expected_fetched_events[i];
@@ -72,5 +72,9 @@ mod tests {
             assert_eq!(new.duration,expected.duration);
             assert_eq!(new.data,expected.data);
         }
+
+        // Get eventcount
+        let event_count = datastore::get_events_count(&conn, &bucket.id, None, None).unwrap();
+        assert_eq!(event_count, 2);
     }
 }

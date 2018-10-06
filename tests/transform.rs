@@ -29,12 +29,14 @@ mod tests {
         };
 
         // Merge result
-        let res_merge = transform::heartbeat(&event1, &heartbeat1, 1.0);
-        assert!(res_merge.is_some());
+        let res_merge = transform::heartbeat(&event1, &heartbeat1, 1.0).unwrap();
+        assert_eq!(res_merge.duration.num_nanos(), heartbeat1.duration.num_nanos());
 
         // No merge result
         let res_no_merge = transform::heartbeat(&event1, &heartbeat1, 0.0);
         assert!(res_no_merge.is_none());
+
+        // TODO: needs more tests!
     }
 
     #[test]

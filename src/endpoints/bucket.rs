@@ -10,33 +10,37 @@ use rocket::State;
 use super::ServerStateMutex;
 
 use super::super::datastore;
+use super::super::transform;
 
 pub type BucketList = Vec<Bucket>;
 
 #[get("/", format = "application/json")]
-pub fn buckets_get(map: State<ServerStateMutex>) -> Json<BucketList> {
-    let conn = &map.lock().unwrap().dbconnection;
+pub fn buckets_get(state: State<ServerStateMutex>) -> Json<BucketList> {
+    let conn = &state.lock().unwrap().dbconnection;
     let bucketlist = datastore::get_buckets(conn).unwrap();
     return Json(bucketlist);
 }
 
 #[get("/<bucket_id>", format = "application/json")]
-pub fn bucket_get(bucket_id: String, map: State<ServerStateMutex>) -> Option<Json<Bucket>> {
-    let conn = &map.lock().unwrap().dbconnection;
+pub fn bucket_get(bucket_id: String, state: State<ServerStateMutex>) -> Option<Json<Bucket>> {
+    let conn = &state.lock().unwrap().dbconnection;
     return Some(Json(datastore::get_bucket(conn, &bucket_id).unwrap()));
 }
 
 #[post("/<bucket_id>", format = "application/json", data = "<message>")]
-pub fn bucket_new(bucket_id: String, mut message: Json<Bucket>, map: State<ServerStateMutex>) -> Json<Value> {
-    let conn = &map.lock().unwrap().dbconnection;
-    if message.0.id != bucket_id {
+pub fn bucket_new(bucket_id: String, mut message: Json<Bucket>, state: State<ServerStateMutex>) -> Json<Value> {
+    let conn = &state.lock().unwrap().dbconnection;
+    if message.0.id.chars().count() == 0 {
+        message.0.id = bucket_id.clone();
+    } else if message.0.id != bucket_id {
         // TODO: Return 400
+        println!("{},{}", message.0.id, bucket_id);
         return Json(json!({
             "status": "error",
             "reason": "BucketID in URL and body doesn't match!"
         }))
     }
-    else if datastore::get_bucket(conn, &bucket_id).is_ok() {
+    if datastore::get_bucket(conn, &bucket_id).is_ok() {
         // TODO: Respond 304
         return Json(json!({
             "status": "error",
@@ -52,7 +56,7 @@ pub fn bucket_new(bucket_id: String, mut message: Json<Bucket>, map: State<Serve
 }
 
 #[derive(FromForm)]
-pub struct Constraints {
+pub struct GetEventsConstraints {
     start: Option<String>,
     end: Option<String>,
     limit: Option<u64>
@@ -60,8 +64,8 @@ pub struct Constraints {
 
 /* FIXME: optional constraints do not work, you always need a ? in the request */
 #[get("/<bucket_id>/events?<constraints>", format = "application/json")]
-pub fn bucket_events_get(bucket_id: String, constraints: Constraints, map: State<ServerStateMutex>) -> Json<Value> {
-    let conn = &map.lock().unwrap().dbconnection;
+pub fn bucket_events_get(bucket_id: String, constraints: GetEventsConstraints, state: State<ServerStateMutex>) -> Json<Value> {
+    let conn = &state.lock().unwrap().dbconnection;
     if datastore::get_bucket(conn, &bucket_id).is_err() {
         // TODO: Respond 400
         return Json(json!({
@@ -97,8 +101,8 @@ pub fn bucket_events_get(bucket_id: String, constraints: Constraints, map: State
 }
 
 #[post("/<bucket_id>/events", format = "application/json", data = "<events>")]
-pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, map: State<ServerStateMutex>) -> Json<Value> {
-    let conn = &map.lock().unwrap().dbconnection;
+pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: State<ServerStateMutex>) -> Json<Value> {
+    let conn = &state.lock().unwrap().dbconnection;
     if datastore::get_bucket(conn, &bucket_id).is_err() {
         // TODO: Respond 400
         return Json(json!({
@@ -110,9 +114,15 @@ pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, map: St
     return Json(json!({"status": "ok"}))
 }
 
-#[get("/<bucket_id>/events/count", format = "application/json")]
-pub fn bucket_event_count(bucket_id: String, map: State<ServerStateMutex>) -> Json<Value> {
-    let conn = &map.lock().unwrap().dbconnection;
+#[derive(FromForm)]
+pub struct HeartbeatConstraints {
+    pulsetime: f64,
+}
+
+#[post("/<bucket_id>/heartbeat?<constraints>", format = "application/json", data = "<heartbeat_json>")]
+pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, constraints: HeartbeatConstraints, state: State<ServerStateMutex>) -> Json<Value> {
+    let heartbeat = heartbeat_json.into_inner();
+    let conn = &state.lock().unwrap().dbconnection;
     if datastore::get_bucket(conn, &bucket_id).is_err() {
         // TODO: Respond 400
         return Json(json!({
@@ -120,12 +130,38 @@ pub fn bucket_event_count(bucket_id: String, map: State<ServerStateMutex>) -> Js
             "reason": "Bucket with that ID doesn't exist"
         }))
     }
-    return Json(json!({ "count": "1" }))
+    let mut last_event_vec = datastore::get_events(&conn, &bucket_id, None, None, Some(1)).unwrap();
+    match last_event_vec.pop() {
+        None => {
+            datastore::insert_events(&conn, &bucket_id, &vec![heartbeat]).unwrap();
+        }
+        Some(last_event) => {
+            match transform::heartbeat(&last_event, &heartbeat, constraints.pulsetime) {
+                None => datastore::insert_events(&conn, &bucket_id, &vec![heartbeat]).unwrap(),
+                Some(merged_heartbeat) => datastore::replace_last_event(&conn, &bucket_id, &merged_heartbeat).unwrap()
+            }
+        }
+    }
+    return Json(json!({"status": "ok"}))
+}
+
+#[get("/<bucket_id>/events/count", format = "application/json")]
+pub fn bucket_events_count(bucket_id: String, state: State<ServerStateMutex>) -> Json<Value> {
+    let conn = &state.lock().unwrap().dbconnection;
+    if datastore::get_bucket(conn, &bucket_id).is_err() {
+        // TODO: Respond 400
+        return Json(json!({
+            "status": "error",
+            "reason": "Bucket with that ID doesn't exist"
+        }))
+    }
+    let eventcount = datastore::get_events_count(&conn, &bucket_id, None, None).unwrap();
+    return Json(json!({ "count": eventcount }))
 }
 
 #[delete("/<bucket_id>")]
-pub fn bucket_delete(bucket_id: String, map: State<ServerStateMutex>) -> Option<Json<Value>> {
-    let conn = &map.lock().unwrap().dbconnection;
+pub fn bucket_delete(bucket_id: String, state: State<ServerStateMutex>) -> Option<Json<Value>> {
+    let conn = &state.lock().unwrap().dbconnection;
     match datastore::delete_bucket(conn, &bucket_id) {
         Ok(_) => Some(Json(json!({ "status": "ok" }))),
         Err(_) => None

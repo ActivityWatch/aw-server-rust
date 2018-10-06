@@ -12,6 +12,7 @@ extern crate rusqlite;
 extern crate chrono;
 
 pub mod models;
+pub mod transform;
 pub mod datastore;
 pub mod endpoints;
 

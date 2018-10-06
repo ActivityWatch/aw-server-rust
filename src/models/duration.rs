@@ -7,12 +7,30 @@ use serde::Deserializer;
  * FIXME:
  * This datatype is actually only written because I had to, I didn't really want to code it to
  * begin with.
- * What I actually wanted was to use serdes Duration datatype, but since I was not able to extend
+ * What I actually wanted was to use chronos Duration datatype, but since I was not able to extend
  * it to do serde_json serialization/deserialization (because it's in a seperate crate) I wrote a
  * new datatype instead.
  */
 
 pub struct Duration {nanos: u64}
+
+impl Duration {
+    pub fn from_seconds(seconds: f64) -> Duration {
+        Duration { nanos: (seconds*1000000f64) as u64 }
+    }
+
+    pub fn num_seconds(&self) -> f64 {
+        (self.nanos as f64)/1000000f64
+    }
+
+    pub fn from_nanos(nanos: u64) -> Duration {
+        Duration { nanos: nanos }
+    }
+
+    pub fn num_nanos(&self) -> u64 {
+        self.nanos
+    }
+}
 
 impl Serialize for Duration {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -69,23 +87,5 @@ impl<'de> Deserialize<'de> for Duration {
 impl PartialEq for Duration {
     fn eq(&self, other: &Duration) -> bool {
         self.nanos == other.nanos
-    }
-}
-
-impl Duration {
-    pub fn from_seconds(seconds: f64) -> Duration {
-        Duration { nanos: (seconds*1000000f64) as u64 }
-    }
-
-    pub fn num_seconds(&self) -> f64 {
-        (self.nanos as f64)/1000000f64
-    }
-
-    pub fn from_nanos(nanos: u64) -> Duration {
-        Duration { nanos: nanos }
-    }
-
-    pub fn num_nanos(&self) -> u64 {
-        self.nanos
     }
 }

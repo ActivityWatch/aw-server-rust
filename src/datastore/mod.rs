@@ -161,7 +161,7 @@ pub fn get_events(conn: &Connection, bucket_id: &str, starttime_opt: Option<Date
         if endtime > endtime_ns {
             endtime = endtime_ns;
         }
-        let mut duration_ns : u64 = 0;
+        let mut duration_ns : i64 = 0;
         if endtime < starttime {
             println!("Endtime is lower than starttime! start:{} end:{}", starttime, endtime);
         } else {

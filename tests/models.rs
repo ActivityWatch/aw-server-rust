@@ -39,11 +39,11 @@ mod tests {
     fn test_duration() {
         let d_s = Duration::from_seconds(1.2345);
         assert_eq!(d_s.num_seconds(), 1.2345);
-        assert_eq!(d_s.num_nanos(), 1234500);
+        assert_eq!(d_s.num_nanos(), 1234500000);
         println!("seconds: {:?}", d_s);
-        let d_ns = Duration::from_nanos(2345678);
-        assert_eq!(d_ns.num_seconds(), 2.345678);
-        assert_eq!(d_ns.num_nanos(), 2345678);
+        let d_ns = Duration::from_nanos(2345678900);
+        assert_eq!(d_ns.num_seconds(), 2.3456789);
+        assert_eq!(d_ns.num_nanos(), 2345678900);
         println!("seconds: {:?}", d_ns);
     }
 }

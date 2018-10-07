@@ -3,6 +3,8 @@ use serde::Serializer;
 use serde::Deserialize;
 use serde::Deserializer;
 
+use chrono;
+
 /*
  * FIXME:
  * This datatype is actually only written because I had to, I didn't really want to code it to
@@ -12,23 +14,27 @@ use serde::Deserializer;
  * new datatype instead.
  */
 
-pub struct Duration {nanos: u64}
+pub struct Duration (chrono::Duration);
 
 impl Duration {
     pub fn from_seconds(seconds: f64) -> Duration {
-        Duration { nanos: (seconds*1000000000f64) as u64 }
+        Duration ( chrono::Duration::nanoseconds((seconds*1000000000f64) as i64) )
+    }
+
+    pub fn inner(&self) -> &chrono::Duration {
+        &self.0
     }
 
     pub fn num_seconds(&self) -> f64 {
-        (self.nanos as f64)/1000000000f64
+        (self.0.num_nanoseconds().unwrap() as f64)/1000000000f64
     }
 
-    pub fn from_nanos(nanos: u64) -> Duration {
-        Duration { nanos: nanos }
+    pub fn from_nanos(nanos: i64) -> Duration {
+        Duration ( chrono::Duration::nanoseconds(nanos))
     }
 
-    pub fn num_nanos(&self) -> u64 {
-        self.nanos
+    pub fn num_nanos(&self) -> i64 {
+        self.0.num_nanoseconds().unwrap()
     }
 }
 
@@ -45,13 +51,13 @@ use std::fmt;
 
 impl fmt::Debug for Duration {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}s", (self.nanos as f64)/1000000000f64)
+        write!(f, "{}s", self.num_seconds())
     }
 }
 
 impl Clone for Duration {
     fn clone(&self) -> Duration {
-        Duration{ nanos: self.nanos }
+        Duration( self.0.clone() )
     }
 }
 
@@ -86,6 +92,6 @@ impl<'de> Deserialize<'de> for Duration {
 
 impl PartialEq for Duration {
     fn eq(&self, other: &Duration) -> bool {
-        self.nanos == other.nanos
+        self.num_nanos() == other.num_nanos()
     }
 }

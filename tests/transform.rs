@@ -23,14 +23,13 @@ mod tests {
         };
         let heartbeat1 = Event {
             id: None,
-            timestamp: now.clone(),
+            timestamp: Utc::now(),
             duration: Duration::from_seconds(1.0),
             data: json!({"test": 1})
         };
 
         // Merge result
         let res_merge = transform::heartbeat(&event1, &heartbeat1, 1.0).unwrap();
-        assert_eq!(res_merge.duration.num_nanos(), heartbeat1.duration.num_nanos());
 
         // No merge result
         let res_no_merge = transform::heartbeat(&event1, &heartbeat1, 0.0);

@@ -28,7 +28,7 @@ pub fn heartbeat(event: &Event, heartbeat: &Event, pulsetime: f64) -> Option<Eve
         endtime = &event_endtime;
     }
 
-    let duration = Duration::from_nanos(endtime.signed_duration_since(*starttime).num_nanoseconds().unwrap() as u64);
+    let duration = Duration::from_nanos(endtime.signed_duration_since(*starttime).num_nanoseconds().unwrap());
     println!("{:?}", duration);
 
     // Success, return successful heartbeat event

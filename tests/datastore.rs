@@ -7,7 +7,7 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
 
-    use aw_server::datastore;
+    use aw_server::datastore::DatastoreInstance;
     use aw_server::models::bucket::Bucket;
     use aw_server::models::event::Event;
     use aw_server::models::duration::Duration;
@@ -15,8 +15,8 @@ mod tests {
     #[test]
     fn test_datastore() {
         // Setup datastore
-        let conn = datastore::setup_memory();
-        //let conn = datastore::setup("/tmp/test.db".to_string());
+        let ds = DatastoreInstance::new_in_memory();
+        //let conn = ds.setup("/tmp/test.db".to_string());
 
         // Create bucket
         let bucket = Bucket {
@@ -26,10 +26,10 @@ mod tests {
             hostname: "testhost".to_string(),
             created: Some(Utc::now()),
         };
-        datastore::create_bucket(&conn, &bucket).unwrap();
+        ds.create_bucket(&bucket).unwrap();
 
         // Fetch bucket
-        let bucket_fetched = datastore::get_bucket(&conn, &bucket.id).unwrap();
+        let bucket_fetched = ds.get_bucket(&bucket.id).unwrap().unwrap();
         assert_eq!(bucket_fetched.id, bucket.id);
         assert_eq!(bucket_fetched._type, bucket._type);
         assert_eq!(bucket_fetched.client, bucket.client);
@@ -37,7 +37,7 @@ mod tests {
         assert_eq!(bucket_fetched.created, bucket.created);
 
         // Fetch all buckets
-        let fetched_buckets = datastore::get_buckets(&conn).unwrap();
+        let fetched_buckets = ds.get_buckets().unwrap();
         assert_eq!(fetched_buckets.len(), 1);
 
         // Insert event
@@ -57,12 +57,12 @@ mod tests {
         event_list.push(e1.clone());
         event_list.push(e2.clone());
 
-        datastore::insert_events(&conn, &bucket.id, &event_list).unwrap();
+        ds.insert_events(&bucket.id, &event_list).unwrap();
 
-        datastore::replace_last_event(&conn, &bucket.id, &e_replace).unwrap();
+        ds.replace_last_event(&bucket.id, &e_replace).unwrap();
 
         // Get all events
-        let fetched_events_all = datastore::get_events(&conn, &bucket.id, None, None, None).unwrap();
+        let fetched_events_all = ds.get_events(&bucket.id, None, None, None).unwrap();
         let expected_fetched_events = vec![&e_replace, &e1];
         assert_eq!(fetched_events_all.len(), 2);
         for i in 0..fetched_events_all.len() {
@@ -74,28 +74,28 @@ mod tests {
         }
 
         println!("Get events with limit filter");
-        let fetched_events_limit = datastore::get_events(&conn, &bucket.id, None, None, Some(1)).unwrap();
+        let fetched_events_limit = ds.get_events(&bucket.id, None, None, Some(1)).unwrap();
         assert_eq!(fetched_events_limit.len(), 1);
         assert_eq!(fetched_events_limit[0].timestamp,e_replace.timestamp);
         assert_eq!(fetched_events_limit[0].duration,e_replace.duration);
         assert_eq!(fetched_events_limit[0].data,e_replace.data);
 
         println!("Get events with starttime filter");
-        let fetched_events_start = datastore::get_events(&conn, &bucket.id, Some(e2.timestamp.clone()), None, None).unwrap();
+        let fetched_events_start = ds.get_events(&bucket.id, Some(e2.timestamp.clone()), None, None).unwrap();
         assert_eq!(fetched_events_start.len(), 1);
         assert_eq!(fetched_events_start[0].timestamp,e_replace.timestamp);
         assert_eq!(fetched_events_start[0].duration,e_replace.duration);
         assert_eq!(fetched_events_start[0].data,e_replace.data);
 
         println!("Get events with endtime filter");
-        let fetched_events_start = datastore::get_events(&conn, &bucket.id, None, Some(e1.timestamp.clone()), None).unwrap();
+        let fetched_events_start = ds.get_events(&bucket.id, None, Some(e1.timestamp.clone()), None).unwrap();
         assert_eq!(fetched_events_start.len(), 1);
         assert_eq!(fetched_events_start[0].timestamp,e1.timestamp);
         assert_eq!(fetched_events_start[0].duration,e1.duration);
         assert_eq!(fetched_events_start[0].data,e1.data);
 
         // Get eventcount
-        let event_count = datastore::get_events_count(&conn, &bucket.id, None, None).unwrap();
+        let event_count = ds.get_events_count(&bucket.id, None, None).unwrap();
         assert_eq!(event_count, 2);
     }
 }

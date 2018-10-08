@@ -10,6 +10,11 @@ curl $URL -X POST -d '{"id": "testid", "type": "testtype", "client": "testclient
 printf "\nBucket info\n"
 URL="$BASEURL/buckets/testid/"
 curl $URL -X GET
+printf "\nBucket info of non-existent bucket\n"
+URL="$BASEURL/buckets/testid2/"
+set +e
+curl $URL -X GET || :
+set -e
 printf "\nEvent count\n"
 URL="$BASEURL/buckets/testid/events/count"
 curl $URL -X GET

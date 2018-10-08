@@ -4,15 +4,11 @@ use rocket;
 use rocket::response::{NamedFile};
 use rocket_contrib::{Json, Value};
 
-use std::sync::Mutex;
-use rusqlite::Connection;
-
-use datastore;
+use datastore::DatastoreInstance;
 
 pub struct ServerState {
-    pub dbconnection: Connection
+    pub datastore: DatastoreInstance
 }
-pub type ServerStateMutex = Mutex<ServerState>;
 
 pub mod bucket;
 
@@ -59,7 +55,7 @@ fn not_found() -> Json<Value> {
 
 pub fn rocket() -> rocket::Rocket {
     let server_state = ServerState {
-        dbconnection: datastore::setup("/tmp/test.db".to_string())
+        datastore: DatastoreInstance::new("/tmp/test.db".to_string())
     };
 
     rocket::ignite()
@@ -72,5 +68,5 @@ pub fn rocket() -> rocket::Rocket {
                bucket::bucket_events_get, bucket::bucket_events_create, bucket::bucket_events_heartbeat, bucket::bucket_events_count
         ])
         .catch(catchers![not_found])
-        .manage(ServerStateMutex::new(server_state))
+        .manage(server_state)
 }

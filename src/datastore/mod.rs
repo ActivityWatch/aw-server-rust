@@ -5,11 +5,16 @@ use rusqlite::Connection;
 use chrono::DateTime;
 use chrono::NaiveDateTime;
 use chrono::Utc;
-use std::convert::TryInto;
 
 use super::models::bucket::Bucket;
 use super::models::event::Event;
 use super::models::duration::Duration;
+
+/*
+ * TODO:
+ * - Optimize with bucket cache (for IDs and get)
+ * - Optimize witht transactions
+ */
 
 fn _create_tables(conn: &Connection) {
     /* Set up bucket table and index */
@@ -71,15 +76,15 @@ pub  fn delete_bucket(conn: &Connection, bucket_id: &str) -> Result<(), rusqlite
     }
 }
 
-pub fn get_bucket(conn: &Connection, bucket_id: &str) -> Result<Bucket, rusqlite::Error> {
+pub fn get_bucket(conn: &Connection, bucket_id: &str) -> Result<Option<Bucket>, rusqlite::Error> {
     conn.query_row("SELECT name, type, client, hostname, created FROM buckets WHERE name = ?1", &[&bucket_id], |row| {
-        Bucket {
+        Some(Bucket {
             id: row.get(0),
             _type: row.get(1),
             client: row.get(2),
             hostname: row.get(3),
             created: row.get(4),
-        }
+        })
     })
 }
 
@@ -118,11 +123,12 @@ pub fn insert_events(conn: &Connection, bucket_id: &str, events: &Vec<Event>) ->
 }
 
 pub fn replace_last_event(conn: &Connection, bucket_id: &str, event: &Event) -> Result<(), rusqlite::Error> {
+    /* TODO: Optimize this query*/
     let mut stmt = try!(conn.prepare("
         UPDATE events
         SET starttime = ?2, endtime = ?3, data = ?4
         WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1)
-            AND endtime = (SELECT max(endtime) FROM events)"));
+            AND endtime = (SELECT max(endtime) FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1))"));
     let starttime_nanos : i64 = event.timestamp.timestamp_nanos();
     let duration_nanos : i64 = event.duration.num_nanos() as i64;
     let endtime_nanos : i64 = starttime_nanos + duration_nanos;
@@ -135,45 +141,43 @@ pub fn replace_last_event(conn: &Connection, bucket_id: &str, event: &Event) -> 
 
 pub fn get_events(conn: &Connection, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, rusqlite::Error> {
     let mut list = Vec::new();
-    let starttime_ns = match starttime_opt {
+
+    let starttime_filter_ns = match starttime_opt {
         Some(dt) => dt.timestamp_nanos() as i64,
         None => 0
     };
-    let endtime_ns = match endtime_opt {
+    let endtime_filter_ns = match endtime_opt {
         Some(dt) => dt.timestamp_nanos() as i64,
         None => std::i64::MAX
     };
-    if starttime_ns >= endtime_ns {
-        println!("Endtime in event query was same or lower than starttime!");
+    if starttime_filter_ns > endtime_filter_ns {
+        println!("Starttime in event query was lower than endtime!");
         return Ok(list);
     }
     let limit = match limit_opt {
         Some(l) => l as i64,
         None => -1
     };
-    let mut stmt = try!(conn.prepare("SELECT id, starttime, endtime, data FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1) AND (starttime >= ?2 OR endtime <= ?3) ORDER BY starttime DESC LIMIT ?4;"));
-    let rows = try!(stmt.query_map(&[&bucket_id, &starttime_ns, &endtime_ns, &limit], |row| {
-        let mut starttime : i64 = row.get(1);
-        if starttime < starttime_ns {
-            starttime = starttime_ns;
-        }
-        let mut endtime : i64 = row.get(2);
-        if endtime > endtime_ns {
-            endtime = endtime_ns;
-        }
-        let mut duration_ns : i64 = 0;
-        if endtime < starttime {
-            println!("Endtime is lower than starttime! start:{} end:{}", starttime, endtime);
-        } else {
-            duration_ns = (endtime - starttime).try_into().unwrap();
-        }
-        let time_seconds : i64 = (starttime/1000000000).try_into().unwrap();
-        let time_nanos : u32 = (starttime%1000000000).try_into().unwrap();
+
+    let mut stmt = try!(conn.prepare("SELECT id, starttime, endtime, data FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1) AND endtime >= ?2 AND starttime <= ?3 ORDER BY starttime DESC LIMIT ?4;"));
+    let rows = try!(stmt.query_map(&[&bucket_id, &starttime_filter_ns, &endtime_filter_ns, &limit], |row| {
+        let id = row.get(0);
+        let mut starttime_ns : i64 = row.get(1);
+        let mut endtime_ns : i64 = row.get(2);
+        let data = row.get(3);
+
+        if starttime_ns < starttime_filter_ns { starttime_ns = starttime_filter_ns }
+        if endtime_ns > endtime_filter_ns { endtime_ns = endtime_filter_ns }
+        let duration_ns = endtime_ns - starttime_ns;
+
+        let time_seconds : i64 = (starttime_ns/1000000000) as i64;
+        let time_subnanos : u32 = (starttime_ns%1000000000) as u32;
+
         return Event {
-            id: Some(row.get(0)),
-            timestamp: DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time_seconds, time_nanos), Utc),
+            id: Some(id),
+            timestamp: DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time_seconds, time_subnanos), Utc),
             duration: Duration::from_nanos(duration_ns),
-            data: row.get(3),
+            data: data,
         }
     }));
     for row in rows {
@@ -183,18 +187,18 @@ pub fn get_events(conn: &Connection, bucket_id: &str, starttime_opt: Option<Date
 }
 
 pub fn get_events_count(conn: &Connection, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, rusqlite::Error> {
-    let starttime_ns = match starttime_opt {
+    let starttime_filter_ns = match starttime_opt {
         Some(dt) => dt.timestamp_nanos() as i64,
         None => 0
     };
-    let endtime_ns = match endtime_opt {
+    let endtime_filter_ns = match endtime_opt {
         Some(dt) => dt.timestamp_nanos() as i64,
         None => std::i64::MAX
     };
-    if starttime_ns >= endtime_ns {
+    if starttime_filter_ns >= endtime_filter_ns {
         println!("Endtime in event query was same or lower than starttime!");
         return Ok(0);
     }
-    let ret : i64 = try!(conn.query_row("SELECT count(*) FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1) AND (starttime >= ?2 OR endtime <= ?3)", &[&bucket_id, &starttime_ns, &endtime_ns], |row| row.get(0)));
+    let ret : i64 = try!(conn.query_row("SELECT count(*) FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1) AND (starttime >= ?2 OR endtime <= ?3)", &[&bucket_id, &starttime_filter_ns, &endtime_filter_ns], |row| row.get(0)));
     return Ok(ret);
 }

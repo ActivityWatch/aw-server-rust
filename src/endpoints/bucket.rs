@@ -7,6 +7,7 @@ use models::bucket::Bucket;
 use models::event::Event;
 
 use rocket::State;
+use rocket::http::Status;
 use super::ServerStateMutex;
 
 use super::super::datastore;
@@ -15,16 +16,19 @@ use super::super::transform;
 pub type BucketList = Vec<Bucket>;
 
 #[get("/", format = "application/json")]
-pub fn buckets_get(state: State<ServerStateMutex>) -> Json<BucketList> {
+pub fn buckets_get(state: State<ServerStateMutex>) -> Result<Json<BucketList>, rocket::Error> {
     let conn = &state.lock().unwrap().dbconnection;
     let bucketlist = datastore::get_buckets(conn).unwrap();
-    return Json(bucketlist);
+    return Ok(Json(bucketlist));
 }
 
 #[get("/<bucket_id>", format = "application/json")]
-pub fn bucket_get(bucket_id: String, state: State<ServerStateMutex>) -> Option<Json<Bucket>> {
+pub fn bucket_get(bucket_id: String, state: State<ServerStateMutex>) -> Result<Json<Bucket>, rocket::http::Status> {
     let conn = &state.lock().unwrap().dbconnection;
-    return Some(Json(datastore::get_bucket(conn, &bucket_id).unwrap()));
+    match datastore::get_bucket(conn, &bucket_id).unwrap() {
+        Some(bucket) => Ok(Json(bucket)),
+        None => Err(Status::NotFound)
+    }
 }
 
 #[post("/<bucket_id>", format = "application/json", data = "<message>")]
@@ -130,6 +134,7 @@ pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, c
             "reason": "Bucket with that ID doesn't exist"
         }))
     }
+    /* TODO: Improve performance with a last_event cache */
     let mut last_event_vec = datastore::get_events(&conn, &bucket_id, None, None, Some(1)).unwrap();
     match last_event_vec.pop() {
         None => {
@@ -137,7 +142,7 @@ pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, c
         }
         Some(last_event) => {
             match transform::heartbeat(&last_event, &heartbeat, constraints.pulsetime) {
-                None => datastore::insert_events(&conn, &bucket_id, &vec![heartbeat]).unwrap(),
+                None => { println!("Failed to merge!"); datastore::insert_events(&conn, &bucket_id, &vec![heartbeat]).unwrap() },
                 Some(merged_heartbeat) => datastore::replace_last_event(&conn, &bucket_id, &merged_heartbeat).unwrap()
             }
         }

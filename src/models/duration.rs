@@ -6,7 +6,6 @@ use serde::Deserializer;
 use chrono;
 
 /*
- * FIXME:
  * This datatype is actually only written because I had to, I didn't really want to code it to
  * begin with.
  * What I actually wanted was to use chronos Duration datatype, but since I was not able to extend

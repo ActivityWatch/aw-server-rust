@@ -8,6 +8,9 @@ use models::event::Event;
 
 use rocket::State;
 use rocket::http::Status;
+use rocket::Response;
+use rocket::response::Failure;
+
 use super::ServerState;
 
 use super::super::transform;
@@ -21,38 +24,32 @@ pub fn buckets_get(state: State<ServerState>) -> Result<Json<BucketList>, rocket
 }
 
 #[get("/<bucket_id>", format = "application/json")]
-pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<Bucket>, rocket::http::Status> {
+pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<Bucket>, Failure> {
     match state.datastore.get_bucket(&bucket_id).unwrap() {
         Some(bucket) => Ok(Json(bucket)),
-        None => Err(Status::NotFound)
+        None => Err(Failure(rocket::http::Status::NotFound))
     }
 }
 
 #[post("/<bucket_id>", format = "application/json", data = "<message>")]
-pub fn bucket_new(bucket_id: String, mut message: Json<Bucket>, state: State<ServerState>) -> Json<Value> {
+pub fn bucket_new(bucket_id: String, mut message: Json<Bucket>, state: State<ServerState>) -> Response {
+    let mut res = Response::new();
     if message.0.id.chars().count() == 0 {
         message.0.id = bucket_id.clone();
     } else if message.0.id != bucket_id {
-        // TODO: Return 400
-        println!("{},{}", message.0.id, bucket_id);
-        return Json(json!({
-            "status": "error",
-            "reason": "BucketID in URL and body doesn't match!"
-        }))
-    }
-    if state.datastore.get_bucket(&bucket_id).is_ok() {
-        // TODO: Respond 304
-        return Json(json!({
-            "status": "error",
-            "reason": "BucketID exists. 304"
-        }))
+        res.set_status(Status::BadRequest);
+        return res;
     }
     match message.created {
         Some(_) => (),
         None => message.created = Some(Utc::now())
     }
-    state.datastore.create_bucket(&message.0).unwrap();
-    return Json(json!({ "status": "ok" }))
+    let ret = state.datastore.create_bucket(&message.0).unwrap();
+    match ret {
+        true => res.set_status(Status::Ok),
+        false => res.set_status(Status::NotModified)
+    };
+    return res
 }
 
 #[derive(FromForm)]

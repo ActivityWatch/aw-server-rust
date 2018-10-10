@@ -4,13 +4,13 @@ use rocket;
 use rocket::response::{NamedFile};
 use rocket_contrib::{Json, Value};
 
+pub mod bucket;
+
 use datastore::DatastoreInstance;
 
 pub struct ServerState {
     pub datastore: DatastoreInstance
 }
-
-pub mod bucket;
 
 #[get("/")]
 fn root_index() -> Option<NamedFile> {
@@ -53,11 +53,7 @@ fn not_found() -> Json<Value> {
     }))
 }
 
-pub fn rocket() -> rocket::Rocket {
-    let server_state = ServerState {
-        datastore: DatastoreInstance::new("/tmp/test.db".to_string())
-    };
-
+pub fn rocket(server_state: ServerState) -> rocket::Rocket {
     rocket::ignite()
         .mount("", routes![
                root_index, root_favicon, root_static, root_css, root_css_map,

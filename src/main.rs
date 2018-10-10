@@ -16,8 +16,10 @@ pub mod transform;
 pub mod datastore;
 pub mod endpoints;
 
-
-
 fn main() {
-    endpoints::rocket().launch();
+    let server_state = endpoints::ServerState {
+        datastore: datastore::DatastoreInstance::new("/tmp/test.db".to_string())
+    };
+
+    endpoints::rocket(server_state).launch();
 }

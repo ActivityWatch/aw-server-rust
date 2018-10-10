@@ -68,19 +68,23 @@ impl DatastoreInstance {
         }
     }
 
-    pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), rusqlite::Error> {
+    pub fn create_bucket(&self, bucket: &Bucket) -> Result<bool, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        /*
-        match get_bucket(conn, &bucket.id) {
-            Ok(_) => return Err(),
-            Err(_) => ()
-        }
-        */
-        try!(conn.execute("
+        let res = conn.execute("
             INSERT INTO buckets (name, type, client, hostname, created)
             VALUES (?1, ?2, ?3, ?4, ?5)",
-            &[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &bucket.created]));
-        Ok(())
+            &[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &bucket.created]);
+
+        match res {
+            Ok(_) => return Ok(true),
+            Err(e) => match e {
+                rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
+                    rusqlite::ErrorCode::ConstraintViolation => Ok(false),
+                    _ => Err(e)
+                },
+                _ => Err(e)
+            }
+        }
     }
 
     pub  fn delete_bucket(&self, bucket_id: &str) -> Result<(), rusqlite::Error>{
@@ -93,7 +97,7 @@ impl DatastoreInstance {
 
     pub fn get_bucket(&self, bucket_id: &str) -> Result<Option<Bucket>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT name, type, client, hostname, created FROM buckets WHERE name = ?1", &[&bucket_id], |row| {
+        let res = conn.query_row("SELECT name, type, client, hostname, created FROM buckets WHERE name = ?1", &[&bucket_id], |row| {
             Some(Bucket {
                 id: row.get(0),
                 _type: row.get(1),
@@ -101,7 +105,14 @@ impl DatastoreInstance {
                 hostname: row.get(3),
                 created: row.get(4),
             })
-        })
+        });
+        match res {
+            Ok(b) => Ok(Some(b.unwrap())),
+            Err(e) => match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                unknown_err => Err(unknown_err),
+            }
+        }
     }
 
     pub fn get_buckets(&self) -> Result<Vec<Bucket>, rusqlite::Error> {

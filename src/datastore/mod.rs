@@ -7,10 +7,10 @@ use rusqlite::Connection;
 use chrono::DateTime;
 use chrono::NaiveDateTime;
 use chrono::Utc;
+use chrono::Duration;
 
 use super::models::bucket::Bucket;
 use super::models::event::Event;
-use super::models::duration::Duration;
 
 /*
  * TODO:
@@ -140,9 +140,9 @@ impl DatastoreInstance {
             INSERT INTO events(bucketrow, starttime, endtime, data)
             VALUES ((SELECT id FROM buckets WHERE name = ?1), ?2, ?3, ?4)"));
         for event in events {
-            let starttime_nanos : i64 = event.timestamp.timestamp_nanos();
-            let duration_nanos : i64 = event.duration.num_nanos() as i64;
-            let endtime_nanos : i64 = starttime_nanos + duration_nanos;
+            let starttime_nanos = event.timestamp.timestamp_nanos();
+            let duration_nanos = event.duration.num_nanoseconds().unwrap();
+            let endtime_nanos = starttime_nanos + duration_nanos;
             if endtime_nanos < starttime_nanos {
                 println!("SHIT!");
             }
@@ -159,9 +159,9 @@ impl DatastoreInstance {
             SET starttime = ?2, endtime = ?3, data = ?4
             WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1)
                 AND endtime = (SELECT max(endtime) FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1))"));
-        let starttime_nanos : i64 = event.timestamp.timestamp_nanos();
-        let duration_nanos : i64 = event.duration.num_nanos() as i64;
-        let endtime_nanos : i64 = starttime_nanos + duration_nanos;
+        let starttime_nanos = event.timestamp.timestamp_nanos();
+        let duration_nanos = event.duration.num_nanoseconds().unwrap();
+        let endtime_nanos = starttime_nanos + duration_nanos;
         if endtime_nanos < starttime_nanos {
             println!("SHIT!");
         }
@@ -173,8 +173,8 @@ impl DatastoreInstance {
         let conn = self.conn.lock().unwrap();
         let mut list = Vec::new();
 
-        let starttime_filter_ns = match starttime_opt {
-            Some(dt) => dt.timestamp_nanos() as i64,
+        let starttime_filter_ns : i64 = match starttime_opt {
+            Some(dt) => dt.timestamp_nanos(),
             None => 0
         };
         let endtime_filter_ns = match endtime_opt {
@@ -207,7 +207,7 @@ impl DatastoreInstance {
             return Event {
                 id: Some(id),
                 timestamp: DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time_seconds, time_subnanos), Utc),
-                duration: Duration::from_nanos(duration_ns),
+                duration: Duration::nanoseconds(duration_ns),
                 data: data,
             }
         }));

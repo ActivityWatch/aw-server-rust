@@ -1,5 +1,5 @@
+use chrono::Duration;
 use super::models::event::Event;
-use super::models::duration::Duration;
 
 // TODO: Compare with aw-cores version to make sure it works correctly
 pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Option<Event> {
@@ -28,8 +28,8 @@ pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Optio
         endtime = &last_event_endtime;
     }
 
-    let duration = Duration::from_nanos(endtime.signed_duration_since(*starttime).num_nanoseconds().unwrap());
-    if duration.num_nanos() < 0 {
+    let duration = Duration::nanoseconds(endtime.signed_duration_since(*starttime).num_nanoseconds().unwrap());
+    if duration.num_nanoseconds().unwrap() < 0 {
         println!("Merging heartbeats would result in a negative duration, refusing to merge!");
         return None
     }

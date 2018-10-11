@@ -5,10 +5,10 @@ extern crate aw_server;
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use chrono::Utc;
+    use chrono::Duration;
+    use serde_json::json;
 
-    use aw_server::models::duration::Duration;
     use aw_server::models::event::Event;
     use aw_server::transform;
 
@@ -17,19 +17,19 @@ mod tests {
         let event1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::from_seconds(0.0),
+            duration: Duration::seconds(0),
             data: json!({"test": 1})
         };
         let heartbeat1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::from_seconds(1.0),
+            duration: Duration::seconds(1),
             data: json!({"test": 1})
         };
 
         // Merge result
         let res_merge = transform::heartbeat(&event1, &heartbeat1, 1.0).unwrap();
-        assert!(res_merge.duration.inner() > Duration::from_seconds(1.0).inner());
+        assert!(res_merge.duration > Duration::seconds(1));
 
         // No merge result
         let res_no_merge = transform::heartbeat(&event1, &heartbeat1, 0.0);
@@ -44,13 +44,13 @@ mod tests {
         let event = Event {
             id: None,
             timestamp: now.clone(),
-            duration: Duration::from_seconds(0.0),
+            duration: Duration::seconds(0),
             data: json!({"test": 1})
         };
         let heartbeat_same_data = Event {
             id: None,
             timestamp: now.clone(),
-            duration: Duration::from_seconds(1.0),
+            duration: Duration::seconds(1),
             data: json!({"test": 1})
         };
 
@@ -61,7 +61,7 @@ mod tests {
         let heartbeat_different_data = Event {
             id: None,
             timestamp: now.clone(),
-            duration: Duration::from_seconds(1.0),
+            duration: Duration::seconds(1),
             data: json!({"test": 2})
         };
         // Data is different, should not merge

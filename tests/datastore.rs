@@ -5,12 +5,12 @@ extern crate serde_json;
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use chrono::Duration;
     use serde_json::json;
 
     use aw_server::datastore::DatastoreInstance;
     use aw_server::models::bucket::Bucket;
     use aw_server::models::event::Event;
-    use aw_server::models::duration::Duration;
 
     #[test]
     fn test_datastore() {
@@ -44,14 +44,14 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::from_seconds(0.0),
+            duration: Duration::seconds(0),
             data: json!({"key": "value"})
         };
         let mut e2 = e1.clone();
         e2.timestamp = Utc::now();
         let mut e_replace = e2.clone();
         e_replace.data = json!({"key": "value2"});
-        e_replace.duration = Duration::from_seconds(2.0);
+        e_replace.duration = Duration::seconds(2);
 
         let mut event_list = Vec::new();
         event_list.push(e1.clone());

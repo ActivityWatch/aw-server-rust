@@ -29,7 +29,7 @@ mod tests {
         ds.create_bucket(&bucket).unwrap();
 
         // Fetch bucket
-        let bucket_fetched = ds.get_bucket(&bucket.id).unwrap().unwrap();
+        let bucket_fetched = ds.get_bucket(&bucket.id).unwrap();
         assert_eq!(bucket_fetched.id, bucket.id);
         assert_eq!(bucket_fetched._type, bucket._type);
         assert_eq!(bucket_fetched.client, bucket.client);

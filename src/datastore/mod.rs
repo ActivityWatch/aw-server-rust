@@ -17,7 +17,16 @@ use super::models::event::Event;
  * - Optimize with bucket cache (for IDs and get)
  * - Optimize witht transactions
  * - Do not unwrap Mutex in case it get poisoned
+ * - Replace unwraps with DatastoreErrors
+ * - Improve error handling
  */
+
+#[derive(Debug)]
+pub enum DatastoreError {
+    NoSuchBucket,
+    BucketAlreadyExists,
+    SqliteError // TODO: Remove this generic error
+}
 
 pub struct DatastoreInstance {
     conn: Mutex<Connection>,
@@ -68,34 +77,41 @@ impl DatastoreInstance {
         }
     }
 
-    pub fn create_bucket(&self, bucket: &Bucket) -> Result<bool, rusqlite::Error> {
+    pub fn create_bucket(&self, bucket: &Bucket) -> Result<bool, DatastoreError> {
         let conn = self.conn.lock().unwrap();
         let res = conn.execute("
             INSERT INTO buckets (name, type, client, hostname, created)
             VALUES (?1, ?2, ?3, ?4, ?5)",
             &[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &bucket.created]);
 
+        // FIXME: This match is ugly, is it possible to write it in a cleaner way?
         match res {
             Ok(_) => return Ok(true),
             Err(e) => match e {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
-                    rusqlite::ErrorCode::ConstraintViolation => Ok(false),
-                    _ => Err(e)
+                    rusqlite::ErrorCode::ConstraintViolation => Err(DatastoreError::BucketAlreadyExists),
+                    _ => Err(DatastoreError::SqliteError)
                 },
-                _ => Err(e)
+                _ => Err(DatastoreError::SqliteError)
             }
         }
     }
 
-    pub  fn delete_bucket(&self, bucket_id: &str) -> Result<(), rusqlite::Error>{
+    pub  fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError>{
         let conn = self.conn.lock().unwrap();
         match conn.execute("DELETE FROM buckets WHERE name = ?1", &[&bucket_id]) {
             Ok(_) => Ok(()),
-            Err(err) => Err(err)
+            Err(err) => match err {
+                rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
+                    rusqlite::ErrorCode::ConstraintViolation => Err(DatastoreError::BucketAlreadyExists),
+                    _ => Err(DatastoreError::SqliteError)
+                },
+                _ => Err(DatastoreError::SqliteError)
+            }
         }
     }
 
-    pub fn get_bucket(&self, bucket_id: &str) -> Result<Option<Bucket>, rusqlite::Error> {
+    pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
         let conn = self.conn.lock().unwrap();
         let res = conn.query_row("SELECT name, type, client, hostname, created FROM buckets WHERE name = ?1", &[&bucket_id], |row| {
             Some(Bucket {
@@ -107,19 +123,19 @@ impl DatastoreInstance {
             })
         });
         match res {
-            Ok(b) => Ok(Some(b.unwrap())),
+            Ok(b) => Ok(b.unwrap()),
             Err(e) => match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                unknown_err => Err(unknown_err),
+                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchBucket),
+                _ => Err(DatastoreError::SqliteError)
             }
         }
     }
 
-    pub fn get_buckets(&self) -> Result<Vec<Bucket>, rusqlite::Error> {
+    pub fn get_buckets(&self) -> Result<Vec<Bucket>, DatastoreError> {
         let conn = self.conn.lock().unwrap();
         let mut list = Vec::new();
-        let mut stmt = try!(conn.prepare("SELECT name, type, client, hostname, created FROM buckets"));
-        let buckets = try!(stmt.query_map(&[], |row| {
+        let mut stmt = conn.prepare("SELECT name, type, client, hostname, created FROM buckets").unwrap();
+        let buckets = stmt.query_map(&[], |row| {
             Bucket {
                 id: row.get(0),
                 _type: row.get(1),
@@ -127,51 +143,76 @@ impl DatastoreInstance {
                 hostname: row.get(3),
                 created: row.get(4),
             }
-        }));
+        }).unwrap();
         for bucket in buckets {
-            list.push(bucket.unwrap());
+            match bucket {
+                Ok(b) => list.push(b),
+                Err(e) => println!("Failed to parse bucket from sqlite: {}", e)
+            }
         }
         Ok(list)
     }
 
-    pub fn insert_events(&self, bucket_id: &str, events: &Vec<Event>) -> Result<(), rusqlite::Error> {
+    pub fn insert_events(&self, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
+        // TODO: Optimize by using a cache instead
+        match self.get_bucket(&bucket_id) {
+            Ok(_) => (),
+            Err(e) => return Err(e)
+        }
+
         let conn = self.conn.lock().unwrap();
-        let mut stmt = try!(conn.prepare("
+        let mut stmt = conn.prepare("
             INSERT INTO events(bucketrow, starttime, endtime, data)
-            VALUES ((SELECT id FROM buckets WHERE name = ?1), ?2, ?3, ?4)"));
+            VALUES ((SELECT id FROM buckets WHERE name = ?1), ?2, ?3, ?4)").unwrap();
         for event in events {
             let starttime_nanos = event.timestamp.timestamp_nanos();
             let duration_nanos = event.duration.num_nanoseconds().unwrap();
             let endtime_nanos = starttime_nanos + duration_nanos;
-            if endtime_nanos < starttime_nanos {
-                println!("SHIT!");
+            let res = stmt.execute(&[&bucket_id, &starttime_nanos, &endtime_nanos, &event.data]);
+            match res {
+                Ok(_) => (),
+                Err(e) => {
+                    println!("Failed to insert event: {}", e);
+                    println!("{:?}", event);
+                    return Err(DatastoreError::SqliteError);
+                }
             }
-            try!(stmt.execute(&[&bucket_id, &starttime_nanos, &endtime_nanos, &event.data]));
         }
         Ok(())
     }
 
-    pub fn replace_last_event(&self, bucket_id: &str, event: &Event) -> Result<(), rusqlite::Error> {
+    pub fn replace_last_event(&self, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
+        // TODO: Optimize by using a cache instead
+        match self.get_bucket(&bucket_id) {
+            Ok(_) => (),
+            Err(e) => return Err(e)
+        }
+
         let conn = self.conn.lock().unwrap();
         /* TODO: Optimize this query*/
-        let mut stmt = try!(conn.prepare("
+        let mut stmt = conn.prepare("
             UPDATE events
             SET starttime = ?2, endtime = ?3, data = ?4
             WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1)
-                AND endtime = (SELECT max(endtime) FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1))"));
+                AND endtime = (SELECT max(endtime) FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1))
+        ").unwrap();
         let starttime_nanos = event.timestamp.timestamp_nanos();
         let duration_nanos = event.duration.num_nanoseconds().unwrap();
         let endtime_nanos = starttime_nanos + duration_nanos;
-        if endtime_nanos < starttime_nanos {
-            println!("SHIT!");
-        }
-        try!(stmt.execute(&[&bucket_id, &starttime_nanos, &endtime_nanos, &event.data]));
+        stmt.execute(&[&bucket_id, &starttime_nanos, &endtime_nanos, &event.data]).unwrap();
         Ok(())
     }
 
-    pub fn get_events(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
+    pub fn get_events(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
+        // TODO: Optimize by using a cache instead
+        match self.get_bucket(&bucket_id) {
+            Ok(_) => (),
+            Err(e) => return Err(e)
+        }
+
         let mut list = Vec::new();
+
+        let conn = self.conn.lock().unwrap();
 
         let starttime_filter_ns : i64 = match starttime_opt {
             Some(dt) => dt.timestamp_nanos(),
@@ -190,8 +231,17 @@ impl DatastoreInstance {
             None => -1
         };
 
-        let mut stmt = try!(conn.prepare("SELECT id, starttime, endtime, data FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1) AND endtime >= ?2 AND starttime <= ?3 ORDER BY starttime DESC LIMIT ?4;"));
-        let rows = try!(stmt.query_map(&[&bucket_id, &starttime_filter_ns, &endtime_filter_ns, &limit], |row| {
+        let mut stmt = conn.prepare("
+            SELECT id, starttime, endtime, data
+            FROM events
+            WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1)
+                AND endtime >= ?2
+                AND starttime <= ?3
+            ORDER BY starttime DESC
+            LIMIT ?4
+        ;").unwrap();
+
+        let rows = stmt.query_map(&[&bucket_id, &starttime_filter_ns, &endtime_filter_ns, &limit], |row| {
             let id = row.get(0);
             let mut starttime_ns : i64 = row.get(1);
             let mut endtime_ns : i64 = row.get(2);
@@ -210,14 +260,20 @@ impl DatastoreInstance {
                 duration: Duration::nanoseconds(duration_ns),
                 data: data,
             }
-        }));
+        }).unwrap();
         for row in rows {
             list.push(row.unwrap());
         }
         Ok(list)
     }
 
-    pub fn get_events_count(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, rusqlite::Error> {
+    pub fn get_events_count(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, DatastoreError> {
+        // TODO: Optimize by using a cache instead
+        match self.get_bucket(&bucket_id) {
+            Ok(_) => (),
+            Err(e) => return Err(e)
+        }
+
         let conn = self.conn.lock().unwrap();
         let starttime_filter_ns = match starttime_opt {
             Some(dt) => dt.timestamp_nanos() as i64,
@@ -231,7 +287,13 @@ impl DatastoreInstance {
             println!("Endtime in event query was same or lower than starttime!");
             return Ok(0);
         }
-        let ret : i64 = try!(conn.query_row("SELECT count(*) FROM events WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1) AND (starttime >= ?2 OR endtime <= ?3)", &[&bucket_id, &starttime_filter_ns, &endtime_filter_ns], |row| row.get(0)));
+        let ret : i64 = conn.query_row("
+            SELECT count(*) FROM events
+            WHERE bucketrow = (SELECT id FROM buckets WHERE name = ?1)
+                AND (starttime >= ?2 OR endtime <= ?3)",
+            &[&bucket_id, &starttime_filter_ns, &endtime_filter_ns],
+            |row| row.get(0)
+        ).unwrap();
         return Ok(ret);
     }
 }

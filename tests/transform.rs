@@ -14,22 +14,23 @@ mod tests {
 
     #[test]
     fn test_heartbeat_pulsetime() {
+        let now = Utc::now();
         let event1 = Event {
             id: None,
-            timestamp: Utc::now(),
-            duration: Duration::seconds(0),
+            timestamp: now,
+            duration: Duration::seconds(1),
             data: json!({"test": 1})
         };
         let heartbeat1 = Event {
             id: None,
-            timestamp: Utc::now(),
+            timestamp: now + Duration::seconds(2),
             duration: Duration::seconds(1),
             data: json!({"test": 1})
         };
 
         // Merge result
-        let res_merge = transform::heartbeat(&event1, &heartbeat1, 1.0).unwrap();
-        assert!(res_merge.duration > Duration::seconds(1));
+        let res_merge = transform::heartbeat(&event1, &heartbeat1, 2.0).unwrap();
+        assert!(res_merge.duration == Duration::seconds(3));
 
         // No merge result
         let res_no_merge = transform::heartbeat(&event1, &heartbeat1, 0.0);

@@ -16,6 +16,6 @@ pub struct DurationSerialization (
 // Provide a conversion to construct the remote type.
 impl From<DurationSerialization> for chrono::Duration {
     fn from(def: DurationSerialization) -> chrono::Duration {
-        chrono::Duration::nanoseconds((def.0/1000000000.0) as i64)
+        chrono::Duration::nanoseconds((def.0*1000000000.0) as i64)
     }
 }

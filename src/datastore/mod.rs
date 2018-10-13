@@ -128,7 +128,14 @@ impl DatastoreInstance {
     }
 
     pub  fn delete_bucket(&mut self, bucket_id: &str) -> Result<(), DatastoreError>{
-        match self.conn.execute("DELETE FROM buckets WHERE name = ?1", &[&bucket_id]) {
+        let bucket = try!(self.get_bucket(&bucket_id));
+        // Delete all events in bucket
+        match self.conn.execute("DELETE FROM events WHERE id = ?1", &[&bucket.bid]) {
+            Ok(_) => (),
+            Err(err) => { println!("{}", err); return Err(DatastoreError::InternalError) }
+        }
+        // Delete bucket itself
+        match self.conn.execute("DELETE FROM buckets WHERE name = ?1", &[&bucket.bid]) {
             Ok(_) => {
                 self.buckets_cache.remove(bucket_id);
                 return Ok(());

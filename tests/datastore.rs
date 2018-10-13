@@ -98,5 +98,12 @@ mod tests {
         // Get eventcount
         let event_count = ds.get_events_count(&bucket.id, None, None).unwrap();
         assert_eq!(event_count, 2);
+
+        // Delete bucket
+        ds.delete_bucket(&bucket.id).unwrap();
+        match ds.get_bucket(&bucket.id) {
+            Ok(_) => panic!("Expected datastore to delete bucket but bucket seems to still be available"),
+            Err(_) => ()
+        }
     }
 }

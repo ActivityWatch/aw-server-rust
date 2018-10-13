@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rocket_contrib::{Json, Value};
 
 use chrono::DateTime;
@@ -17,17 +19,22 @@ use super::super::datastore::DatastoreError;
 
 use super::super::transform;
 
-pub type BucketList = Vec<Bucket>;
+/*
+ * TODO:
+ * - Make sure that the mutex will never be able to be poisoned by unwraps
+ */
 
 #[get("/", format = "application/json")]
-pub fn buckets_get(state: State<ServerState>) -> Result<Json<BucketList>, rocket::Error> {
-    let bucketlist = state.datastore.get_buckets().unwrap();
+pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Bucket>>, rocket::Error> {
+    let datastore = state.datastore.lock().unwrap();
+    let bucketlist = datastore.get_buckets().unwrap();
     return Ok(Json(bucketlist));
 }
 
 #[get("/<bucket_id>", format = "application/json")]
 pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<Bucket>, Failure> {
-    match state.datastore.get_bucket(&bucket_id) {
+    let datastore = state.datastore.lock().unwrap();
+    match datastore.get_bucket(&bucket_id) {
         Ok(bucket) => Ok(Json(bucket)),
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Failure(Status::NotFound)),
@@ -49,7 +56,8 @@ pub fn bucket_new(bucket_id: String, mut message: Json<Bucket>, state: State<Ser
         Some(_) => (),
         None => message.created = Some(Utc::now())
     }
-    let ret = state.datastore.create_bucket(&message.0);
+    let mut datastore = state.datastore.lock().unwrap();
+    let ret = datastore.create_bucket(&message.0);
     match ret {
         Ok(_) => res.set_status(Status::Ok),
         Err(e) => match e {
@@ -94,7 +102,8 @@ pub fn bucket_events_get(bucket_id: String, constraints: GetEventsConstraints, s
         },
         None => None
     };
-    let res = state.datastore.get_events(&bucket_id, starttime, endtime, constraints.limit);
+    let datastore = state.datastore.lock().unwrap();
+    let res = datastore.get_events(&bucket_id, starttime, endtime, constraints.limit);
     match res {
         Ok(events) => Ok(Json(json!(events))),
         Err(err) => match err {
@@ -109,7 +118,8 @@ pub fn bucket_events_get(bucket_id: String, constraints: GetEventsConstraints, s
 
 #[post("/<bucket_id>/events", format = "application/json", data = "<events>")]
 pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: State<ServerState>) -> Result<(), Failure> {
-    let res = state.datastore.insert_events(&bucket_id, &events);
+    let datastore = state.datastore.lock().unwrap();
+    let res = datastore.insert_events(&bucket_id, &events);
     match res {
         Ok(_) => Ok(()),
         Err(e) => match e {
@@ -132,15 +142,16 @@ pub struct HeartbeatConstraints {
 pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, constraints: HeartbeatConstraints, state: State<ServerState>) -> Result<(), Failure> {
     let heartbeat = heartbeat_json.into_inner();
     /* TODO: Improve performance with a last_event cache */
-    let mut last_event_vec = state.datastore.get_events(&bucket_id, None, None, Some(1)).unwrap();
+    let datastore = state.datastore.lock().unwrap();
+    let mut last_event_vec = datastore.get_events(&bucket_id, None, None, Some(1)).unwrap();
     match last_event_vec.pop() {
         None => {
-            state.datastore.insert_events(&bucket_id, &vec![heartbeat]).unwrap();
+            datastore.insert_events(&bucket_id, &vec![heartbeat]).unwrap();
         }
         Some(last_event) => {
             match transform::heartbeat(&last_event, &heartbeat, constraints.pulsetime) {
-                None => { println!("Failed to merge!"); state.datastore.insert_events(&bucket_id, &vec![heartbeat]).unwrap() },
-                Some(merged_heartbeat) => state.datastore.replace_last_event(&bucket_id, &merged_heartbeat).unwrap()
+                None => { println!("Failed to merge!"); datastore.insert_events(&bucket_id, &vec![heartbeat]).unwrap() },
+                Some(merged_heartbeat) => datastore.replace_last_event(&bucket_id, &merged_heartbeat).unwrap()
             }
         }
     }
@@ -149,7 +160,8 @@ pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, c
 
 #[get("/<bucket_id>/events/count", format = "application/json")]
 pub fn bucket_events_count(bucket_id: String, state: State<ServerState>) -> Result<Json<Value>, Failure> {
-    let res = state.datastore.get_events_count(&bucket_id, None, None);
+    let datastore = state.datastore.lock().unwrap();
+    let res = datastore.get_events_count(&bucket_id, None, None);
     match res {
         Ok(eventcount) => Ok(Json(json!({"count": eventcount}))),
         Err(e) => match e {
@@ -164,7 +176,8 @@ pub fn bucket_events_count(bucket_id: String, state: State<ServerState>) -> Resu
 
 #[delete("/<bucket_id>")]
 pub fn bucket_delete(bucket_id: String, state: State<ServerState>) -> Result<(), Failure> {
-    match state.datastore.delete_bucket(&bucket_id) {
+    let mut datastore = state.datastore.lock().unwrap();
+    match datastore.delete_bucket(&bucket_id) {
         Ok(_) => Ok(()),
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Failure(Status::NotFound)),

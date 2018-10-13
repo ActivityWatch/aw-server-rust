@@ -15,11 +15,12 @@ mod tests {
     #[test]
     fn test_datastore() {
         // Setup datastore
-        let ds = DatastoreInstance::new_in_memory();
+        let mut ds = DatastoreInstance::new_in_memory();
         //let conn = ds.setup("/tmp/test.db".to_string());
 
         // Create bucket
         let bucket = Bucket {
+            bid: None,
             id: "testid".to_string(),
             _type: "testtype".to_string(),
             client: "testclient".to_string(),

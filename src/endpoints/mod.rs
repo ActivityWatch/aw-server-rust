@@ -1,4 +1,5 @@
 use std::path::{Path,PathBuf};
+use std::sync::Mutex;
 
 use rocket;
 use rocket::response::{NamedFile};
@@ -9,7 +10,7 @@ pub mod bucket;
 use datastore::DatastoreInstance;
 
 pub struct ServerState {
-    pub datastore: DatastoreInstance
+    pub datastore: Mutex<DatastoreInstance>
 }
 
 #[get("/")]

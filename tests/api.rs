@@ -13,7 +13,7 @@ mod tests {
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
-            datastore: Mutex::new(datastore::DatastoreInstance::new_in_memory())
+            datastore: Mutex::new(datastore::Datastore::new_in_memory())
         };
         endpoints::rocket(state)
     }

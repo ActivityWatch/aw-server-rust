@@ -1,4 +1,3 @@
-use chrono::Duration;
 use super::models::event::Event;
 
 // TODO: Compare with aw-cores version to make sure it works correctly

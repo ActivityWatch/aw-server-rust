@@ -9,6 +9,8 @@ extern crate serde_json;
 
 extern crate rusqlite;
 
+extern crate mpsc_requests;
+
 extern crate chrono;
 
 pub mod models;
@@ -20,7 +22,7 @@ use std::sync::Mutex;
 
 fn main() {
     let server_state = endpoints::ServerState {
-        datastore: Mutex::new(datastore::DatastoreInstance::new("/tmp/test.db".to_string()))
+        datastore: Mutex::new(datastore::Datastore::new("/tmp/test.db".to_string()))
     };
 
     endpoints::rocket(server_state).launch();

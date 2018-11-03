@@ -9,6 +9,8 @@ extern crate serde_json;
 
 extern crate rusqlite;
 
+extern crate mpsc_requests;
+
 extern crate chrono;
 
 pub mod models;

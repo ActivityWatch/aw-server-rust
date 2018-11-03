@@ -24,6 +24,14 @@ use super::super::transform;
  * - Make sure that the mutex will never be able to be poisoned by unwraps
  */
 
+macro_rules! response_status {
+    ($status:expr) => ({
+        let mut res = Response::new();
+        res.set_status($status);
+        res
+    })
+}
+
 #[get("/", format = "application/json")]
 pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Bucket>>, rocket::Error> {
     let datastore = state.datastore.lock().unwrap();
@@ -45,12 +53,10 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
 
 #[post("/<bucket_id>", format = "application/json", data = "<message>")]
 pub fn bucket_new(bucket_id: String, mut message: Json<Bucket>, state: State<ServerState>) -> Response {
-    let mut res = Response::new();
     if message.0.id.chars().count() == 0 {
         message.0.id = bucket_id.clone();
     } else if message.0.id != bucket_id {
-        res.set_status(Status::BadRequest);
-        return res;
+        return response_status!(Status::BadRequest)
     }
     match message.created {
         Some(_) => (),
@@ -59,13 +65,12 @@ pub fn bucket_new(bucket_id: String, mut message: Json<Bucket>, state: State<Ser
     let mut datastore = state.datastore.lock().unwrap();
     let ret = datastore.create_bucket(&message.0);
     match ret {
-        Ok(_) => res.set_status(Status::Ok),
+        Ok(_) => response_status!(Status::Ok),
         Err(e) => match e {
-            DatastoreError::BucketAlreadyExists => res.set_status(Status::NotModified),
-            _ => res.set_status(Status::InternalServerError)
+            DatastoreError::BucketAlreadyExists => response_status!(Status::NotModified),
+            _ => response_status!(Status::InternalServerError)
         }
-    };
-    return res
+    }
 }
 
 #[derive(FromForm)]
@@ -159,9 +164,9 @@ pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, c
 }
 
 #[get("/<bucket_id>/events/count", format = "application/json")]
-pub fn bucket_events_count(bucket_id: String, state: State<ServerState>) -> Result<Json<Value>, Failure> {
+pub fn bucket_event_count(bucket_id: String, state: State<ServerState>) -> Result<Json<Value>, Failure> {
     let datastore = state.datastore.lock().unwrap();
-    let res = datastore.get_events_count(&bucket_id, None, None);
+    let res = datastore.get_event_count(&bucket_id, None, None);
     match res {
         Ok(eventcount) => Ok(Json(json!({"count": eventcount}))),
         Err(e) => match e {

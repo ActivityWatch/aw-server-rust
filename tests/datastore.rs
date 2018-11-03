@@ -8,14 +8,14 @@ mod tests {
     use chrono::Duration;
     use serde_json::json;
 
-    use aw_server::datastore::DatastoreInstance;
+    use aw_server::datastore::Datastore;
     use aw_server::models::bucket::Bucket;
     use aw_server::models::event::Event;
 
     #[test]
     fn test_datastore() {
         // Setup datastore
-        let mut ds = DatastoreInstance::new_in_memory();
+        let mut ds = Datastore::new_in_memory();
         //let conn = ds.setup("/tmp/test.db".to_string());
 
         // Create bucket
@@ -96,7 +96,7 @@ mod tests {
         assert_eq!(fetched_events_start[0].data,e1.data);
 
         // Get eventcount
-        let event_count = ds.get_events_count(&bucket.id, None, None).unwrap();
+        let event_count = ds.get_event_count(&bucket.id, None, None).unwrap();
         assert_eq!(event_count, 2);
 
         // Delete bucket

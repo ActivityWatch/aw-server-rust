@@ -1,13 +1,20 @@
 extern crate rusqlite;
 extern crate chrono;
 
+use std::thread;
+use std::thread::Thread;
 use std::collections::HashMap;
 
-use rusqlite::Connection;
 use chrono::DateTime;
 use chrono::NaiveDateTime;
 use chrono::Utc;
 use chrono::Duration;
+
+use rusqlite::Connection;
+use rusqlite::Transaction;
+use rusqlite::DropBehavior;
+
+use mpsc_requests;
 
 use super::models::bucket::Bucket;
 use super::models::event::Event;
@@ -17,6 +24,19 @@ use super::models::event::Event;
  * - Optimize with transactions
  */
 
+pub enum Responses {
+    Empty(),
+    Bucket(Bucket),
+    BucketMap(HashMap<String, Bucket>),
+    EventList(Vec<Event>),
+    Count(i64)
+}
+
+pub enum DatastoreMethod {
+    Memory(),
+    File(String),
+}
+
 #[derive(Debug)]
 pub enum DatastoreError {
     NoSuchBucket,
@@ -24,9 +44,24 @@ pub enum DatastoreError {
     InternalError
 }
 
-pub struct DatastoreInstance {
-    conn: Connection,
-    buckets_cache: HashMap<String, Bucket>
+pub enum Commands {
+    CreateBucket(Bucket),
+    DeleteBucket(String),
+    GetBucket(String),
+    GetBuckets(),
+    InsertEvents(String, Vec<Event>),
+    ReplaceLastEvent(String, Event),
+    GetEvents(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<u64>),
+    GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>)
+}
+
+pub struct Datastore {
+    requester: mpsc_requests::Requester<Commands, Result<Responses, DatastoreError>>
+}
+
+struct DatastoreWorker {
+    responder: mpsc_requests::Responder<Commands, Result<Responses, DatastoreError>>,
+    quit: bool
 }
 
 fn _create_tables(conn: &Connection) {
@@ -56,21 +91,112 @@ fn _create_tables(conn: &Connection) {
     conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[]).unwrap();
 }
 
-impl DatastoreInstance {
+use std::cell::Ref;
+use std::cell::RefCell;
+use std::borrow::Borrow;
 
-    pub fn new(dbpath: String) -> Self {
-        let conn = Connection::open(dbpath).unwrap();
-        _create_tables(&conn);
-        let mut ds = DatastoreInstance {
-            conn: conn,
-            buckets_cache: HashMap::new()
-        };
-        ds.get_stored_buckets();
-        return ds;
+struct DatastoreInstance {
+    commit: bool,
+    uncommited_events: u64,
+    buckets_cache: HashMap<String, Bucket>,
+}
+
+impl DatastoreWorker {
+    pub fn new(responder: mpsc_requests::Responder<Commands, Result<Responses, DatastoreError>>) -> Self {
+        DatastoreWorker {
+            responder: responder,
+            quit: false
+        }
     }
 
-    fn get_stored_buckets(&mut self) {
-        let mut stmt = self.conn.prepare("SELECT id, name, type, client, hostname, created FROM buckets").unwrap();
+    fn work_loop(&mut self, method: DatastoreMethod) -> () {
+        println!("Starting SQLite worker thread");
+        let mut conn = match method {
+            DatastoreMethod::Memory() => Connection::open_in_memory().unwrap(),
+            DatastoreMethod::File(path) => Connection::open(path).unwrap()
+        };
+        _create_tables(&conn);
+        let mut ds = DatastoreInstance {
+            commit: false,
+            uncommited_events: 0,
+            buckets_cache: HashMap::new()
+        };
+        ds.get_stored_buckets(&conn);
+        loop {
+            let mut transaction = conn.transaction().unwrap();
+            transaction.set_drop_behavior(DropBehavior::Commit);
+            loop {
+                let mut request = match self.responder.poll() {
+                    Ok(r) => r,
+                    Err(_) => { // All references to responder is gone, quit
+                        println!("DB worker quitting");
+                        self.quit = true;
+                        break;
+                    }
+                };
+                let response = match request.body() {
+                    Commands::CreateBucket(bucket) => {
+                        match ds.create_bucket(&transaction, bucket) {
+                            Ok(_) => Ok(Responses::Empty()),
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::DeleteBucket(bucketname) => {
+                        match ds.delete_bucket(&transaction, bucketname) {
+                            Ok(_) => Ok(Responses::Empty()),
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::GetBucket(bucketname) => {
+                        match ds.get_bucket(bucketname) {
+                            Ok(b) => Ok(Responses::Bucket(b)),
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::GetBuckets() => {
+                        Ok(Responses::BucketMap(ds.get_buckets().unwrap()))
+                    },
+                    Commands::InsertEvents(bucketname, events) => {
+                        match ds.insert_events(&transaction, bucketname, events) {
+                            Ok(_) => Ok(Responses::Empty()),
+                            Err(e) => Err(e)
+                        }
+                    }
+                    Commands::ReplaceLastEvent(bucketname, event) => {
+                        match ds.replace_last_event(&transaction, bucketname, event) {
+                            Ok(_) => Ok(Responses::Empty()),
+                            Err(e) => Err(e)
+                        }
+                    }
+                    Commands::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt) => {
+                        match ds.get_events(&transaction, bucketname, *starttime_opt, *endtime_opt, *limit_opt) {
+                            Ok(el) => Ok(Responses::EventList(el)),
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::GetEventCount(bucketname, starttime_opt, endtime_opt) => {
+                        match ds.get_event_count(&transaction, bucketname, *starttime_opt, *endtime_opt) {
+                            Ok(n) => Ok(Responses::Count(n)),
+                            Err(e) => Err(e)
+                        }
+                    },
+                };
+                request.respond(response);
+                if ds.commit || ds.uncommited_events > 100 { break };
+            }
+            println!("Commiting DB! Force commit {}, {} uncommited events", ds.commit, ds.uncommited_events);
+            transaction.commit().unwrap();
+            ds.commit = false;
+            ds.uncommited_events = 0;
+            if self.quit { break };
+        }
+    }
+}
+
+impl DatastoreInstance {
+
+    fn get_stored_buckets(&mut self, conn: &Connection) {
+        let mut stmt = conn.prepare("SELECT id, name, type, client, hostname, created FROM buckets").unwrap();
         let buckets = stmt.query_map(&[], |row| {
             Bucket {
                 bid: row.get(0),
@@ -83,7 +209,10 @@ impl DatastoreInstance {
         }).unwrap();
         for bucket in buckets {
             match bucket {
-                Ok(b) => {self.buckets_cache.insert(b.id.clone(), b.clone());},
+                Ok(b) => {
+                    println!("{:?}", b);
+                    self.buckets_cache.insert(b.id.clone(), b.clone());
+                },
                 Err(e) => {
                     println!("Failed to parse bucket from SQLite, database is corrupt!");
                     println!("{}", e);
@@ -93,51 +222,46 @@ impl DatastoreInstance {
         ()
     }
 
-    pub fn new_in_memory() -> Self {
-        let conn = Connection::open_in_memory().unwrap();
-        _create_tables(&conn);
-        return DatastoreInstance {
-            conn: conn,
-            buckets_cache: HashMap::new()
-        }
-    }
-
-    pub fn create_bucket(&mut self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        let res = self.conn.execute("
+    fn create_bucket(&mut self, conn: &Connection, bucket: &Bucket) -> Result<(), DatastoreError> {
+        let mut stmt = conn.prepare("
             INSERT INTO buckets (name, type, client, hostname, created)
-            VALUES (?1, ?2, ?3, ?4, ?5)",
-            &[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &bucket.created]);
+            VALUES (?1, ?2, ?3, ?4, ?5)").unwrap();
+        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &bucket.created.unwrap()]);
 
         match res {
             Ok(_) => {
-                let rowid = self.conn.last_insert_rowid();
+                let rowid = conn.last_insert_rowid();
                 let mut inserted_bucket = bucket.clone();
                 inserted_bucket.bid = Some(rowid);
+
+                println!("{:?}", inserted_bucket);
                 self.buckets_cache.insert(bucket.id.clone(), inserted_bucket);
-                return Ok(())
+                self.commit = true;
+                return Ok(());
             },
             // FIXME: This match is ugly, is it possible to write it in a cleaner way?
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
                     rusqlite::ErrorCode::ConstraintViolation => Err(DatastoreError::BucketAlreadyExists),
-                    _ => { println!("{}", err); return Err(DatastoreError::InternalError) }
+                    _ => { println!("{}", err); return Err(DatastoreError::InternalError); }
                 },
-                _ => { println!("{}", err); return Err(DatastoreError::InternalError) }
+                _ => { println!("{}", err); return Err(DatastoreError::InternalError); }
             }
         }
     }
 
-    pub  fn delete_bucket(&mut self, bucket_id: &str) -> Result<(), DatastoreError>{
-        let bucket = try!(self.get_bucket(&bucket_id));
+    fn delete_bucket(&mut self, conn: &Connection, bucket_id: &str) -> Result<(), DatastoreError>{
+        let bucket = (self.get_bucket(&bucket_id))?;
         // Delete all events in bucket
-        match self.conn.execute("DELETE FROM events WHERE id = ?1", &[&bucket.bid]) {
+        match conn.execute("DELETE FROM events WHERE id = ?1", &[&bucket.bid]) {
             Ok(_) => (),
             Err(err) => { println!("{}", err); return Err(DatastoreError::InternalError) }
         }
         // Delete bucket itself
-        match self.conn.execute("DELETE FROM buckets WHERE name = ?1", &[&bucket.bid]) {
+        match conn.execute("DELETE FROM buckets WHERE name = ?1", &[&bucket.id]) {
             Ok(_) => {
                 self.buckets_cache.remove(bucket_id);
+                self.commit = true;
                 return Ok(());
             },
             Err(err) => match err {
@@ -150,7 +274,7 @@ impl DatastoreInstance {
         }
     }
 
-    pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
+    fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
         let cached_bucket = self.buckets_cache.get(bucket_id);
         match cached_bucket {
             Some(bucket) => Ok(bucket.clone()),
@@ -158,14 +282,15 @@ impl DatastoreInstance {
         }
     }
 
-    pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
+    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
         return Ok(self.buckets_cache.clone());
     }
 
-    pub fn insert_events(&self, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
+
+    pub fn insert_events(&mut self, conn: &Connection, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
         let bucket = try!(self.get_bucket(&bucket_id));
 
-        let mut stmt = self.conn.prepare("
+        let mut stmt = conn.prepare("
             INSERT INTO events(bucketrow, starttime, endtime, data)
             VALUES (?1, ?2, ?3, ?4)").unwrap();
         for event in events {
@@ -174,7 +299,7 @@ impl DatastoreInstance {
             let endtime_nanos = starttime_nanos + duration_nanos;
             let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data]);
             match res {
-                Ok(_) => (),
+                Ok(_) => self.uncommited_events += 1,
                 Err(e) => {
                     println!("Failed to insert event: {}", e);
                     println!("{:?}", event);
@@ -185,10 +310,10 @@ impl DatastoreInstance {
         Ok(())
     }
 
-    pub fn replace_last_event(&self, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
+    pub fn replace_last_event(&mut self, conn: &Connection, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
         let bucket = try!(self.get_bucket(&bucket_id));
 
-        let mut stmt = self.conn.prepare("
+        let mut stmt = conn.prepare("
             UPDATE events
             SET starttime = ?2, endtime = ?3, data = ?4
             WHERE bucketrow = ?1
@@ -198,10 +323,11 @@ impl DatastoreInstance {
         let duration_nanos = event.duration.num_nanoseconds().unwrap();
         let endtime_nanos = starttime_nanos + duration_nanos;
         stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data]).unwrap();
+        self.uncommited_events += 1;
         Ok(())
     }
 
-    pub fn get_events(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
+    pub fn get_events(&mut self, conn: &Connection, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
         let bucket = try!(self.get_bucket(&bucket_id));
 
         let mut list = Vec::new();
@@ -223,7 +349,7 @@ impl DatastoreInstance {
             None => -1
         };
 
-        let mut stmt = self.conn.prepare("
+        let mut stmt = conn.prepare("
             SELECT id, starttime, endtime, data
             FROM events
             WHERE bucketrow = ?1
@@ -259,7 +385,7 @@ impl DatastoreInstance {
         Ok(list)
     }
 
-    pub fn get_events_count(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, DatastoreError> {
+    pub fn get_event_count(&self, conn: &Connection, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, DatastoreError> {
         let bucket = try!(self.get_bucket(&bucket_id));
 
         let starttime_filter_ns = match starttime_opt {
@@ -274,13 +400,119 @@ impl DatastoreInstance {
             println!("Endtime in event query was same or lower than starttime!");
             return Ok(0);
         }
-        let ret : i64 = self.conn.query_row("
+
+        let mut stmt = conn.prepare("
             SELECT count(*) FROM events
             WHERE bucketrow = ?1
-                AND (starttime >= ?2 OR endtime <= ?3)",
-            &[&bucket.bid.unwrap(), &starttime_filter_ns, &endtime_filter_ns],
+                AND (starttime >= ?2 OR endtime <= ?3)"
+        ).unwrap();
+
+        let ret = stmt.query_row(&[&bucket.bid.unwrap(), &starttime_filter_ns, &endtime_filter_ns],
             |row| row.get(0)
         ).unwrap();
+
         return Ok(ret);
+    }
+}
+
+
+impl Datastore {
+
+    pub fn new(dbpath: String) -> Self {
+        let method = DatastoreMethod::File(dbpath);
+        Datastore::_new_internal(method)
+    }
+
+    pub fn new_in_memory() -> Self {
+        let method = DatastoreMethod::Memory();
+        Datastore::_new_internal(method)
+    }
+
+    fn _new_internal(method: DatastoreMethod) -> Self {
+        let (responder, requester) = mpsc_requests::channel::<Commands, Result<Responses, DatastoreError>>();
+        let _thread = thread::spawn(move || {
+            let mut di = DatastoreWorker::new(responder);
+            di.work_loop(method);
+        });
+        Datastore {
+            requester: requester
+        }
+    }
+
+    pub fn create_bucket(&mut self, bucket: &Bucket) -> Result<(), DatastoreError> {
+        match self.requester.request(Commands::CreateBucket(bucket.clone())) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e)
+        }
+    }
+
+    pub  fn delete_bucket(&mut self, bucket_id: &str) -> Result<(), DatastoreError>{
+        match self.requester.request(Commands::DeleteBucket(bucket_id.to_string())) {
+            Ok(r) => match r {
+                Responses::Empty() => Ok(()),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
+        match self.requester.request(Commands::GetBucket(bucket_id.to_string())) {
+            Ok(r) => match r {
+                Responses::Bucket(b) => Ok(b),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
+        match self.requester.request(Commands::GetBuckets()) {
+            Ok(r) => match r {
+                Responses::BucketMap(bm) => Ok(bm),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn insert_events(&self, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
+        match self.requester.request(Commands::InsertEvents(bucket_id.to_string(), events.clone())) {
+            Ok(r) => match r {
+                Responses::Empty() => Ok(()),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn replace_last_event(&self, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
+        match self.requester.request(Commands::ReplaceLastEvent(bucket_id.to_string(), event.clone())) {
+            Ok(r) => match r {
+                Responses::Empty() => return Ok(()),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn get_events(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
+        match self.requester.request(Commands::GetEvents(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone(), limit_opt.clone())) {
+            Ok(r) => match r {
+                Responses::EventList(el) => Ok(el),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn get_event_count(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, DatastoreError> {
+        match self.requester.request(Commands::GetEventCount(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone())) {
+            Ok(r) => match r {
+                Responses::Count(n) => Ok(n),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
     }
 }

@@ -7,10 +7,10 @@ use rocket_contrib::{Json, Value};
 
 pub mod bucket;
 
-use datastore::DatastoreInstance;
+use datastore::Datastore;
 
 pub struct ServerState {
-    pub datastore: Mutex<DatastoreInstance>
+    pub datastore: Mutex<Datastore>
 }
 
 #[get("/")]
@@ -62,7 +62,7 @@ pub fn rocket(server_state: ServerState) -> rocket::Rocket {
         .mount("/api/0/info", routes![server_info])
         .mount("/api/0/buckets", routes![
                bucket::bucket_new, bucket::bucket_delete, bucket::buckets_get, bucket::bucket_get,
-               bucket::bucket_events_get, bucket::bucket_events_create, bucket::bucket_events_heartbeat, bucket::bucket_events_count
+               bucket::bucket_events_get, bucket::bucket_events_create, bucket::bucket_events_heartbeat, bucket::bucket_event_count
         ])
         .catch(catchers![not_found])
         .manage(server_state)

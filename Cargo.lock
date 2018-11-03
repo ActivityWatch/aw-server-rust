@@ -11,6 +11,7 @@ name = "aw_server"
 version = "0.1.0"
 dependencies = [
  "chrono 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
+ "mpsc_requests 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rocket 0.3.16 (registry+https://github.com/rust-lang/crates.io-index)",
  "rocket_codegen 0.3.16 (registry+https://github.com/rust-lang/crates.io-index)",
  "rocket_contrib 0.3.16 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -248,6 +249,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "log 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
+
+[[package]]
+name = "mpsc_requests"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "nodrop"
@@ -630,6 +636,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum memchr 2.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "4b3629fe9fdbff6daa6c33b90f7c08355c1aca05a3d01fa8063b822fcf185f3b"
 "checksum memoffset 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "0f9dc261e2b62d7a622bf416ea3c5245cdd5d9a7fcc428c0d06804dfce1775b3"
 "checksum mime 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)" = "ba626b8a6de5da682e1caa06bdb42a335aee5a84db8e5046a3e8ab17ba0a3ae0"
+"checksum mpsc_requests 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)" = "60fe6664286a658f6a6674856d8f4700a8306dce9c909955eae5eb71cbcfca3b"
 "checksum nodrop 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)" = "9a2228dca57108069a5262f2ed8bd2e82496d2e074a06d1ccc7ce1687b6ae0a2"
 "checksum num-integer 0.1.39 (registry+https://github.com/rust-lang/crates.io-index)" = "e83d528d2677f0518c570baf2b7abdcf0cd2d248860b68507bdcb3e91d4c0cea"
 "checksum num-traits 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)" = "0b3a5d7cc97d6d30d8b9bc8fa19bf45349ffe46241e8816f50f62f6d6aaabee1"

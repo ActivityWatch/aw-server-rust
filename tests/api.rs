@@ -3,7 +3,7 @@ extern crate rocket;
 extern crate aw_server;
 
 #[cfg(test)]
-mod tests {
+mod api_tests {
     use rocket::http::ContentType;
 
     use aw_server::datastore;

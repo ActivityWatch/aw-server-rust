@@ -21,6 +21,7 @@ use super::models::event::Event;
 /*
  * TODO:
  * - Needs refactoring
+ * - Add macro for getting requester lock
  */
 
 pub enum Responses {

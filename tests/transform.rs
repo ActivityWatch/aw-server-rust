@@ -4,7 +4,7 @@ extern crate serde_json;
 extern crate aw_server;
 
 #[cfg(test)]
-mod tests {
+mod transform_tests {
     use chrono::Utc;
     use chrono::Duration;
     use serde_json::json;

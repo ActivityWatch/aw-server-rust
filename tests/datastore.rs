@@ -15,7 +15,7 @@ mod tests {
     #[test]
     fn test_datastore() {
         // Setup datastore
-        let mut ds = Datastore::new_in_memory();
+        let ds = Datastore::new_in_memory();
         //let conn = ds.setup("/tmp/test.db".to_string());
 
         // Create bucket

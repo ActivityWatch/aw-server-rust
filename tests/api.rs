@@ -4,8 +4,6 @@ extern crate aw_server;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use rocket::http::ContentType;
 
     use aw_server::datastore;
@@ -13,7 +11,7 @@ mod tests {
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
-            datastore: Mutex::new(datastore::Datastore::new_in_memory())
+            datastore: datastore::Datastore::new_in_memory()
         };
         endpoints::rocket(state)
     }

@@ -1,8 +1,8 @@
 extern crate rusqlite;
 extern crate chrono;
 
+use std::sync::Mutex;
 use std::thread;
-use std::thread::Thread;
 use std::collections::HashMap;
 
 use chrono::DateTime;
@@ -11,7 +11,6 @@ use chrono::Utc;
 use chrono::Duration;
 
 use rusqlite::Connection;
-use rusqlite::Transaction;
 use rusqlite::DropBehavior;
 
 use mpsc_requests;
@@ -21,7 +20,7 @@ use super::models::event::Event;
 
 /*
  * TODO:
- * - Optimize with transactions
+ * - Needs refactoring
  */
 
 pub enum Responses {
@@ -41,7 +40,8 @@ pub enum DatastoreMethod {
 pub enum DatastoreError {
     NoSuchBucket,
     BucketAlreadyExists,
-    InternalError
+    RequestLockTimeout,
+    InternalError,
 }
 
 pub enum Commands {
@@ -56,7 +56,7 @@ pub enum Commands {
 }
 
 pub struct Datastore {
-    requester: mpsc_requests::Requester<Commands, Result<Responses, DatastoreError>>
+    requester: Mutex<mpsc_requests::Requester<Commands, Result<Responses, DatastoreError>>>
 }
 
 struct DatastoreWorker {
@@ -90,10 +90,6 @@ fn _create_tables(conn: &Connection) {
     conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[]).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[]).unwrap();
 }
-
-use std::cell::Ref;
-use std::cell::RefCell;
-use std::borrow::Borrow;
 
 struct DatastoreInstance {
     commit: bool,
@@ -435,19 +431,27 @@ impl Datastore {
             di.work_loop(method);
         });
         Datastore {
-            requester: requester
+            requester: Mutex::new(requester)
         }
     }
 
-    pub fn create_bucket(&mut self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        match self.requester.request(Commands::CreateBucket(bucket.clone())) {
+    pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
+        let requester = match self.requester.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        };
+        match requester.request(Commands::CreateBucket(bucket.clone())) {
             Ok(_) => Ok(()),
             Err(e) => Err(e)
         }
     }
 
-    pub  fn delete_bucket(&mut self, bucket_id: &str) -> Result<(), DatastoreError>{
-        match self.requester.request(Commands::DeleteBucket(bucket_id.to_string())) {
+    pub  fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError>{
+        let requester = match self.requester.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        };
+        match requester.request(Commands::DeleteBucket(bucket_id.to_string())) {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
                 _ => panic!("Invalid response")
@@ -457,7 +461,11 @@ impl Datastore {
     }
 
     pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        match self.requester.request(Commands::GetBucket(bucket_id.to_string())) {
+        let requester = match self.requester.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        };
+        match requester.request(Commands::GetBucket(bucket_id.to_string())) {
             Ok(r) => match r {
                 Responses::Bucket(b) => Ok(b),
                 _ => panic!("Invalid response")
@@ -467,7 +475,11 @@ impl Datastore {
     }
 
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
-        match self.requester.request(Commands::GetBuckets()) {
+        let requester = match self.requester.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        };
+        match requester.request(Commands::GetBuckets()) {
             Ok(r) => match r {
                 Responses::BucketMap(bm) => Ok(bm),
                 _ => panic!("Invalid response")
@@ -477,7 +489,11 @@ impl Datastore {
     }
 
     pub fn insert_events(&self, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
-        match self.requester.request(Commands::InsertEvents(bucket_id.to_string(), events.clone())) {
+        let requester = match self.requester.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        };
+        match requester.request(Commands::InsertEvents(bucket_id.to_string(), events.clone())) {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
                 _ => panic!("Invalid response")
@@ -487,7 +503,11 @@ impl Datastore {
     }
 
     pub fn replace_last_event(&self, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
-        match self.requester.request(Commands::ReplaceLastEvent(bucket_id.to_string(), event.clone())) {
+        let requester = match self.requester.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        };
+        match requester.request(Commands::ReplaceLastEvent(bucket_id.to_string(), event.clone())) {
             Ok(r) => match r {
                 Responses::Empty() => return Ok(()),
                 _ => panic!("Invalid response")
@@ -497,7 +517,11 @@ impl Datastore {
     }
 
     pub fn get_events(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
-        match self.requester.request(Commands::GetEvents(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone(), limit_opt.clone())) {
+        let requester = match self.requester.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        };
+        match requester.request(Commands::GetEvents(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone(), limit_opt.clone())) {
             Ok(r) => match r {
                 Responses::EventList(el) => Ok(el),
                 _ => panic!("Invalid response")
@@ -507,7 +531,11 @@ impl Datastore {
     }
 
     pub fn get_event_count(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, DatastoreError> {
-        match self.requester.request(Commands::GetEventCount(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone())) {
+        let requester = match self.requester.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        };
+        match requester.request(Commands::GetEventCount(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone())) {
             Ok(r) => match r {
                 Responses::Count(n) => Ok(n),
                 _ => panic!("Invalid response")

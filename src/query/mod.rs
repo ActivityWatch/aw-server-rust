@@ -1,5 +1,17 @@
 
-pub mod lexer {
+#[derive(Debug)]
+pub enum QueryError {
+	// Lexing + Parsing
+	LexingError, // FIXME: Lexing currently cannot fail without panic, unused
+	ParsingError,
+
+	// Execution
+	NoReturn,
+	VariableNotDefined(String),
+	InvalidType(String)
+}
+
+mod lexer {
     use plex::lexer;
 
     #[derive(Debug, Clone)]
@@ -7,7 +19,6 @@ pub mod lexer {
         Ident(String),
 
         Return,
-        Print,
 
         Number(f64),
         String(String),
@@ -32,7 +43,6 @@ pub mod lexer {
         r#"#[^\n]*"# => (Token::Comment, text),
 
         r#"return"# => (Token::Return, text),
-        r#"print"# => (Token::Print, text),
 
 		r#"\"[^\"]*\""# => (
 			Token::String(text.to_owned()[1..text.len()-1].to_string()),
@@ -42,6 +52,7 @@ pub mod lexer {
             (if let Ok(i) = text.parse() {
                 Token::Number(i)
             } else {
+                // TODO: do not panic, send an error
                 panic!("integer {} is out of range", text)
             }, text)
         }
@@ -57,6 +68,7 @@ pub mod lexer {
         r#"\)"# => (Token::RParen, text),
         r#";"# => (Token::Semi, text),
 
+        // TODO: do not panic, send an error
         r#"."# => panic!("unexpected character: {}", text),
     }
 
@@ -132,14 +144,15 @@ mod ast {
 */
         Var(String),
         Assign(String, Box<Expr>),
-        Print(Box<Expr>),
+        // TODO: multi-argument functions
+        Function(String, Box<Expr>),
         Return(Box<Expr>),
         Literal(f64),
         LiteralString(String),
     }
 }
 
-pub mod parser {
+mod parser {
     use query::ast::*;
     use query::lexer::Token::*;
     use query::lexer::*;
@@ -168,9 +181,9 @@ pub mod parser {
         }
 
         assign: Expr {
-            Print LParen assign[a] RParen => Expr {
+            Ident(fname) LParen assign[a] RParen => Expr {
                 span: span!(),
-                node: Expr_::Print(Box::new(a)),
+                node: Expr_::Function(fname, Box::new(a)),
             },
             Return assign[a] => Expr {
                 span: span!(),
@@ -236,36 +249,59 @@ pub mod parser {
 
 #[derive(Debug,Clone)]
 pub enum DataType {
+	None(),
 	Number(f64),
 	String(String),
+	List(Vec<DataType>),
+	Function(fn(Vec<DataType>) -> Result<DataType, QueryError>),
 }
 
-#[derive(Debug)]
-pub enum QueryError {
-	NoReturn
+mod functions {
+	use query::DataType;
+	use query::QueryError;
+
+	use std::collections::HashMap;
+
+	pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
+		env.insert("print", DataType::Function(q_print));
+	}
+
+	fn q_print(args: Vec<DataType>) -> Result<DataType, QueryError> {
+		for arg in args {
+			println!("{:?}", arg);
+		}
+		return Ok(DataType::None());
+	}
 }
 
-pub mod interp {
+mod interpret {
+	use query;
     use query::ast::*;
 	use query::DataType;
 	use query::QueryError;
     use std::collections::HashMap;
 
-    pub fn interp<'a>(p: &'a Program) -> Result<DataType, QueryError> {
+	fn get_env<'a>() -> HashMap<&'a str, DataType> {
         let mut env = HashMap::new();
+		query::functions::fill_env(&mut env);
+		return env;
+	}
+
+    pub fn interpret_prog<'a>(p: &'a Program) -> Result<DataType, QueryError> {
 		let last_i = p.stmts.len()-1;
+		let mut env = get_env();
 		let mut i = 0;
         for expr in &p.stmts {
-            let ret = interp_expr(&mut env, expr);
+            let ret = interpret_expr(&mut env, expr)?;
 			// FIXME: This is ugly
 			if i == last_i {
-				return Ok(ret);
-			}
+                return Ok(ret);
+            }
 			i+=1;
         }
 		Err(QueryError::NoReturn)
     }
-    fn interp_expr<'a>(env: &mut HashMap<&'a str, DataType>, expr: &'a Expr) -> DataType {
+    fn interpret_expr<'a>(env: &mut HashMap<&'a str, DataType>, expr: &'a Expr) -> Result<DataType, QueryError> {
         use query::ast::Expr_::*;
         match expr.node {
 /*
@@ -275,25 +311,48 @@ pub mod interp {
             Div(ref a, ref b) => interp_expr(env, a) / interp_expr(env, b),
 */
             Assign(ref var, ref b) => {
-                let val = interp_expr(env, b);
+                let val = interpret_expr(env, b)?;
 				// FIXME: avoid clone, it's slow
                 env.insert(var, val.clone());
-                val
+                Ok(val)
             }
 			// FIXME: avoid clone, it's slow
-            Var(ref var) => env.get(&var[..]).unwrap().clone(),
-            Literal(lit) => DataType::Number(lit),
-            LiteralString(ref litstr) => DataType::String(litstr.to_string()),
+            Var(ref var) => {
+				match env.get(&var[..]) {
+					Some(v) => Ok(v.clone()),
+					None => Err(QueryError::VariableNotDefined(var.to_string()))
+				}
+			},
+            Literal(lit) => Ok(DataType::Number(lit)),
+            LiteralString(ref litstr) => Ok(DataType::String(litstr.to_string())),
             Return(ref e) => {
-                let val = interp_expr(env, e);
+                let val = interpret_expr(env, e)?;
                 println!("{:?}", val);
-				val
+				Ok(val)
             }
-            Print(ref e) => {
-                let val = interp_expr(env, e);
-                println!("{:?}", val);
-                val
+            Function(ref fname, ref e) => {
+                let val = interpret_expr(env, e)?;
+				let mut args = Vec::new();
+				args.push(val);
+				let f = match env.get(&fname[..]).unwrap() {
+					DataType::Function(f) => f,
+					_ => return Err(QueryError::InvalidType(fname.to_string()))
+				};
+				f(args)
             }
         }
     }
+}
+
+pub fn query<'a>(code: &str) -> Result<DataType, QueryError> {
+	let lexer = lexer::Lexer::new(code)
+		.inspect(|tok| eprintln!("tok: {:?}", tok));
+	let program = match parser::parse(lexer) {
+		Ok(p) => p,
+		Err(e) => {
+			println!("{:?}", e);
+			return Err(QueryError::ParsingError);
+		}
+	};
+	interpret::interpret_prog(&program)
 }

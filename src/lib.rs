@@ -1,6 +1,5 @@
 #![feature(plugin,try_from,custom_derive)]
 #![feature(proc_macro_gen)]
-#![feature(use_extern_macros)]
 #![plugin(rocket_codegen)]
 extern crate rocket;
 #[macro_use] extern crate rocket_contrib;

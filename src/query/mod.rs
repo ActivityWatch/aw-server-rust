@@ -6,9 +6,9 @@ pub enum QueryError {
 	ParsingError,
 
 	// Execution
-	NoReturn,
 	VariableNotDefined(String),
-	InvalidType(String)
+	MathError(String),
+	InvalidType(String),
 }
 
 mod lexer {
@@ -27,8 +27,12 @@ mod lexer {
         Minus,
         Star,
         Slash,
+        Percent,
         LParen,
         RParen,
+        LBracket,
+        RBracket,
+        Comma,
         Semi,
 
         Whitespace,
@@ -64,8 +68,12 @@ mod lexer {
         r#"-"# => (Token::Minus, text),
         r#"\*"# => (Token::Star, text),
         r#"/"# => (Token::Slash, text),
+        r#"%"# => (Token::Percent, text),
         r#"\("# => (Token::LParen, text),
         r#"\)"# => (Token::RParen, text),
+        r#"\["# => (Token::LBracket, text),
+        r#"\]"# => (Token::RBracket, text),
+        r#","# => (Token::Comma, text),
         r#";"# => (Token::Semi, text),
 
         // TODO: do not panic, send an error
@@ -128,27 +136,27 @@ mod ast {
         pub stmts: Vec<Expr>
     }
 
-    #[derive(Debug)]
+    #[derive(Debug,Clone)]
     pub struct Expr {
         pub span: Span,
         pub node: Expr_,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug,Clone)]
     pub enum Expr_ {
-/*
         Add(Box<Expr>, Box<Expr>),
         Sub(Box<Expr>, Box<Expr>),
         Mul(Box<Expr>, Box<Expr>),
         Div(Box<Expr>, Box<Expr>),
-*/
+        Mod(Box<Expr>, Box<Expr>),
         Var(String),
         Assign(String, Box<Expr>),
         // TODO: multi-argument functions
         Function(String, Box<Expr>),
         Return(Box<Expr>),
-        Literal(f64),
-        LiteralString(String),
+        Number(f64),
+        String(String),
+        List(Vec<Expr>),
     }
 }
 
@@ -174,10 +182,18 @@ mod parser {
 
         statements: Vec<Expr> {
             => vec![],
-            statements[mut st] assign[e] Semi => {
-                st.push(e);
+            statements[mut st] ret[r] Semi => {
+                st.push(r);
                 st
             }
+        }
+
+        ret: Expr {
+            Return assign[a] => Expr {
+                span: span!(),
+                node: Expr_::Return(Box::new(a)),
+            },
+            assign[a] => a
         }
 
         assign: Expr {
@@ -185,19 +201,49 @@ mod parser {
                 span: span!(),
                 node: Expr_::Function(fname, Box::new(a)),
             },
-            Return assign[a] => Expr {
-                span: span!(),
-                node: Expr_::Return(Box::new(a)),
-            },
             Ident(var) Equals assign[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Assign(var, Box::new(rhs)),
             },
-            term[t] => t,
+            object[o] => o
+        }
+
+        object: Expr {
+            LBracket list[l] RBracket => l,
+            LBracket RBracket => Expr {
+                span: span!(),
+                node: {
+                    Expr_::List(Vec::new())
+                }
+            },
+            term[o] => o,
+        }
+
+        list: Expr {
+            object[o] => Expr {
+                span: span!(),
+                node: {
+                    let mut list = Vec::new();
+                    list.push(o);
+                    Expr_::List(list)
+                }
+            },
+            list[l] Comma object[o] => Expr {
+                span: span!(),
+                node: {
+                    match l.node {
+                        Expr_::List(mut l) => {
+                            l.push(o);
+                            // FIXME: this can be incredibly slow
+                            Expr_::List(l.clone())
+                        },
+                        _ => panic!("a")
+                    }
+                }
+            },
         }
 
         term: Expr {
-/*
             term[lhs] Plus fact[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Add(Box::new(lhs), Box::new(rhs)),
@@ -206,12 +252,10 @@ mod parser {
                 span: span!(),
                 node: Expr_::Sub(Box::new(lhs), Box::new(rhs)),
             },
-*/
             fact[x] => x
         }
 
         fact: Expr {
-/*
             fact[lhs] Star atom[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Mul(Box::new(lhs), Box::new(rhs)),
@@ -220,7 +264,10 @@ mod parser {
                 span: span!(),
                 node: Expr_::Div(Box::new(lhs), Box::new(rhs)),
             },
-*/
+            fact[lhs] Percent atom[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
+            },
             atom[x] => x
         }
 
@@ -232,11 +279,11 @@ mod parser {
             },
             Number(i) => Expr {
                 span: span!(),
-                node: Expr_::Literal(i),
+                node: Expr_::Number(i),
             },
             String(s) => Expr {
                 span: span!(),
-                node: Expr_::LiteralString(s),
+                node: Expr_::String(s),
             },
             LParen assign[a] RParen => a
         }
@@ -299,17 +346,80 @@ mod interpret {
             }
 			i+=1;
         }
-		Err(QueryError::NoReturn)
+        panic!("This should be unreachable!");
     }
+
     fn interpret_expr<'a>(env: &mut HashMap<&'a str, DataType>, expr: &'a Expr) -> Result<DataType, QueryError> {
         use query::ast::Expr_::*;
         match expr.node {
-/*
-            Add(ref a, ref b) => interp_expr(env, a) + interp_expr(env, b),
-            Sub(ref a, ref b) => interp_expr(env, a) - interp_expr(env, b),
-            Mul(ref a, ref b) => interp_expr(env, a) * interp_expr(env, b),
-            Div(ref a, ref b) => interp_expr(env, a) / interp_expr(env, b),
-*/
+            Add(ref a, ref b) => {
+                let a_res = interpret_expr(env, a)?;
+                let b_res = interpret_expr(env, b)?;
+                let a_num = match a_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot add something that is not a number!".to_string()))
+                };
+                let b_num = match b_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot add something that is not a number!".to_string()))
+                };
+                Ok(DataType::Number(a_num+b_num))
+            },
+            Sub(ref a, ref b) => {
+                let a_res = interpret_expr(env, a)?;
+                let b_res = interpret_expr(env, b)?;
+                let a_num = match a_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
+                };
+                let b_num = match b_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
+                };
+                Ok(DataType::Number(a_num-b_num))
+            },
+            Mul(ref a, ref b) => {
+                let a_res = interpret_expr(env, a)?;
+                let b_res = interpret_expr(env, b)?;
+                let a_num = match a_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
+                };
+                let b_num = match b_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
+                };
+                Ok(DataType::Number(a_num*b_num))
+            },
+            Div(ref a, ref b) => {
+                let a_res = interpret_expr(env, a)?;
+                let b_res = interpret_expr(env, b)?;
+                let a_num = match a_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
+                };
+                let b_num = match b_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
+                };
+                if b_num == 0.0 {
+                    return Err(QueryError::MathError("Tried to divide by zero!".to_string()));
+                }
+                Ok(DataType::Number(a_num/b_num))
+            },
+            Mod(ref a, ref b) => {
+                let a_res = interpret_expr(env, a)?;
+                let b_res = interpret_expr(env, b)?;
+                let a_num = match a_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
+                };
+                let b_num = match b_res {
+                    DataType::Number(n) => n,
+                    _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
+                };
+                Ok(DataType::Number(a_num%b_num))
+            },
             Assign(ref var, ref b) => {
                 let val = interpret_expr(env, b)?;
 				// FIXME: avoid clone, it's slow
@@ -323,22 +433,34 @@ mod interpret {
 					None => Err(QueryError::VariableNotDefined(var.to_string()))
 				}
 			},
-            Literal(lit) => Ok(DataType::Number(lit)),
-            LiteralString(ref litstr) => Ok(DataType::String(litstr.to_string())),
+            Number(lit) => Ok(DataType::Number(lit)),
+            String(ref litstr) => Ok(DataType::String(litstr.to_string())),
             Return(ref e) => {
                 let val = interpret_expr(env, e)?;
                 println!("{:?}", val);
 				Ok(val)
-            }
+            },
             Function(ref fname, ref e) => {
                 let val = interpret_expr(env, e)?;
 				let mut args = Vec::new();
 				args.push(val);
-				let f = match env.get(&fname[..]).unwrap() {
+                let var = match env.get(&fname[..]) {
+                    Some(v) => v,
+                    None => return Err(QueryError::VariableNotDefined(fname.clone()))
+                };
+				let f = match var {
 					DataType::Function(f) => f,
 					_ => return Err(QueryError::InvalidType(fname.to_string()))
 				};
 				f(args)
+            },
+            List(ref list) => {
+                let mut l = Vec::new();
+                for entry in list {
+                    let res = interpret_expr(env, entry)?;
+                    l.push(res);
+                }
+                Ok(DataType::List(l))
             }
         }
     }

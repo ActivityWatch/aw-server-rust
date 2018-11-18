@@ -1,6 +1,7 @@
 use chrono;
 
-// TODO: What is the max duration of a i64 nanosecond?
+// Max duration of a i64 nanosecond is 2562047.7880152157 hours
+// ((2**64)/2)/1000000000/60/60
 
 fn get_nanos(duration: &chrono::Duration) -> f64 {
     return (duration.num_nanoseconds().unwrap() as f64)/1000000000.0

@@ -62,9 +62,9 @@ pub struct Datastore {
 }
 
 impl fmt::Debug for Datastore {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "Datastore()")
-	}
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Datastore()")
+    }
 }
 
 struct DatastoreWorker {

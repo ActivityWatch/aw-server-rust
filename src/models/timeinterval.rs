@@ -11,7 +11,7 @@ pub struct TimeInterval {
 
 #[derive(Debug)]
 pub enum TimeIntervalError {
-	ParseError()
+    ParseError()
 }
 
 impl TimeInterval {
@@ -23,18 +23,18 @@ impl TimeInterval {
     }
 
     pub fn new_from_string(period: &str) -> Result<TimeInterval, TimeIntervalError> {
-		let splits = period.split("/").collect::<Vec<&str>>();
-		if splits.len() != 2 {
-			return Err(TimeIntervalError::ParseError());
-		}
-		let start = match DateTime::parse_from_rfc3339(splits[0]) {
-			Ok(dt) => dt.with_timezone(&Utc),
-			Err(_e) => return Err(TimeIntervalError::ParseError())
-		};
-		let end = match DateTime::parse_from_rfc3339(splits[1]) {
-			Ok(dt) => dt.with_timezone(&Utc),
-			Err(_e) => return Err(TimeIntervalError::ParseError())
-		};
+        let splits = period.split("/").collect::<Vec<&str>>();
+        if splits.len() != 2 {
+            return Err(TimeIntervalError::ParseError());
+        }
+        let start = match DateTime::parse_from_rfc3339(splits[0]) {
+            Ok(dt) => dt.with_timezone(&Utc),
+            Err(_e) => return Err(TimeIntervalError::ParseError())
+        };
+        let end = match DateTime::parse_from_rfc3339(splits[1]) {
+            Ok(dt) => dt.with_timezone(&Utc),
+            Err(_e) => return Err(TimeIntervalError::ParseError())
+        };
 
         Ok(TimeInterval::new(start, end))
     }
@@ -53,7 +53,7 @@ impl TimeInterval {
 }
 
 impl fmt::Display for TimeInterval {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}/{}", self.start.to_rfc3339(), self.end.to_rfc3339())
-	}
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}/{}", self.start.to_rfc3339(), self.end.to_rfc3339())
+    }
 }

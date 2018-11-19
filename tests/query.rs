@@ -1,27 +1,65 @@
 extern crate aw_server;
 
-extern crate plex;
+extern crate chrono;
+extern crate serde_json;
 
 #[cfg(test)]
 mod query_tests {
+    use chrono;
+    use chrono::Duration;
+    use serde_json::json;
+
     use aw_server::query;
     use aw_server::query::QueryError;
     use aw_server::query::DataType;
-
 	use aw_server::datastore::Datastore;
+    use aw_server::models::Bucket;
+    use aw_server::models::Event;
     use aw_server::models::TimeInterval;
 
     static TIME_INTERVAL : &str = "2000-01-01T00:00:00Z/2000-01-02T00:00:00Z";
 
-	fn setup_datastore() -> Datastore {
-        // Setup datastore
+	fn setup_datastore_empty() -> Datastore {
+        Datastore::new_in_memory()
+	}
+
+    fn setup_datastore_populated() -> Datastore {
         let ds = Datastore::new_in_memory();
+        // Create bucket
+        let bucket = Bucket {
+            bid: None,
+            id: "testid".to_string(),
+            _type: "testtype".to_string(),
+            client: "testclient".to_string(),
+            hostname: "testhost".to_string(),
+            created: Some(chrono::Utc::now()),
+        };
+        ds.create_bucket(&bucket).unwrap();
+        // Insert events
+        let e1 = Event {
+            id: None,
+            timestamp: chrono::Utc::now(),
+            duration: Duration::seconds(0),
+            data: json!({"key": "value"})
+        };
+        let mut e2 = e1.clone();
+        e2.timestamp = chrono::Utc::now();
+        let mut e_replace = e2.clone();
+        e_replace.data = json!({"key": "value2"});
+        e_replace.duration = Duration::seconds(2);
+
+        let mut event_list = Vec::new();
+        event_list.push(e1.clone());
+        event_list.push(e2.clone());
+
+        ds.insert_events(&bucket.id, &event_list).unwrap();
+
 		return ds;
 	}
 
 	#[test]
     fn test_number() {
-		let ds = setup_datastore();
+		let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("1;1.;1.1;");
@@ -30,7 +68,7 @@ mod query_tests {
 
     #[test]
     fn test_return() {
-		let ds = setup_datastore();
+		let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
 		let code = String::from("return 1;");
@@ -42,7 +80,7 @@ mod query_tests {
 
 	#[test]
     fn test_function() {
-		let ds = setup_datastore();
+		let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("print(1);");
@@ -68,8 +106,17 @@ mod query_tests {
     }
 
     #[test]
+    fn test_all_functions() {
+		let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let code = String::from("query_bucket(\"testid\");");
+		query::query(&code, &interval, &ds).unwrap();
+    }
+
+    #[test]
 	fn test_string() {
-		let ds = setup_datastore();
+		let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("a=\"test\";");
@@ -82,7 +129,7 @@ mod query_tests {
 
 	#[test]
 	fn test_list() {
-		let ds = setup_datastore();
+		let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
 		let code = String::from("[];");
@@ -106,7 +153,7 @@ mod query_tests {
 
 	#[test]
 	fn test_comment() {
-		let ds = setup_datastore();
+		let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("1;# testing 123");
@@ -115,7 +162,7 @@ mod query_tests {
 
 	#[test]
 	fn test_math() {
-		let ds = setup_datastore();
+		let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("1+1;");

@@ -8,6 +8,9 @@ pub enum QueryError {
 	VariableNotDefined(String),
 	MathError(String),
 	InvalidType(String),
+    InvalidFunctionParameters(String),
+    TimeIntervalError(String),
+    BucketQueryError(String),
 }
 
 mod lexer {
@@ -293,11 +296,14 @@ mod parser {
     }
 }
 
+use models::Event;
+
 #[derive(Clone)]
 pub enum DataType {
 	None(),
 	Number(f64),
 	String(String),
+    Event(Event),
 	List(Vec<DataType>),
 	Function(functions::QueryFn),
 }
@@ -313,6 +319,7 @@ impl fmt::Debug for DataType {
 			DataType::None() => write!(f, "None()"),
 			DataType::Number(n) => write!(f, "Number({})", n),
 			DataType::String(s) => write!(f, "String({})", s),
+			DataType::Event(e) => write!(f, "Event({:?})", e),
 			DataType::List(l) => write!(f, "List({:?})", l),
 			DataType::Function(_fun) => write!(f, "Function(Unknown)"),
 		}
@@ -323,6 +330,7 @@ mod functions {
 	use query::DataType;
 	use query::QueryError;
     use datastore::Datastore;
+    use models::TimeInterval;
 
 	use std::collections::HashMap;
 
@@ -341,7 +349,33 @@ mod functions {
 	}
 
 	fn q_query_bucket(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
-		return Ok(DataType::None());
+        if args.len() != 1 {
+            return Err(QueryError::InvalidFunctionParameters(format!("Expected 1 argument, got {}", args.len())));
+        }
+        let bucket_id = match args[0] {
+            DataType::String(ref s) => s,
+            ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type String, got {:?}", invalid_type)))
+        };
+        let interval_str = match env.get("TIMEINTERVAL") {
+            Some(data_ti) => match data_ti {
+                DataType::String(ti_str) => ti_str,
+                _ => return Err(QueryError::TimeIntervalError("TIMEINTERVAL is not of type string!".to_string()))
+            },
+            None => return Err(QueryError::TimeIntervalError("TIMEINTERVAL not defined!".to_string()))
+        };
+        let interval = match TimeInterval::new_from_string(interval_str) {
+            Ok(ti) => ti,
+            Err(_e) => return Err(QueryError::TimeIntervalError(format!("Failed to parse TIMEINTERVAL: {}", interval_str)))
+        };
+        let events = match ds.get_events(bucket_id, Some(interval.start().clone()), Some(interval.end().clone()), None) {
+            Ok(events) => events,
+            Err(e) => return Err(QueryError::BucketQueryError(format!("Failed to query bucket: {:?}", e)))
+        };
+        let mut ret = Vec::new();
+        for event in events {
+            ret.push(DataType::Event(event));
+        };
+        return Ok(DataType::List(ret));
 	}
 }
 

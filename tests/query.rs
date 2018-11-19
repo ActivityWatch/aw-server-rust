@@ -9,7 +9,7 @@ mod query_tests {
     use aw_server::query::DataType;
 
 	use aw_server::datastore::Datastore;
-    use aw_server::models::timeinterval::TimeInterval;
+    use aw_server::models::TimeInterval;
 
     static TIME_INTERVAL : &str = "2000-01-01T00:00:00Z/2000-01-02T00:00:00Z";
 

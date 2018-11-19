@@ -9,7 +9,7 @@ mod transform_tests {
     use chrono::Duration;
     use serde_json::json;
 
-    use aw_server::models::event::Event;
+    use aw_server::models::Event;
     use aw_server::transform;
 
     #[test]

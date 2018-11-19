@@ -5,8 +5,8 @@ use rocket_contrib::{Json, Value};
 use chrono::DateTime;
 use chrono::Utc;
 
-use models::bucket::Bucket;
-use models::event::Event;
+use models::Bucket;
+use models::Event;
 
 use rocket::State;
 use rocket::http::Status;

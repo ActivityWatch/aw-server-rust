@@ -1,4 +1,4 @@
-use models::event::Event;
+use models::Event;
 
 // TODO: Compare with aw-cores version to make sure it works correctly
 pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Option<Event> {

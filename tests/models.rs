@@ -12,9 +12,9 @@ mod models_tests {
     use chrono::Utc;
     use chrono::Duration;
 
-    use aw_server::models::bucket::Bucket;
-    use aw_server::models::event::Event;
-    use aw_server::models::timeinterval::TimeInterval;
+    use aw_server::models::Bucket;
+    use aw_server::models::Event;
+    use aw_server::models::TimeInterval;
 
     #[test]
     fn test_bucket() {

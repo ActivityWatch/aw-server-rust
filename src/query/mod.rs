@@ -352,7 +352,7 @@ mod interpret {
 	use query::QueryError;
     use std::collections::HashMap;
     use datastore::Datastore;
-    use models::timeinterval::TimeInterval;
+    use models::TimeInterval;
 
 	fn init_env<'a>(ti: &TimeInterval) -> HashMap<&'a str, DataType> {
         let mut env = HashMap::new();
@@ -493,7 +493,7 @@ mod interpret {
 }
 
 use datastore::Datastore;
-use models::timeinterval::TimeInterval;
+use models::TimeInterval;
 
 pub fn query<'a>(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
 	let lexer = lexer::Lexer::new(code)

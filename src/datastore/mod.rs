@@ -1,6 +1,7 @@
 extern crate rusqlite;
 extern crate chrono;
 
+use std::fmt;
 use std::sync::Mutex;
 use std::thread;
 use std::collections::HashMap;
@@ -15,8 +16,8 @@ use rusqlite::DropBehavior;
 
 use mpsc_requests;
 
-use super::models::bucket::Bucket;
-use super::models::event::Event;
+use models::bucket::Bucket;
+use models::event::Event;
 
 /*
  * TODO:
@@ -58,6 +59,12 @@ pub enum Commands {
 
 pub struct Datastore {
     requester: Mutex<mpsc_requests::Requester<Commands, Result<Responses, DatastoreError>>>
+}
+
+impl fmt::Debug for Datastore {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "Datastore()")
+	}
 }
 
 struct DatastoreWorker {
@@ -107,7 +114,6 @@ impl DatastoreWorker {
     }
 
     fn work_loop(&mut self, method: DatastoreMethod) -> () {
-        println!("Starting SQLite worker thread");
         let mut conn = match method {
             DatastoreMethod::Memory() => Connection::open_in_memory().unwrap(),
             DatastoreMethod::File(path) => Connection::open(path).unwrap()

@@ -5,12 +5,16 @@ extern crate aw_server;
 
 #[cfg(test)]
 mod models_tests {
+	use std::str::FromStr;
+
     use serde_json::json;
+    use chrono::DateTime;
     use chrono::Utc;
     use chrono::Duration;
 
     use aw_server::models::bucket::Bucket;
     use aw_server::models::event::Event;
+    use aw_server::models::timeinterval::TimeInterval;
 
     #[test]
     fn test_bucket() {
@@ -34,5 +38,24 @@ mod models_tests {
             data: json!({"test": 1})
         };
         println!("event: {:?}", e);
+    }
+
+    #[test]
+    fn test_timeinterval() {
+        let start = DateTime::from_str("2000-01-01T00:00:00Z").unwrap();
+        let end = DateTime::from_str("2000-01-02T00:00:00Z").unwrap();
+		let period_str = "2000-01-01T00:00:00+00:00/2000-01-02T00:00:00+00:00";
+		let duration = end - start;
+        let tp = TimeInterval::new(start, end);
+		assert_eq!(tp.start(), &start);
+		assert_eq!(tp.end(), &end);
+		assert_eq!(tp.duration(), duration);
+        assert_eq!(tp.to_string(), period_str);
+
+        let tp = TimeInterval::new_from_string(period_str).unwrap();
+		assert_eq!(tp.start(), &start);
+		assert_eq!(tp.end(), &end);
+		assert_eq!(tp.duration(), duration);
+        assert_eq!(tp.to_string(), period_str);
     }
 }

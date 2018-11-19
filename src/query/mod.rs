@@ -1,4 +1,3 @@
-
 #[derive(Debug)]
 pub enum QueryError {
 	// Lexing + Parsing
@@ -294,29 +293,54 @@ mod parser {
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Clone)]
 pub enum DataType {
 	None(),
 	Number(f64),
 	String(String),
 	List(Vec<DataType>),
-	Function(fn(Vec<DataType>) -> Result<DataType, QueryError>),
+	Function(functions::QueryFn),
+}
+
+use std::fmt;
+
+// Needed because of a limitation in rust where you cannot derive(Debug) on a
+// enum which has a fn with reference parameters which our QueryFn has
+// https://stackoverflow.com/questions/53380040/function-pointer-with-a-reference-argument-cannot-derive-debug
+impl fmt::Debug for DataType {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			DataType::None() => write!(f, "None()"),
+			DataType::Number(n) => write!(f, "Number({})", n),
+			DataType::String(s) => write!(f, "String({})", s),
+			DataType::List(l) => write!(f, "List({:?})", l),
+			DataType::Function(_fun) => write!(f, "Function(Unknown)"),
+		}
+	}
 }
 
 mod functions {
 	use query::DataType;
 	use query::QueryError;
+    use datastore::Datastore;
 
 	use std::collections::HashMap;
 
+    pub type QueryFn = fn(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError>;
+
 	pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
 		env.insert("print", DataType::Function(q_print));
+		env.insert("query_bucket", DataType::Function(q_query_bucket));
 	}
 
-	fn q_print(args: Vec<DataType>) -> Result<DataType, QueryError> {
+	fn q_print(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
 		for arg in args {
 			println!("{:?}", arg);
 		}
+		return Ok(DataType::None());
+	}
+
+	fn q_query_bucket(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
 		return Ok(DataType::None());
 	}
 }
@@ -327,19 +351,22 @@ mod interpret {
 	use query::DataType;
 	use query::QueryError;
     use std::collections::HashMap;
+    use datastore::Datastore;
+    use models::timeinterval::TimeInterval;
 
-	fn get_env<'a>() -> HashMap<&'a str, DataType> {
+	fn init_env<'a>(ti: &TimeInterval) -> HashMap<&'a str, DataType> {
         let mut env = HashMap::new();
+        env.insert("TIMEINTERVAL", DataType::String(ti.to_string()));
 		query::functions::fill_env(&mut env);
 		return env;
 	}
 
-    pub fn interpret_prog<'a>(p: &'a Program) -> Result<DataType, QueryError> {
+    pub fn interpret_prog<'a>(p: &'a Program, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
 		let last_i = p.stmts.len()-1;
-		let mut env = get_env();
+		let mut env = init_env(ti);
 		let mut i = 0;
         for expr in &p.stmts {
-            let ret = interpret_expr(&mut env, expr)?;
+            let ret = interpret_expr(&mut env, ds, expr)?;
 			// FIXME: This is ugly
 			if i == last_i {
                 return Ok(ret);
@@ -349,12 +376,12 @@ mod interpret {
         panic!("This should be unreachable!");
     }
 
-    fn interpret_expr<'a>(env: &mut HashMap<&'a str, DataType>, expr: &'a Expr) -> Result<DataType, QueryError> {
+    fn interpret_expr<'a>(env: &mut HashMap<&'a str, DataType>, ds: &Datastore, expr: &'a Expr) -> Result<DataType, QueryError> {
         use query::ast::Expr_::*;
         match expr.node {
             Add(ref a, ref b) => {
-                let a_res = interpret_expr(env, a)?;
-                let b_res = interpret_expr(env, b)?;
+                let a_res = interpret_expr(env, ds, a)?;
+                let b_res = interpret_expr(env, ds, b)?;
                 let a_num = match a_res {
                     DataType::Number(n) => n,
                     _ => return Err(QueryError::InvalidType("Cannot add something that is not a number!".to_string()))
@@ -366,8 +393,8 @@ mod interpret {
                 Ok(DataType::Number(a_num+b_num))
             },
             Sub(ref a, ref b) => {
-                let a_res = interpret_expr(env, a)?;
-                let b_res = interpret_expr(env, b)?;
+                let a_res = interpret_expr(env, ds, a)?;
+                let b_res = interpret_expr(env, ds, b)?;
                 let a_num = match a_res {
                     DataType::Number(n) => n,
                     _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
@@ -379,8 +406,8 @@ mod interpret {
                 Ok(DataType::Number(a_num-b_num))
             },
             Mul(ref a, ref b) => {
-                let a_res = interpret_expr(env, a)?;
-                let b_res = interpret_expr(env, b)?;
+                let a_res = interpret_expr(env, ds, a)?;
+                let b_res = interpret_expr(env, ds, b)?;
                 let a_num = match a_res {
                     DataType::Number(n) => n,
                     _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
@@ -392,8 +419,8 @@ mod interpret {
                 Ok(DataType::Number(a_num*b_num))
             },
             Div(ref a, ref b) => {
-                let a_res = interpret_expr(env, a)?;
-                let b_res = interpret_expr(env, b)?;
+                let a_res = interpret_expr(env, ds, a)?;
+                let b_res = interpret_expr(env, ds, b)?;
                 let a_num = match a_res {
                     DataType::Number(n) => n,
                     _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
@@ -408,8 +435,8 @@ mod interpret {
                 Ok(DataType::Number(a_num/b_num))
             },
             Mod(ref a, ref b) => {
-                let a_res = interpret_expr(env, a)?;
-                let b_res = interpret_expr(env, b)?;
+                let a_res = interpret_expr(env, ds, a)?;
+                let b_res = interpret_expr(env, ds, b)?;
                 let a_num = match a_res {
                     DataType::Number(n) => n,
                     _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
@@ -421,7 +448,7 @@ mod interpret {
                 Ok(DataType::Number(a_num%b_num))
             },
             Assign(ref var, ref b) => {
-                let val = interpret_expr(env, b)?;
+                let val = interpret_expr(env, ds, b)?;
 				// FIXME: avoid clone, it's slow
                 env.insert(var, val.clone());
                 Ok(val)
@@ -436,12 +463,11 @@ mod interpret {
             Number(lit) => Ok(DataType::Number(lit)),
             String(ref litstr) => Ok(DataType::String(litstr.to_string())),
             Return(ref e) => {
-                let val = interpret_expr(env, e)?;
-                println!("{:?}", val);
+                let val = interpret_expr(env, ds, e)?;
 				Ok(val)
             },
             Function(ref fname, ref e) => {
-                let val = interpret_expr(env, e)?;
+                let val = interpret_expr(env, ds, e)?;
 				let mut args = Vec::new();
 				args.push(val);
                 let var = match env.get(&fname[..]) {
@@ -452,12 +478,12 @@ mod interpret {
 					DataType::Function(f) => f,
 					_ => return Err(QueryError::InvalidType(fname.to_string()))
 				};
-				f(args)
+				f(args, &env, ds)
             },
             List(ref list) => {
                 let mut l = Vec::new();
                 for entry in list {
-                    let res = interpret_expr(env, entry)?;
+                    let res = interpret_expr(env, ds, entry)?;
                     l.push(res);
                 }
                 Ok(DataType::List(l))
@@ -466,7 +492,10 @@ mod interpret {
     }
 }
 
-pub fn query<'a>(code: &str) -> Result<DataType, QueryError> {
+use datastore::Datastore;
+use models::timeinterval::TimeInterval;
+
+pub fn query<'a>(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
 	let lexer = lexer::Lexer::new(code)
 		.inspect(|tok| eprintln!("tok: {:?}", tok));
 	let program = match parser::parse(lexer) {
@@ -476,5 +505,5 @@ pub fn query<'a>(code: &str) -> Result<DataType, QueryError> {
 			return Err(QueryError::ParsingError);
 		}
 	};
-	interpret::interpret_prog(&program)
+	interpret::interpret_prog(&program, ti, ds)
 }

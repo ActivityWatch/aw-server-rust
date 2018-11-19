@@ -3,7 +3,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use chrono::Duration;
 
-use super::duration::DurationSerialization;
+use models::duration::DurationSerialization;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Event {

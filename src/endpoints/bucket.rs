@@ -15,9 +15,8 @@ use rocket::response::Failure;
 
 use super::ServerState;
 
-use super::super::datastore::DatastoreError;
-
-use super::super::transform;
+use datastore::DatastoreError;
+use transform;
 
 /*
  * TODO:

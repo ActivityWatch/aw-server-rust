@@ -305,7 +305,8 @@ pub enum DataType {
     String(String),
     Event(Event),
     List(Vec<DataType>),
-    Function(functions::QueryFn),
+    // Name, argc (-1=unlimited), func
+    Function(String, i8, functions::QueryFn),
 }
 
 use std::fmt;
@@ -321,7 +322,7 @@ impl fmt::Debug for DataType {
             DataType::String(s) => write!(f, "String({})", s),
             DataType::Event(e) => write!(f, "Event({:?})", e),
             DataType::List(l) => write!(f, "List({:?})", l),
-            DataType::Function(_fun) => write!(f, "Function(Unknown)"),
+            DataType::Function(name, _argc, _fun) => write!(f, "Function({})", name),
         }
     }
 }
@@ -337,8 +338,22 @@ mod functions {
     pub type QueryFn = fn(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError>;
 
     pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
-        env.insert("print", DataType::Function(q_print));
-        env.insert("query_bucket", DataType::Function(q_query_bucket));
+        env.insert("print", DataType::Function("print".to_string(), -1, q_print));
+        env.insert("query_bucket", DataType::Function("query_bucket".to_string(), 1, q_query_bucket));
+    }
+
+    fn get_timeinterval (env: &HashMap<&str, DataType>) -> Result<TimeInterval, QueryError> {
+        let interval_str = match env.get("TIMEINTERVAL") {
+            Some(data_ti) => match data_ti {
+                DataType::String(ti_str) => ti_str,
+                _ => return Err(QueryError::TimeIntervalError("TIMEINTERVAL is not of type string!".to_string()))
+            },
+            None => return Err(QueryError::TimeIntervalError("TIMEINTERVAL not defined!".to_string()))
+        };
+        match TimeInterval::new_from_string(interval_str) {
+            Ok(ti) => Ok(ti),
+            Err(_e) => Err(QueryError::TimeIntervalError(format!("Failed to parse TIMEINTERVAL: {}", interval_str)))
+        }
     }
 
     fn q_print(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
@@ -349,24 +364,11 @@ mod functions {
     }
 
     fn q_query_bucket(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
-        if args.len() != 1 {
-            return Err(QueryError::InvalidFunctionParameters(format!("Expected 1 argument, got {}", args.len())));
-        }
         let bucket_id = match args[0] {
             DataType::String(ref s) => s,
             ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type String, got {:?}", invalid_type)))
         };
-        let interval_str = match env.get("TIMEINTERVAL") {
-            Some(data_ti) => match data_ti {
-                DataType::String(ti_str) => ti_str,
-                _ => return Err(QueryError::TimeIntervalError("TIMEINTERVAL is not of type string!".to_string()))
-            },
-            None => return Err(QueryError::TimeIntervalError("TIMEINTERVAL not defined!".to_string()))
-        };
-        let interval = match TimeInterval::new_from_string(interval_str) {
-            Ok(ti) => ti,
-            Err(_e) => return Err(QueryError::TimeIntervalError(format!("Failed to parse TIMEINTERVAL: {}", interval_str)))
-        };
+        let interval = get_timeinterval (env)?;
         let events = match ds.get_events(bucket_id, Some(interval.start().clone()), Some(interval.end().clone()), None) {
             Ok(events) => events,
             Err(e) => return Err(QueryError::BucketQueryError(format!("Failed to query bucket: {:?}", e)))
@@ -508,11 +510,14 @@ mod interpret {
                     Some(v) => v,
                     None => return Err(QueryError::VariableNotDefined(fname.clone()))
                 };
-                let f = match var {
-                    DataType::Function(f) => f,
-                    _ => return Err(QueryError::InvalidType(fname.to_string()))
+                let (name, argc, fun) = match var {
+                    DataType::Function(name, argc, fun) => (name, argc, fun),
+                    data => return Err(QueryError::InvalidType(fname.to_string()))
                 };
-                f(args, &env, ds)
+                if (args.len() as i8) != *argc && *argc >= 0 {
+                    return Err(QueryError::InvalidFunctionParameters(format!("Expected 1 argument, got {}", args.len())));
+                }
+                fun(args, env, ds)
             },
             List(ref list) => {
                 let mut l = Vec::new();

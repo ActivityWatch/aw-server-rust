@@ -35,7 +35,10 @@ mod lexer {
         RParen,
         LBracket,
         RBracket,
+        LBrace,
+        RBrace,
         Comma,
+        Colon,
         Semi,
 
         Whitespace,
@@ -76,7 +79,10 @@ mod lexer {
         r#"\)"# => (Token::RParen, text),
         r#"\["# => (Token::LBracket, text),
         r#"\]"# => (Token::RBracket, text),
+        r#"\{"# => (Token::LBrace, text),
+        r#"\}"# => (Token::RBrace, text),
         r#","# => (Token::Comma, text),
+        r#":"# => (Token::Colon, text),
         r#";"# => (Token::Semi, text),
 
         // TODO: do not panic, send an error
@@ -134,6 +140,8 @@ mod lexer {
 mod ast {
     use query::lexer::Span;
 
+    use std::collections::HashMap;
+
     #[derive(Debug)]
     pub struct Program {
         pub stmts: Vec<Expr>
@@ -160,6 +168,7 @@ mod ast {
         Number(f64),
         String(String),
         List(Vec<Expr>),
+        Dict(HashMap<String, Expr>),
     }
 }
 
@@ -168,6 +177,9 @@ mod parser {
     use query::lexer::Token::*;
     use query::lexer::*;
     use plex::parser;
+
+    use std::collections::HashMap;
+
     parser! {
         fn parse_(Token, Span);
 
@@ -219,6 +231,13 @@ mod parser {
                     Expr_::List(Vec::new())
                 }
             },
+            LBrace dict[d] RBrace => d,
+            LBrace RBrace => Expr {
+                span: span!(),
+                node: {
+                    Expr_::Dict(HashMap::new())
+                }
+            },
             term[o] => o,
         }
 
@@ -239,6 +258,30 @@ mod parser {
                             l.push(o);
                             // FIXME: this can be incredibly slow
                             Expr_::List(l.clone())
+                        },
+                        _ => panic!("a")
+                    }
+                }
+            },
+        }
+
+        dict: Expr {
+            String(k) Colon object[v] => Expr {
+                span: span!(),
+                node: {
+                    let mut dict = HashMap::new();
+                    dict.insert(k, v);
+                    Expr_::Dict(dict)
+                }
+            },
+            dict[d] Comma String(k) Colon object[v] => Expr {
+                span: span!(),
+                node: {
+                    match d.node {
+                        Expr_::Dict(mut d) => {
+                            d.insert(k, v);
+                            // FIXME: this can be incredibly slow
+                            Expr_::Dict(d.clone())
                         },
                         _ => panic!("a")
                     }
@@ -301,6 +344,8 @@ use models::Event;
 use serde::Serializer;
 use serde::Serialize;
 
+use std::collections::HashMap;
+
 #[derive(Clone,Serialize)]
 #[serde(untagged)]
 pub enum DataType {
@@ -309,6 +354,7 @@ pub enum DataType {
     String(String),
     Event(Event),
     List(Vec<DataType>),
+    Dict(HashMap<String, DataType>),
     // Name, argc (-1=unlimited), func
     #[serde(serialize_with = "serialize_function")]
     Function(String, i8, functions::QueryFn),
@@ -334,6 +380,7 @@ impl fmt::Debug for DataType {
             DataType::String(s) => write!(f, "String({})", s),
             DataType::Event(e) => write!(f, "Event({:?})", e),
             DataType::List(l) => write!(f, "List({:?})", l),
+            DataType::Dict(d) => write!(f, "Dict({:?})", d),
             DataType::Function(name, _argc, _fun) => write!(f, "Function({})", name),
         }
     }
@@ -541,6 +588,14 @@ mod interpret {
                     l.push(res);
                 }
                 Ok(DataType::List(l))
+            }
+            Dict(ref d) => {
+                let mut dict = HashMap::new();
+                for (key, val_uninterpreted) in d {
+                    let val = interpret_expr(env, ds, val_uninterpreted)?;
+                    dict.insert(key.clone(), val);
+                }
+                Ok(DataType::Dict(dict))
             }
         }
     }

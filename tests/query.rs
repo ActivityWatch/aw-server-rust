@@ -161,6 +161,24 @@ mod query_tests {
     }
 
     #[test]
+    fn test_dict() {
+        let ds = setup_datastore_empty();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let code = String::from("return {};");
+        query::query(&code, &interval, &ds).unwrap();
+
+        let code = String::from("return {\"test\": 2};");
+        query::query(&code, &interval, &ds).unwrap();
+
+        let code = String::from("return {\"test\": 2, \"test2\": \"teststr\"};");
+        query::query(&code, &interval, &ds).unwrap();
+
+        let code = String::from("return {\"test\": {\"test\": \"test\"}};");
+        query::query(&code, &interval, &ds).unwrap();
+    }
+
+    #[test]
     fn test_math() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();

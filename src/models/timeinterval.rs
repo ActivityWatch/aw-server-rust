@@ -1,9 +1,12 @@
 use std::fmt;
 
+use serde::de::{self, Visitor, Deserialize, Deserializer};
+
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 
+#[derive(Clone,Debug)]
 pub struct TimeInterval {
     start: DateTime<Utc>,
     end: DateTime<Utc>
@@ -55,5 +58,33 @@ impl TimeInterval {
 impl fmt::Display for TimeInterval {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}/{}", self.start.to_rfc3339(), self.end.to_rfc3339())
+    }
+}
+
+struct TimeIntervalVisitor;
+
+impl<'de> Visitor<'de> for TimeIntervalVisitor {
+    type Value = TimeInterval;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("an string in ISO timeinterval format (such as 2000-01-01T00:00:00+01:00/2001-02-02T01:01:01+01:00)")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        // TODO: do not unwrap and return proper error
+        println!("asdiuwehfiewuhf: {}", value);
+        Ok(TimeInterval::new_from_string(&value).unwrap())
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeInterval {
+    fn deserialize<D>(deserializer: D) -> Result<TimeInterval, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(TimeIntervalVisitor)
     }
 }

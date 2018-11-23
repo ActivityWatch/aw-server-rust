@@ -1,4 +1,5 @@
 #![feature(plugin,try_from,custom_derive)]
+#![feature(proc_macro_gen)]
 #![plugin(rocket_codegen)]
 extern crate rocket;
 #[macro_use] extern crate rocket_contrib;
@@ -13,9 +14,12 @@ extern crate mpsc_requests;
 
 extern crate chrono;
 
+extern crate plex;
+
 pub mod models;
 pub mod transform;
 pub mod datastore;
+pub mod query;
 pub mod endpoints;
 
 fn main() {

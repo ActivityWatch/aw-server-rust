@@ -13,7 +13,7 @@ use rocket::http::Status;
 use rocket::Response;
 use rocket::response::Failure;
 
-use super::ServerState;
+use endpoints::ServerState;
 
 use datastore::DatastoreError;
 use transform;

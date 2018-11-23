@@ -4,7 +4,8 @@ use rocket;
 use rocket::response::{NamedFile};
 use rocket_contrib::{Json, Value};
 
-pub mod bucket;
+mod bucket;
+mod query;
 
 use datastore::Datastore;
 
@@ -62,6 +63,9 @@ pub fn rocket(server_state: ServerState) -> rocket::Rocket {
         .mount("/api/0/buckets", routes![
                bucket::bucket_new, bucket::bucket_delete, bucket::buckets_get, bucket::bucket_get,
                bucket::bucket_events_get, bucket::bucket_events_create, bucket::bucket_events_heartbeat, bucket::bucket_event_count
+        ])
+        .mount("/api/0/query", routes![
+               query::query
         ])
         .catch(catchers![not_found])
         .manage(server_state)

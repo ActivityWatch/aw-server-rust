@@ -5,6 +5,7 @@ pub enum QueryError {
     ParsingError,
 
     // Execution
+    EmptyQuery(),
     VariableNotDefined(String),
     MathError(String),
     InvalidType(String),
@@ -297,8 +298,11 @@ mod parser {
 }
 
 use models::Event;
+use serde::Serializer;
+use serde::Serialize;
 
-#[derive(Clone)]
+#[derive(Clone,Serialize)]
+#[serde(untagged)]
 pub enum DataType {
     None(),
     Number(f64),
@@ -306,7 +310,15 @@ pub enum DataType {
     Event(Event),
     List(Vec<DataType>),
     // Name, argc (-1=unlimited), func
+    #[serde(serialize_with = "serialize_function")]
     Function(String, i8, functions::QueryFn),
+}
+
+fn serialize_function<S>(element: &String, i: &i8, fun: &functions::QueryFn, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer
+{
+    panic!("Query function was unevaluated and was attempted to be serialized, panic!");
+    //element.id.serialize(serializer)
 }
 
 use std::fmt;
@@ -398,6 +410,9 @@ mod interpret {
     }
 
     pub fn interpret_prog<'a>(p: &'a Program, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
+        if (p.stmts.len() == 0) {
+            return Err(QueryError::EmptyQuery());
+        }
         let last_i = p.stmts.len()-1;
         let mut env = init_env(ti);
         let mut i = 0;

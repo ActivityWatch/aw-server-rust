@@ -20,7 +20,6 @@ use transform;
 
 /*
  * TODO:
- * - Make sure that the mutex will never be able to be poisoned by unwraps
  * - Fix some unwraps
  */
 

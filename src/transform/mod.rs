@@ -48,6 +48,12 @@ pub fn sort_by_timestamp(mut events: Vec<Event>) -> Vec<Event> {
     return events;
 }
 
+/* Highest first */
+pub fn sort_by_duration(mut events: Vec<Event>) -> Vec<Event> {
+    events.sort_by(|e1, e2| e2.duration.cmp(&e1.duration));
+    return events;
+}
+
 pub fn flood(mut events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
     let mut events_sorted = sort_by_timestamp (events);
     let mut e1_iter = events_sorted.drain(..).peekable();
@@ -66,8 +72,8 @@ pub fn flood(mut events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> 
         let gap = e2.timestamp - e1.timestamp;
 
         if gap < pulsetime {
-            let e2_end = e2.timestamp + e2.duration;
             if e1.data == e2.data {
+                let e2_end = e2.timestamp + e2.duration;
                 // Extend e1 to the end of e2
                 e1.duration = e2_end - e1.timestamp;
                 // Drop next event since they are merged and flooded into e1
@@ -87,8 +93,15 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
         return vec![];
     }
     let mut merged_events_map : HashMap<String, Event> = HashMap::new();
-    for event in events {
-        let summed_key = keys.join(".");
+    'event: for event in events {
+        let mut key_values = Vec::new();
+        'key: for key in keys.iter() {
+            match event.data.get(key) {
+                Some(v) => key_values.push(v.to_string()),
+                None => continue 'event
+            }
+        }
+        let summed_key = key_values.join(".");
         if merged_events_map.contains_key(&summed_key) {
             let merged_event = merged_events_map.get_mut(&summed_key).unwrap();
             merged_event.duration = merged_event.duration + event.duration;

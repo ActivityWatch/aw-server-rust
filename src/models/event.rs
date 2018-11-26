@@ -19,3 +19,12 @@ impl Event {
         self.timestamp + chrono::Duration::nanoseconds(self.duration.num_nanoseconds().unwrap() as i64)
     }
 }
+
+impl PartialEq for Event {
+    fn eq(&self, other: &Event) -> bool {
+        if self.timestamp != other.timestamp { return false; }
+        if self.duration != other.duration { return false; }
+        if self.data != other.data { return false; }
+        return true;
+    }
+}

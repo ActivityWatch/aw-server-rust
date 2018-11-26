@@ -464,33 +464,30 @@ mod functions {
     }
 
     fn q_flood(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
-        let mut events = match args[0] {
-            // TODO: sort by timestamp first
+        let mut tagged_events = match args[0] {
             DataType::List(ref l) => l.clone(),
             ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
         };
-        println!("{:?}", events);
         // Move events out of DataType container
-        let mut new_events = Vec::new();
-        for event in events.drain(..) {
+        let mut events = Vec::new();
+        for event in tagged_events.drain(..) {
             match event {
-                DataType::Event(e) => new_events.push(e.clone()),
+                DataType::Event(e) => events.push(e.clone()),
                 ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List of Events, list contains {:?}", invalid_type)))
             }
         }
         // Run flood
-        let mut flooded_events = transform::flood(new_events, chrono::Duration::seconds(5));
+        let mut flooded_events = transform::flood(events, chrono::Duration::seconds(5));
         // Put events back into DataType::Event container
-        let mut new_flooded_events = Vec::new();
+        let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
-            new_flooded_events.push(DataType::Event(event));
+            tagged_flooded_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(new_flooded_events));
+        return Ok(DataType::List(tagged_flooded_events));
     }
 
     fn q_merge_events_by_keys(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
         let mut tagged_events = match args[0] {
-            // TODO: sort by timestamp first
             DataType::List(ref events) => events.clone(),
             ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
         };
@@ -690,8 +687,7 @@ use datastore::Datastore;
 use models::TimeInterval;
 
 pub fn query<'a>(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
-    let lexer = lexer::Lexer::new(code)
-        .inspect(|tok| eprintln!("tok: {:?}", tok));
+    let lexer = lexer::Lexer::new(code);
     let program = match parser::parse(lexer) {
         Ok(p) => p,
         Err(e) => {

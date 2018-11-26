@@ -17,24 +17,30 @@ mod query_tests {
     use aw_server::models::Event;
     use aw_server::models::TimeInterval;
 
-    static TIME_INTERVAL : &str = "2000-01-01T00:00:00Z/2000-01-02T00:00:00Z";
+    static TIME_INTERVAL : &str = "1980-01-01T00:00:00Z/2080-01-02T00:00:00Z";
+    static BUCKET_ID : &str = "testid";
 
     fn setup_datastore_empty() -> Datastore {
-        Datastore::new_in_memory()
+        return Datastore::new_in_memory();
     }
 
-    fn setup_datastore_populated() -> Datastore {
-        let ds = Datastore::new_in_memory();
+    fn setup_datastore_with_bucket() -> Datastore {
+        let ds = setup_datastore_empty();
         // Create bucket
         let bucket = Bucket {
             bid: None,
-            id: "testid".to_string(),
+            id: BUCKET_ID.to_string(),
             _type: "testtype".to_string(),
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
             created: Some(chrono::Utc::now()),
         };
         ds.create_bucket(&bucket).unwrap();
+        return ds;
+    }
+
+    fn setup_datastore_populated() -> Datastore {
+        let ds = setup_datastore_with_bucket();
         // Insert events
         let e1 = Event {
             id: None,
@@ -52,7 +58,7 @@ mod query_tests {
         event_list.push(e1.clone());
         event_list.push(e2.clone());
 
-        ds.insert_events(&bucket.id, &event_list).unwrap();
+        ds.insert_events(&BUCKET_ID, &event_list).unwrap();
 
         return ds;
     }
@@ -86,6 +92,9 @@ mod query_tests {
         let code = String::from("print(1);");
         query::query(&code, &interval, &ds).unwrap();
 
+        let code = String::from("print(1, 2);");
+        query::query(&code, &interval, &ds).unwrap();
+
         let code = String::from("no_such_function(1);");
         match query::query(&code, &interval, &ds) {
             Ok(ok) => panic!(format!("Expected QueryError, got {:?}", ok)),
@@ -112,6 +121,17 @@ mod query_tests {
 
         let code = String::from("query_bucket(\"testid\");");
         query::query(&code, &interval, &ds).unwrap();
+
+        let code = format!(r#"
+            events = flood(query_bucket("{}"));
+            events = merge_events_by_keys(events, ["key"]);
+            RETURN = events;"#,
+            "testid");
+        let ret = query::query(&code, &interval, &ds).unwrap();
+        let events_ret = match ret {
+            query::DataType::List(l) => l,
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
     }
 
     #[test]

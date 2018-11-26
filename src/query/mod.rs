@@ -212,13 +212,17 @@ mod parser {
         }
 
         assign: Expr {
-            Ident(fname) LParen assign[a] RParen => Expr {
-                span: span!(),
-                node: Expr_::Function(fname, Box::new(a)),
-            },
+            // Assign
             Ident(var) Equals assign[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Assign(var, Box::new(rhs)),
+            },
+            // Function
+            Ident(fname) LParen list[l] RParen => Expr {
+                span: span!(),
+                node: {
+                    Expr_::Function(fname, Box::new(l))
+                }
             },
             object[o] => o
         }
@@ -242,7 +246,7 @@ mod parser {
         }
 
         list: Expr {
-            object[o] => Expr {
+            assign[o] => Expr {
                 span: span!(),
                 node: {
                     let mut list = Vec::new();
@@ -250,7 +254,7 @@ mod parser {
                     Expr_::List(list)
                 }
             },
-            list[l] Comma object[o] => Expr {
+            list[l] Comma assign[o] => Expr {
                 span: span!(),
                 node: {
                     match l.node {
@@ -266,7 +270,7 @@ mod parser {
         }
 
         dict: Expr {
-            String(k) Colon object[v] => Expr {
+            String(k) Colon assign[v] => Expr {
                 span: span!(),
                 node: {
                     let mut dict = HashMap::new();
@@ -274,7 +278,7 @@ mod parser {
                     Expr_::Dict(dict)
                 }
             },
-            dict[d] Comma String(k) Colon object[v] => Expr {
+            dict[d] Comma String(k) Colon assign[v] => Expr {
                 span: span!(),
                 node: {
                     match d.node {
@@ -386,11 +390,29 @@ impl fmt::Debug for DataType {
     }
 }
 
+impl PartialEq for DataType {
+    fn eq(&self, other: &DataType) -> bool {
+        match (self, other) {
+            (DataType::None(), DataType::None()) => true,
+            (DataType::Number(n1), DataType::Number(n2)) => n1 == n2,
+            (DataType::String(s1), DataType::String(s2)) => s1 == s2,
+            // TODO: Implement event comparison
+            (DataType::Event(e1), DataType::String(e2)) => true, //e1 == e2,
+            (DataType::List(l1), DataType::List(l2)) => l1 == l2,
+            (DataType::Dict(d1), DataType::Dict(d2)) => d1 == d2,
+            // We do not care about comparing functions
+            _ => false
+        }
+    }
+}
+
 mod functions {
     use query::DataType;
     use query::QueryError;
     use datastore::Datastore;
     use models::TimeInterval;
+    use models::Event;
+    use transform;
 
     use std::collections::HashMap;
 
@@ -399,6 +421,8 @@ mod functions {
     pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
         env.insert("print", DataType::Function("print".to_string(), -1, q_print));
         env.insert("query_bucket", DataType::Function("query_bucket".to_string(), 1, q_query_bucket));
+        env.insert("flood", DataType::Function("flood".to_string(), 1, q_flood));
+        env.insert("merge_events_by_keys", DataType::Function("merge_events_by_keys".to_string(), 2, q_merge_events_by_keys));
     }
 
     fn get_timeinterval (env: &HashMap<&str, DataType>) -> Result<TimeInterval, QueryError> {
@@ -437,6 +461,66 @@ mod functions {
             ret.push(DataType::Event(event));
         };
         return Ok(DataType::List(ret));
+    }
+
+    fn q_flood(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
+        let mut events = match args[0] {
+            // TODO: sort by timestamp first
+            DataType::List(ref l) => l.clone(),
+            ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
+        };
+        println!("{:?}", events);
+        // Move events out of DataType container
+        let mut new_events = Vec::new();
+        for event in events.drain(..) {
+            match event {
+                DataType::Event(e) => new_events.push(e.clone()),
+                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List of Events, list contains {:?}", invalid_type)))
+            }
+        }
+        // Run flood
+        let mut flooded_events = transform::flood(new_events, chrono::Duration::seconds(5));
+        // Put events back into DataType::Event container
+        let mut new_flooded_events = Vec::new();
+        for event in flooded_events.drain(..) {
+            new_flooded_events.push(DataType::Event(event));
+        }
+        return Ok(DataType::List(new_flooded_events));
+    }
+
+    fn q_merge_events_by_keys(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
+        let mut tagged_events = match args[0] {
+            // TODO: sort by timestamp first
+            DataType::List(ref events) => events.clone(),
+            ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
+        };
+        let keys = match args[1] {
+            DataType::List(ref keys) => keys,
+            ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
+        };
+        if keys.len() == 0 {
+            return Ok(DataType::List(tagged_events));
+        }
+        let mut new_events = Vec::new();
+        for event in tagged_events.drain(..) {
+            match event {
+                DataType::Event(e) => new_events.push(e),
+                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List of Events, list contains {:?}", invalid_type)))
+            }
+        }
+        let mut new_keys = Vec::new();
+        for key in keys {
+            match key {
+                DataType::String(s) => new_keys.push(s.clone()),
+                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List of Events, list contains {:?}", invalid_type)))
+            }
+        }
+        let mut merged_events = transform::merge_events_by_keys(new_events, new_keys);
+        let mut merged_tagged_events = Vec::new();
+        for event in merged_events.drain(..) {
+            merged_tagged_events.push(DataType::Event(event));
+        }
+        return Ok(DataType::List(merged_tagged_events));
     }
 }
 
@@ -565,9 +649,10 @@ mod interpret {
                 Ok(val)
             },
             Function(ref fname, ref e) => {
-                let val = interpret_expr(env, ds, e)?;
-                let mut args = Vec::new();
-                args.push(val);
+                let args = match interpret_expr(env, ds, e)? {
+                    DataType::List(l) => l,
+                    _ => panic!("This should not be possible")
+                };
                 let var = match env.get(&fname[..]) {
                     Some(v) => v,
                     None => return Err(QueryError::VariableNotDefined(fname.clone()))

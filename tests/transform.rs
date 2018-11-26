@@ -69,4 +69,23 @@ mod transform_tests {
         let res_merge = transform::heartbeat(&event, &heartbeat_different_data, 1.0);
         assert!(res_merge.is_none());
     }
+
+    #[test]
+    fn test_flood() {
+        let now = Utc::now();
+        let e1 = Event {
+            id: None,
+            timestamp: now.clone(),
+            duration: Duration::seconds(0),
+            data: json!({"test": 1})
+        };
+        let e2 = Event {
+            id: None,
+            timestamp: now.clone(),
+            duration: Duration::seconds(0),
+            data: json!({"test": 1})
+        };
+        transform::flood(vec![e1, e2], Duration::seconds(5));
+        // TODO: check result
+    }
 }

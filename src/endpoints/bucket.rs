@@ -140,23 +140,16 @@ pub struct HeartbeatConstraints {
 #[post("/<bucket_id>/heartbeat?<constraints>", format = "application/json", data = "<heartbeat_json>")]
 pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, constraints: HeartbeatConstraints, state: State<ServerState>) -> Result<(), Failure> {
     let heartbeat = heartbeat_json.into_inner();
-    /* TODO: Improve performance with a last_event cache */
-    let mut last_event_vec = state.datastore.get_events(&bucket_id, None, None, Some(1)).unwrap();
-    match last_event_vec.pop() {
-        None => {
-            state.datastore.insert_events(&bucket_id, &vec![heartbeat]).unwrap();
-        }
-        Some(last_event) => {
-            match transform::heartbeat(&last_event, &heartbeat, constraints.pulsetime) {
-                None => {
-                    println!("Failed to merge!");
-                    state.datastore.insert_events(&bucket_id, &vec![heartbeat]).unwrap()
-                },
-                Some(merged_heartbeat) => state.datastore.replace_last_event(&bucket_id, &merged_heartbeat).unwrap()
+    match state.datastore.heartbeat(&bucket_id, heartbeat, constraints.pulsetime) {
+        Ok(_) => Ok(()),
+        Err(e) => match e {
+            DatastoreError::NoSuchBucket => Err(Failure(Status::NotFound)),
+            e => {
+                println!("Unexpected error: {:?}", e);
+                Err(Failure(Status::InternalServerError))
             }
         }
     }
-    return Ok(());
 }
 
 #[get("/<bucket_id>/events/count", format = "application/json")]

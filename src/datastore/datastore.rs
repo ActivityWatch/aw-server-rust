@@ -18,10 +18,11 @@ use mpsc_requests;
 
 use models::Bucket;
 use models::Event;
+use transform;
 
 /*
  * TODO:
- * - Needs refactoring
+ * - Needs refactoring?
  * - Add macro for getting requester lock
  */
 
@@ -53,12 +54,16 @@ pub enum Commands {
     GetBuckets(),
     InsertEvents(String, Vec<Event>),
     ReplaceLastEvent(String, Event),
+    Heartbeat(String, Event, f64),
     GetEvents(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<u64>),
-    GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>)
+    GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
 }
 
+type Requester = mpsc_requests::Requester<Commands, Result<Responses, DatastoreError>>;
+type Responder = mpsc_requests::Responder<Commands, Result<Responses, DatastoreError>>;
+
 pub struct Datastore {
-    requester: Mutex<mpsc_requests::Requester<Commands, Result<Responses, DatastoreError>>>
+    requester: Mutex<Requester>,
 }
 
 impl fmt::Debug for Datastore {
@@ -68,7 +73,7 @@ impl fmt::Debug for Datastore {
 }
 
 struct DatastoreWorker {
-    responder: mpsc_requests::Responder<Commands, Result<Responses, DatastoreError>>,
+    responder: Responder,
     quit: bool
 }
 
@@ -124,6 +129,7 @@ impl DatastoreWorker {
             uncommited_events: 0,
             buckets_cache: HashMap::new()
         };
+        let mut last_heartbeat = HashMap::new();
         ds.get_stored_buckets(&conn);
         loop {
             let mut transaction = conn.transaction().unwrap();
@@ -161,16 +167,28 @@ impl DatastoreWorker {
                     },
                     Commands::InsertEvents(bucketname, events) => {
                         match ds.insert_events(&transaction, bucketname, events) {
-                            Ok(_) => Ok(Responses::Empty()),
+                            Ok(_) => {
+                                last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
+                                Ok(Responses::Empty())
+                            },
                             Err(e) => Err(e)
                         }
-                    }
+                    },
                     Commands::ReplaceLastEvent(bucketname, event) => {
                         match ds.replace_last_event(&transaction, bucketname, event) {
+                            Ok(_) => {
+                                last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
+                                Ok(Responses::Empty())
+                            },
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::Heartbeat(bucketname, event, pulsetime) => {
+                        match ds.heartbeat(&transaction, bucketname, event.clone(), *pulsetime, &mut last_heartbeat) {
                             Ok(_) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
-                    }
+                    },
                     Commands::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt) => {
                         match ds.get_events(&transaction, bucketname, *starttime_opt, *endtime_opt, *limit_opt) {
                             Ok(el) => Ok(Responses::EventList(el)),
@@ -330,6 +348,42 @@ impl DatastoreInstance {
         Ok(())
     }
 
+    pub fn heartbeat(&mut self, conn: &Connection, bucket_id: &str, heartbeat: Event, pulsetime: f64, last_heartbeat: &mut HashMap<String, Option<Event>>) -> Result<(), DatastoreError> {
+        let bucket = try!(self.get_bucket(&bucket_id));
+        if !last_heartbeat.contains_key(bucket_id) {
+            last_heartbeat.insert(bucket_id.to_string(), None);
+        }
+        let last_event = match last_heartbeat.remove(bucket_id).unwrap() {
+            // last heartbeat is in cache
+            Some(last_event) => last_event,
+            None => {
+                // last heartbeat was not in cache, fetch from DB
+                let mut last_event_vec = self.get_events(conn, &bucket_id, None, None, Some(1))?;
+                match last_event_vec.pop() {
+                    Some(last_event) => last_event,
+                    None => {
+                        // There was no last event, insert and return
+                        self.insert_events(conn, &bucket_id, &vec![heartbeat.clone()])?;
+                        return Ok(());
+                    }
+                }
+            }
+        };
+        let inserted_heartbeat = match transform::heartbeat(&last_event, &heartbeat, pulsetime) {
+            Some(merged_heartbeat) => {
+                self.replace_last_event(conn, &bucket_id, &merged_heartbeat);
+                merged_heartbeat
+            },
+            None => {
+                println!("Failed to merge!");
+                self.insert_events(conn, &bucket_id, &vec![heartbeat.clone()])?;
+                heartbeat
+            }
+        };
+        last_heartbeat.insert(bucket_id.to_string(), Some(inserted_heartbeat));
+        Ok(())
+    }
+
     pub fn get_events(&mut self, conn: &Connection, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
         let bucket = try!(self.get_bucket(&bucket_id));
 
@@ -438,7 +492,7 @@ impl Datastore {
             di.work_loop(method);
         });
         Datastore {
-            requester: Mutex::new(requester)
+            requester: Mutex::new(requester),
         }
     }
 
@@ -503,6 +557,20 @@ impl Datastore {
         match requester.request(Commands::InsertEvents(bucket_id.to_string(), events.clone())) {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn heartbeat(&self, bucket_id: &str, heartbeat: Event, pulsetime: f64) -> Result<(), DatastoreError> {
+        let requester = match self.requester.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        };
+        match requester.request(Commands::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime)) {
+            Ok(r) => match r {
+                Responses::Empty() => return Ok(()),
                 _ => panic!("Invalid response")
             },
             Err(e) => Err(e)

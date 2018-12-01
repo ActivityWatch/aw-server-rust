@@ -14,7 +14,10 @@ pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Optio
     // Verify that timestamps intersect (including pulsetime)
     let pulsetime_ns : i64 = (pulsetime*1000000000.0).round() as i64;
     let last_endtime_allowed = last_event_endtime + chrono::Duration::nanoseconds(pulsetime_ns);
-    if heartbeat.timestamp > last_endtime_allowed || heartbeat_endtime < last_event.timestamp {
+    if last_event.timestamp > heartbeat.timestamp {
+        return None
+    }
+    if heartbeat.timestamp > last_endtime_allowed {
         return None
     }
 

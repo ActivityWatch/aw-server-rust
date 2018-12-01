@@ -57,13 +57,13 @@ pub fn sort_by_duration(mut events: Vec<Event>) -> Vec<Event> {
     return events;
 }
 
-pub fn flood(mut events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
+pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
     let mut events_sorted = sort_by_timestamp (events);
     let mut e1_iter = events_sorted.drain(..).peekable();
     let mut new_events = Vec::new();
     let mut drop_next = false;
     while let Some(mut e1) = e1_iter.next() {
-        if (drop_next) {
+        if drop_next {
             drop_next = false;
             continue;
         }

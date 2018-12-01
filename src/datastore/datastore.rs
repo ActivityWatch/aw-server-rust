@@ -349,7 +349,7 @@ impl DatastoreInstance {
     }
 
     pub fn heartbeat(&mut self, conn: &Connection, bucket_id: &str, heartbeat: Event, pulsetime: f64, last_heartbeat: &mut HashMap<String, Option<Event>>) -> Result<(), DatastoreError> {
-        let bucket = try!(self.get_bucket(&bucket_id));
+        try!(self.get_bucket(&bucket_id));
         if !last_heartbeat.contains_key(bucket_id) {
             last_heartbeat.insert(bucket_id.to_string(), None);
         }
@@ -371,7 +371,7 @@ impl DatastoreInstance {
         };
         let inserted_heartbeat = match transform::heartbeat(&last_event, &heartbeat, pulsetime) {
             Some(merged_heartbeat) => {
-                self.replace_last_event(conn, &bucket_id, &merged_heartbeat);
+                self.replace_last_event(conn, &bucket_id, &merged_heartbeat)?;
                 merged_heartbeat
             },
             None => {

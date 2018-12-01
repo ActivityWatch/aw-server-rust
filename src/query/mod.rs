@@ -346,7 +346,6 @@ mod parser {
 
 use models::Event;
 use serde::Serializer;
-use serde::Serialize;
 
 use std::collections::HashMap;
 
@@ -364,7 +363,7 @@ pub enum DataType {
     Function(String, i8, functions::QueryFn),
 }
 
-fn serialize_function<S>(element: &String, i: &i8, fun: &functions::QueryFn, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_function<S>(_element: &String, _i: &i8, _fun: &functions::QueryFn, _serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer
 {
     panic!("Query function was unevaluated and was attempted to be serialized, panic!");
@@ -396,8 +395,8 @@ impl PartialEq for DataType {
             (DataType::None(), DataType::None()) => true,
             (DataType::Number(n1), DataType::Number(n2)) => n1 == n2,
             (DataType::String(s1), DataType::String(s2)) => s1 == s2,
-            // TODO: Implement event comparison
-            (DataType::Event(e1), DataType::String(e2)) => true, //e1 == e2,
+            // TODO: Properly implement event comparison
+            (DataType::Event(e1), DataType::Event(e2)) => e1.data == e2.data, //e1 == e2
             (DataType::List(l1), DataType::List(l2)) => l1 == l2,
             (DataType::Dict(d1), DataType::Dict(d2)) => d1 == d2,
             // We do not care about comparing functions
@@ -411,7 +410,6 @@ mod functions {
     use query::QueryError;
     use datastore::Datastore;
     use models::TimeInterval;
-    use models::Event;
     use transform;
 
     use std::collections::HashMap;
@@ -439,7 +437,7 @@ mod functions {
         }
     }
 
-    fn q_print(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
+    fn q_print(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         for arg in args {
             println!("{:?}", arg);
         }
@@ -463,7 +461,7 @@ mod functions {
         return Ok(DataType::List(ret));
     }
 
-    fn q_flood(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
+    fn q_flood(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         let mut tagged_events = match args[0] {
             DataType::List(ref l) => l.clone(),
             ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
@@ -486,7 +484,7 @@ mod functions {
         return Ok(DataType::List(tagged_flooded_events));
     }
 
-    fn q_merge_events_by_keys(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
+    fn q_merge_events_by_keys(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         let mut tagged_events = match args[0] {
             DataType::List(ref events) => events.clone(),
             ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
@@ -538,7 +536,7 @@ mod interpret {
     }
 
     pub fn interpret_prog<'a>(p: &'a Program, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
-        if (p.stmts.len() == 0) {
+        if p.stmts.len() == 0 {
             return Err(QueryError::EmptyQuery());
         }
         let last_i = p.stmts.len()-1;
@@ -654,9 +652,9 @@ mod interpret {
                     Some(v) => v,
                     None => return Err(QueryError::VariableNotDefined(fname.clone()))
                 };
-                let (name, argc, fun) = match var {
+                let (_name, argc, fun) = match var {
                     DataType::Function(name, argc, fun) => (name, argc, fun),
-                    data => return Err(QueryError::InvalidType(fname.to_string()))
+                    _data => return Err(QueryError::InvalidType(fname.to_string()))
                 };
                 if (args.len() as i8) != *argc && *argc >= 0 {
                     return Err(QueryError::InvalidFunctionParameters(format!("Expected 1 argument, got {}", args.len())));

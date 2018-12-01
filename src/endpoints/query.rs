@@ -1,9 +1,8 @@
-use rocket_contrib::{Json, Value};
+use rocket_contrib::Json;
 
 use rocket::State;
 use query as q;
 use endpoints::ServerState;
-use rocket::http::Status;
 use rocket::response::Failure;
 
 use models::Query;

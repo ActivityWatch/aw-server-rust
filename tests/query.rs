@@ -128,10 +128,11 @@ mod query_tests {
             RETURN = events;"#,
             "testid");
         let ret = query::query(&code, &interval, &ds).unwrap();
-        let events_ret = match ret {
+        match ret {
             query::DataType::List(l) => l,
             ref data => panic!("Wrong datatype, {:?}", data)
         };
+        // TODO: assert_eq result
     }
 
     #[test]

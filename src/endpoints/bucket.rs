@@ -16,7 +16,6 @@ use rocket::response::Failure;
 use endpoints::ServerState;
 
 use datastore::DatastoreError;
-use transform;
 
 /*
  * TODO:

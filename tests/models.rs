@@ -24,7 +24,8 @@ mod models_tests {
             _type: "type".to_string(),
             client: "client".to_string(),
             hostname: "hostname".to_string(),
-            created: None
+            created: None,
+            events: None
         };
         println!("bucket: {:?}", b);
     }

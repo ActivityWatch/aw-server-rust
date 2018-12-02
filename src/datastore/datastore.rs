@@ -226,6 +226,7 @@ impl DatastoreInstance {
                 client: row.get(3),
                 hostname: row.get(4),
                 created: row.get(5),
+                events: None,
             }
         }).unwrap();
         for bucket in buckets {
@@ -244,10 +245,14 @@ impl DatastoreInstance {
     }
 
     fn create_bucket(&mut self, conn: &Connection, bucket: &Bucket) -> Result<(), DatastoreError> {
+        let created = match bucket.created {
+            Some(created) => created,
+            None => Utc::now()
+        };
         let mut stmt = conn.prepare("
             INSERT INTO buckets (name, type, client, hostname, created)
             VALUES (?1, ?2, ?3, ?4, ?5)").unwrap();
-        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &bucket.created.unwrap()]);
+        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created]);
 
         match res {
             Ok(_) => {
@@ -258,17 +263,20 @@ impl DatastoreInstance {
                 println!("{:?}", inserted_bucket);
                 self.buckets_cache.insert(bucket.id.clone(), inserted_bucket);
                 self.commit = true;
-                return Ok(());
             },
             // FIXME: This match is ugly, is it possible to write it in a cleaner way?
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
-                    rusqlite::ErrorCode::ConstraintViolation => Err(DatastoreError::BucketAlreadyExists),
+                    rusqlite::ErrorCode::ConstraintViolation => { return Err(DatastoreError::BucketAlreadyExists); },
                     _ => { println!("{}", err); return Err(DatastoreError::InternalError); }
                 },
                 _ => { println!("{}", err); return Err(DatastoreError::InternalError); }
             }
+        };
+        if let Some(ref events) = bucket.events {
+            self.insert_events(conn, &bucket.id, events)?;
         }
+        return Ok(());
     }
 
     fn delete_bucket(&mut self, conn: &Connection, bucket_id: &str) -> Result<(), DatastoreError>{

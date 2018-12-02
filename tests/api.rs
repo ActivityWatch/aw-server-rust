@@ -66,6 +66,7 @@ mod api_tests {
             .header(ContentType::JSON)
             .dispatch();
         println!("{:?}", res.body_string());
+        // TODO: assert data
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Get newly created bucket
@@ -169,6 +170,62 @@ mod api_tests {
 
         // Delete bucket
         res = client.delete("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .dispatch();
+        println!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
+
+    #[test]
+    fn test_import() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        // Import single bucket
+        let mut res = client.post("/api/0/import")
+            .header(ContentType::JSON)
+            .body(r#"{
+                "id": "id1",
+                "type": "type",
+                "client": "client",
+                "hostname": "hostname",
+                "events": [{
+                    "timestamp":"2000-01-01T00:00:00.000000+00:00",
+                    "duration":1.0,
+                    "data": {}
+                }]
+            }"#)
+            .dispatch();
+        println!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Get created bucket
+        res = client.get("/api/0/buckets/id1")
+            .header(ContentType::JSON)
+            .dispatch();
+        println!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Import multiple buckets
+        let mut res = client.post("/api/0/import")
+            .header(ContentType::JSON)
+            .body(r#"{"id2": {
+                "id": "id2",
+                "type": "type",
+                "client": "client",
+                "hostname": "hostname",
+                "events": [{
+                    "timestamp":"2000-01-01T00:00:00Z",
+                    "duration":1.0,
+                    "data": {}
+                }]
+            }}"#)
+            .dispatch();
+        println!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Get created bucket
+        res = client.get("/api/0/buckets/id1")
             .header(ContentType::JSON)
             .dispatch();
         println!("{:?}", res.body_string());

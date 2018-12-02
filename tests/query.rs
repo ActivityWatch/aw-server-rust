@@ -34,6 +34,7 @@ mod query_tests {
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
             created: Some(chrono::Utc::now()),
+            events: None
         };
         ds.create_bucket(&bucket).unwrap();
         return ds;

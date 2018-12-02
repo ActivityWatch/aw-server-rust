@@ -48,17 +48,13 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
 }
 
 #[post("/<bucket_id>", format = "application/json", data = "<message>")]
-pub fn bucket_new(bucket_id: String, mut message: Json<Bucket>, state: State<ServerState>) -> Response {
-    if message.0.id.chars().count() == 0 {
-        message.0.id = bucket_id.clone();
-    } else if message.0.id != bucket_id {
+pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerState>) -> Response {
+    let bucket = message.into_inner();
+    if bucket.id != bucket_id {
+        println!("endpoint bucketid doesn't match payload bucketid");
         return response_status!(Status::BadRequest)
     }
-    match message.created {
-        Some(_) => (),
-        None => message.created = Some(Utc::now())
-    }
-    let ret = state.datastore.create_bucket(&message.0);
+    let ret = state.datastore.create_bucket(&bucket);
     match ret {
         Ok(_) => response_status!(Status::Ok),
         Err(e) => match e {

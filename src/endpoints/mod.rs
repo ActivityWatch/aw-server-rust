@@ -6,6 +6,7 @@ use rocket_contrib::{Json, Value};
 
 mod bucket;
 mod query;
+mod import;
 
 use datastore::Datastore;
 
@@ -66,6 +67,9 @@ pub fn rocket(server_state: ServerState) -> rocket::Rocket {
         ])
         .mount("/api/0/query", routes![
                query::query
+        ])
+        .mount("/api/0/import", routes![
+               import::bucket_import
         ])
         .catch(catchers![not_found])
         .manage(server_state)

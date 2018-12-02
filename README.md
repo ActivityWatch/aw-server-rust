@@ -13,5 +13,8 @@ Caveats:
 - Lots of refactoring is needed, code is far from good looking (especially query code)
 - Lots of TODO and FIXME comments
 
+Bugs:
+- Memory leak during import? (wtf rust?)
+
 Features missing compared to aw-server python and won't be reimplemented:
 - Swagger support

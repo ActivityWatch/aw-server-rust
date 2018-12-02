@@ -1,7 +1,9 @@
 [development]
 address = "localhost"
+limits = { json = 1000000000 }
 port = 5666
 
 [production]
 address = "localhost"
+limits = { json = 1000000000 }
 port = 5666

@@ -13,6 +13,5 @@ pub struct Bucket {
     pub client: String,
     pub hostname: String,
     pub created: Option<DateTime<Utc>>,
-    #[serde(skip_deserializing)]
     pub events: Option<Vec<Event>>,
 }

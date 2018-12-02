@@ -62,6 +62,7 @@ impl fmt::Display for TimeInterval {
 }
 
 struct TimeIntervalVisitor;
+use serde::de::Unexpected;
 
 impl<'de> Visitor<'de> for TimeIntervalVisitor {
     type Value = TimeInterval;
@@ -75,8 +76,13 @@ impl<'de> Visitor<'de> for TimeIntervalVisitor {
         E: de::Error,
     {
         // TODO: do not unwrap and return proper error
-        println!("asdiuwehfiewuhf: {}", value);
-        Ok(TimeInterval::new_from_string(&value).unwrap())
+        match TimeInterval::new_from_string(&value) {
+            Ok(ti) => Ok(ti),
+            Err(e) => {
+                println!("{:?}", e);
+                Err(de::Error::invalid_value(Unexpected::Str(value), &self))
+            }
+        }
     }
 }
 

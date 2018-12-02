@@ -1,3 +1,10 @@
+use std::collections::HashMap;
+
+use datastore::Datastore;
+use models::Event;
+use models::TimeInterval;
+use serde::Serializer;
+
 #[derive(Debug)]
 pub enum QueryError {
     // Lexing + Parsing
@@ -12,6 +19,62 @@ pub enum QueryError {
     InvalidFunctionParameters(String),
     TimeIntervalError(String),
     BucketQueryError(String),
+}
+
+#[derive(Clone,Serialize)]
+#[serde(untagged)]
+pub enum DataType {
+    None(),
+    Number(f64),
+    String(String),
+    Event(Event),
+    List(Vec<DataType>),
+    Dict(HashMap<String, DataType>),
+    // Name, argc (-1=unlimited), func
+    #[serde(serialize_with = "serialize_function")]
+    Function(String, i8, functions::QueryFn),
+}
+
+fn serialize_function<S>(_element: &String, _i: &i8, _fun: &functions::QueryFn, _serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer
+{
+    panic!("Query function was unevaluated and was attempted to be serialized, panic!");
+    //element.id.serialize(serializer)
+}
+
+use std::fmt;
+
+// Needed because of a limitation in rust where you cannot derive(Debug) on a
+// enum which has a fn with reference parameters which our QueryFn has
+// https://stackoverflow.com/questions/53380040/function-pointer-with-a-reference-argument-cannot-derive-debug
+impl fmt::Debug for DataType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            DataType::None() => write!(f, "None()"),
+            DataType::Number(n) => write!(f, "Number({})", n),
+            DataType::String(s) => write!(f, "String({})", s),
+            DataType::Event(e) => write!(f, "Event({:?})", e),
+            DataType::List(l) => write!(f, "List({:?})", l),
+            DataType::Dict(d) => write!(f, "Dict({:?})", d),
+            DataType::Function(name, _argc, _fun) => write!(f, "Function({})", name),
+        }
+    }
+}
+
+impl PartialEq for DataType {
+    fn eq(&self, other: &DataType) -> bool {
+        match (self, other) {
+            (DataType::None(), DataType::None()) => true,
+            (DataType::Number(n1), DataType::Number(n2)) => n1 == n2,
+            (DataType::String(s1), DataType::String(s2)) => s1 == s2,
+            // TODO: Properly implement event comparison
+            (DataType::Event(e1), DataType::Event(e2)) => e1.data == e2.data, //e1 == e2
+            (DataType::List(l1), DataType::List(l2)) => l1 == l2,
+            (DataType::Dict(d1), DataType::Dict(d2)) => d1 == d2,
+            // We do not care about comparing functions
+            _ => false
+        }
+    }
 }
 
 mod lexer {
@@ -344,180 +407,7 @@ mod parser {
     }
 }
 
-use models::Event;
-use serde::Serializer;
-
-use std::collections::HashMap;
-
-#[derive(Clone,Serialize)]
-#[serde(untagged)]
-pub enum DataType {
-    None(),
-    Number(f64),
-    String(String),
-    Event(Event),
-    List(Vec<DataType>),
-    Dict(HashMap<String, DataType>),
-    // Name, argc (-1=unlimited), func
-    #[serde(serialize_with = "serialize_function")]
-    Function(String, i8, functions::QueryFn),
-}
-
-fn serialize_function<S>(_element: &String, _i: &i8, _fun: &functions::QueryFn, _serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer
-{
-    panic!("Query function was unevaluated and was attempted to be serialized, panic!");
-    //element.id.serialize(serializer)
-}
-
-use std::fmt;
-
-// Needed because of a limitation in rust where you cannot derive(Debug) on a
-// enum which has a fn with reference parameters which our QueryFn has
-// https://stackoverflow.com/questions/53380040/function-pointer-with-a-reference-argument-cannot-derive-debug
-impl fmt::Debug for DataType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            DataType::None() => write!(f, "None()"),
-            DataType::Number(n) => write!(f, "Number({})", n),
-            DataType::String(s) => write!(f, "String({})", s),
-            DataType::Event(e) => write!(f, "Event({:?})", e),
-            DataType::List(l) => write!(f, "List({:?})", l),
-            DataType::Dict(d) => write!(f, "Dict({:?})", d),
-            DataType::Function(name, _argc, _fun) => write!(f, "Function({})", name),
-        }
-    }
-}
-
-impl PartialEq for DataType {
-    fn eq(&self, other: &DataType) -> bool {
-        match (self, other) {
-            (DataType::None(), DataType::None()) => true,
-            (DataType::Number(n1), DataType::Number(n2)) => n1 == n2,
-            (DataType::String(s1), DataType::String(s2)) => s1 == s2,
-            // TODO: Properly implement event comparison
-            (DataType::Event(e1), DataType::Event(e2)) => e1.data == e2.data, //e1 == e2
-            (DataType::List(l1), DataType::List(l2)) => l1 == l2,
-            (DataType::Dict(d1), DataType::Dict(d2)) => d1 == d2,
-            // We do not care about comparing functions
-            _ => false
-        }
-    }
-}
-
-mod functions {
-    use query::DataType;
-    use query::QueryError;
-    use datastore::Datastore;
-    use models::TimeInterval;
-    use transform;
-
-    use std::collections::HashMap;
-
-    pub type QueryFn = fn(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError>;
-
-    pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
-        env.insert("print", DataType::Function("print".to_string(), -1, q_print));
-        env.insert("query_bucket", DataType::Function("query_bucket".to_string(), 1, q_query_bucket));
-        env.insert("flood", DataType::Function("flood".to_string(), 1, q_flood));
-        env.insert("merge_events_by_keys", DataType::Function("merge_events_by_keys".to_string(), 2, q_merge_events_by_keys));
-    }
-
-    fn get_timeinterval (env: &HashMap<&str, DataType>) -> Result<TimeInterval, QueryError> {
-        let interval_str = match env.get("TIMEINTERVAL") {
-            Some(data_ti) => match data_ti {
-                DataType::String(ti_str) => ti_str,
-                _ => return Err(QueryError::TimeIntervalError("TIMEINTERVAL is not of type string!".to_string()))
-            },
-            None => return Err(QueryError::TimeIntervalError("TIMEINTERVAL not defined!".to_string()))
-        };
-        match TimeInterval::new_from_string(interval_str) {
-            Ok(ti) => Ok(ti),
-            Err(_e) => Err(QueryError::TimeIntervalError(format!("Failed to parse TIMEINTERVAL: {}", interval_str)))
-        }
-    }
-
-    fn q_print(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
-        for arg in args {
-            println!("{:?}", arg);
-        }
-        return Ok(DataType::None());
-    }
-
-    fn q_query_bucket(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
-        let bucket_id = match args[0] {
-            DataType::String(ref s) => s,
-            ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type String, got {:?}", invalid_type)))
-        };
-        let interval = get_timeinterval (env)?;
-        let events = match ds.get_events(bucket_id, Some(interval.start().clone()), Some(interval.end().clone()), None) {
-            Ok(events) => events,
-            Err(e) => return Err(QueryError::BucketQueryError(format!("Failed to query bucket: {:?}", e)))
-        };
-        let mut ret = Vec::new();
-        for event in events {
-            ret.push(DataType::Event(event));
-        };
-        return Ok(DataType::List(ret));
-    }
-
-    fn q_flood(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
-        let mut tagged_events = match args[0] {
-            DataType::List(ref l) => l.clone(),
-            ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
-        };
-        // Move events out of DataType container
-        let mut events = Vec::new();
-        for event in tagged_events.drain(..) {
-            match event {
-                DataType::Event(e) => events.push(e.clone()),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List of Events, list contains {:?}", invalid_type)))
-            }
-        }
-        // Run flood
-        let mut flooded_events = transform::flood(events, chrono::Duration::seconds(5));
-        // Put events back into DataType::Event container
-        let mut tagged_flooded_events = Vec::new();
-        for event in flooded_events.drain(..) {
-            tagged_flooded_events.push(DataType::Event(event));
-        }
-        return Ok(DataType::List(tagged_flooded_events));
-    }
-
-    fn q_merge_events_by_keys(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
-        let mut tagged_events = match args[0] {
-            DataType::List(ref events) => events.clone(),
-            ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
-        };
-        let keys = match args[1] {
-            DataType::List(ref keys) => keys,
-            ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List, got {:?}", invalid_type)))
-        };
-        if keys.len() == 0 {
-            return Ok(DataType::List(tagged_events));
-        }
-        let mut new_events = Vec::new();
-        for event in tagged_events.drain(..) {
-            match event {
-                DataType::Event(e) => new_events.push(e),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List of Events, list contains {:?}", invalid_type)))
-            }
-        }
-        let mut new_keys = Vec::new();
-        for key in keys {
-            match key {
-                DataType::String(s) => new_keys.push(s.clone()),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(format!("Expected parameter of type List of Events, list contains {:?}", invalid_type)))
-            }
-        }
-        let mut merged_events = transform::merge_events_by_keys(new_events, new_keys);
-        let mut merged_tagged_events = Vec::new();
-        for event in merged_events.drain(..) {
-            merged_tagged_events.push(DataType::Event(event));
-        }
-        return Ok(DataType::List(merged_tagged_events));
-    }
-}
+mod functions;
 
 mod interpret {
     use query;
@@ -680,9 +570,6 @@ mod interpret {
         }
     }
 }
-
-use datastore::Datastore;
-use models::TimeInterval;
 
 pub fn query<'a>(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
     let lexer = lexer::Lexer::new(code);

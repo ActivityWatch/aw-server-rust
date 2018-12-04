@@ -30,13 +30,13 @@ macro_rules! response_status {
     })
 }
 
-#[get("/", format = "application/json")]
+#[get("/")]
 pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Bucket>>, rocket::Error> {
     let bucketlist = state.datastore.get_buckets().unwrap();
     return Ok(Json(bucketlist));
 }
 
-#[get("/<bucket_id>", format = "application/json")]
+#[get("/<bucket_id>")]
 pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<Bucket>, Failure> {
     match state.datastore.get_bucket(&bucket_id) {
         Ok(bucket) => Ok(Json(bucket)),
@@ -72,7 +72,7 @@ pub struct GetEventsConstraints {
 }
 
 /* FIXME: optional constraints do not work, you always need a ? in the request */
-#[get("/<bucket_id>/events?<constraints>", format = "application/json")]
+#[get("/<bucket_id>/events?<constraints>")]
 pub fn bucket_events_get(bucket_id: String, constraints: GetEventsConstraints, state: State<ServerState>) -> Result<Json<Value>, Failure> {
     let starttime : Option<DateTime<Utc>> = match constraints.start {
         Some(dt_str) => {
@@ -147,7 +147,7 @@ pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, c
     }
 }
 
-#[get("/<bucket_id>/events/count", format = "application/json")]
+#[get("/<bucket_id>/events/count")]
 pub fn bucket_event_count(bucket_id: String, state: State<ServerState>) -> Result<Json<Value>, Failure> {
     let res = state.datastore.get_event_count(&bucket_id, None, None);
     match res {

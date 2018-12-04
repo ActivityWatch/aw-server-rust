@@ -32,10 +32,10 @@ pub enum DataType {
     Dict(HashMap<String, DataType>),
     // Name, argc (-1=unlimited), func
     #[serde(serialize_with = "serialize_function")]
-    Function(String, i8, functions::QueryFn),
+    Function(String, functions::QueryFn),
 }
 
-fn serialize_function<S>(_element: &String, _i: &i8, _fun: &functions::QueryFn, _serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_function<S>(_element: &String, _fun: &functions::QueryFn, _serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer
 {
     panic!("Query function was unevaluated and was attempted to be serialized, panic!");
@@ -56,7 +56,7 @@ impl fmt::Debug for DataType {
             DataType::Event(e) => write!(f, "Event({:?})", e),
             DataType::List(l) => write!(f, "List({:?})", l),
             DataType::Dict(d) => write!(f, "Dict({:?})", d),
-            DataType::Function(name, _argc, _fun) => write!(f, "Function({})", name),
+            DataType::Function(name, _fun) => write!(f, "Function({})", name),
         }
     }
 }
@@ -542,13 +542,10 @@ mod interpret {
                     Some(v) => v,
                     None => return Err(QueryError::VariableNotDefined(fname.clone()))
                 };
-                let (_name, argc, fun) = match var {
-                    DataType::Function(name, argc, fun) => (name, argc, fun),
+                let (_name, fun) = match var {
+                    DataType::Function(name, fun) => (name, fun),
                     _data => return Err(QueryError::InvalidType(fname.to_string()))
                 };
-                if (args.len() as i8) != *argc && *argc >= 0 {
-                    return Err(QueryError::InvalidFunctionParameters(format!("Expected 1 argument, got {}", args.len())));
-                }
                 fun(args, env, ds)
             },
             List(ref list) => {

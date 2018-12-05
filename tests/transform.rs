@@ -197,4 +197,62 @@ mod transform_tests {
         let res = transform::filter_keyvals(vec![e1.clone(), e2, e3], "test", &vec![json!(1)]);
         assert_eq!(vec![e1], res);
     }
+
+    #[test]
+    fn test_filter_period_intersect() {
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json!({"test": 1})
+        };
+        let mut e2 = e1.clone();
+        e2.timestamp = DateTime::from_str("2000-01-01T00:00:02Z").unwrap();
+        let mut e3 = e1.clone();
+        e3.timestamp = DateTime::from_str("2000-01-01T00:00:03Z").unwrap();
+        let mut e4 = e1.clone();
+        e4.timestamp = DateTime::from_str("2000-01-01T00:00:04Z").unwrap();
+        let mut e5 = e1.clone();
+        e5.timestamp = DateTime::from_str("2000-01-01T00:00:05Z").unwrap();
+
+        let filter_event = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:02.5Z").unwrap(),
+            duration: Duration::seconds(2),
+            data: json!({"test": 1})
+        };
+
+        let filtered_events = transform::filter_period_intersect(&vec![e1, e2, e3, e4, e5], &vec![filter_event]);
+        assert_eq!(filtered_events.len(), 3);
+        assert_eq!(filtered_events[0].duration, Duration::milliseconds(500));
+        assert_eq!(filtered_events[1].duration, Duration::milliseconds(1000));
+        assert_eq!(filtered_events[2].duration, Duration::milliseconds(500));
+
+        let dt : DateTime<Utc> = DateTime::from_str("2000-01-01T00:00:02.500Z").unwrap();
+        assert_eq!(filtered_events[0].timestamp, dt);
+        let dt : DateTime<Utc> = DateTime::from_str("2000-01-01T00:00:03.000Z").unwrap();
+        assert_eq!(filtered_events[1].timestamp, dt);
+        let dt : DateTime<Utc> = DateTime::from_str("2000-01-01T00:00:04.000Z").unwrap();
+        assert_eq!(filtered_events[2].timestamp, dt);
+    }
+
+    #[test]
+    fn test_chunk_events_by_key() {
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json!({"test": 1})
+        };
+        let mut e2 = e1.clone();
+        e2.data = json!({"test2": 1});
+        let e3 = e1.clone();
+        let mut e4 = e1.clone();
+        e4.data = json!({"test": 2});
+
+        let res = transform::chunk_events_by_key(vec![e1, e2, e3, e4], "test");
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].duration, Duration::seconds(2));
+        assert_eq!(res[1].duration, Duration::seconds(1));
+    }
 }

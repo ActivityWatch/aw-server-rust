@@ -99,8 +99,8 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
     let mut merged_events_map : HashMap<String, Event> = HashMap::new();
     'event: for event in events {
         let mut key_values = Vec::new();
-        'key: for key in keys.iter() {
-            match event.data.get(key) {
+        'key: for key in &keys {
+            match event.data.get(&key) {
                 Some(v) => key_values.push(v.to_string()),
                 None => continue 'event
             }
@@ -110,13 +110,10 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
             let merged_event = merged_events_map.get_mut(&summed_key).unwrap();
             merged_event.duration = merged_event.duration + event.duration;
         } else {
-            // TODO: only copy values in select keys, not all keys in event
-            /*
-            let data = HashMap::new();
-            for (k, v) in e1.data.iter() {
-                data.insert(k, v);
+            let mut data = HashMap::new();
+            for key in &keys {
+                data.insert(key.clone(), event.data.get(key).unwrap());
             }
-            */
             let merged_event = Event {
                 id: None,
                 timestamp: event.timestamp.clone(),
@@ -131,6 +128,33 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
         merged_events_list.push(event);
     }
     return merged_events_list;
+}
+
+pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
+    let mut chunked_events : Vec<Event> = Vec::new();
+    for event in events {
+        if chunked_events.len() == 0 && event.data.get(key).is_some() {
+            // TODO: Add sub-chunks
+            chunked_events.push(event.clone());
+        } else {
+            let val = match event.data.get(key) {
+                None => continue,
+                Some(v) => v
+            };
+            let mut last_event = chunked_events.pop().unwrap();
+            let last_val = last_event.data.get(key).unwrap().clone();
+            if &last_val == val {
+                // TODO: Add sub-chunks
+                last_event.duration = last_event.duration + event.duration;
+            }
+            chunked_events.push(last_event);
+            if &last_val != val {
+                // TODO: Add sub-chunks
+                chunked_events.push(event.clone());
+            }
+        }
+    }
+    return chunked_events;
 }
 
 pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &Vec<Value>) -> Vec<Event> {
@@ -180,6 +204,28 @@ pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &Vec<Value>) -> Vec<E
                 }
             }
             None => break
+        }
+    }
+    return filtered_events;
+}
+
+pub fn filter_period_intersect(events: &Vec<Event>, filter_events: &Vec<Event>) -> Vec<Event> {
+    let mut filtered_events = Vec::new();
+    for filter in filter_events {
+        let filter_endtime = filter.calculate_endtime();
+        for event in events {
+            if event.timestamp > filter_endtime {
+                continue
+            }
+            let event_endtime = event.calculate_endtime();
+            if event_endtime < filter.timestamp {
+                continue
+            }
+            let mut e = event.clone();
+            e.timestamp = std::cmp::max(e.timestamp, filter.timestamp);
+            let endtime = std::cmp::min(event_endtime, filter_endtime);
+            e.duration = endtime - e.timestamp;
+            filtered_events.push(e);
         }
     }
     return filtered_events;

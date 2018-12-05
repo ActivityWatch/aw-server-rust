@@ -264,6 +264,9 @@ mod parser {
             statements[mut st] ret[r] Semi => {
                 st.push(r);
                 st
+            },
+            statements[st] Semi => {
+                st
             }
         }
 

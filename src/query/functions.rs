@@ -14,7 +14,9 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
     env.insert("limit_events", DataType::Function("limit_events".to_string(), qfunctions::limit_events));
     env.insert("flood", DataType::Function("flood".to_string(), qfunctions::flood));
     env.insert("merge_events_by_keys", DataType::Function("merge_events_by_keys".to_string(), qfunctions::merge_events_by_keys));
+    env.insert("chunk_events_by_key", DataType::Function("chunk_events_by_key".to_string(), qfunctions::chunk_events_by_keys));
     env.insert("filter_keyvals", DataType::Function("filter_keyvals".to_string(), qfunctions::filter_keyvals));
+    env.insert("filter_period_intersect", DataType::Function("filter_period_intersect".to_string(), qfunctions::filter_period_intersect));
 }
 
 mod qfunctions {
@@ -135,6 +137,20 @@ mod qfunctions {
         return Ok(DataType::List(merged_tagged_events));
     }
 
+    pub fn chunk_events_by_keys(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 2)?;
+        let events = validate::arg_type_event_list(&args, 0)?;
+        let key  = validate::arg_type_string(&args, 1)?;
+
+        let mut merged_events = transform::chunk_events_by_key(events, &key);
+        let mut merged_tagged_events = Vec::new();
+        for event in merged_events.drain(..) {
+            merged_tagged_events.push(DataType::Event(event));
+        }
+        return Ok(DataType::List(merged_tagged_events));
+    }
+
     pub fn filter_keyvals(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 3)?;
@@ -142,12 +158,26 @@ mod qfunctions {
         let key  = validate::arg_type_string(&args, 1)?;
         let vals = validate::arg_type_value_list(&args, 2)?;
 
-        let mut merged_events = transform::filter_keyvals(events, &key, &vals);
-        let mut merged_tagged_events = Vec::new();
-        for event in merged_events.drain(..) {
-            merged_tagged_events.push(DataType::Event(event));
+        let mut filtered_events = transform::filter_keyvals(events, &key, &vals);
+        let mut filtered_tagged_events = Vec::new();
+        for event in filtered_events.drain(..) {
+            filtered_tagged_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(merged_tagged_events));
+        return Ok(DataType::List(filtered_tagged_events));
+    }
+
+    pub fn filter_period_intersect(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 2)?;
+        let events = validate::arg_type_event_list(&args, 0)?;
+        let filter_events = validate::arg_type_event_list(&args, 1)?;
+
+        let mut filtered_events = transform::filter_period_intersect(&events, &filter_events);
+        let mut filtered_tagged_events = Vec::new();
+        for event in filtered_events.drain(..) {
+            filtered_tagged_events.push(DataType::Event(event));
+        }
+        return Ok(DataType::List(filtered_tagged_events));
     }
 }
 

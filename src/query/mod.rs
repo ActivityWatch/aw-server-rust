@@ -21,6 +21,7 @@ pub enum QueryError {
     BucketQueryError(String),
 }
 
+/* TODO: Add support for bools */
 #[derive(Clone,Serialize)]
 #[serde(untagged)]
 pub enum DataType {

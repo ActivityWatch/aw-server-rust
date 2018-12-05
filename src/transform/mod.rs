@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use models::Event;
+use rocket_contrib::json::Value;
 
 // TODO: Compare with aw-cores version to make sure it works correctly
 pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Option<Event> {
@@ -130,4 +131,56 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
         merged_events_list.push(event);
     }
     return merged_events_list;
+}
+
+pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &Vec<Value>) -> Vec<Event> {
+    let mut filtered_events = Vec::new();
+    for event in events {
+        match event.data.get(key) {
+            Some(v) => match v {
+                Value::Null => {
+                    for val in vals {
+                        match val {
+                            Value::Null => filtered_events.push(event.clone()),
+                            _ => break
+                        }
+                    }
+                },
+                Value::Bool(b1) => {
+                    for val in vals {
+                        match val {
+                            Value::Bool(ref b2) => if b1 == b2 { filtered_events.push(event.clone()) },
+                            _ => break
+                        }
+                    }
+                },
+                Value::Number(n1) => {
+                    for val in vals {
+                        match val {
+                            Value::Number(ref n2) => if n1 == n2 { filtered_events.push(event.clone()) },
+                            _ => break
+                        }
+                    }
+                },
+                Value::String(s1) => {
+                    for val in vals {
+                        match val {
+                            Value::String(ref s2) => if s1 == s2 { filtered_events.push(event.clone()) },
+                            _ => break
+                        }
+                    }
+                },
+                Value::Array(_) => {
+                    // TODO: cannot match objects
+                    break
+                },
+                Value::Object(_) => {
+                    // TODO: cannot match objects
+                    break
+                }
+            }
+            None => break
+        }
+    }
+    return filtered_events;
 }

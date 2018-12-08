@@ -279,19 +279,49 @@ mod parser {
         }
 
         assign: Expr {
-            // Assign
-            Ident(var) Equals assign[rhs] => Expr {
+            Ident(var) Equals term[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Assign(var, Box::new(rhs)),
             },
-            // Function
+            term[t] => t
+        }
+
+        term: Expr {
+            term[lhs] Plus fact[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Add(Box::new(lhs), Box::new(rhs)),
+            },
+            term[lhs] Minus fact[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Sub(Box::new(lhs), Box::new(rhs)),
+            },
+            fact[x] => x
+        }
+
+        fact: Expr {
+            fact[lhs] Star func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Mul(Box::new(lhs), Box::new(rhs)),
+            },
+            fact[lhs] Slash func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Div(Box::new(lhs), Box::new(rhs)),
+            },
+            fact[lhs] Percent func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
+            },
+            func[x] => x
+        }
+
+        func: Expr {
             Ident(fname) LParen list[l] RParen => Expr {
                 span: span!(),
                 node: {
                     Expr_::Function(fname, Box::new(l))
                 }
             },
-            object[o] => o
+            object[o] => o,
         }
 
         object: Expr {
@@ -309,11 +339,11 @@ mod parser {
                     Expr_::Dict(HashMap::new())
                 }
             },
-            term[o] => o,
+            atom[a] => a
         }
 
         list: Expr {
-            assign[o] => Expr {
+            term[o] => Expr {
                 span: span!(),
                 node: {
                     let mut list = Vec::new();
@@ -321,7 +351,7 @@ mod parser {
                     Expr_::List(list)
                 }
             },
-            list[l] Comma assign[o] => Expr {
+            list[l] Comma term[o] => Expr {
                 span: span!(),
                 node: {
                     match l.node {
@@ -337,7 +367,7 @@ mod parser {
         }
 
         dict: Expr {
-            String(k) Colon assign[v] => Expr {
+            String(k) Colon term[v] => Expr {
                 span: span!(),
                 node: {
                     let mut dict = HashMap::new();
@@ -345,7 +375,7 @@ mod parser {
                     Expr_::Dict(dict)
                 }
             },
-            dict[d] Comma String(k) Colon assign[v] => Expr {
+            dict[d] Comma String(k) Colon term[v] => Expr {
                 span: span!(),
                 node: {
                     match d.node {
@@ -358,34 +388,6 @@ mod parser {
                     }
                 }
             },
-        }
-
-        term: Expr {
-            term[lhs] Plus fact[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Add(Box::new(lhs), Box::new(rhs)),
-            },
-            term[lhs] Minus fact[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Sub(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[x] => x
-        }
-
-        fact: Expr {
-            fact[lhs] Star atom[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Mul(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[lhs] Slash atom[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Div(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[lhs] Percent atom[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
-            },
-            atom[x] => x
         }
 
         atom: Expr {
@@ -402,7 +404,7 @@ mod parser {
                 span: span!(),
                 node: Expr_::String(s),
             },
-            LParen assign[a] RParen => a
+            LParen term[a] RParen => a
         }
     }
 
@@ -453,15 +455,30 @@ mod interpret {
             Add(ref a, ref b) => {
                 let a_res = interpret_expr(env, ds, a)?;
                 let b_res = interpret_expr(env, ds, b)?;
-                let a_num = match a_res {
-                    DataType::Number(n) => n,
-                    _ => return Err(QueryError::InvalidType("Cannot add something that is not a number!".to_string()))
+                let res = match a_res {
+                    DataType::Number(n1) => match b_res {
+                        DataType::Number(n2) => DataType::Number(n1+n2),
+                        _ => return Err(QueryError::InvalidType("Cannot use + on something that is not a number with a number!".to_string()))
+                    },
+                    DataType::List(l1) => match b_res {
+                        DataType::List(l2) => {
+                            let mut new_list = l1.clone();
+                            new_list.append(&mut l2.clone());
+                            DataType::List(new_list)
+                        },
+                        _ => return Err(QueryError::InvalidType("Cannot use + on something that is not a list with a list!".to_string()))
+                    }
+                    DataType::String(s1) => match b_res {
+                        DataType::String(s2) => {
+                            let mut new_string = s1.clone();
+                            new_string.push_str(&s2);
+                            DataType::String(new_string)
+                        },
+                        _ => return Err(QueryError::InvalidType("Cannot use + on something that is not a list with a list!".to_string()))
+                    }
+                    _ => return Err(QueryError::InvalidType("Cannot use + on something that is not a number, list or string!".to_string()))
                 };
-                let b_num = match b_res {
-                    DataType::Number(n) => n,
-                    _ => return Err(QueryError::InvalidType("Cannot add something that is not a number!".to_string()))
-                };
-                Ok(DataType::Number(a_num+b_num))
+                Ok(res)
             },
             Sub(ref a, ref b) => {
                 let a_res = interpret_expr(env, ds, a)?;

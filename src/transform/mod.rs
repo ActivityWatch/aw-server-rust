@@ -231,3 +231,51 @@ pub fn filter_period_intersect(events: &Vec<Event>, filter_events: &Vec<Event>) 
     return filtered_events;
 }
 
+pub fn split_url_event(event: &mut Event) {
+    use rocket::http::uri::Absolute;
+    use serde_json::Value;
+    let uri_str = match event.data.get("url") {
+        None => return,
+        Some(val) => match val {
+            Value::String(s) => s.clone(),
+            _ => return
+        }
+    };
+    let uri = match Absolute::parse(&uri_str) {
+        Ok(uri) => uri,
+        Err(_) => return
+    };
+    let data = match event.data {
+        Value::Object(ref mut o) => o,
+        _ => panic!("event data is not a object!")
+    };
+    // Protocol
+    let protocol = uri.scheme().to_string();
+    data.insert("protocol".to_string(), Value::String(protocol));
+    // Domain
+    let domain = match uri.authority() {
+        Some(authority) => {
+            authority.host().trim_start_matches("www.").to_string()
+        },
+        None => "".to_string(),
+    };
+    data.insert("domain".to_string(), Value::String(domain));
+    // Path
+    let path = match uri.origin() {
+        Some(origin) => origin.path().to_string(),
+        None => "".to_string()
+    };
+    data.insert("path".to_string(), Value::String(path));
+    // Params
+    // TODO: What's the difference between params and query?
+    let params = match uri.origin() {
+        Some(origin) => match origin.query() {
+            Some(query) => query.to_string(),
+            None => "".to_string()
+        },
+        None => "".to_string()
+    };
+    data.insert("params".to_string(), Value::String(params));
+
+    // TODO: aw-server-python also has options and identifier
+}

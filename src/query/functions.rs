@@ -17,6 +17,7 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
     env.insert("chunk_events_by_key", DataType::Function("chunk_events_by_key".to_string(), qfunctions::chunk_events_by_keys));
     env.insert("filter_keyvals", DataType::Function("filter_keyvals".to_string(), qfunctions::filter_keyvals));
     env.insert("filter_period_intersect", DataType::Function("filter_period_intersect".to_string(), qfunctions::filter_period_intersect));
+    env.insert("split_url_events", DataType::Function("split_url_events".to_string(), qfunctions::split_url_events));
 }
 
 mod qfunctions {
@@ -178,6 +179,19 @@ mod qfunctions {
             filtered_tagged_events.push(DataType::Event(event));
         }
         return Ok(DataType::List(filtered_tagged_events));
+    }
+
+    pub fn split_url_events(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 1)?;
+        let mut events = validate::arg_type_event_list(&args, 0)?;
+
+        let mut tagged_split_url_events = Vec::new();
+        for mut event in events.drain(..) {
+            transform::split_url_event(&mut event);
+            tagged_split_url_events.push(DataType::Event(event));
+        }
+        return Ok(DataType::List(tagged_split_url_events));
     }
 }
 

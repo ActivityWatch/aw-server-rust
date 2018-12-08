@@ -255,4 +255,22 @@ mod transform_tests {
         assert_eq!(res[0].duration, Duration::seconds(2));
         assert_eq!(res[1].duration, Duration::seconds(1));
     }
+
+    #[test]
+    fn test_split_url_events() {
+        let mut e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json!({"url": "http://www.google.com/path?query=1"})
+        };
+        transform::split_url_event(&mut e1);
+        assert_eq!(e1.data, json!({
+            "url": "http://www.google.com/path?query=1",
+            "protocol": "http",
+            "domain": "google.com",
+            "path": "/path",
+            "params": "query=1"
+        }));
+    }
 }

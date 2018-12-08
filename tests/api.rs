@@ -129,17 +129,10 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Get inserted event
-        res = client.get("/api/0/buckets/id/events?")
+        res = client.get("/api/0/buckets/id/events")
             .header(ContentType::JSON)
             .dispatch();
-        assert_eq!(res.body_string().unwrap(), r#"[{"data":{},"duration":1.0,"id":1,"timestamp":"2018-01-01T01:01:01Z"}]"#);
-        assert_eq!(res.status(), rocket::http::Status::Ok);
-
-        // Get inserted event
-        res = client.get("/api/0/buckets/id/events?")
-            .header(ContentType::JSON)
-            .dispatch();
-        assert_eq!(res.body_string().unwrap(), r#"[{"data":{},"duration":1.0,"id":1,"timestamp":"2018-01-01T01:01:01Z"}]"#);
+        assert_eq!(res.body_string().unwrap(), r#"[{"id":1,"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}]"#);
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Heartbeat
@@ -155,17 +148,17 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Get heartbeat event
-        res = client.get("/api/0/buckets/id/events?")
+        res = client.get("/api/0/buckets/id/events")
             .header(ContentType::JSON)
             .dispatch();
-        assert_eq!(res.body_string().unwrap(), r#"[{"data":{},"duration":2.0,"id":1,"timestamp":"2018-01-01T01:01:01Z"}]"#);
+        assert_eq!(res.body_string().unwrap(), r#"[{"id":1,"timestamp":"2018-01-01T01:01:01Z","duration":2.0,"data":{}}]"#);
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Get eventcount
         res = client.get("/api/0/buckets/id/events/count")
             .header(ContentType::JSON)
             .dispatch();
-        assert_eq!(res.body_string().unwrap(), r#"{"count":1}"#);
+        assert_eq!(res.body_string().unwrap(), "1");
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Delete bucket

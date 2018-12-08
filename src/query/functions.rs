@@ -251,14 +251,15 @@ mod validate {
         return Ok(strings);
     }
 
-    use rocket_contrib::json::Value;
+    use serde_json::value::Value;
+    use serde_json::Number;
     pub fn arg_type_value_list (args: &Vec<DataType>, arg_index: usize) -> Result<Vec<Value>, QueryError> {
         let mut tagged_strings = arg_type_list(args, arg_index)?.clone();
         let mut strings = Vec::new();
         for string in tagged_strings.drain(..) {
             match string {
-                DataType::String(s) => strings.push(json!(s)),
-                DataType::Number(n) => strings.push(json!(n)),
+                DataType::String(s) => strings.push(Value::String(s)),
+                DataType::Number(n) => strings.push(Value::Number(Number::from_f64(n).unwrap())),
                 //DataType::Bool(b) => strings.push(json!(b)),
                 DataType::None() => strings.push(Value::Null),
                 ref invalid_type => return Err(QueryError::InvalidFunctionParameters(

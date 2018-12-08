@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use models::Event;
-use rocket_contrib::json::Value;
+use serde_json::value::Value;
 
 // TODO: Compare with aw-cores version to make sure it works correctly
 pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Option<Event> {
@@ -230,3 +230,4 @@ pub fn filter_period_intersect(events: &Vec<Event>, filter_events: &Vec<Event>) 
     }
     return filtered_events;
 }
+

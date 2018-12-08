@@ -1,7 +1,8 @@
 #![feature(plugin,try_from,custom_derive)]
 #![feature(proc_macro_hygiene)]
-#![plugin(rocket_codegen)]
-extern crate rocket;
+#![feature(custom_attribute)]
+#![feature(decl_macro)]
+#[macro_use] extern crate rocket;
 #[macro_use] extern crate rocket_contrib;
 
 extern crate serde;

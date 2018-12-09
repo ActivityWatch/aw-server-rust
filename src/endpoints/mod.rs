@@ -7,6 +7,7 @@ use rocket_contrib::json::JsonValue;
 mod bucket;
 mod query;
 mod import;
+mod cors;
 
 use datastore::Datastore;
 
@@ -79,6 +80,7 @@ pub fn rocket(server_state: ServerState) -> rocket::Rocket {
         .mount("/api/0/import/", routes![
                import::bucket_import
         ])
+        .attach(cors::cors())
         .register(catchers![not_modified, not_found])
         .manage(server_state)
 }

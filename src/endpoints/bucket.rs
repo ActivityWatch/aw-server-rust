@@ -49,7 +49,7 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
     }
 }
 
-#[post("/<bucket_id>", format = "application/json", data = "<message>")]
+#[post("/<bucket_id>", data = "<message>")]
 pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerState>) -> Response {
     let bucket = message.into_inner();
     if bucket.id != bucket_id {
@@ -108,7 +108,7 @@ pub fn bucket_events_get(bucket_id: String, start: Option<String>, end: Option<S
     }
 }
 
-#[post("/<bucket_id>/events", format = "application/json", data = "<events>")]
+#[post("/<bucket_id>/events", data = "<events>")]
 pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: State<ServerState>) -> Result<(), Status> {
     let res = state.datastore.insert_events(&bucket_id, &events);
     match res {
@@ -123,7 +123,7 @@ pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: 
     }
 }
 
-#[post("/<bucket_id>/heartbeat?<pulsetime>", format = "application/json", data = "<heartbeat_json>")]
+#[post("/<bucket_id>/heartbeat?<pulsetime>", data = "<heartbeat_json>")]
 pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, pulsetime: f64, state: State<ServerState>) -> Result<(), Status> {
     let heartbeat = heartbeat_json.into_inner();
     match state.datastore.heartbeat(&bucket_id, heartbeat, pulsetime) {

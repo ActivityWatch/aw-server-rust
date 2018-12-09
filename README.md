@@ -7,7 +7,7 @@ Primary features missing:
 - Config
 - Save DB in proper location (appdirs)
 - Import HTTP api
-- CORS
+- Safe CORS (not allow all, fix dynamic CORS in rocket_cors upstream)
 
 Caveats:
 - Some refactoring is needed

@@ -5,7 +5,6 @@ A reimplementation of aw-server in Rust
 
 Primary features missing:
 - Config
-- Save DB in proper location (appdirs)
 - Import HTTP api
 - Safe CORS (not allow all, fix dynamic CORS in rocket_cors upstream)
 

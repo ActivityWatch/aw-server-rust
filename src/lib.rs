@@ -18,8 +18,11 @@ extern crate chrono;
 
 extern crate plex;
 
+extern crate appdirs;
+
 pub mod models;
 pub mod transform;
 pub mod datastore;
 pub mod query;
 pub mod endpoints;
+pub mod dirs;

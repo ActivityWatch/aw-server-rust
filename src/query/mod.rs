@@ -5,11 +5,12 @@ use models::Event;
 use models::TimeInterval;
 use serde::Serializer;
 
+/* TODO: add line numbers to errors? */
+
 #[derive(Debug)]
 pub enum QueryError {
-    // Lexing + Parsing
-    LexingError, // FIXME: Lexing currently cannot fail without panic, unused
-    ParsingError,
+    // Parser
+    ParsingError(String),
 
     // Execution
     EmptyQuery(),
@@ -154,9 +155,6 @@ mod lexer {
         r#","# => (Token::Comma, text),
         r#":"# => (Token::Colon, text),
         r#";"# => (Token::Semi, text),
-
-        // TODO: do not panic, send an error
-        r#"."# => panic!("unexpected character: {}", text),
     }
 
     pub struct Lexer<'a> {
@@ -600,8 +598,9 @@ pub fn query<'a>(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataTy
     let program = match parser::parse(lexer) {
         Ok(p) => p,
         Err(e) => {
-            println!("{:?}", e);
-            return Err(QueryError::ParsingError);
+            // TODO: Improve parsing error message
+            println!("ParsingError: {:?}", e);
+            return Err(QueryError::ParsingError(format!("{:?}", e)));
         }
     };
     interpret::interpret_prog(&program, ti, ds)

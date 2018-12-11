@@ -48,18 +48,16 @@ fn server_info() -> JsonValue {
 
 #[catch(304)]
 fn not_modified() -> JsonValue {
-    /* TODO: Set to HTML page */
     json!({
-        "status": "error",
-        "reason": "Resource was not found."
+        "status": 304,
+        "reason": "Not modified."
     })
 }
 
 #[catch(404)]
 fn not_found() -> JsonValue {
-    /* TODO: Set to HTML page */
     json!({
-        "status": "error",
+        "status": 404,
         "reason": "Resource was not found."
     })
 }

@@ -23,7 +23,6 @@ use transform;
 /*
  * TODO:
  * - Needs refactoring?
- * - Add macro for getting requester lock
  */
 
 pub enum Responses {
@@ -480,6 +479,14 @@ impl DatastoreInstance {
     }
 }
 
+macro_rules! get_lock {
+    ( $lock:expr ) => {
+        match $lock.lock() {
+            Ok(r) => r,
+            Err(_) => return Err(DatastoreError::RequestLockTimeout)
+        }
+    }
+}
 
 impl Datastore {
 
@@ -505,10 +512,7 @@ impl Datastore {
     }
 
     pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        let requester = match self.requester.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        };
+        let requester = get_lock!(self.requester);
         match requester.request(Commands::CreateBucket(bucket.clone())) {
             Ok(_) => Ok(()),
             Err(e) => Err(e)
@@ -516,10 +520,7 @@ impl Datastore {
     }
 
     pub  fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError>{
-        let requester = match self.requester.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        };
+        let requester = get_lock!(self.requester);
         match requester.request(Commands::DeleteBucket(bucket_id.to_string())) {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
@@ -530,10 +531,7 @@ impl Datastore {
     }
 
     pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        let requester = match self.requester.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        };
+        let requester = get_lock!(self.requester);
         match requester.request(Commands::GetBucket(bucket_id.to_string())) {
             Ok(r) => match r {
                 Responses::Bucket(b) => Ok(b),
@@ -544,10 +542,7 @@ impl Datastore {
     }
 
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
-        let requester = match self.requester.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        };
+        let requester = get_lock!(self.requester);
         match requester.request(Commands::GetBuckets()) {
             Ok(r) => match r {
                 Responses::BucketMap(bm) => Ok(bm),
@@ -558,10 +553,7 @@ impl Datastore {
     }
 
     pub fn insert_events(&self, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
-        let requester = match self.requester.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        };
+        let requester = get_lock!(self.requester);
         match requester.request(Commands::InsertEvents(bucket_id.to_string(), events.clone())) {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
@@ -572,10 +564,7 @@ impl Datastore {
     }
 
     pub fn heartbeat(&self, bucket_id: &str, heartbeat: Event, pulsetime: f64) -> Result<(), DatastoreError> {
-        let requester = match self.requester.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        };
+        let requester = get_lock!(self.requester);
         match requester.request(Commands::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime)) {
             Ok(r) => match r {
                 Responses::Empty() => return Ok(()),
@@ -586,10 +575,7 @@ impl Datastore {
     }
 
     pub fn replace_last_event(&self, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
-        let requester = match self.requester.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        };
+        let requester = get_lock!(self.requester);
         match requester.request(Commands::ReplaceLastEvent(bucket_id.to_string(), event.clone())) {
             Ok(r) => match r {
                 Responses::Empty() => return Ok(()),
@@ -600,10 +586,7 @@ impl Datastore {
     }
 
     pub fn get_events(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
-        let requester = match self.requester.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        };
+        let requester = get_lock!(self.requester);
         match requester.request(Commands::GetEvents(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone(), limit_opt.clone())) {
             Ok(r) => match r {
                 Responses::EventList(el) => Ok(el),
@@ -614,10 +597,7 @@ impl Datastore {
     }
 
     pub fn get_event_count(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, DatastoreError> {
-        let requester = match self.requester.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        };
+        let requester = get_lock!(self.requester);
         match requester.request(Commands::GetEventCount(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone())) {
             Ok(r) => match r {
                 Responses::Count(n) => Ok(n),

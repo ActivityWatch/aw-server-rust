@@ -70,7 +70,10 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
         }
         let e2 = match e1_iter.peek() {
             Some(e) => e,
-            None => break
+            None => {
+                new_events.push(e1.clone());
+                break;
+            }
         };
 
         let gap = e2.timestamp - e1.timestamp;

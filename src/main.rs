@@ -24,7 +24,7 @@ pub mod endpoints;
 
 fn main() {
     let server_state = endpoints::ServerState {
-        datastore: datastore::Datastore::new("/tmp/test.db".to_string())
+        datastore: datastore::Datastore::new("/home/erb/.local/share/activitywatch/aw-server-rust/aw-server-rust-testing.sqlite".to_string())
     };
 
     endpoints::rocket(server_state).launch();

@@ -2,7 +2,7 @@ use std::path::{Path,PathBuf};
 
 use rocket;
 use rocket::response::{NamedFile};
-use rocket_contrib::{Json, Value};
+use rocket_contrib::json::{Json, JsonValue};
 
 mod bucket;
 mod query;
@@ -37,7 +37,7 @@ fn root_favicon() -> Option<NamedFile> {
 }
 
 #[get("/")]
-fn server_info() -> Json<Value> {
+fn server_info() -> Json<JsonValue> {
     Json(json!({
         "hostname": "johan-desktop",
         "version": "aw-server-rust_v0.1",
@@ -47,7 +47,7 @@ fn server_info() -> Json<Value> {
 
 
 #[catch(404)]
-fn not_found() -> Json<Value> {
+fn not_found() -> Json<JsonValue> {
     /* TODO: Set to HTML page */
     Json(json!({
         "status": "error",
@@ -71,6 +71,6 @@ pub fn rocket(server_state: ServerState) -> rocket::Rocket {
         .mount("/api/0/import", routes![
                import::bucket_import
         ])
-        .catch(catchers![not_found])
+        .register(catchers![not_found])
         .manage(server_state)
 }

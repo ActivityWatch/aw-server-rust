@@ -1,14 +1,14 @@
-use rocket_contrib::Json;
+use rocket_contrib::json::Json;
 
 use rocket::State;
+use rocket::http::Status;
 use query as q;
 use endpoints::ServerState;
-use rocket::response::Failure;
 
 use models::Query;
 
 #[post("/", format = "application/json", data = "<query_req>")]
-fn query(query_req: Json<Query>, state: State<ServerState>) -> Result<Json<Vec<q::DataType>>, Failure> {
+pub fn query(query_req: Json<Query>, state: State<ServerState>) -> Result<Json<Vec<q::DataType>>, Status> {
     let query_code = query_req.0.query.join("\n");
     let intervals = &query_req.0.timeperiods;
     let mut res = Vec::new();

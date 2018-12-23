@@ -1,7 +1,7 @@
 use rocket::State;
 use rocket::Response;
 use rocket::http::Status;
-use rocket_contrib::Json;
+use rocket_contrib::json::Json;
 
 use std::collections::HashMap;
 

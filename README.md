@@ -4,17 +4,26 @@ aw-server-rust
 A reimplementation of aw-server in Rust
 
 Primary features missing:
-- Most transforms for query2 to be useful
 - Config
-- Import/Export HTTP api
-- CORS
+- Import HTTP api
+- Safe CORS (not allow all, fix dynamic CORS in rocket_cors upstream)
 
 Caveats:
-- Lots of refactoring is needed, code is far from good looking (especially query code)
+- Some refactoring is needed
 - Lots of TODO and FIXME comments
 
 Bugs:
 - Memory leak during import? (wtf rust?)
 
-Features missing compared to aw-server python and won't be reimplemented:
+Features missing compared to aw-server python:
 - Swagger support
+
+### How to compile
+
+cargo build --release
+
+### How to run
+
+Install rust nightly and run
+
+cargo run

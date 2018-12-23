@@ -2,11 +2,12 @@ use std::path::{Path,PathBuf};
 
 use rocket;
 use rocket::response::{NamedFile};
-use rocket_contrib::json::{Json, JsonValue};
+use rocket_contrib::json::JsonValue;
 
 mod bucket;
 mod query;
 mod import;
+mod cors;
 
 use datastore::Datastore;
 
@@ -37,27 +38,33 @@ fn root_favicon() -> Option<NamedFile> {
 }
 
 #[get("/")]
-fn server_info() -> Json<JsonValue> {
-    Json(json!({
+fn server_info() -> JsonValue {
+    json!({
         "hostname": "johan-desktop",
         "version": "aw-server-rust_v0.1",
         "testing": false
-    }))
+    })
 }
 
+#[catch(304)]
+fn not_modified() -> JsonValue {
+    json!({
+        "status": 304,
+        "reason": "Not modified."
+    })
+}
 
 #[catch(404)]
-fn not_found() -> Json<JsonValue> {
-    /* TODO: Set to HTML page */
-    Json(json!({
-        "status": "error",
+fn not_found() -> JsonValue {
+    json!({
+        "status": 404,
         "reason": "Resource was not found."
-    }))
+    })
 }
 
 pub fn rocket(server_state: ServerState) -> rocket::Rocket {
     rocket::ignite()
-        .mount("", routes![
+        .mount("/", routes![
                root_index, root_favicon, root_static, root_css, root_css_map,
         ])
         .mount("/api/0/info", routes![server_info])
@@ -68,9 +75,10 @@ pub fn rocket(server_state: ServerState) -> rocket::Rocket {
         .mount("/api/0/query", routes![
                query::query
         ])
-        .mount("/api/0/import", routes![
+        .mount("/api/0/import/", routes![
                import::bucket_import
         ])
-        .register(catchers![not_found])
+        .attach(cors::cors())
+        .register(catchers![not_modified, not_found])
         .manage(server_state)
 }

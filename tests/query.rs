@@ -201,6 +201,25 @@ mod query_tests {
     }
 
     #[test]
+    fn test_concat() {
+        let ds = setup_datastore_empty();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // Append lists
+        let code = String::from("return [1]+[2];");
+        let res = query::query(&code, &interval, &ds).unwrap();
+        let mut v = Vec::new();
+        v.push(DataType::Number(1.0));
+        v.push(DataType::Number(2.0));
+        assert_eq!(res, DataType::List(v));
+
+        // Append strings
+        let code = String::from(r#"return "a"+"b";"#);
+        let res = query::query(&code, &interval, &ds).unwrap();
+        assert_eq!(res, DataType::String("ab".to_string()));
+    }
+
+    #[test]
     fn test_math() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();

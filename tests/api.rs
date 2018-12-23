@@ -129,17 +129,10 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Get inserted event
-        res = client.get("/api/0/buckets/id/events?")
+        res = client.get("/api/0/buckets/id/events")
             .header(ContentType::JSON)
             .dispatch();
-        assert_eq!(res.body_string().unwrap(), r#"[{"data":{},"duration":1.0,"id":1,"timestamp":"2018-01-01T01:01:01Z"}]"#);
-        assert_eq!(res.status(), rocket::http::Status::Ok);
-
-        // Get inserted event
-        res = client.get("/api/0/buckets/id/events?")
-            .header(ContentType::JSON)
-            .dispatch();
-        assert_eq!(res.body_string().unwrap(), r#"[{"data":{},"duration":1.0,"id":1,"timestamp":"2018-01-01T01:01:01Z"}]"#);
+        assert_eq!(res.body_string().unwrap(), r#"[{"id":1,"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}]"#);
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Heartbeat
@@ -155,17 +148,17 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Get heartbeat event
-        res = client.get("/api/0/buckets/id/events?")
+        res = client.get("/api/0/buckets/id/events")
             .header(ContentType::JSON)
             .dispatch();
-        assert_eq!(res.body_string().unwrap(), r#"[{"data":{},"duration":2.0,"id":1,"timestamp":"2018-01-01T01:01:01Z"}]"#);
+        assert_eq!(res.body_string().unwrap(), r#"[{"id":1,"timestamp":"2018-01-01T01:01:01Z","duration":2.0,"data":{}}]"#);
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Get eventcount
         res = client.get("/api/0/buckets/id/events/count")
             .header(ContentType::JSON)
             .dispatch();
-        assert_eq!(res.body_string().unwrap(), r#"{"count":1}"#);
+        assert_eq!(res.body_string().unwrap(), "1");
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Delete bucket
@@ -280,7 +273,18 @@ mod api_tests {
             }"#)
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#"[[{"id":1,"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}]]"#);
+        assert_eq!(res.body_string().unwrap(), r#"[[{"data":{},"duration":1.0,"id":1,"timestamp":"2018-01-01T01:01:01Z"}]]"#);
+
+        // Test error
+        let mut res = client.post("/api/0/query")
+            .header(ContentType::JSON)
+            .body(r#"{
+                "timeperiods": ["2000-01-01T00:00:00Z/2020-01-01T00:00:00Z"],
+                "query": [""]
+            }"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::InternalServerError);
+        assert_eq!(res.body_string().unwrap(), r#"{"message":"EmptyQuery","reason":"Internal Server Error (Query Error)","status":500}"#);
     }
 
 }

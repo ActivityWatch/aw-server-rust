@@ -5,11 +5,12 @@ use models::Event;
 use models::TimeInterval;
 use serde::Serializer;
 
+/* TODO: add line numbers to errors? */
+
 #[derive(Debug)]
 pub enum QueryError {
-    // Lexing + Parsing
-    LexingError, // FIXME: Lexing currently cannot fail without panic, unused
-    ParsingError,
+    // Parser
+    ParsingError(String),
 
     // Execution
     EmptyQuery(),
@@ -21,6 +22,13 @@ pub enum QueryError {
     BucketQueryError(String),
 }
 
+impl fmt::Display for QueryError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/* TODO: Add support for bools */
 #[derive(Clone,Serialize)]
 #[serde(untagged)]
 pub enum DataType {
@@ -32,10 +40,10 @@ pub enum DataType {
     Dict(HashMap<String, DataType>),
     // Name, argc (-1=unlimited), func
     #[serde(serialize_with = "serialize_function")]
-    Function(String, i8, functions::QueryFn),
+    Function(String, functions::QueryFn),
 }
 
-fn serialize_function<S>(_element: &String, _i: &i8, _fun: &functions::QueryFn, _serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_function<S>(_element: &String, _fun: &functions::QueryFn, _serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer
 {
     panic!("Query function was unevaluated and was attempted to be serialized, panic!");
@@ -56,7 +64,7 @@ impl fmt::Debug for DataType {
             DataType::Event(e) => write!(f, "Event({:?})", e),
             DataType::List(l) => write!(f, "List({:?})", l),
             DataType::Dict(d) => write!(f, "Dict({:?})", d),
-            DataType::Function(name, _argc, _fun) => write!(f, "Function({})", name),
+            DataType::Function(name, _fun) => write!(f, "Function({})", name),
         }
     }
 }
@@ -147,9 +155,6 @@ mod lexer {
         r#","# => (Token::Comma, text),
         r#":"# => (Token::Colon, text),
         r#";"# => (Token::Semi, text),
-
-        // TODO: do not panic, send an error
-        r#"."# => panic!("unexpected character: {}", text),
     }
 
     pub struct Lexer<'a> {
@@ -263,6 +268,9 @@ mod parser {
             statements[mut st] ret[r] Semi => {
                 st.push(r);
                 st
+            },
+            statements[st] Semi => {
+                st
             }
         }
 
@@ -275,19 +283,49 @@ mod parser {
         }
 
         assign: Expr {
-            // Assign
-            Ident(var) Equals assign[rhs] => Expr {
+            Ident(var) Equals term[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Assign(var, Box::new(rhs)),
             },
-            // Function
+            term[t] => t
+        }
+
+        term: Expr {
+            term[lhs] Plus fact[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Add(Box::new(lhs), Box::new(rhs)),
+            },
+            term[lhs] Minus fact[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Sub(Box::new(lhs), Box::new(rhs)),
+            },
+            fact[x] => x
+        }
+
+        fact: Expr {
+            fact[lhs] Star func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Mul(Box::new(lhs), Box::new(rhs)),
+            },
+            fact[lhs] Slash func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Div(Box::new(lhs), Box::new(rhs)),
+            },
+            fact[lhs] Percent func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
+            },
+            func[x] => x
+        }
+
+        func: Expr {
             Ident(fname) LParen list[l] RParen => Expr {
                 span: span!(),
                 node: {
                     Expr_::Function(fname, Box::new(l))
                 }
             },
-            object[o] => o
+            object[o] => o,
         }
 
         object: Expr {
@@ -305,11 +343,11 @@ mod parser {
                     Expr_::Dict(HashMap::new())
                 }
             },
-            term[o] => o,
+            atom[a] => a
         }
 
         list: Expr {
-            assign[o] => Expr {
+            term[o] => Expr {
                 span: span!(),
                 node: {
                     let mut list = Vec::new();
@@ -317,7 +355,7 @@ mod parser {
                     Expr_::List(list)
                 }
             },
-            list[l] Comma assign[o] => Expr {
+            list[l] Comma term[o] => Expr {
                 span: span!(),
                 node: {
                     match l.node {
@@ -333,7 +371,7 @@ mod parser {
         }
 
         dict: Expr {
-            String(k) Colon assign[v] => Expr {
+            String(k) Colon term[v] => Expr {
                 span: span!(),
                 node: {
                     let mut dict = HashMap::new();
@@ -341,7 +379,7 @@ mod parser {
                     Expr_::Dict(dict)
                 }
             },
-            dict[d] Comma String(k) Colon assign[v] => Expr {
+            dict[d] Comma String(k) Colon term[v] => Expr {
                 span: span!(),
                 node: {
                     match d.node {
@@ -354,34 +392,6 @@ mod parser {
                     }
                 }
             },
-        }
-
-        term: Expr {
-            term[lhs] Plus fact[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Add(Box::new(lhs), Box::new(rhs)),
-            },
-            term[lhs] Minus fact[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Sub(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[x] => x
-        }
-
-        fact: Expr {
-            fact[lhs] Star atom[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Mul(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[lhs] Slash atom[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Div(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[lhs] Percent atom[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
-            },
-            atom[x] => x
         }
 
         atom: Expr {
@@ -398,7 +408,7 @@ mod parser {
                 span: span!(),
                 node: Expr_::String(s),
             },
-            LParen assign[a] RParen => a
+            LParen term[a] RParen => a
         }
     }
 
@@ -449,15 +459,30 @@ mod interpret {
             Add(ref a, ref b) => {
                 let a_res = interpret_expr(env, ds, a)?;
                 let b_res = interpret_expr(env, ds, b)?;
-                let a_num = match a_res {
-                    DataType::Number(n) => n,
-                    _ => return Err(QueryError::InvalidType("Cannot add something that is not a number!".to_string()))
+                let res = match a_res {
+                    DataType::Number(n1) => match b_res {
+                        DataType::Number(n2) => DataType::Number(n1+n2),
+                        _ => return Err(QueryError::InvalidType("Cannot use + on something that is not a number with a number!".to_string()))
+                    },
+                    DataType::List(l1) => match b_res {
+                        DataType::List(l2) => {
+                            let mut new_list = l1.clone();
+                            new_list.append(&mut l2.clone());
+                            DataType::List(new_list)
+                        },
+                        _ => return Err(QueryError::InvalidType("Cannot use + on something that is not a list with a list!".to_string()))
+                    }
+                    DataType::String(s1) => match b_res {
+                        DataType::String(s2) => {
+                            let mut new_string = s1.clone();
+                            new_string.push_str(&s2);
+                            DataType::String(new_string)
+                        },
+                        _ => return Err(QueryError::InvalidType("Cannot use + on something that is not a list with a list!".to_string()))
+                    }
+                    _ => return Err(QueryError::InvalidType("Cannot use + on something that is not a number, list or string!".to_string()))
                 };
-                let b_num = match b_res {
-                    DataType::Number(n) => n,
-                    _ => return Err(QueryError::InvalidType("Cannot add something that is not a number!".to_string()))
-                };
-                Ok(DataType::Number(a_num+b_num))
+                Ok(res)
             },
             Sub(ref a, ref b) => {
                 let a_res = interpret_expr(env, ds, a)?;
@@ -542,13 +567,10 @@ mod interpret {
                     Some(v) => v,
                     None => return Err(QueryError::VariableNotDefined(fname.clone()))
                 };
-                let (_name, argc, fun) = match var {
-                    DataType::Function(name, argc, fun) => (name, argc, fun),
+                let (_name, fun) = match var {
+                    DataType::Function(name, fun) => (name, fun),
                     _data => return Err(QueryError::InvalidType(fname.to_string()))
                 };
-                if (args.len() as i8) != *argc && *argc >= 0 {
-                    return Err(QueryError::InvalidFunctionParameters(format!("Expected 1 argument, got {}", args.len())));
-                }
                 fun(args, env, ds)
             },
             List(ref list) => {
@@ -576,8 +598,9 @@ pub fn query<'a>(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataTy
     let program = match parser::parse(lexer) {
         Ok(p) => p,
         Err(e) => {
-            println!("{:?}", e);
-            return Err(QueryError::ParsingError);
+            // TODO: Improve parsing error message
+            println!("ParsingError: {:?}", e);
+            return Err(QueryError::ParsingError(format!("{:?}", e)));
         }
     };
     interpret::interpret_prog(&program, ti, ds)

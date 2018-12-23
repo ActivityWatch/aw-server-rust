@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use rocket_contrib::json::{Json, JsonValue};
+use rocket_contrib::json::Json;
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -11,7 +11,6 @@ use models::Event;
 use rocket::State;
 use rocket::http::Status;
 use rocket::Response;
-use rocket::request::Form;
 
 use endpoints::ServerState;
 
@@ -31,9 +30,9 @@ macro_rules! response_status {
 }
 
 #[get("/")]
-pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Bucket>>, Status> {
+pub fn buckets_get(state: State<ServerState>) -> Json<HashMap<String, Bucket>> {
     let bucketlist = state.datastore.get_buckets().unwrap();
-    return Ok(Json(bucketlist));
+    return Json(bucketlist);
 }
 
 #[get("/<bucket_id>")]
@@ -42,12 +41,15 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
         Ok(bucket) => Ok(Json(bucket)),
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
-            _ => Err(Status::InternalServerError)
+            _ => {
+                println!("Unexpected error: {:?}", e);
+                Err(Status::InternalServerError)
+            }
         }
     }
 }
 
-#[post("/<bucket_id>", format = "application/json", data = "<message>")]
+#[post("/<bucket_id>", data = "<message>")]
 pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerState>) -> Response {
     let bucket = message.into_inner();
     if bucket.id != bucket_id {
@@ -59,23 +61,18 @@ pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerS
         Ok(_) => response_status!(Status::Ok),
         Err(e) => match e {
             DatastoreError::BucketAlreadyExists => response_status!(Status::NotModified),
-            _ => response_status!(Status::InternalServerError)
+            _ => {
+                println!("Unexpected error: {:?}", e);
+                response_status!(Status::InternalServerError)
+            }
         }
     }
 }
 
-#[derive(FromForm)]
-pub struct GetEventsConstraints {
-    start: Option<String>,
-    end: Option<String>,
-    limit: Option<u64>
-}
-
-/* FIXME: optional constraints do not work, you always need a ? in the request */
-#[get("/<bucket_id>/events?<constraints..>")]
-pub fn bucket_events_get(bucket_id: String, constraints: Form<GetEventsConstraints>, state: State<ServerState>) -> Result<Json<JsonValue>, Status> {
-    let starttime : Option<DateTime<Utc>> = match constraints.start {
-        Some(ref dt_str) => {
+#[get("/<bucket_id>/events?<start>&<end>&<limit>")]
+pub fn bucket_events_get(bucket_id: String, start: Option<String>, end: Option<String>, limit: Option<u64>, state: State<ServerState>) -> Result<Json<Vec<Event>>, Status> {
+    let starttime : Option<DateTime<Utc>> = match start {
+        Some(dt_str) => {
             match DateTime::parse_from_rfc3339(&dt_str) {
                 Ok(dt) => Some(dt.with_timezone(&Utc)),
                 Err(e) => {
@@ -86,8 +83,8 @@ pub fn bucket_events_get(bucket_id: String, constraints: Form<GetEventsConstrain
         },
         None => None
     };
-    let endtime : Option<DateTime<Utc>> = match constraints.end {
-        Some(ref dt_str) => {
+    let endtime : Option<DateTime<Utc>> = match end {
+        Some(dt_str) => {
             match DateTime::parse_from_rfc3339(&dt_str) {
                 Ok(dt) => Some(dt.with_timezone(&Utc)),
                 Err(e) => {
@@ -98,9 +95,9 @@ pub fn bucket_events_get(bucket_id: String, constraints: Form<GetEventsConstrain
         },
         None => None
     };
-    let res = state.datastore.get_events(&bucket_id, starttime, endtime, constraints.limit);
+    let res = state.datastore.get_events(&bucket_id, starttime, endtime, limit);
     match res {
-        Ok(events) => Ok(Json(json!(events))),
+        Ok(events) => Ok(Json(events)),
         Err(err) => match err {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
             e => {
@@ -111,7 +108,7 @@ pub fn bucket_events_get(bucket_id: String, constraints: Form<GetEventsConstrain
     }
 }
 
-#[post("/<bucket_id>/events", format = "application/json", data = "<events>")]
+#[post("/<bucket_id>/events", data = "<events>")]
 pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: State<ServerState>) -> Result<(), Status> {
     let res = state.datastore.insert_events(&bucket_id, &events);
     match res {
@@ -126,16 +123,10 @@ pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: 
     }
 }
 
-#[derive(FromForm)]
-pub struct HeartbeatConstraints {
-    pulsetime: f64,
-}
-
-// TODO: Improve this endpoint!
-#[post("/<bucket_id>/heartbeat?<constraints..>", format = "application/json", data = "<heartbeat_json>")]
-pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, constraints: Form<HeartbeatConstraints>, state: State<ServerState>) -> Result<(), Status> {
+#[post("/<bucket_id>/heartbeat?<pulsetime>", data = "<heartbeat_json>")]
+pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, pulsetime: f64, state: State<ServerState>) -> Result<(), Status> {
     let heartbeat = heartbeat_json.into_inner();
-    match state.datastore.heartbeat(&bucket_id, heartbeat, constraints.pulsetime) {
+    match state.datastore.heartbeat(&bucket_id, heartbeat, pulsetime) {
         Ok(_) => Ok(()),
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
@@ -148,10 +139,10 @@ pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, c
 }
 
 #[get("/<bucket_id>/events/count")]
-pub fn bucket_event_count(bucket_id: String, state: State<ServerState>) -> Result<Json<JsonValue>, Status> {
+pub fn bucket_event_count(bucket_id: String, state: State<ServerState>) -> Result<Json<u64>, Status> {
     let res = state.datastore.get_event_count(&bucket_id, None, None);
     match res {
-        Ok(eventcount) => Ok(Json(json!({"count": eventcount}))),
+        Ok(eventcount) => Ok(Json(eventcount as u64)),
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
             e => {

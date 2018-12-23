@@ -1,13 +1,14 @@
 [package]
 name = "aw_server"
 version = "0.1.0"
-authors = ["Johan Bjäreholt <johan@bjareho.lt>"]
+authors = ["Johan Bjäreholt <johan@bjareho.lt>", "Erik Bjäreholt <erik@bjareho.lt>"]
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.5", default-features = false }
 
 [dependencies]
 rocket = "0.4"
+rocket_cors = "0.4.0"
 serde = "1.0"
 serde_json = "1.0"
 serde_derive = "1.0"
@@ -15,6 +16,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.14", features = ["chrono", "serde_json"] }
 mpsc_requests = "0.2"
 plex = "0.2.3"
+appdirs = "0.2.0"
 
 [dependencies.rocket_contrib]
 version = "*"

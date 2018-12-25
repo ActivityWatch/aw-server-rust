@@ -44,7 +44,7 @@ pub extern fn rust_greeting(to: *const c_char) -> *mut c_char {
         Ok(string) => string,
     };
 
-    CString::new("Hello ".to_owned() + recipient).unwrap().into_raw()
+    CString::new("Hello ".to_owned() + recipient + " (from Rust!)").unwrap().into_raw()
 }
 
 #[cfg(target_os="android")]
@@ -58,7 +58,7 @@ pub mod android {
     use self::jni::sys::{jstring};
 
     #[no_mangle]
-    pub unsafe extern fn Java_com_mozilla_greetings_RustGreetings_greeting(env: JNIEnv, _: JClass, java_pattern: JString) -> jstring {
+    pub unsafe extern fn Java_net_activitywatch_android_RustGreetings_greeting(env: JNIEnv, _: JClass, java_pattern: JString) -> jstring {
         // Our Java companion code might pass-in "world" as a string, hence the name.
         let world = rust_greeting(env.get_string(java_pattern).expect("invalid pattern string").as_ptr());
         // Retake pointer so that we can use it below and allow memory to be freed when it goes out of scope.

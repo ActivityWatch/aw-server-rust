@@ -5,7 +5,7 @@ A reimplementation of aw-server in Rust
 
 Primary features missing:
 - Config
-- Import HTTP api
+- Export HTTP api
 - Safe CORS (not allow all, fix dynamic CORS in rocket_cors upstream)
 
 Caveats:
@@ -13,7 +13,7 @@ Caveats:
 - Lots of TODO and FIXME comments
 
 Bugs:
-- Memory leak during import? (wtf rust?)
+- Memory leak during Bucket import? (wtf rust?)
 
 Features missing compared to aw-server python:
 - Swagger support

@@ -3,9 +3,6 @@ name = "aw_server"
 version = "0.1.0"
 authors = ["Johan Bjäreholt <johan@bjareho.lt>", "Erik Bjäreholt <erik@bjareho.lt>"]
 
-[target.'cfg(target_os="android")'.dependencies]
-jni = { version = "0.5", default-features = false }
-
 [dependencies]
 rocket = "0.4"
 rocket_contrib = { version = "*", default-features = false, features = ["json"] }
@@ -21,3 +18,6 @@ appdirs = "0.2.0"
 
 [lib]
 crate-type = ["cdylib"]
+
+[target.'cfg(target_os="android")'.dependencies]
+jni = { version = "0.5", default-features = false }

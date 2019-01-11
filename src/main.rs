@@ -1,4 +1,4 @@
-#![feature(plugin,try_from,custom_derive)]
+#![feature(plugin,try_from)]
 #![feature(proc_macro_hygiene)]
 #![feature(custom_attribute)]
 #![feature(decl_macro)]

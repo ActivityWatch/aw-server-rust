@@ -17,7 +17,12 @@ plex = "0.2.3"
 appdirs = "0.2.0"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["lib", "cdylib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "aw_server"
+path = "src/main.rs"
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.5", default-features = false }

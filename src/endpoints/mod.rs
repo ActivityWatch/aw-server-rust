@@ -17,24 +17,24 @@ pub struct ServerState {
 
 #[get("/")]
 fn root_index() -> Option<NamedFile> {
-    NamedFile::open(Path::new("frontend/dist/index.html")).ok()
+    NamedFile::open(Path::new("aw-webui/dist/index.html")).ok()
 }
 #[get("/0.css")]
 fn root_css() -> Option<NamedFile> {
-    NamedFile::open(Path::new("frontend/dist/0.css")).ok()
+    NamedFile::open(Path::new("aw-webui/dist/0.css")).ok()
 }
 #[get("/0.css.map")]
 fn root_css_map() -> Option<NamedFile> {
-    NamedFile::open(Path::new("frontend/dist/0.css.map")).ok()
+    NamedFile::open(Path::new("aw-webui/dist/0.css.map")).ok()
 }
 #[get("/static/<file..>")]
 fn root_static(file: PathBuf) -> Option<NamedFile> {
-    NamedFile::open(Path::new("frontend/dist/static/").join(file)).ok()
+    NamedFile::open(Path::new("aw-webui/dist/static/").join(file)).ok()
 }
 
 #[get("/favicon.ico")]
 fn root_favicon() -> Option<NamedFile> {
-    NamedFile::open(Path::new("frontend/dist/favicon.ico")).ok()
+    NamedFile::open(Path::new("aw-webui/dist/favicon.ico")).ok()
 }
 
 #[get("/")]

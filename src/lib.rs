@@ -1,4 +1,4 @@
-#![feature(plugin,try_from,custom_derive)]
+#![feature(plugin,try_from)]
 #![feature(proc_macro_hygiene)]
 #![feature(custom_attribute)]
 #![feature(decl_macro)]
@@ -26,3 +26,6 @@ pub mod datastore;
 pub mod query;
 pub mod endpoints;
 pub mod dirs;
+
+#[cfg(target_os="android")]
+pub mod android;

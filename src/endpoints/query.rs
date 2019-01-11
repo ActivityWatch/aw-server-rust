@@ -1,8 +1,7 @@
 use rocket::State;
 use rocket::http::Status;
 use rocket::response::status;
-use rocket_contrib::json::Json;
-use rocket_contrib::json::JsonValue;
+use rocket_contrib::json::{Json, JsonValue};
 
 use query;
 use query::QueryError;

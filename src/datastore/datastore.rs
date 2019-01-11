@@ -519,7 +519,7 @@ impl Datastore {
         }
     }
 
-    pub  fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError>{
+    pub fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError>{
         let requester = get_lock!(self.requester);
         match requester.request(Commands::DeleteBucket(bucket_id.to_string())) {
             Ok(r) => match r {

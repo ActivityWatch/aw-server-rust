@@ -10,15 +10,14 @@ static mut ANDROID_DATA_DIR: Option<PathBuf> = None;
 pub fn get_config_dir() -> Result<PathBuf, ()> {
     #[cfg(not(target_os="android"))]
     {
-        let mut dir;
-        dir = appdirs::user_config_dir(Some("activitywatch"), None, false)?;
+        let mut dir = appdirs::user_config_dir(Some("activitywatch"), None, false)?;
         dir.push("aw-server-rust");
         return Ok(dir);
     }
 
     #[cfg(target_os="android")]
     {
-        return Err(());
+        panic!("not implemented on Android");
     }
 }
 
@@ -34,7 +33,7 @@ pub fn get_data_dir() -> Result<PathBuf, ()> {
     unsafe {
          return match ANDROID_DATA_DIR {
             Some(ref path) => Ok(path.to_path_buf()),
-            None => Err(())
+            None => panic!("ANDROID_DATA_DIR not set, set it first")
         }
     }
 }
@@ -49,7 +48,7 @@ pub fn get_cache_dir() -> Result<PathBuf, ()> {
 
     #[cfg(target_os="android")]
     {
-        return Err(());
+        panic!("not implemented on Android");
     }
 }
 

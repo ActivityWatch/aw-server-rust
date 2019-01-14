@@ -15,6 +15,7 @@ rusqlite = { version = "0.14", features = ["chrono", "serde_json", "bundled"]  }
 mpsc_requests = "0.2"
 plex = "0.2.3"
 appdirs = "0.2.0"
+lazy_static = "1.2"
 
 [lib]
 crate-type = ["lib", "cdylib"]

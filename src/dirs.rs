@@ -1,11 +1,14 @@
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
 #[cfg(not(target_os="android"))]
 use appdirs;
 
-use std::fs;
-use std::path::PathBuf;
-
 #[cfg(target_os="android")]
-static mut ANDROID_DATA_DIR: Option<PathBuf> = None;
+lazy_static! {
+    static ref ANDROID_DATA_DIR: Mutex<PathBuf> = Mutex::new(PathBuf::from("/data/data/net.activitywatch.android"));
+}
 
 pub fn get_config_dir() -> Result<PathBuf, ()> {
     #[cfg(not(target_os="android"))]
@@ -30,11 +33,8 @@ pub fn get_data_dir() -> Result<PathBuf, ()> {
     }
 
     #[cfg(target_os="android")]
-    unsafe {
-         return match ANDROID_DATA_DIR {
-            Some(ref path) => Ok(path.to_path_buf()),
-            None => panic!("ANDROID_DATA_DIR not set, set it first")
-        }
+    {
+        return Ok(ANDROID_DATA_DIR.lock().unwrap().to_path_buf());
     }
 }
 
@@ -64,7 +64,6 @@ pub fn db_path() -> PathBuf {
 
 #[cfg(target_os="android")]
 pub fn set_android_data_dir(path: &str) {
-    unsafe {
-        ANDROID_DATA_DIR = Some(PathBuf::from(path));
-    }
+    let mut android_data_dir = ANDROID_DATA_DIR.lock().unwrap();
+    *android_data_dir = PathBuf::from(path);
 }

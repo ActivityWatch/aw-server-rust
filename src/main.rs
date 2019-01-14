@@ -20,6 +20,8 @@ extern crate plex;
 
 extern crate appdirs;
 
+#[macro_use] extern crate lazy_static;
+
 pub mod models;
 pub mod transform;
 pub mod datastore;

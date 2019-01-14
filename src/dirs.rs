@@ -7,7 +7,7 @@ use appdirs;
 
 #[cfg(target_os="android")]
 lazy_static! {
-    static ref ANDROID_DATA_DIR: Mutex<PathBuf> = Mutex::new(PathBuf::from("/data/data/net.activitywatch.android"));
+    static ref ANDROID_DATA_DIR: Mutex<PathBuf> = Mutex::new(PathBuf::from("/data/user/0/net.activitywatch.android/files"));
 }
 
 pub fn get_config_dir() -> Result<PathBuf, ()> {

@@ -20,6 +20,8 @@ use models::Bucket;
 use models::Event;
 use transform;
 
+use rusqlite::types::ToSql;
+
 /*
  * TODO:
  * - Needs refactoring?
@@ -86,8 +88,8 @@ fn _create_tables(conn: &Connection) {
             client TEXT NOT NULL,
             hostname TEXT NOT NULL,
             created TEXT NOT NULL
-        )", &[]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id)", &[]).unwrap();
+        )", &[] as &[&ToSql]).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id)", &[] as &[&ToSql]).unwrap();
 
     conn.execute("
         CREATE TABLE IF NOT EXISTS events (
@@ -97,10 +99,10 @@ fn _create_tables(conn: &Connection) {
             endtime INTEGER NOT NULL,
             data TEXT NOT NULL,
             FOREIGN KEY (bucketrow) REFERENCES buckets(id)
-        )", &[]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS events_bucketrow_index ON events(bucketrow)", &[]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[]).unwrap();
+        )", &[] as &[&ToSql]).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS events_bucketrow_index ON events(bucketrow)", &[] as &[&ToSql]).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[] as &[&ToSql]).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[] as &[&ToSql]).unwrap();
 }
 
 struct DatastoreInstance {
@@ -217,7 +219,7 @@ impl DatastoreInstance {
 
     fn get_stored_buckets(&mut self, conn: &Connection) {
         let mut stmt = conn.prepare("SELECT id, name, type, client, hostname, created FROM buckets").unwrap();
-        let buckets = stmt.query_map(&[], |row| {
+        let buckets = stmt.query_map(&[] as &[&ToSql], |row| {
             Bucket {
                 bid: row.get(0),
                 id: row.get(1),
@@ -251,7 +253,7 @@ impl DatastoreInstance {
         let mut stmt = conn.prepare("
             INSERT INTO buckets (name, type, client, hostname, created)
             VALUES (?1, ?2, ?3, ?4, ?5)").unwrap();
-        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created]);
+        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &ToSql]);
 
         match res {
             Ok(_) => {
@@ -325,7 +327,7 @@ impl DatastoreInstance {
             let starttime_nanos = event.timestamp.timestamp_nanos();
             let duration_nanos = event.duration.num_nanoseconds().unwrap();
             let endtime_nanos = starttime_nanos + duration_nanos;
-            let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data]);
+            let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]);
             match res {
                 Ok(_) => self.uncommited_events += 1,
                 Err(e) => {
@@ -350,7 +352,8 @@ impl DatastoreInstance {
         let starttime_nanos = event.timestamp.timestamp_nanos();
         let duration_nanos = event.duration.num_nanoseconds().unwrap();
         let endtime_nanos = starttime_nanos + duration_nanos;
-        stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data]).unwrap();
+        // TODO: handle error
+        stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]).unwrap();
         self.uncommited_events += 1;
         Ok(())
     }

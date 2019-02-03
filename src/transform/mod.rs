@@ -59,6 +59,8 @@ pub fn sort_by_duration(mut events: Vec<Event>) -> Vec<Event> {
 }
 
 pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
+    let mut warned_negative_gap_safe = false;
+    let mut warned_negative_gap_unsafe = false;
     let mut events_sorted = sort_by_timestamp (events);
     let mut e1_iter = events_sorted.drain(..).peekable();
     let mut new_events = Vec::new();
@@ -76,16 +78,26 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
             }
         };
 
-        let gap = e2.timestamp - e1.timestamp;
+        let gap = e2.timestamp - e1.calculate_endtime();
 
         if gap < pulsetime {
             if e1.data == e2.data {
-                let e2_end = e2.timestamp + e2.duration;
+                if chrono::Duration::seconds(0) > gap && !warned_negative_gap_safe {
+                    println!("Gap was of negative duration ({}s), but could be safely merged. This error will only show once per batch.", gap);
+                    warned_negative_gap_safe = true;
+                }
                 // Extend e1 to the end of e2
-                e1.duration = e2_end - e1.timestamp;
+                e1.duration = e2.calculate_endtime() - e1.timestamp;
                 // Drop next event since they are merged and flooded into e1
                 drop_next = true;
             } else {
+                if chrono::Duration::seconds(0) > gap {
+                    if !warned_negative_gap_unsafe {
+                        println!("Gap was of negative duration ({}s) and could NOT be safely merged. This error will only show once per batch.", gap);
+                        warned_negative_gap_unsafe = true;
+                    }
+                    continue;
+                }
                 // Extend e1 to the start of e2
                 e1.duration = e2.timestamp - e1.timestamp;
             }

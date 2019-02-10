@@ -63,15 +63,21 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_startServer(env: JNIEnv, _: JClass) -> jstring {
+    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_startServer(env: JNIEnv, _: JClass, java_asset_path: JString) {
+        use std::path::{PathBuf};
         use endpoints;
         use rocket::config::{Config, Environment};
 
         println!("Building server state...");
 
+        let asset_path = jstring_to_string(&env, java_asset_path);
+        println!("Using asset dir: {}", asset_path);
+
         let server_state = endpoints::ServerState {
-            datastore: openDatastore()
+            datastore: openDatastore(),
+            asset_path: PathBuf::from(asset_path),
         };
+
         let config = Config::build(Environment::Production)
             .address("127.0.0.1")
             .port(5600)
@@ -79,15 +85,13 @@ pub mod android {
 
         println!("Starting server...");
         endpoints::rocket(server_state, Some(config)).launch();
-
         println!("Server exited");
-        string_to_jstring(&env, "server exited".to_string())
     }
 
     static mut INITIALIZED: bool = false;
 
     #[no_mangle]
-    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_initialize(env: JNIEnv, _: JClass) -> jstring {
+    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_initialize(env: JNIEnv, _: JClass) {
         if !INITIALIZED {
             redirect_stdout_to_logcat();
             println!("Initializing aw-server-rust...");
@@ -96,23 +100,16 @@ pub mod android {
             println!("Already initialized");
         }
         INITIALIZED = true;
-        string_to_jstring(&env, "success".to_string())
+
+        // Without this it might not work due to weird error probably arising from Rust optimizing away the JNIEnv:
+        //  JNI DETECTED ERROR IN APPLICATION: use of deleted weak global reference
+        string_to_jstring(&env, "test".to_string());
     }
 
     #[no_mangle]
-    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_setAndroidDataDir(env: JNIEnv, _: JClass, java_dir: JString) -> jstring {
+    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_setDataDir(env: JNIEnv, _: JClass, java_dir: JString) {
         println!("Setting android data dir");
-
-        let dir = jstring_to_string(&env, java_dir);
-        //let c_str = CStr::from_ptr(env.get_string(java_dir).expect("invalid pattern string").as_ptr());
-        //let dir = c_str.to_str().unwrap();
-        dirs::set_android_data_dir(&dir);
-
-        let current_dir: String = match dirs::get_data_dir() {
-            Ok(path) => String::from(path.to_str().unwrap()),
-            Err(_) => String::from("invalid path")
-        };
-        string_to_jstring(&env, current_dir.as_str().to_string())
+        dirs::set_android_data_dir(&jstring_to_string(&env, java_dir));
     }
 
     #[no_mangle]

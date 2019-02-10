@@ -30,11 +30,14 @@ pub mod endpoints;
 pub mod dirs;
 
 fn main() {
+    use std::path::{PathBuf};
+
     let db_path = dirs::db_path().to_str().unwrap().to_string();
     println!("Using DB at path {:?}", db_path);
 
     let server_state = endpoints::ServerState {
-        datastore: datastore::Datastore::new(db_path)
+        datastore: datastore::Datastore::new(db_path),
+        asset_path: PathBuf::from("aw-webui").join("dist"),
     };
 
     endpoints::rocket(server_state, None).launch();

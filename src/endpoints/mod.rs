@@ -1,4 +1,4 @@
-use std::path::{Path,PathBuf};
+use std::path::PathBuf;
 
 use rocket;
 use rocket::config::{Config};

@@ -1,6 +1,7 @@
 use std::path::{Path,PathBuf};
 
 use rocket;
+use rocket::config::{Config};
 use rocket::response::{NamedFile};
 use rocket_contrib::json::JsonValue;
 
@@ -62,8 +63,12 @@ fn not_found() -> JsonValue {
     })
 }
 
-pub fn rocket(server_state: ServerState) -> rocket::Rocket {
-    rocket::ignite()
+pub fn rocket(server_state: ServerState, config: Option<Config>) -> rocket::Rocket {
+    let rocket = match config {
+        Some(config) => rocket::custom(config),
+        None => rocket::ignite()
+    };
+    rocket
         .mount("/", routes![
                root_index, root_favicon, root_static, root_css, root_css_map,
         ])

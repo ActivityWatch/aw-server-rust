@@ -27,3 +27,4 @@ path = "src/main.rs"
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.5", default-features = false }
+libc = "0.2"

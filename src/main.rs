@@ -37,5 +37,5 @@ fn main() {
         datastore: datastore::Datastore::new(db_path)
     };
 
-    endpoints::rocket(server_state).launch();
+    endpoints::rocket(server_state, None).launch();
 }

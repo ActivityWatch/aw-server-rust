@@ -1,9 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 #[cfg(not(target_os="android"))]
 use appdirs;
+
+#[cfg(target_os="android")]
+use std::sync::Mutex;
 
 #[cfg(target_os="android")]
 lazy_static! {

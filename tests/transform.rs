@@ -111,6 +111,7 @@ mod transform_tests {
 
     #[test]
     fn test_flood() {
+        // Test merging of events with the same data
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
@@ -130,9 +131,38 @@ mod transform_tests {
             data: json!({"test": 1})
         };
         let res = transform::flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
-        // TODO: check result
-        let res_e = &res[0];
-        assert_eq!(res_e, &e_expected);
+        assert_eq!(1, res.len());
+        assert_eq!(&res[0], &e_expected);
+
+        // Test flood gap between two different events which should meet in the middle
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json!({"test": 1})
+        };
+        let e2 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json!({"test": 2})
+        };
+        let e1_expected = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
+            duration: Duration::seconds(2),
+            data: json!({"test": 1})
+        };
+        let e2_expected = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:02Z").unwrap(),
+            duration: Duration::seconds(2),
+            data: json!({"test": 2})
+        };
+        let res = transform::flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
+        assert_eq!(2, res.len());
+        assert_eq!(&res[0], &e1_expected);
+        assert_eq!(&res[1], &e2_expected);
     }
 
     #[test]

@@ -1,10 +1,18 @@
 language: rust
+rust:
+  - nightly
+
 os:
   - linux
   - osx
   - windows
-rust:
-  - nightly
+
+before_script:
+  - cargo install cargo-prune --force
+script:
+  - set -x;
+    cargo test --verbose --release
+
 cache:
   cargo: true
 before_cache:

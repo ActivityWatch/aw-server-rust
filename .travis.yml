@@ -1,3 +1,11 @@
 language: rust
+os:
+  - linux
+  - osx
+  - windows
 rust:
   - nightly
+cache:
+  cargo: true
+before_cache:
+  - cargo prune

@@ -50,7 +50,7 @@ mod datastore_tests {
             data: json!({"key": "value"})
         };
         let mut e2 = e1.clone();
-        e2.timestamp = Utc::now();
+        e2.timestamp = e2.timestamp + Duration::nanoseconds(1);
         let mut e_replace = e2.clone();
         e_replace.data = json!({"key": "value2"});
         e_replace.duration = Duration::seconds(2);

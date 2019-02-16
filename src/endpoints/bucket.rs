@@ -51,10 +51,9 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
 
 #[post("/<bucket_id>", data = "<message>")]
 pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerState>) -> Response {
-    let bucket = message.into_inner();
+    let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
-        println!("endpoint bucketid doesn't match payload bucketid");
-        return response_status!(Status::BadRequest)
+        bucket.id = bucket_id;
     }
     let ret = state.datastore.create_bucket(&bucket);
     match ret {

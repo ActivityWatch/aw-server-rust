@@ -7,6 +7,7 @@ use models::Event;
 pub struct Bucket {
     #[serde(skip)]
     pub bid: Option<i64>,
+    #[serde(default)]
     pub id: String,
     #[serde(rename = "type")] /* type is a reserved Rust keyword */
     pub _type: String,

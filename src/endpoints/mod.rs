@@ -39,10 +39,20 @@ fn root_favicon() -> Option<NamedFile> {
 
 #[get("/")]
 fn server_info() -> JsonValue {
+    let testing : bool;
+    #[cfg(debug_assertions)]
+    {
+        testing = true;
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        testing = false;
+    }
+
     json!({
         "hostname": "johan-desktop",
         "version": "aw-server-rust_v0.1",
-        "testing": false
+        "testing": testing
     })
 }
 

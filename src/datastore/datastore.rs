@@ -1,6 +1,3 @@
-extern crate rusqlite;
-extern crate chrono;
-
 use std::fmt;
 use std::sync::Mutex;
 use std::thread;
@@ -19,6 +16,8 @@ use mpsc_requests;
 use models::Bucket;
 use models::Event;
 use transform;
+
+use rusqlite::types::ToSql;
 
 /*
  * TODO:
@@ -86,8 +85,8 @@ fn _create_tables(conn: &Connection) {
             client TEXT NOT NULL,
             hostname TEXT NOT NULL,
             created TEXT NOT NULL
-        )", &[]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id)", &[]).unwrap();
+        )", &[] as &[&ToSql]).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id)", &[] as &[&ToSql]).unwrap();
 
     conn.execute("
         CREATE TABLE IF NOT EXISTS events (
@@ -97,10 +96,10 @@ fn _create_tables(conn: &Connection) {
             endtime INTEGER NOT NULL,
             data TEXT NOT NULL,
             FOREIGN KEY (bucketrow) REFERENCES buckets(id)
-        )", &[]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS events_bucketrow_index ON events(bucketrow)", &[]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[]).unwrap();
+        )", &[] as &[&ToSql]).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS events_bucketrow_index ON events(bucketrow)", &[] as &[&ToSql]).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[] as &[&ToSql]).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[] as &[&ToSql]).unwrap();
 }
 
 struct DatastoreInstance {
@@ -137,7 +136,7 @@ impl DatastoreWorker {
                 let mut request = match self.responder.poll() {
                     Ok(r) => r,
                     Err(_) => { // All references to responder is gone, quit
-                        println!("DB worker quitting");
+                        info!("DB worker quitting");
                         self.quit = true;
                         break;
                     }
@@ -204,7 +203,7 @@ impl DatastoreWorker {
                 request.respond(response);
                 if ds.commit || ds.uncommited_events > 100 { break };
             }
-            println!("Commiting DB! Force commit {}, {} uncommited events", ds.commit, ds.uncommited_events);
+            debug!("Commiting DB! Force commit {}, {} uncommited events", ds.commit, ds.uncommited_events);
             transaction.commit().unwrap();
             ds.commit = false;
             ds.uncommited_events = 0;
@@ -217,7 +216,7 @@ impl DatastoreInstance {
 
     fn get_stored_buckets(&mut self, conn: &Connection) {
         let mut stmt = conn.prepare("SELECT id, name, type, client, hostname, created FROM buckets").unwrap();
-        let buckets = stmt.query_map(&[], |row| {
+        let buckets = stmt.query_map(&[] as &[&ToSql], |row| {
             Bucket {
                 bid: row.get(0),
                 id: row.get(1),
@@ -234,8 +233,7 @@ impl DatastoreInstance {
                     self.buckets_cache.insert(b.id.clone(), b.clone());
                 },
                 Err(e) => {
-                    println!("Failed to parse bucket from SQLite, database is corrupt!");
-                    println!("{}", e);
+                    error!("Failed to parse bucket from SQLite, database is corrupt! {}", e);
                 }
             }
         };
@@ -250,7 +248,7 @@ impl DatastoreInstance {
         let mut stmt = conn.prepare("
             INSERT INTO buckets (name, type, client, hostname, created)
             VALUES (?1, ?2, ?3, ?4, ?5)").unwrap();
-        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created]);
+        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &ToSql]);
 
         match res {
             Ok(_) => {
@@ -258,7 +256,7 @@ impl DatastoreInstance {
                 let mut inserted_bucket = bucket.clone();
                 inserted_bucket.bid = Some(rowid);
 
-                println!("{:?}", inserted_bucket);
+                info!("Created bucket {:?}", inserted_bucket);
                 self.buckets_cache.insert(bucket.id.clone(), inserted_bucket);
                 self.commit = true;
             },
@@ -266,9 +264,9 @@ impl DatastoreInstance {
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
                     rusqlite::ErrorCode::ConstraintViolation => { return Err(DatastoreError::BucketAlreadyExists); },
-                    _ => { println!("{}", err); return Err(DatastoreError::InternalError); }
+                    _ => { warn!("{}", err); return Err(DatastoreError::InternalError); }
                 },
-                _ => { println!("{}", err); return Err(DatastoreError::InternalError); }
+                _ => { warn!("{}", err); return Err(DatastoreError::InternalError); }
             }
         };
         if let Some(ref events) = bucket.events {
@@ -280,12 +278,12 @@ impl DatastoreInstance {
     fn delete_bucket(&mut self, conn: &Connection, bucket_id: &str) -> Result<(), DatastoreError>{
         let bucket = (self.get_bucket(&bucket_id))?;
         // Delete all events in bucket
-        match conn.execute("DELETE FROM events WHERE id = ?1", &[&bucket.bid]) {
+        match conn.execute("DELETE FROM events WHERE bucketrow = ?1", &[&bucket.bid]) {
             Ok(_) => (),
-            Err(err) => { println!("{}", err); return Err(DatastoreError::InternalError) }
+            Err(err) => { warn!("{}", err); return Err(DatastoreError::InternalError) }
         }
         // Delete bucket itself
-        match conn.execute("DELETE FROM buckets WHERE name = ?1", &[&bucket.id]) {
+        match conn.execute("DELETE FROM buckets WHERE id = ?1", &[&bucket.bid]) {
             Ok(_) => {
                 self.buckets_cache.remove(bucket_id);
                 self.commit = true;
@@ -294,9 +292,9 @@ impl DatastoreInstance {
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
                     rusqlite::ErrorCode::ConstraintViolation => Err(DatastoreError::BucketAlreadyExists),
-                    _ => { println!("{}", err); return Err(DatastoreError::InternalError) }
+                    _ => { warn!("{}", err); return Err(DatastoreError::InternalError) }
                 },
-                _ => { println!("{}", err); return Err(DatastoreError::InternalError) }
+                _ => { warn!("{}", err); return Err(DatastoreError::InternalError) }
             }
         }
     }
@@ -324,12 +322,11 @@ impl DatastoreInstance {
             let starttime_nanos = event.timestamp.timestamp_nanos();
             let duration_nanos = event.duration.num_nanoseconds().unwrap();
             let endtime_nanos = starttime_nanos + duration_nanos;
-            let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data]);
+            let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]);
             match res {
                 Ok(_) => self.uncommited_events += 1,
                 Err(e) => {
-                    println!("Failed to insert event: {}", e);
-                    println!("{:?}", event);
+                    warn!("Failed to insert event: {:?}, {}", event, e);
                     return Err(DatastoreError::InternalError);
                 }
             }
@@ -349,7 +346,8 @@ impl DatastoreInstance {
         let starttime_nanos = event.timestamp.timestamp_nanos();
         let duration_nanos = event.duration.num_nanoseconds().unwrap();
         let endtime_nanos = starttime_nanos + duration_nanos;
-        stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data]).unwrap();
+        // TODO: handle error
+        stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]).unwrap();
         self.uncommited_events += 1;
         Ok(())
     }
@@ -381,7 +379,7 @@ impl DatastoreInstance {
                 merged_heartbeat
             },
             None => {
-                println!("Failed to merge!");
+                debug!("Failed to merge heartbeat!");
                 self.insert_events(conn, &bucket_id, &vec![heartbeat.clone()])?;
                 heartbeat
             }
@@ -404,7 +402,7 @@ impl DatastoreInstance {
             None => std::i64::MAX
         };
         if starttime_filter_ns > endtime_filter_ns {
-            println!("Starttime in event query was lower than endtime!");
+            warn!("Starttime in event query was lower than endtime!");
             return Ok(list);
         }
         let limit = match limit_opt {
@@ -460,7 +458,7 @@ impl DatastoreInstance {
             None => std::i64::MAX
         };
         if starttime_filter_ns >= endtime_filter_ns {
-            println!("Endtime in event query was same or lower than starttime!");
+            warn!("Endtime in event query was same or lower than starttime!");
             return Ok(0);
         }
 

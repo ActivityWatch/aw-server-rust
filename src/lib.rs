@@ -22,12 +22,16 @@ extern crate appdirs;
 
 #[macro_use] extern crate lazy_static;
 
+#[macro_use] extern crate log;
+extern crate fern;
+
 pub mod models;
 pub mod transform;
 pub mod datastore;
 pub mod query;
 pub mod endpoints;
 pub mod dirs;
+pub mod logging;
 
 #[cfg(target_os="android")]
 pub mod android;

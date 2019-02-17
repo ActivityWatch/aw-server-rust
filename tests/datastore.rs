@@ -1,3 +1,5 @@
+#[macro_use]
+extern crate log;
 extern crate chrono;
 extern crate aw_server;
 extern crate serde_json;
@@ -50,7 +52,7 @@ mod datastore_tests {
             data: json!({"key": "value"})
         };
         let mut e2 = e1.clone();
-        e2.timestamp = Utc::now();
+        e2.timestamp = e2.timestamp + Duration::nanoseconds(1);
         let mut e_replace = e2.clone();
         e_replace.data = json!({"key": "value2"});
         e_replace.duration = Duration::seconds(2);
@@ -75,21 +77,21 @@ mod datastore_tests {
             assert_eq!(new.data,expected.data);
         }
 
-        println!("Get events with limit filter");
+        info!("Get events with limit filter");
         let fetched_events_limit = ds.get_events(&bucket.id, None, None, Some(1)).unwrap();
         assert_eq!(fetched_events_limit.len(), 1);
         assert_eq!(fetched_events_limit[0].timestamp,e_replace.timestamp);
         assert_eq!(fetched_events_limit[0].duration,e_replace.duration);
         assert_eq!(fetched_events_limit[0].data,e_replace.data);
 
-        println!("Get events with starttime filter");
+        info!("Get events with starttime filter");
         let fetched_events_start = ds.get_events(&bucket.id, Some(e2.timestamp.clone()), None, None).unwrap();
         assert_eq!(fetched_events_start.len(), 1);
         assert_eq!(fetched_events_start[0].timestamp,e_replace.timestamp);
         assert_eq!(fetched_events_start[0].duration,e_replace.duration);
         assert_eq!(fetched_events_start[0].data,e_replace.data);
 
-        println!("Get events with endtime filter");
+        info!("Get events with endtime filter");
         let fetched_events_start = ds.get_events(&bucket.id, None, Some(e1.timestamp.clone()), None).unwrap();
         assert_eq!(fetched_events_start.len(), 1);
         assert_eq!(fetched_events_start[0].timestamp,e1.timestamp);
@@ -101,14 +103,13 @@ mod datastore_tests {
         assert_eq!(event_count, 2);
 
         // Delete bucket
-        // FIXME
-        //match ds.delete_bucket(&bucket.id) {
-        //    Ok(_) => println!("bucket successfully deleted"),
-        //    Err(e) => panic!(e)
-        //}
-        //match ds.get_bucket(&bucket.id) {
-        //    Ok(_) => panic!("Expected datastore to delete bucket but bucket seems to still be available"),
-        //    Err(e) => panic!(e)
-        //}
+        match ds.delete_bucket(&bucket.id) {
+            Ok(_) => info!("bucket successfully deleted"),
+            Err(e) => panic!(e)
+        }
+        match ds.get_bucket(&bucket.id) {
+            Ok(_) => panic!("Expected datastore to delete bucket but bucket seems to still be available"),
+            Err(_e) => ()
+        }
     }
 }

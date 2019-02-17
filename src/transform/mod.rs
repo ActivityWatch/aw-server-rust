@@ -34,7 +34,7 @@ pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Optio
 
     let duration = endtime.signed_duration_since(*starttime);
     if duration.num_nanoseconds().unwrap() < 0 {
-        println!("Merging heartbeats would result in a negative duration, refusing to merge!");
+        debug!("Merging heartbeats would result in a negative duration, refusing to merge!");
         return None
     }
 
@@ -59,14 +59,25 @@ pub fn sort_by_duration(mut events: Vec<Event>) -> Vec<Event> {
 }
 
 pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
+    let mut warned_negative_gap_safe = false;
+    let mut warned_negative_gap_unsafe = false;
     let mut events_sorted = sort_by_timestamp (events);
     let mut e1_iter = events_sorted.drain(..).peekable();
     let mut new_events = Vec::new();
     let mut drop_next = false;
+    let mut gap_prev : Option<chrono::Duration> = None;
     while let Some(mut e1) = e1_iter.next() {
         if drop_next {
             drop_next = false;
             continue;
+        }
+        match gap_prev {
+            Some(gap) => {
+                e1.timestamp = e1.timestamp - (gap/2);
+                e1.duration = e1.duration + (gap/2);
+                gap_prev = None;
+            },
+            None => (),
         }
         let e2 = match e1_iter.peek() {
             Some(e) => e,
@@ -76,18 +87,30 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
             }
         };
 
-        let gap = e2.timestamp - e1.timestamp;
+        let gap = e2.timestamp - e1.calculate_endtime();
 
         if gap < pulsetime {
             if e1.data == e2.data {
-                let e2_end = e2.timestamp + e2.duration;
-                // Extend e1 to the end of e2
-                e1.duration = e2_end - e1.timestamp;
+                if chrono::Duration::seconds(0) > gap && !warned_negative_gap_safe {
+                    println!("Gap was of negative duration ({}s), but could be safely merged. This error will only show once per batch.", gap);
+                    warned_negative_gap_safe = true;
+                }
+                // Extend e1 to the middle between e1 and e2
+                e1.duration = e2.calculate_endtime() - e1.timestamp;
                 // Drop next event since they are merged and flooded into e1
                 drop_next = true;
             } else {
-                // Extend e1 to the start of e2
-                e1.duration = e2.timestamp - e1.timestamp;
+                if chrono::Duration::seconds(0) > gap {
+                    if !warned_negative_gap_unsafe {
+                        println!("Gap was of negative duration ({}s) and could NOT be safely merged. This error will only show once per batch.", gap);
+                        warned_negative_gap_unsafe = true;
+                    }
+                    continue;
+                }
+                // Extend e1 to the middle between e1 and e2
+                e1.duration = e1.duration + (gap/2);
+                // Make sure next event is pre-extended
+                gap_prev = Some(gap);
             }
         }
         new_events.push(e1.clone());

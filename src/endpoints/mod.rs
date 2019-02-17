@@ -45,10 +45,20 @@ fn root_favicon(state: State<ServerState>) -> Option<NamedFile> {
 
 #[get("/")]
 fn server_info() -> JsonValue {
+    let testing : bool;
+    #[cfg(debug_assertions)]
+    {
+        testing = true;
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        testing = false;
+    }
+
     json!({
         "hostname": "johan-desktop",
         "version": "aw-server-rust_v0.1",
-        "testing": false
+        "testing": testing
     })
 }
 
@@ -69,6 +79,7 @@ fn not_found() -> JsonValue {
 }
 
 pub fn rocket(server_state: ServerState, config: Option<Config>) -> rocket::Rocket {
+    // TODO: add info!("Starting aw-server at 127.0.0.1:port")
     let rocket = match config {
         Some(config) => rocket::custom(config),
         None => rocket::ignite()

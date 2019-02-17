@@ -42,7 +42,7 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
             _ => {
-                println!("Unexpected error: {:?}", e);
+                warn!("Unexpected error: {:?}", e);
                 Err(Status::InternalServerError)
             }
         }
@@ -51,10 +51,9 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
 
 #[post("/<bucket_id>", data = "<message>")]
 pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerState>) -> Response {
-    let bucket = message.into_inner();
+    let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
-        println!("endpoint bucketid doesn't match payload bucketid");
-        return response_status!(Status::BadRequest)
+        bucket.id = bucket_id;
     }
     let ret = state.datastore.create_bucket(&bucket);
     match ret {
@@ -62,7 +61,7 @@ pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerS
         Err(e) => match e {
             DatastoreError::BucketAlreadyExists => response_status!(Status::NotModified),
             _ => {
-                println!("Unexpected error: {:?}", e);
+                warn!("Unexpected error: {:?}", e);
                 response_status!(Status::InternalServerError)
             }
         }
@@ -76,7 +75,7 @@ pub fn bucket_events_get(bucket_id: String, start: Option<String>, end: Option<S
             match DateTime::parse_from_rfc3339(&dt_str) {
                 Ok(dt) => Some(dt.with_timezone(&Utc)),
                 Err(e) => {
-                    println!("Failed to parse starttime, datetime needs to be in rfc3339 format: {}", e);
+                    warn!("Failed to parse starttime, datetime needs to be in rfc3339 format: {}", e);
                     return Err(Status::BadRequest);
                 }
             }
@@ -88,7 +87,7 @@ pub fn bucket_events_get(bucket_id: String, start: Option<String>, end: Option<S
             match DateTime::parse_from_rfc3339(&dt_str) {
                 Ok(dt) => Some(dt.with_timezone(&Utc)),
                 Err(e) => {
-                    println!("Failed to parse endtime, datetime needs to be in rfc3339 format: {}", e);
+                    warn!("Failed to parse endtime, datetime needs to be in rfc3339 format: {}", e);
                     return Err(Status::BadRequest);
                 }
             }
@@ -101,7 +100,7 @@ pub fn bucket_events_get(bucket_id: String, start: Option<String>, end: Option<S
         Err(err) => match err {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
             e => {
-                println!("Unexpected error: {:?}", e);
+                warn!("Failed to fetch events: {:?}", e);
                 Err(Status::InternalServerError)
             }
         }
@@ -116,7 +115,7 @@ pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: 
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
             e => {
-                println!("Unexpected error: {:?}", e);
+                warn!("Failed to create event(s): {:?}", e);
                 Err(Status::InternalServerError)
             }
         }
@@ -131,7 +130,7 @@ pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, p
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
             e => {
-                println!("Unexpected error: {:?}", e);
+                warn!("Heartbeat failed: {:?}", e);
                 Err(Status::InternalServerError)
             }
         }
@@ -146,7 +145,7 @@ pub fn bucket_event_count(bucket_id: String, state: State<ServerState>) -> Resul
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
             e => {
-                println!("Unexpected error: {:?}", e);
+                warn!("Failed to count events: {:?}", e);
                 Err(Status::InternalServerError)
             }
         }
@@ -160,7 +159,7 @@ pub fn bucket_delete(bucket_id: String, state: State<ServerState>) -> Result<(),
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
             e => {
-                println!("Unexpected error: {:?}", e);
+                warn!("Failed to delete bucket: {:?}", e);
                 Err(Status::InternalServerError)
             }
         }

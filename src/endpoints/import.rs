@@ -20,7 +20,7 @@ pub fn bucket_import(state: State<ServerState>, json_data: Json<ImportFormat>) -
         ImportFormat::Single(bucket) => match state.datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(e) => {
-                println!("{:?}", e);
+                warn!("Failed to import bucket: {:?}", e);
                 return Err(Status::InternalServerError)
             }
         },
@@ -29,7 +29,7 @@ pub fn bucket_import(state: State<ServerState>, json_data: Json<ImportFormat>) -
                 match state.datastore.create_bucket(&bucket) {
                     Ok(_) => (),
                     Err(e) => {
-                        println!("{:?}", e);
+                        warn!("Failed to import bucket: {:?}", e);
                         return Err(Status::InternalServerError)
                     },
                 }

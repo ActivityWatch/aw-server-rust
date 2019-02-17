@@ -1,7 +1,7 @@
-extern crate aw_server;
-
 extern crate chrono;
 extern crate serde_json;
+
+extern crate aw_server;
 
 #[cfg(test)]
 mod query_tests {

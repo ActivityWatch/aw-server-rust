@@ -6,16 +6,18 @@ authors = ["Johan Bjäreholt <johan@bjareho.lt>", "Erik Bjäreholt <erik@bjareho
 [dependencies]
 rocket = "0.4"
 rocket_contrib = { version = "*", default-features = false, features = ["json"] }
-rocket_cors = "0.4.0"
+rocket_cors = "0.4"
 serde = "1.0"
 serde_json = "1.0"
 serde_derive = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.14", features = ["chrono", "serde_json", "bundled"]  }
+rusqlite = { version = "0.16", features = ["chrono", "serde_json", "bundled"]  }
 mpsc_requests = "0.2"
 plex = "0.2.3"
 appdirs = "0.2.0"
 lazy_static = "1.2"
+log = "0.4"
+fern = { version = "0.5", features = ["colored"] }
 
 [lib]
 crate-type = ["lib", "cdylib"]

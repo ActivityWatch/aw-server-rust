@@ -20,6 +20,10 @@ extern crate plex;
 
 extern crate appdirs;
 
+#[macro_use]
+extern crate log;
+extern crate fern;
+
 pub mod models;
 pub mod transform;
 pub mod datastore;

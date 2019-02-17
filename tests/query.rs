@@ -1,7 +1,9 @@
-extern crate aw_server;
-
+#[macro_use]
+extern crate log;
 extern crate chrono;
 extern crate serde_json;
+
+extern crate aw_server;
 
 #[cfg(test)]
 mod query_tests {

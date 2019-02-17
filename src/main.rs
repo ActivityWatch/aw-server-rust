@@ -20,6 +20,10 @@ extern crate plex;
 
 extern crate appdirs;
 
+#[macro_use]
+extern crate log;
+extern crate fern;
+
 pub mod models;
 pub mod transform;
 pub mod datastore;
@@ -29,7 +33,7 @@ pub mod dirs;
 
 fn main() {
     let db_path = dirs::db_path().to_str().unwrap().to_string();
-    println!("Using DB at path {:?}", db_path);
+    info!("Using DB at path {:?}", db_path);
 
     let server_state = endpoints::ServerState {
         datastore: datastore::Datastore::new(db_path)

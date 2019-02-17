@@ -231,7 +231,6 @@ impl DatastoreInstance {
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
-                    println!("{:?}", b);
                     self.buckets_cache.insert(b.id.clone(), b.clone());
                 },
                 Err(e) => {

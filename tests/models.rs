@@ -1,3 +1,5 @@
+#[macro_use]
+extern crate log;
 extern crate chrono;
 extern crate serde_json;
 
@@ -27,7 +29,7 @@ mod models_tests {
             created: None,
             events: None
         };
-        println!("bucket: {:?}", b);
+        debug!("bucket: {:?}", b);
     }
 
     #[test]
@@ -38,7 +40,7 @@ mod models_tests {
             duration: Duration::seconds(1),
             data: json!({"test": 1})
         };
-        println!("event: {:?}", e);
+        debug!("event: {:?}", e);
     }
 
     #[test]

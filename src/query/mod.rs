@@ -599,7 +599,7 @@ pub fn query<'a>(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataTy
         Ok(p) => p,
         Err(e) => {
             // TODO: Improve parsing error message
-            println!("ParsingError: {:?}", e);
+            warn!("ParsingError: {:?}", e);
             return Err(QueryError::ParsingError(format!("{:?}", e)));
         }
     };

@@ -1,6 +1,3 @@
-extern crate rusqlite;
-extern crate chrono;
-
 use std::fmt;
 use std::sync::Mutex;
 use std::thread;
@@ -139,7 +136,7 @@ impl DatastoreWorker {
                 let mut request = match self.responder.poll() {
                     Ok(r) => r,
                     Err(_) => { // All references to responder is gone, quit
-                        println!("DB worker quitting");
+                        info!("DB worker quitting");
                         self.quit = true;
                         break;
                     }
@@ -206,7 +203,7 @@ impl DatastoreWorker {
                 request.respond(response);
                 if ds.commit || ds.uncommited_events > 100 { break };
             }
-            println!("Commiting DB! Force commit {}, {} uncommited events", ds.commit, ds.uncommited_events);
+            debug!("Commiting DB! Force commit {}, {} uncommited events", ds.commit, ds.uncommited_events);
             transaction.commit().unwrap();
             ds.commit = false;
             ds.uncommited_events = 0;
@@ -233,12 +230,10 @@ impl DatastoreInstance {
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
-                    println!("{:?}", b);
                     self.buckets_cache.insert(b.id.clone(), b.clone());
                 },
                 Err(e) => {
-                    println!("Failed to parse bucket from SQLite, database is corrupt!");
-                    println!("{}", e);
+                    error!("Failed to parse bucket from SQLite, database is corrupt! {}", e);
                 }
             }
         };
@@ -261,7 +256,7 @@ impl DatastoreInstance {
                 let mut inserted_bucket = bucket.clone();
                 inserted_bucket.bid = Some(rowid);
 
-                println!("{:?}", inserted_bucket);
+                info!("Created bucket {:?}", inserted_bucket);
                 self.buckets_cache.insert(bucket.id.clone(), inserted_bucket);
                 self.commit = true;
             },
@@ -269,9 +264,9 @@ impl DatastoreInstance {
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
                     rusqlite::ErrorCode::ConstraintViolation => { return Err(DatastoreError::BucketAlreadyExists); },
-                    _ => { println!("{}", err); return Err(DatastoreError::InternalError); }
+                    _ => { warn!("{}", err); return Err(DatastoreError::InternalError); }
                 },
-                _ => { println!("{}", err); return Err(DatastoreError::InternalError); }
+                _ => { warn!("{}", err); return Err(DatastoreError::InternalError); }
             }
         };
         if let Some(ref events) = bucket.events {
@@ -285,7 +280,7 @@ impl DatastoreInstance {
         // Delete all events in bucket
         match conn.execute("DELETE FROM events WHERE bucketrow = ?1", &[&bucket.bid]) {
             Ok(_) => (),
-            Err(err) => { println!("{}", err); return Err(DatastoreError::InternalError) }
+            Err(err) => { warn!("{}", err); return Err(DatastoreError::InternalError) }
         }
         // Delete bucket itself
         match conn.execute("DELETE FROM buckets WHERE id = ?1", &[&bucket.bid]) {
@@ -297,9 +292,9 @@ impl DatastoreInstance {
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
                     rusqlite::ErrorCode::ConstraintViolation => Err(DatastoreError::BucketAlreadyExists),
-                    _ => { println!("{}", err); return Err(DatastoreError::InternalError) }
+                    _ => { warn!("{}", err); return Err(DatastoreError::InternalError) }
                 },
-                _ => { println!("{}", err); return Err(DatastoreError::InternalError) }
+                _ => { warn!("{}", err); return Err(DatastoreError::InternalError) }
             }
         }
     }
@@ -331,8 +326,7 @@ impl DatastoreInstance {
             match res {
                 Ok(_) => self.uncommited_events += 1,
                 Err(e) => {
-                    println!("Failed to insert event: {}", e);
-                    println!("{:?}", event);
+                    warn!("Failed to insert event: {:?}, {}", event, e);
                     return Err(DatastoreError::InternalError);
                 }
             }
@@ -385,7 +379,7 @@ impl DatastoreInstance {
                 merged_heartbeat
             },
             None => {
-                println!("Failed to merge!");
+                debug!("Failed to merge heartbeat!");
                 self.insert_events(conn, &bucket_id, &vec![heartbeat.clone()])?;
                 heartbeat
             }
@@ -408,7 +402,7 @@ impl DatastoreInstance {
             None => std::i64::MAX
         };
         if starttime_filter_ns > endtime_filter_ns {
-            println!("Starttime in event query was lower than endtime!");
+            warn!("Starttime in event query was lower than endtime!");
             return Ok(list);
         }
         let limit = match limit_opt {
@@ -464,7 +458,7 @@ impl DatastoreInstance {
             None => std::i64::MAX
         };
         if starttime_filter_ns >= endtime_filter_ns {
-            println!("Endtime in event query was same or lower than starttime!");
+            warn!("Endtime in event query was same or lower than starttime!");
             return Ok(0);
         }
 

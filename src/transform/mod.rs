@@ -34,7 +34,7 @@ pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Optio
 
     let duration = endtime.signed_duration_since(*starttime);
     if duration.num_nanoseconds().unwrap() < 0 {
-        println!("Merging heartbeats would result in a negative duration, refusing to merge!");
+        debug!("Merging heartbeats would result in a negative duration, refusing to merge!");
         return None
     }
 

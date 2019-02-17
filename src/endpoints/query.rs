@@ -39,7 +39,7 @@ pub fn query(query_req: Json<Query>, state: State<ServerState>) -> status::Custo
         let result = match query::query(&query_code, &interval, &state.datastore) {
             Ok(data) => data,
             Err(e) => {
-                println!("{:?}", e);
+                warn!("Query failed: {:?}", e);
                 return error(e);
             }
         };

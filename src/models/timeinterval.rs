@@ -79,7 +79,7 @@ impl<'de> Visitor<'de> for TimeIntervalVisitor {
         match TimeInterval::new_from_string(&value) {
             Ok(ti) => Ok(ti),
             Err(e) => {
-                println!("{:?}", e);
+                warn!("{:?}", e);
                 Err(de::Error::invalid_value(Unexpected::Str(value), &self))
             }
         }

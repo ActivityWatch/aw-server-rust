@@ -25,16 +25,19 @@ pub mod android {
     extern crate jni;
 
     use super::*;
+    use std::path::{PathBuf};
+    use rocket::config::{Config, Environment};
     use self::jni::JNIEnv;
     use self::jni::objects::{JClass, JString};
     use self::jni::sys::{jstring, jdouble};
+
     use datastore::Datastore;
     use models::{Event, Bucket};
+    use endpoints;
 
-    fn openDatastore() -> Datastore {
-        let db_dir = dirs::db_path().to_str().unwrap().to_string();
-        Datastore::new(db_dir)
-    }
+
+    static mut DATASTORE: Option<&Datastore> = None;
+    static mut SERVER_STATE: Option<endpoints::ServerState> = None;
 
     #[no_mangle]
     pub unsafe extern fn Java_net_activitywatch_android_RustInterface_greeting(env: JNIEnv, _: JClass, java_pattern: JString) -> jstring {
@@ -63,20 +66,8 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_startServer(env: JNIEnv, _: JClass, java_asset_path: JString) {
-        use std::path::{PathBuf};
-        use endpoints;
-        use rocket::config::{Config, Environment};
-
+    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_startServer(env: JNIEnv, _: JClass, ) {
         println!("Building server state...");
-
-        let asset_path = jstring_to_string(&env, java_asset_path);
-        println!("Using asset dir: {}", asset_path);
-
-        let server_state = endpoints::ServerState {
-            datastore: openDatastore(),
-            asset_path: PathBuf::from(asset_path),
-        };
 
         let config = Config::build(Environment::Production)
             .address("127.0.0.1")
@@ -84,18 +75,28 @@ pub mod android {
             .finalize().unwrap();
 
         println!("Starting server...");
-        endpoints::rocket(server_state, Some(config)).launch();
+        endpoints::rocket(SERVER_STATE.unwrap(), Some(config)).launch();
         println!("Server exited");
     }
 
     static mut INITIALIZED: bool = false;
 
     #[no_mangle]
-    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_initialize(env: JNIEnv, _: JClass) {
+    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_initialize(env: JNIEnv, _: JClass, java_asset_path: JString) {
+
         if !INITIALIZED {
             redirect_stdout_to_logcat();
             println!("Initializing aw-server-rust...");
-            println!("Redirecting aw-server-rust stdout/stderr to logcat");
+            println!("Redirected aw-server-rust stdout/stderr to logcat");
+
+            let db_dir = dirs::db_path().to_str().unwrap().to_string();
+            let asset_path = jstring_to_string(&env, java_asset_path);
+            println!("Using asset dir: {}", asset_path);
+
+            SERVER_STATE = Some(endpoints::ServerState {
+                datastore: Datastore::new(db_dir),
+                asset_path: PathBuf::from(asset_path),
+            });
         } else {
             println!("Already initialized");
         }
@@ -114,7 +115,7 @@ pub mod android {
 
     #[no_mangle]
     pub unsafe extern fn Java_net_activitywatch_android_RustInterface_getBuckets(env: JNIEnv, _: JClass) -> jstring {
-        let buckets = openDatastore().get_buckets().unwrap();
+        let buckets = DATASTORE.unwrap().get_buckets().unwrap();
         string_to_jstring(&env, json!(buckets).to_string())
     }
 
@@ -125,7 +126,7 @@ pub mod android {
             Ok(json) => json,
             Err(err) => return create_error_object(&env, err.to_string())
         };
-        match openDatastore().create_bucket(&bucket_json) {
+        match DATASTORE.unwrap().create_bucket(&bucket_json) {
             Ok(()) => string_to_jstring(&env, "Bucket successfully created".to_string()),
             Err(_) => create_error_object(&env, "Something went wrong when trying to create bucket".to_string())
         }
@@ -140,7 +141,7 @@ pub mod android {
             Ok(json) => json,
             Err(err) => return create_error_object(&env, err.to_string())
         };
-        match openDatastore().heartbeat(&bucket_id, event_json, pulsetime) {
+        match DATASTORE.unwrap().heartbeat(&bucket_id, event_json, pulsetime) {
             Ok(()) => string_to_jstring(&env, "Heartbeat successfully received".to_string()),
             Err(_) => create_error_object(&env, "Something went wrong when trying to send heartbeat".to_string())
         }
@@ -149,7 +150,7 @@ pub mod android {
     #[no_mangle]
     pub unsafe extern fn Java_net_activitywatch_android_RustInterface_getEvents(env: JNIEnv, _: JClass, java_bucket_id: JString) -> jstring {
         let bucket_id = jstring_to_string(&env, java_bucket_id);
-        match openDatastore().get_events(&bucket_id, None, None, None) {
+        match DATASTORE.unwrap().get_events(&bucket_id, None, None, None) {
             Ok(events) => string_to_jstring(&env, json!(events).to_string()),
             Err(_) => create_error_object(&env, "Something went wrong when trying to send heartbeat".to_string())
         }

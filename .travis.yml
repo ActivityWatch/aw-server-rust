@@ -7,13 +7,30 @@ os:
   - osx
   - windows
 
+matrix:
+  include:
+  - os: linux
+    env: BUILD_ANDROID=true
+    allow_failure: true
+
+
 before_script:
   - cargo install cargo-prune --force
+  - if [ -z BUILD_ANDROID ]; then
+      ./install-ndk.sh;
+      export ANDROID_NDK_HOME=`pwd`/NDK
+    fi
+
 script:
+  - if [ -z BUILD_ANDROID ]; then
+        ./compile-android.sh;
+    fi
   - set -x;
     cargo test --verbose --release
 
-cache:
-  cargo: true
+
 before_cache:
   - cargo prune
+
+cache:
+  cargo: true

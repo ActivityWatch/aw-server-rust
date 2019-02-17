@@ -2,6 +2,11 @@
 
 set -e
 
+if [ -z "$ANDROID_NDK_HOME" ]; then
+    echo "Environment variable ANDROID_NDK_HOME not set, please set to location of Android NDK."
+    exit 1
+fi
+
 # Ring won't build in the below target for whatever reason
 # 'arm armv7-linux-androideabi' \
 

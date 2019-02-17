@@ -20,8 +20,9 @@ extern crate plex;
 
 extern crate appdirs;
 
-#[macro_use]
-extern crate log;
+#[macro_use] extern crate lazy_static;
+
+#[macro_use] extern crate log;
 extern crate fern;
 
 pub mod models;

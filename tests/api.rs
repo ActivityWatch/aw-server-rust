@@ -7,6 +7,7 @@ extern crate aw_server;
 
 #[cfg(test)]
 mod api_tests {
+    use std::path::{PathBuf};
     use rocket::http::ContentType;
 
     use aw_server::datastore;
@@ -14,9 +15,10 @@ mod api_tests {
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
-            datastore: datastore::Datastore::new_in_memory()
+            datastore: datastore::Datastore::new_in_memory(),
+            asset_path: PathBuf::from("aw-webui/dist"),
         };
-        endpoints::rocket(state)
+        endpoints::rocket(state, None)
     }
 
     #[test]

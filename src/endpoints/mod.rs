@@ -1,7 +1,9 @@
-use std::path::{Path,PathBuf};
+use std::path::PathBuf;
 
 use rocket;
+use rocket::config::{Config};
 use rocket::response::{NamedFile};
+use rocket::State;
 use rocket_contrib::json::JsonValue;
 
 mod bucket;
@@ -12,29 +14,33 @@ mod cors;
 use datastore::Datastore;
 
 pub struct ServerState {
-    pub datastore: Datastore
+    pub datastore: Datastore,
+    pub asset_path: PathBuf,
 }
 
 #[get("/")]
-fn root_index() -> Option<NamedFile> {
-    NamedFile::open(Path::new("aw-webui/dist/index.html")).ok()
+fn root_index(state: State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("index.html")).ok()
 }
+
 #[get("/0.css")]
-fn root_css() -> Option<NamedFile> {
-    NamedFile::open(Path::new("aw-webui/dist/0.css")).ok()
+fn root_css(state: State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("0.css")).ok()
 }
+
 #[get("/0.css.map")]
-fn root_css_map() -> Option<NamedFile> {
-    NamedFile::open(Path::new("aw-webui/dist/0.css.map")).ok()
+fn root_css_map(state: State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("0.css.map")).ok()
 }
+
 #[get("/static/<file..>")]
-fn root_static(file: PathBuf) -> Option<NamedFile> {
-    NamedFile::open(Path::new("aw-webui/dist/static/").join(file)).ok()
+fn root_static(file: PathBuf, state: State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("static").join(file)).ok()
 }
 
 #[get("/favicon.ico")]
-fn root_favicon() -> Option<NamedFile> {
-    NamedFile::open(Path::new("aw-webui/dist/favicon.ico")).ok()
+fn root_favicon(state: State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("favicon.ico")).ok()
 }
 
 #[get("/")]
@@ -72,9 +78,13 @@ fn not_found() -> JsonValue {
     })
 }
 
-pub fn rocket(server_state: ServerState) -> rocket::Rocket {
+pub fn rocket(server_state: ServerState, config: Option<Config>) -> rocket::Rocket {
     // TODO: add info!("Starting aw-server at 127.0.0.1:port")
-    rocket::ignite()
+    let rocket = match config {
+        Some(config) => rocket::custom(config),
+        None => rocket::ignite()
+    };
+    rocket
         .mount("/", routes![
                root_index, root_favicon, root_static, root_css, root_css_map,
         ])

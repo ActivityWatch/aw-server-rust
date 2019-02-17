@@ -5,6 +5,9 @@ use std::os::raw::{c_char};
 use std::ffi::{CString, CStr};
 use dirs;
 
+mod logcat;
+use android::logcat::{redirect_stdout_to_logcat};
+
 #[no_mangle]
 pub extern fn rust_greeting(to: *const c_char) -> *mut c_char {
     let c_str = unsafe { CStr::from_ptr(to) };
@@ -24,7 +27,7 @@ pub mod android {
     use super::*;
     use self::jni::JNIEnv;
     use self::jni::objects::{JClass, JString};
-    use self::jni::sys::{jstring};
+    use self::jni::sys::{jstring, jdouble};
     use datastore::Datastore;
     use models::{Event, Bucket};
 
@@ -53,18 +56,60 @@ pub mod android {
         env.new_string(string).expect("Couldn't create java string").into_inner()
     }
 
-    #[no_mangle]
-    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_setAndroidDataDir(env: JNIEnv, _: JClass, java_dir: JString) -> jstring {
-        let dir = jstring_to_string(&env, java_dir);
-        //let c_str = CStr::from_ptr(env.get_string(java_dir).expect("invalid pattern string").as_ptr());
-        //let dir = c_str.to_str().unwrap();
-        dirs::set_android_data_dir(&dir);
+    unsafe fn create_error_object(env: &JNIEnv, msg: String) -> jstring {
+        let mut obj = json!({});
+        obj["error"] = json!(msg).0;
+        string_to_jstring(&env, obj.to_string())
+    }
 
-        let current_dir: String = match dirs::get_data_dir() {
-            Ok(path) => String::from(path.to_str().unwrap()),
-            Err(_) => String::from("invalid path")
+    #[no_mangle]
+    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_startServer(env: JNIEnv, _: JClass, java_asset_path: JString) {
+        use std::path::{PathBuf};
+        use endpoints;
+        use rocket::config::{Config, Environment};
+
+        println!("Building server state...");
+
+        let asset_path = jstring_to_string(&env, java_asset_path);
+        println!("Using asset dir: {}", asset_path);
+
+        let server_state = endpoints::ServerState {
+            datastore: openDatastore(),
+            asset_path: PathBuf::from(asset_path),
         };
-        string_to_jstring(&env, current_dir.as_str().to_string())
+
+        let config = Config::build(Environment::Production)
+            .address("127.0.0.1")
+            .port(5600)
+            .finalize().unwrap();
+
+        println!("Starting server...");
+        endpoints::rocket(server_state, Some(config)).launch();
+        println!("Server exited");
+    }
+
+    static mut INITIALIZED: bool = false;
+
+    #[no_mangle]
+    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_initialize(env: JNIEnv, _: JClass) {
+        if !INITIALIZED {
+            redirect_stdout_to_logcat();
+            println!("Initializing aw-server-rust...");
+            println!("Redirecting aw-server-rust stdout/stderr to logcat");
+        } else {
+            println!("Already initialized");
+        }
+        INITIALIZED = true;
+
+        // Without this it might not work due to weird error probably arising from Rust optimizing away the JNIEnv:
+        //  JNI DETECTED ERROR IN APPLICATION: use of deleted weak global reference
+        string_to_jstring(&env, "test".to_string());
+    }
+
+    #[no_mangle]
+    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_setDataDir(env: JNIEnv, _: JClass, java_dir: JString) {
+        println!("Setting android data dir");
+        dirs::set_android_data_dir(&jstring_to_string(&env, java_dir));
     }
 
     #[no_mangle]
@@ -78,25 +123,26 @@ pub mod android {
         let bucket = jstring_to_string(&env, java_bucket);
         let bucket_json: Bucket = match serde_json::from_str(&bucket) {
             Ok(json) => json,
-            Err(err) => return string_to_jstring(&env, err.to_string())
+            Err(err) => return create_error_object(&env, err.to_string())
         };
         match openDatastore().create_bucket(&bucket_json) {
             Ok(()) => string_to_jstring(&env, "Bucket successfully created".to_string()),
-            Err(_) => string_to_jstring(&env, "Something went wrong when trying to create bucket".to_string())
+            Err(_) => create_error_object(&env, "Something went wrong when trying to create bucket".to_string())
         }
     }
 
     #[no_mangle]
-    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_heartbeat(env: JNIEnv, _: JClass, java_bucket_id: JString, java_event: JString) -> jstring {
+    pub unsafe extern fn Java_net_activitywatch_android_RustInterface_heartbeat(env: JNIEnv, _: JClass, java_bucket_id: JString, java_event: JString, java_pulsetime: jdouble) -> jstring {
         let bucket_id = jstring_to_string(&env, java_bucket_id);
         let event = jstring_to_string(&env, java_event);
+        let pulsetime = java_pulsetime as f64;
         let event_json: Event = match serde_json::from_str(&event) {
             Ok(json) => json,
-            Err(err) => return string_to_jstring(&env, err.to_string())
+            Err(err) => return create_error_object(&env, err.to_string())
         };
-        match openDatastore().heartbeat(&bucket_id, event_json, 60.0) {
+        match openDatastore().heartbeat(&bucket_id, event_json, pulsetime) {
             Ok(()) => string_to_jstring(&env, "Heartbeat successfully received".to_string()),
-            Err(_) => string_to_jstring(&env, "Something went wrong when trying to send heartbeat".to_string())
+            Err(_) => create_error_object(&env, "Something went wrong when trying to send heartbeat".to_string())
         }
     }
 
@@ -105,7 +151,7 @@ pub mod android {
         let bucket_id = jstring_to_string(&env, java_bucket_id);
         match openDatastore().get_events(&bucket_id, None, None, None) {
             Ok(events) => string_to_jstring(&env, json!(events).to_string()),
-            Err(_) => string_to_jstring(&env, "Something went wrong when trying to send heartbeat".to_string())
+            Err(_) => create_error_object(&env, "Something went wrong when trying to send heartbeat".to_string())
         }
     }
 }

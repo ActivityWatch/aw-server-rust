@@ -15,6 +15,7 @@ rusqlite = { version = "0.16", features = ["chrono", "serde_json", "bundled"]  }
 mpsc_requests = "0.2"
 plex = "0.2.3"
 appdirs = "0.2.0"
+lazy_static = "1.2"
 log = "0.4"
 fern = { version = "0.5", features = ["colored"] }
 
@@ -28,3 +29,4 @@ path = "src/main.rs"
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.5", default-features = false }
+libc = "0.2"

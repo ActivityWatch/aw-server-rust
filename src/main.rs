@@ -20,8 +20,9 @@ extern crate plex;
 
 extern crate appdirs;
 
-#[macro_use]
-extern crate log;
+#[macro_use] extern crate lazy_static;
+
+#[macro_use] extern crate log;
 extern crate fern;
 
 pub mod models;
@@ -33,14 +34,17 @@ pub mod dirs;
 pub mod logging;
 
 fn main() {
+    use std::path::{PathBuf};
+
     logging::setup_logger().expect("Failed to setup logging");
 
     let db_path = dirs::db_path().to_str().unwrap().to_string();
     info!("Using DB at path {:?}", db_path);
 
     let server_state = endpoints::ServerState {
-        datastore: datastore::Datastore::new(db_path)
+        datastore: datastore::Datastore::new(db_path),
+        asset_path: PathBuf::from("aw-webui").join("dist"),
     };
 
-    endpoints::rocket(server_state).launch();
+    endpoints::rocket(server_state, None).launch();
 }

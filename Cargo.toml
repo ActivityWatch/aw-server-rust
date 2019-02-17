@@ -16,7 +16,7 @@ mpsc_requests = "0.2"
 plex = "0.2.3"
 appdirs = "0.2.0"
 log = "0.4"
-fern = "0.5"
+fern = { version = "0.5", features = ["colored"] }
 
 [lib]
 crate-type = ["lib", "cdylib"]

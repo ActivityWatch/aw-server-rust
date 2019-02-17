@@ -30,8 +30,11 @@ pub mod datastore;
 pub mod query;
 pub mod endpoints;
 pub mod dirs;
+pub mod logging;
 
 fn main() {
+    logging::setup_logger().expect("Failed to setup logging");
+
     let db_path = dirs::db_path().to_str().unwrap().to_string();
     info!("Using DB at path {:?}", db_path);
 

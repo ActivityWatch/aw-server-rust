@@ -10,6 +10,7 @@ use chrono::Duration;
 
 use rusqlite::Connection;
 use rusqlite::DropBehavior;
+use rusqlite::TransactionBehavior;
 
 use mpsc_requests;
 
@@ -130,7 +131,8 @@ impl DatastoreWorker {
         let mut last_heartbeat = HashMap::new();
         ds.get_stored_buckets(&conn);
         loop {
-            let mut transaction = conn.transaction().unwrap();
+            let mut transaction = conn.transaction_with_behavior(TransactionBehavior::Exclusive)
+                .expect("Unable to take exclusive lock on SQLite database!");
             transaction.set_drop_behavior(DropBehavior::Commit);
             loop {
                 let mut request = match self.responder.poll() {
@@ -161,7 +163,7 @@ impl DatastoreWorker {
                         }
                     },
                     Commands::GetBuckets() => {
-                        Ok(Responses::BucketMap(ds.get_buckets().unwrap()))
+                        Ok(Responses::BucketMap(ds.get_buckets()))
                     },
                     Commands::InsertEvents(bucketname, events) => {
                         match ds.insert_events(&transaction, bucketname, events) {
@@ -307,8 +309,8 @@ impl DatastoreInstance {
         }
     }
 
-    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
-        return Ok(self.buckets_cache.clone());
+    fn get_buckets(&self) -> HashMap<String, Bucket> {
+        return self.buckets_cache.clone();
     }
 
 

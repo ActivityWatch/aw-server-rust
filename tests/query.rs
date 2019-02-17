@@ -1,5 +1,3 @@
-#[macro_use]
-extern crate log;
 extern crate chrono;
 extern crate serde_json;
 

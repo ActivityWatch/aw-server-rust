@@ -30,6 +30,7 @@ pub mod datastore;
 pub mod query;
 pub mod endpoints;
 pub mod dirs;
+pub mod logging;
 
 #[cfg(target_os="android")]
 pub mod android;

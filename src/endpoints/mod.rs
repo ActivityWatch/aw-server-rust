@@ -63,6 +63,7 @@ fn not_found() -> JsonValue {
 }
 
 pub fn rocket(server_state: ServerState) -> rocket::Rocket {
+    // TODO: add info!("Starting aw-server at 127.0.0.1:port")
     rocket::ignite()
         .mount("/", routes![
                root_index, root_favicon, root_static, root_css, root_css_map,

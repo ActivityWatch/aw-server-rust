@@ -11,7 +11,7 @@ matrix:
   include:
   - os: linux
     env: BUILD_ANDROID=true
-    allow_failure: true
+    allow_failures: true
 
 
 before_install:

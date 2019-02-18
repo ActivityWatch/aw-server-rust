@@ -16,13 +16,13 @@ matrix:
 
 before_script:
   - cargo install cargo-prune --force
-  - if [ -z "$BUILD_ANDROID" ]; then
+  - if [ "$BUILD_ANDROID" == true ]; then
       ./install-ndk.sh;
       export ANDROID_NDK_HOME=`pwd`/NDK;
     fi
 
 script:
-  - if [ -z "$BUILD_ANDROID" ]; then
+  - if [ "$BUILD_ANDROID" == true ]; then
         ./compile-android.sh;
     fi
   - set -x;

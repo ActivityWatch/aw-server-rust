@@ -7,11 +7,14 @@ os:
   - osx
   - windows
 
+env:
+
 matrix:
   include:
   - os: linux
     env: BUILD_ANDROID=true
-    allow_failures: true
+  allow_failures:
+  - env: BUILD_ANDROID=true
 
 
 before_install:

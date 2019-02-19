@@ -22,7 +22,7 @@ for archtargetstr in \
     echo "Building for $arch..."
 
     if [ -d "$NDK_ARCH_DIR" ]; then
-        env PATH="$ORIG_PATH:$NDK_ARCH_DIR" \
+        env PATH="$NDK_ARCH_DIR:$ORIG_PATH" \
             cargo build --target $target --release --lib
     else
         echo "Couldn't find directory for target $arch"

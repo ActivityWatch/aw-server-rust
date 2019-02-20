@@ -9,8 +9,8 @@ use models::Bucket;
 use models::Event;
 
 use rocket::State;
+use rocket::response::status;
 use rocket::http::Status;
-use rocket::Response;
 
 use endpoints::ServerState;
 
@@ -20,14 +20,6 @@ use datastore::DatastoreError;
  * TODO:
  * - Fix some unwraps
  */
-
-macro_rules! response_status {
-    ($status:expr) => ({
-        let mut res = Response::new();
-        res.set_status($status);
-        res
-    })
-}
 
 #[get("/")]
 pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Bucket>>, Status> {
@@ -51,8 +43,11 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
     }
 }
 
+// FIXME: The status::Custom return is used because if we simply used Status and return a
+// Status::NotModified rocket will for some unknown reason consider that to be a
+// "Invalid status used as responder" and converts it to a 500 which we do not want.
 #[post("/<bucket_id>", data = "<message>")]
-pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerState>) -> Response {
+pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerState>) -> status::Custom<()> {
     let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
         bucket.id = bucket_id;
@@ -63,17 +58,17 @@ pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerS
         Ok(ds) => ds,
         Err(e) => {
             warn!("Taking datastore lock failed, returning 504: {}", e);
-            return response_status!(Status::ServiceUnavailable);
+            return status::Custom(Status::ServiceUnavailable, ());
         }
     };
     let ret = datastore.create_bucket(&bucket);
     match ret {
-        Ok(_) => response_status!(Status::Ok),
+        Ok(_) => status::Custom(Status::Ok, ()),
         Err(e) => match e {
-            DatastoreError::BucketAlreadyExists => response_status!(Status::NotModified),
+            DatastoreError::BucketAlreadyExists => status::Custom(Status::NotModified, ()),
             _ => {
                 warn!("Unexpected error: {:?}", e);
-                response_status!(Status::InternalServerError)
+                status::Custom(Status::InternalServerError, ())
             }
         }
     }

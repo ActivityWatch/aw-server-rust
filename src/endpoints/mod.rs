@@ -1,10 +1,24 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use rocket;
 use rocket::config::{Config};
 use rocket::response::{NamedFile};
 use rocket::State;
 use rocket_contrib::json::JsonValue;
+
+#[macro_export]
+macro_rules! endpoints_get_lock {
+    ( $lock:expr ) => {
+        match $lock.lock() {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Taking datastore lock failed, returning 504: {}", e);
+                return Err(Status::ServiceUnavailable);
+            }
+        }
+    }
+}
 
 mod bucket;
 mod query;
@@ -14,7 +28,7 @@ mod cors;
 use datastore::Datastore;
 
 pub struct ServerState {
-    pub datastore: Datastore,
+    pub datastore: Mutex<Datastore>,
     pub asset_path: PathBuf,
 }
 
@@ -62,6 +76,8 @@ fn server_info() -> JsonValue {
     })
 }
 
+// This catcher is sadly invalid as catchers in rocket are only forwarded if they
+// have code 400-599 for some reason
 #[catch(304)]
 fn not_modified() -> JsonValue {
     json!({

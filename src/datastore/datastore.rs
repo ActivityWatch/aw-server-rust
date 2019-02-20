@@ -1,5 +1,4 @@
 use std::fmt;
-use std::sync::Mutex;
 use std::thread;
 use std::collections::HashMap;
 
@@ -25,6 +24,7 @@ use rusqlite::types::ToSql;
  * - Needs refactoring?
  */
 
+#[derive(Debug,Clone)]
 pub enum Responses {
     Empty(),
     Bucket(Bucket),
@@ -38,7 +38,7 @@ pub enum DatastoreMethod {
     File(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum DatastoreError {
     NoSuchBucket,
     BucketAlreadyExists,
@@ -46,6 +46,7 @@ pub enum DatastoreError {
     InternalError,
 }
 
+#[derive(Debug,Clone)]
 pub enum Commands {
     CreateBucket(Bucket),
     DeleteBucket(String),
@@ -61,8 +62,9 @@ pub enum Commands {
 type Requester = mpsc_requests::Requester<Commands, Result<Responses, DatastoreError>>;
 type Responder = mpsc_requests::Responder<Commands, Result<Responses, DatastoreError>>;
 
+#[derive(Clone)]
 pub struct Datastore {
-    requester: Mutex<Requester>,
+    requester: Requester,
 }
 
 impl fmt::Debug for Datastore {
@@ -478,15 +480,6 @@ impl DatastoreInstance {
     }
 }
 
-macro_rules! get_lock {
-    ( $lock:expr ) => {
-        match $lock.lock() {
-            Ok(r) => r,
-            Err(_) => return Err(DatastoreError::RequestLockTimeout)
-        }
-    }
-}
-
 impl Datastore {
 
     pub fn new(dbpath: String) -> Self {
@@ -506,21 +499,19 @@ impl Datastore {
             di.work_loop(method);
         });
         Datastore {
-            requester: Mutex::new(requester),
+            requester: requester,
         }
     }
 
     pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        let requester = get_lock!(self.requester);
-        match requester.request(Commands::CreateBucket(bucket.clone())) {
+        match self.requester.request(Commands::CreateBucket(bucket.clone())) {
             Ok(_) => Ok(()),
             Err(e) => Err(e)
         }
     }
 
     pub fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError>{
-        let requester = get_lock!(self.requester);
-        match requester.request(Commands::DeleteBucket(bucket_id.to_string())) {
+        match self.requester.request(Commands::DeleteBucket(bucket_id.to_string())) {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
                 _ => panic!("Invalid response")
@@ -530,8 +521,7 @@ impl Datastore {
     }
 
     pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        let requester = get_lock!(self.requester);
-        match requester.request(Commands::GetBucket(bucket_id.to_string())) {
+        match self.requester.request(Commands::GetBucket(bucket_id.to_string())) {
             Ok(r) => match r {
                 Responses::Bucket(b) => Ok(b),
                 _ => panic!("Invalid response")
@@ -541,8 +531,7 @@ impl Datastore {
     }
 
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
-        let requester = get_lock!(self.requester);
-        match requester.request(Commands::GetBuckets()) {
+        match self.requester.request(Commands::GetBuckets()) {
             Ok(r) => match r {
                 Responses::BucketMap(bm) => Ok(bm),
                 _ => panic!("Invalid response")
@@ -552,8 +541,7 @@ impl Datastore {
     }
 
     pub fn insert_events(&self, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
-        let requester = get_lock!(self.requester);
-        match requester.request(Commands::InsertEvents(bucket_id.to_string(), events.clone())) {
+        match self.requester.request(Commands::InsertEvents(bucket_id.to_string(), events.clone())) {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
                 _ => panic!("Invalid response")
@@ -563,8 +551,7 @@ impl Datastore {
     }
 
     pub fn heartbeat(&self, bucket_id: &str, heartbeat: Event, pulsetime: f64) -> Result<(), DatastoreError> {
-        let requester = get_lock!(self.requester);
-        match requester.request(Commands::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime)) {
+        match self.requester.request(Commands::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime)) {
             Ok(r) => match r {
                 Responses::Empty() => return Ok(()),
                 _ => panic!("Invalid response")
@@ -574,8 +561,7 @@ impl Datastore {
     }
 
     pub fn replace_last_event(&self, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
-        let requester = get_lock!(self.requester);
-        match requester.request(Commands::ReplaceLastEvent(bucket_id.to_string(), event.clone())) {
+        match self.requester.request(Commands::ReplaceLastEvent(bucket_id.to_string(), event.clone())) {
             Ok(r) => match r {
                 Responses::Empty() => return Ok(()),
                 _ => panic!("Invalid response")
@@ -585,8 +571,7 @@ impl Datastore {
     }
 
     pub fn get_events(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
-        let requester = get_lock!(self.requester);
-        match requester.request(Commands::GetEvents(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone(), limit_opt.clone())) {
+        match self.requester.request(Commands::GetEvents(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone(), limit_opt.clone())) {
             Ok(r) => match r {
                 Responses::EventList(el) => Ok(el),
                 _ => panic!("Invalid response")
@@ -596,8 +581,7 @@ impl Datastore {
     }
 
     pub fn get_event_count(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, DatastoreError> {
-        let requester = get_lock!(self.requester);
-        match requester.request(Commands::GetEventCount(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone())) {
+        match self.requester.request(Commands::GetEventCount(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone())) {
             Ok(r) => match r {
                 Responses::Count(n) => Ok(n),
                 _ => panic!("Invalid response")

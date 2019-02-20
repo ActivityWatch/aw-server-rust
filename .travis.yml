@@ -13,8 +13,8 @@ matrix:
   include:
   - os: linux
     env: BUILD_ANDROID=true RELEASE=false
-  allow_failures:
-  - env: BUILD_ANDROID=true RELEASE=false
+# allow_failures:
+# - env: BUILD_ANDROID=true RELEASE=false
 
 
 before_install:
@@ -32,13 +32,12 @@ install:
   - if [ "$BUILD_ANDROID" == true ]; then
         ./compile-android.sh;
     else
-        cargo build --release --bin;
-        cargo build --release --lib;
+        cargo build --bin $($RELEASE && '--release');
+        cargo build --lib $($RELEASE && '--release');
     fi
 
-
 script:
-  - cargo test --verbose --release
+  - cargo test --verbose $($RELEASE && '--release')
 
 
 before_cache:

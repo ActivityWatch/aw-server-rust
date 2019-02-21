@@ -17,7 +17,7 @@ pub enum ImportFormat {
 #[post("/", data = "<json_data>", format = "application/json")]
 pub fn bucket_import(state: State<ServerState>, json_data: Json<ImportFormat>) -> Result<(), Status> {
     match json_data.into_inner() {
-        ImportFormat::Single(bucket) => match state.datastore.create_bucket(&bucket) {
+        ImportFormat::Single(bucket) => match endpoints_get_lock!(state.datastore).create_bucket(&bucket) {
             Ok(_) => (),
             Err(e) => {
                 warn!("Failed to import bucket: {:?}", e);
@@ -26,7 +26,7 @@ pub fn bucket_import(state: State<ServerState>, json_data: Json<ImportFormat>) -
         },
         ImportFormat::Multiple(buckets) => {
             for (_bucketname, bucket) in buckets {
-                match state.datastore.create_bucket(&bucket) {
+                match endpoints_get_lock!(state.datastore).create_bucket(&bucket) {
                     Ok(_) => (),
                     Err(e) => {
                         warn!("Failed to import bucket: {:?}", e);

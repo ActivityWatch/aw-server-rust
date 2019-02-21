@@ -34,7 +34,8 @@ pub mod dirs;
 pub mod logging;
 
 fn main() {
-    use std::path::{PathBuf};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
 
     logging::setup_logger().expect("Failed to setup logging");
 
@@ -42,7 +43,7 @@ fn main() {
     info!("Using DB at path {:?}", db_path);
 
     let server_state = endpoints::ServerState {
-        datastore: datastore::Datastore::new(db_path),
+        datastore: Mutex::new(datastore::Datastore::new(db_path)),
         asset_path: PathBuf::from("aw-webui").join("dist"),
     };
 

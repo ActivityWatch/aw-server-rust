@@ -36,7 +36,21 @@ pub fn query(query_req: Json<Query>, state: State<ServerState>) -> status::Custo
     let intervals = &query_req.0.timeperiods;
     let mut results = Vec::new();
     for interval in intervals {
-        let result = match query::query(&query_code, &interval, &state.datastore) {
+        // Cannot re-use endpoints_get_lock!() here because it returns Err(Status) on failure and this
+        // function returns status::Custom
+        let datastore = match state.datastore.lock() {
+            Ok(ds) => ds,
+            Err(e) => {
+                warn!("Taking datastore lock failed, returning 500: {}", e);
+                let body = QueryErrorJson {
+                    status: 504,
+                    reason: "Service Unavailable".to_string(),
+                    message: "Taking datastore lock failed, see aw-server logs".to_string()
+                };
+                return status::Custom(Status::ServiceUnavailable, json!(body));
+            }
+        };
+        let result = match query::query(&query_code, &interval, &datastore) {
             Ok(data) => data,
             Err(e) => {
                 warn!("Query failed: {:?}", e);

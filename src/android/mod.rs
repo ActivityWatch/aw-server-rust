@@ -3,6 +3,7 @@
 
 use std::os::raw::{c_char};
 use std::ffi::{CString, CStr};
+use std::sync::Mutex;
 use dirs;
 
 mod logcat;
@@ -31,9 +32,17 @@ pub mod android {
     use datastore::Datastore;
     use models::{Event, Bucket};
 
-    fn openDatastore() -> Datastore {
-        let db_dir = dirs::db_path().to_str().unwrap().to_string();
-        Datastore::new(db_dir)
+    static mut DATASTORE: Option<Datastore> = None;
+
+    unsafe fn openDatastore() -> Datastore {
+        match DATASTORE {
+            Some(ref ds) => ds.clone(),
+            None => {
+                let db_dir = dirs::db_path().to_str().unwrap().to_string();
+                DATASTORE = Some(Datastore::new(db_dir));
+                openDatastore()
+            }
+        }
     }
 
     #[no_mangle]
@@ -74,7 +83,7 @@ pub mod android {
         println!("Using asset dir: {}", asset_path);
 
         let server_state = endpoints::ServerState {
-            datastore: openDatastore(),
+            datastore: Mutex::new(openDatastore()),
             asset_path: PathBuf::from(asset_path),
         };
 

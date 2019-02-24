@@ -93,7 +93,7 @@ pub mod android {
             .finalize().unwrap();
 
         println!("Starting server...");
-        endpoints::rocket(server_state, Some(config)).launch();
+        endpoints::rocket(server_state, config).launch();
         println!("Server exited");
     }
 

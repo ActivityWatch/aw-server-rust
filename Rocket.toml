@@ -1,9 +1,0 @@
-[development]
-address = "127.0.0.1"
-limits = { json = 1000000000 }
-port = 5666
-
-[production]
-address = "127.0.0.1"
-limits = { json = 1000000000 }
-port = 5600

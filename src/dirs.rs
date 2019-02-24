@@ -17,6 +17,7 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
     {
         let mut dir = appdirs::user_config_dir(Some("activitywatch"), None, false)?;
         dir.push("aw-server-rust");
+        fs::create_dir_all(dir.clone()).expect("Unable to create config dir");
         return Ok(dir);
     }
 
@@ -31,6 +32,7 @@ pub fn get_data_dir() -> Result<PathBuf, ()> {
     {
         let mut dir = appdirs::user_data_dir(Some("activitywatch"), None, false)?;
         dir.push("aw-server-rust");
+        fs::create_dir_all(dir.clone()).expect("Unable to create data dir");
         return Ok(dir);
     }
 
@@ -45,6 +47,7 @@ pub fn get_cache_dir() -> Result<PathBuf, ()> {
     {
         let mut dir = appdirs::user_cache_dir(Some("activitywatch"), None)?;
         dir.push("aw-server-rust");
+        fs::create_dir_all(dir.clone()).expect("Unable to create cache dir");
         return Ok(dir);
     }
 
@@ -56,7 +59,6 @@ pub fn get_cache_dir() -> Result<PathBuf, ()> {
 
 pub fn db_path() -> PathBuf {
     let mut db_path = get_data_dir().unwrap();
-    fs::create_dir_all(db_path.clone()).unwrap();
     #[cfg(debug_assertions)]
     db_path.push("sqlite-testing.db");
     #[cfg(not(debug_assertions))]

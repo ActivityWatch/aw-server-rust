@@ -6,7 +6,6 @@ aw-server-rust
 A reimplementation of aw-server in Rust
 
 Primary features missing:
-- Config
 - Safe CORS (not allow all, fix dynamic CORS in rocket_cors upstream)
 
 Caveats:

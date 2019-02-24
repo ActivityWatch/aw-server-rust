@@ -95,13 +95,9 @@ fn not_found() -> JsonValue {
     })
 }
 
-pub fn rocket(server_state: ServerState, config: Option<Config>) -> rocket::Rocket {
-    // TODO: add info!("Starting aw-server at 127.0.0.1:port")
-    let rocket = match config {
-        Some(config) => rocket::custom(config),
-        None => rocket::ignite()
-    };
-    rocket
+pub fn rocket(server_state: ServerState, config: Config) -> rocket::Rocket {
+    info!("Starting aw-server-rust at {}:{}", config.address, config.port);
+    rocket::custom(config)
         .mount("/", routes![
                root_index, root_favicon, root_static, root_css, root_css_map,
         ])

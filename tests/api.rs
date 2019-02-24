@@ -12,6 +12,7 @@ mod api_tests {
     use rocket::http::Header;
     use rocket::http::ContentType;
 
+    use aw_server::config;
     use aw_server::datastore;
     use aw_server::endpoints;
 
@@ -22,7 +23,8 @@ mod api_tests {
             datastore: Mutex::new(datastore::Datastore::new_in_memory()),
             asset_path: PathBuf::from("aw-webui/dist"),
         };
-        endpoints::rocket(state, None)
+        let aw_config = config::AWConfig::default();
+        endpoints::rocket(state, aw_config.to_rocket_config())
     }
 
     #[test]

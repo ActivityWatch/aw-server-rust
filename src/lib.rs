@@ -5,6 +5,7 @@
 #[macro_use] extern crate rocket;
 #[macro_use] extern crate rocket_contrib;
 extern crate rocket_cors;
+extern crate multipart;
 
 extern crate serde;
 extern crate serde_json;

@@ -260,7 +260,7 @@ impl DatastoreInstance {
                 let mut inserted_bucket = bucket.clone();
                 inserted_bucket.bid = Some(rowid);
 
-                info!("Created bucket {:?}", inserted_bucket);
+                info!("Created bucket {}", inserted_bucket.id);
                 self.buckets_cache.insert(bucket.id.clone(), inserted_bucket);
                 self.commit = true;
             },

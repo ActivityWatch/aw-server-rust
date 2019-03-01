@@ -112,8 +112,9 @@ pub fn rocket(server_state: ServerState, config: Option<Config>) -> rocket::Rock
         .mount("/api/0/query", routes![
                query::query
         ])
-        .mount("/api/0/import/", routes![
-               import::bucket_import
+        .mount("/api/0/import", routes![
+               import::bucket_import_json,
+               import::bucket_import_form
         ])
         .attach(cors::cors())
         .register(catchers![not_modified, not_found])

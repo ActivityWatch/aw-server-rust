@@ -9,6 +9,7 @@ extern crate aw_server;
 mod api_tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
+    use rocket::http::Header;
     use rocket::http::ContentType;
 
     use aw_server::datastore;
@@ -180,36 +181,11 @@ mod api_tests {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
-        // Import single bucket
+        // Import bucket
         let mut res = client.post("/api/0/import")
             .header(ContentType::JSON)
-            .body(r#"{
+            .body(r#"{"id1": {
                 "id": "id1",
-                "type": "type",
-                "client": "client",
-                "hostname": "hostname",
-                "events": [{
-                    "timestamp":"2000-01-01T00:00:00.000000+00:00",
-                    "duration":1.0,
-                    "data": {}
-                }]
-            }"#)
-            .dispatch();
-        debug!("{:?}", res.body_string());
-        assert_eq!(res.status(), rocket::http::Status::Ok);
-
-        // Get created bucket
-        res = client.get("/api/0/buckets/id1")
-            .header(ContentType::JSON)
-            .dispatch();
-        debug!("{:?}", res.body_string());
-        assert_eq!(res.status(), rocket::http::Status::Ok);
-
-        // Import multiple buckets
-        let mut res = client.post("/api/0/import")
-            .header(ContentType::JSON)
-            .body(r#"{"id2": {
-                "id": "id2",
                 "type": "type",
                 "client": "client",
                 "hostname": "hostname",
@@ -225,6 +201,40 @@ mod api_tests {
 
         // Get created bucket
         res = client.get("/api/0/buckets/id1")
+            .header(ContentType::JSON)
+            .dispatch();
+        debug!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Import bucket from multipart/form-data
+        // NOTE: DO NOT TOUCH START AND END VARS!
+        // They are byte-perfect and this was really cumbersome to fix, modifying them will most
+        // likely break the test
+        let start = b"--a\r\nContent-Disposition: form-data; name=\"test\"\r\n\r\n";
+        let content = r#"
+            {"id2": {
+                "id": "id2",
+                "type": "type",
+                "client": "client",
+                "hostname": "hostname",
+                "events": [{
+                    "timestamp":"2000-01-01T00:00:00Z",
+                    "duration":1.0,
+                    "data": {}
+                }]
+            }}
+            "#.as_bytes();
+        let end = b"--a--";
+        let sum = [&start[..], &content[..], &end[..]].concat();
+        let mut res = client.post("/api/0/import")
+            .header(Header::new("Content-Type", "multipart/form-data; boundary=a"))
+            .body(&sum[..])
+            .dispatch();
+        debug!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Get created bucket
+        let mut res = client.get("/api/0/buckets/id2")
             .header(ContentType::JSON)
             .dispatch();
         debug!("{:?}", res.body_string());

@@ -184,7 +184,8 @@ mod api_tests {
         // Import bucket
         let mut res = client.post("/api/0/import")
             .header(ContentType::JSON)
-            .body(r#"{"id1": {
+            .body(r#"{"buckets":
+            {"id1": {
                 "id": "id1",
                 "type": "type",
                 "client": "client",
@@ -194,7 +195,7 @@ mod api_tests {
                     "duration":1.0,
                     "data": {}
                 }]
-            }}"#)
+            }}}"#)
             .dispatch();
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::Ok);
@@ -211,7 +212,7 @@ mod api_tests {
         // They are byte-perfect and this was really cumbersome to fix, modifying them will most
         // likely break the test
         let start = b"--a\r\nContent-Disposition: form-data; name=\"test\"\r\n\r\n";
-        let content = r#"
+        let content = r#"{"buckets":
             {"id2": {
                 "id": "id2",
                 "type": "type",
@@ -222,7 +223,7 @@ mod api_tests {
                     "duration":1.0,
                     "data": {}
                 }]
-            }}
+            }}}
             "#.as_bytes();
         let end = b"--a--";
         let sum = [&start[..], &content[..], &end[..]].concat();

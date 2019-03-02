@@ -1,5 +1,6 @@
 use chrono::DateTime;
 use chrono::Utc;
+use std::collections::HashMap;
 
 use models::Event;
 
@@ -15,4 +16,9 @@ pub struct Bucket {
     pub hostname: String,
     pub created: Option<DateTime<Utc>>,
     pub events: Option<Vec<Event>>,
+}
+
+#[derive(Clone,Serialize,Deserialize)]
+pub struct BucketsExport {
+    pub buckets: HashMap<String, Bucket>,
 }

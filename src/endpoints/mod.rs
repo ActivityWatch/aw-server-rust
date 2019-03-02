@@ -24,6 +24,7 @@ mod bucket;
 mod query;
 mod import;
 mod cors;
+mod export;
 
 use datastore::Datastore;
 
@@ -115,6 +116,9 @@ pub fn rocket(server_state: ServerState, config: Option<Config>) -> rocket::Rock
         .mount("/api/0/import", routes![
                import::bucket_import_json,
                import::bucket_import_form
+        ])
+        .mount("/api/0/export", routes![
+               export::buckets_export
         ])
         .attach(cors::cors())
         .register(catchers![not_modified, not_found])

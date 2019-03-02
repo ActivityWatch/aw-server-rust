@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Cursor;
 
 use rocket_contrib::json::Json;
 
@@ -6,10 +7,13 @@ use chrono::DateTime;
 use chrono::Utc;
 
 use models::Bucket;
+use models::BucketsExport;
 use models::Event;
 
 use rocket::State;
 use rocket::response::status;
+use rocket::response::Response;
+use rocket::http::Header;
 use rocket::http::Status;
 
 use endpoints::ServerState;
@@ -160,6 +164,35 @@ pub fn bucket_event_count(bucket_id: String, state: State<ServerState>) -> Resul
             }
         }
     }
+}
+
+#[get("/<bucket_id>/export")]
+pub fn bucket_export(bucket_id: String, state: State<ServerState>) -> Result<Response, Status> {
+    let datastore = endpoints_get_lock!(state.datastore);
+    let mut export = BucketsExport {
+        buckets: HashMap::new()
+    };
+    let mut bucket = match datastore.get_bucket(&bucket_id) {
+        Ok(bucket) => bucket,
+        Err(err) => match err {
+            DatastoreError::NoSuchBucket => return Err(Status::NotFound),
+            e => {
+                warn!("Failed to fetch events: {:?}", e);
+                return Err(Status::InternalServerError);
+            }
+        }
+    };
+    bucket.events = Some(datastore.get_events(&bucket_id, None, None, None).expect("Failed to get events for bucket"));
+    export.buckets.insert(bucket_id.clone(), bucket);
+    let filename = format!("aw-bucket-export_{}.json", bucket_id);
+
+    let header_content = format!("attachment; filename={}", filename);
+    let response = Response::build()
+        .status(Status::Ok)
+        .header(Header::new("Content-Disposition", header_content))
+        .sized_body(Cursor::new(serde_json::to_string(&export).expect("Failed to serialize")))
+        .finalize();
+    return Ok(response);
 }
 
 #[delete("/<bucket_id>")]

@@ -202,31 +202,27 @@ mod api_tests {
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
-        // Get created bucket
-        res = client.get("/api/0/buckets/id1")
+        // Export single created bucket
+        let mut res = client.get("/api/0/buckets/id1/export")
+            .header(ContentType::JSON)
+            .dispatch();
+        debug!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let export : BucketsExport = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+
+        // Delete bucket so we can import it again
+        res = client.delete("/api/0/buckets/id1")
             .header(ContentType::JSON)
             .dispatch();
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
-        // Import bucket from multipart/form-data
+        // Import exported bucket again but with multipart/form-data
         // NOTE: DO NOT TOUCH START AND END VARS!
         // They are byte-perfect and this was really cumbersome to fix, modifying them will most
         // likely break the test
         let start = b"--a\r\nContent-Disposition: form-data; name=\"test\"\r\n\r\n";
-        let content = r#"{"buckets":
-            {"id2": {
-                "id": "id2",
-                "type": "type",
-                "client": "client",
-                "hostname": "hostname",
-                "events": [{
-                    "timestamp":"2000-01-01T00:00:00Z",
-                    "duration":1.0,
-                    "data": {}
-                }]
-            }}}
-            "#.as_bytes();
+        let content = serde_json::to_vec(&export).unwrap();
         let end = b"--a--";
         let sum = [&start[..], &content[..], &end[..]].concat();
         let mut res = client.post("/api/0/import")
@@ -237,7 +233,7 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Get created bucket
-        let mut res = client.get("/api/0/buckets/id2")
+        let mut res = client.get("/api/0/buckets/id1")
             .header(ContentType::JSON)
             .dispatch();
         println!("{:?}", res.body_string());
@@ -251,12 +247,8 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
         let export : BucketsExport = serde_json::from_str(&res.body_string().unwrap()).unwrap();
         let mut buckets = export.buckets;
-        assert_eq!(buckets.len(), 2);
-        let b = buckets.remove("id1").unwrap();
-        assert_eq!(b.events.unwrap().len(), 1);
-
         assert_eq!(buckets.len(), 1);
-        let b = buckets.remove("id2").unwrap();
+        let b = buckets.remove("id1").unwrap();
         assert_eq!(b.events.unwrap().len(), 1);
 
         assert_eq!(buckets.len(), 0);

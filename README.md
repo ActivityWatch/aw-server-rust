@@ -7,7 +7,6 @@ A reimplementation of aw-server in Rust
 
 Primary features missing:
 - Config
-- Export HTTP api for single buckets
 - Safe CORS (not allow all, fix dynamic CORS in rocket_cors upstream)
 
 Caveats:

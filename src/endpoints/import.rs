@@ -6,7 +6,7 @@ use rocket_contrib::json::Json;
 
 use multipart::server::Multipart;
 
-use std::io::{self, Read};
+use std::io::Read;
 use std::sync::Mutex;
 
 use models::BucketsExport;

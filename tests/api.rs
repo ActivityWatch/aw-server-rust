@@ -15,6 +15,8 @@ mod api_tests {
     use aw_server::datastore;
     use aw_server::endpoints;
 
+    use aw_server::models::BucketsExport;
+
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
             datastore: Mutex::new(datastore::Datastore::new_in_memory()),
@@ -177,7 +179,7 @@ mod api_tests {
     }
 
     #[test]
-    fn test_import() {
+    fn test_import_export() {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
@@ -238,8 +240,26 @@ mod api_tests {
         let mut res = client.get("/api/0/buckets/id2")
             .header(ContentType::JSON)
             .dispatch();
+        println!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Export all buckets
+        let mut res = client.get("/api/0/export")
+            .header(ContentType::JSON)
+            .dispatch();
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::Ok);
+        let export : BucketsExport = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        let mut buckets = export.buckets;
+        assert_eq!(buckets.len(), 2);
+        let b = buckets.remove("id1").unwrap();
+        assert_eq!(b.events.unwrap().len(), 1);
+
+        assert_eq!(buckets.len(), 1);
+        let b = buckets.remove("id2").unwrap();
+        assert_eq!(b.events.unwrap().len(), 1);
+
+        assert_eq!(buckets.len(), 0);
     }
 
     #[test]

@@ -8,46 +8,27 @@ use multipart::server::Multipart;
 
 use std::io::{self, Read};
 use std::sync::Mutex;
-use std::collections::HashMap;
 
-use models::Bucket;
+use models::BucketsExport;
 use datastore::Datastore;
 use endpoints::ServerState;
 
-#[derive(Clone,Serialize,Deserialize)]
-#[serde(untagged)]
-pub enum ImportFormat {
-    Single(Bucket),
-    Multiple(HashMap<String, Bucket>),
-}
-
-fn import(datastore_mutex: &Mutex<Datastore>, import: ImportFormat) -> Result<(), Status> {
+fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), Status> {
     let datastore = endpoints_get_lock!(datastore_mutex);
-    match import {
-        ImportFormat::Single(bucket) => match datastore.create_bucket(&bucket) {
+    for (_bucketname, bucket) in import.buckets {
+        match datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(e) => {
                 warn!("Failed to import bucket: {:?}", e);
                 return Err(Status::InternalServerError);
-            }
-        },
-        ImportFormat::Multiple(buckets) => {
-            for (_bucketname, bucket) in buckets {
-                match datastore.create_bucket(&bucket) {
-                    Ok(_) => (),
-                    Err(e) => {
-                        warn!("Failed to import bucket: {:?}", e);
-                        return Err(Status::InternalServerError);
-                    },
-                }
-            }
+            },
         }
     }
     Ok(())
 }
 
 #[post("/", data = "<json_data>", format = "application/json")]
-pub fn bucket_import_json(state: State<ServerState>, json_data: Json<ImportFormat>) -> Result<(), Status> {
+pub fn bucket_import_json(state: State<ServerState>, json_data: Json<BucketsExport>) -> Result<(), Status> {
     import(&state.datastore, json_data.into_inner())
 }
 
@@ -60,15 +41,9 @@ pub fn bucket_import_form(state: State<ServerState>, cont_type: &ContentType, da
                 return Status::BadRequest;
         )?;
 
-    let string = match process_multipart_packets(boundary, data) {
-        Ok(string) => string,
-        Err(err) => {
-            warn!("{}", err.to_string());
-            return Err(Status::InternalServerError);
-        }
-    };
+    let string = process_multipart_packets(boundary, data);
 
-    let import_data : ImportFormat = serde_json::from_str(&string)
+    let import_data : BucketsExport = serde_json::from_str(&string)
         .expect("Failed to deserialize import data as JSON to bucket format");
 
     import(&state.datastore, import_data)
@@ -78,7 +53,7 @@ pub fn bucket_import_form(state: State<ServerState>, cont_type: &ContentType, da
 // NOTE: this is far from a optimal way of parsing multipart packets as it doesn't check
 // headers and can be used for denial-of-service attacks as we don't have a size limit and
 // store everything in RAM
-fn process_multipart_packets(boundary: &str, data: Data) -> io::Result<String> {
+fn process_multipart_packets(boundary: &str, data: Data) -> String {
     let mut content = String::new();
     Multipart::with_body(data.open(), boundary).foreach_entry(| mut entry | {
         let mut string = String::new();
@@ -86,5 +61,5 @@ fn process_multipart_packets(boundary: &str, data: Data) -> io::Result<String> {
         content.push_str(&string);
     }).expect("Failed to retrieve multipart upload");
 
-    Ok(content)
+    content
 }

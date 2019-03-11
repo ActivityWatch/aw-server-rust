@@ -2,8 +2,8 @@
 
 set -e
 
-if [ -z "$NDK_HOME" ]; then
-    echo "Environment variable NDK_HOME not set, please set to location of Android NDK."
+if [ -z "$ANDROID_NDK_HOME" ]; then
+    echo "Environment variable ANDROID_NDK_HOME not set, please set to location of Android NDK."
     exit 1
 fi
 
@@ -18,7 +18,7 @@ for archtargetstr in \
 ; do
     arch=$(echo $archtargetstr | cut -d " " -f 1)
     target=$(echo $archtargetstr | cut -d " " -f 2)
-    NDK_ARCH_DIR="$NDK_HOME/$arch/bin"
+    NDK_ARCH_DIR="$ANDROID_NDK_HOME/$arch/bin"
     echo "Building for $arch..."
 
     if [ -d "$NDK_ARCH_DIR" ]; then

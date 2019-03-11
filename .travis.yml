@@ -21,10 +21,10 @@ before_install:
   - cargo install cargo-prune --force
   - if [ "$BUILD_ANDROID" == true ]; then
       ./install-ndk.sh;
-      export NDK_HOME=`pwd`/NDK;
-      ${NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm64 --install-dir "${NDK_HOME}/arm64";
-      ${NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm --install-dir "${NDK_HOME}/arm";
-      ${NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch x86 --install-dir "${NDK_HOME}/x86";
+      export ANDROID_NDK_HOME=`pwd`/NDK;
+      ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm64 --install-dir "${ANDROID_NDK_HOME}/arm64";
+      ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm --install-dir "${ANDROID_NDK_HOME}/arm";
+      ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch x86 --install-dir "${ANDROID_NDK_HOME}/x86";
       rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android;
     fi
 

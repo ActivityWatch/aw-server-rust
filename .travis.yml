@@ -32,12 +32,12 @@ install:
   - if [ "$BUILD_ANDROID" == true ]; then
         ./compile-android.sh;
     else
-        cargo build --bin aw_server $($RELEASE && '--release');
-        cargo build --lib $($RELEASE && '--release');
+        cargo build --bin aw_server $($RELEASE && echo '--release');
+        cargo build --lib $($RELEASE && echo '--release');
     fi
 
 script:
-  - cargo test --verbose $($RELEASE && '--release')
+  - cargo test --verbose $($RELEASE && echo '--release')
 
 
 before_cache:

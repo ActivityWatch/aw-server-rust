@@ -37,9 +37,9 @@ pub fn bucket_import_json(state: State<ServerState>, json_data: Json<BucketsExpo
 #[post("/", data = "<data>", format = "multipart/form-data")]
 pub fn bucket_import_form(state: State<ServerState>, cont_type: &ContentType, data: Data) -> Result<(), Status> {
     let (_, boundary) = cont_type.params().find(|&(k, _)| k == "boundary").ok_or_else( || {
-                warn!("`Content-Type: multipart/form-data` boundary param not provided");
-                return Status::BadRequest;
-        )?;
+        warn!("`Content-Type: multipart/form-data` boundary param not provided");
+        return Status::BadRequest;
+    })?;
 
     let string = process_multipart_packets(boundary, data);
 

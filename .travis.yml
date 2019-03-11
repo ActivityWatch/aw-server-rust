@@ -32,7 +32,7 @@ install:
   - if [ "$BUILD_ANDROID" == true ]; then
         ./compile-android.sh;
     else
-        cargo build --bin $($RELEASE && '--release');
+        cargo build --bin aw_server $($RELEASE && '--release');
         cargo build --lib $($RELEASE && '--release');
     fi
 

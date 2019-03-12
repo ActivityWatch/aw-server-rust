@@ -43,7 +43,7 @@ pub enum DatastoreError {
     NoSuchBucket,
     BucketAlreadyExists,
     RequestLockTimeout,
-    InternalError,
+    InternalError(String),
 }
 
 #[derive(Debug,Clone)]
@@ -88,8 +88,9 @@ fn _create_tables(conn: &Connection) {
             client TEXT NOT NULL,
             hostname TEXT NOT NULL,
             created TEXT NOT NULL
-        )", &[] as &[&ToSql]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id)", &[] as &[&ToSql]).unwrap();
+        )", &[] as &[&ToSql]).expect("Failed to create buckets tabke");
+    conn.execute("CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id)", &[] as &[&ToSql])
+        .expect("Failed to create buckets index");
 
     conn.execute("
         CREATE TABLE IF NOT EXISTS events (
@@ -99,10 +100,13 @@ fn _create_tables(conn: &Connection) {
             endtime INTEGER NOT NULL,
             data TEXT NOT NULL,
             FOREIGN KEY (bucketrow) REFERENCES buckets(id)
-        )", &[] as &[&ToSql]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS events_bucketrow_index ON events(bucketrow)", &[] as &[&ToSql]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[] as &[&ToSql]).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[] as &[&ToSql]).unwrap();
+        )", &[] as &[&ToSql]).expect("Failed to create events table");
+    conn.execute("CREATE INDEX IF NOT EXISTS events_bucketrow_index ON events(bucketrow)", &[] as &[&ToSql])
+        .expect("Failed to create events_bucketrow index");
+    conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[] as &[&ToSql])
+        .expect("Failed to create events_starttime index");
+    conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[] as &[&ToSql])
+        .expect("Failed to create events_endtime index");
 }
 
 struct DatastoreInstance {
@@ -121,8 +125,10 @@ impl DatastoreWorker {
 
     fn work_loop(&mut self, method: DatastoreMethod) -> () {
         let mut conn = match method {
-            DatastoreMethod::Memory() => Connection::open_in_memory().unwrap(),
-            DatastoreMethod::File(path) => Connection::open(path).unwrap()
+            DatastoreMethod::Memory() => Connection::open_in_memory()
+                .expect("Failed to create in-memory datastore"),
+            DatastoreMethod::File(path) => Connection::open(path)
+                .expect("Failed to create datastore")
         };
         _create_tables(&conn);
         let mut ds = DatastoreInstance {
@@ -131,10 +137,15 @@ impl DatastoreWorker {
             buckets_cache: HashMap::new()
         };
         let mut last_heartbeat = HashMap::new();
-        ds.get_stored_buckets(&conn);
+        match ds.get_stored_buckets(&conn) {
+            Ok(_) => (),
+            Err(err) => panic!("Failed to initially load buckets from datastore! {:?}", err)
+        }
         loop {
-            let mut transaction = conn.transaction_with_behavior(TransactionBehavior::Exclusive)
-                .expect("Unable to take exclusive lock on SQLite database!");
+            let mut transaction = match conn.transaction_with_behavior(TransactionBehavior::Exclusive) {
+                Ok(transaction) => transaction,
+                Err(err) => panic!("Unable to take exclusive lock on SQLite database! {}", err)
+            };
             transaction.set_drop_behavior(DropBehavior::Commit);
             loop {
                 let mut request = match self.responder.poll() {
@@ -208,7 +219,10 @@ impl DatastoreWorker {
                 if ds.commit || ds.uncommited_events > 100 { break };
             }
             debug!("Commiting DB! Force commit {}, {} uncommited events", ds.commit, ds.uncommited_events);
-            transaction.commit().unwrap();
+            match transaction.commit() {
+                Ok(_) => (),
+                Err(err) => panic!("Failed to commit datastore transaction! {}", err)
+            }
             ds.commit = false;
             ds.uncommited_events = 0;
             if self.quit { break };
@@ -218,19 +232,25 @@ impl DatastoreWorker {
 
 impl DatastoreInstance {
 
-    fn get_stored_buckets(&mut self, conn: &Connection) {
-        let mut stmt = conn.prepare("SELECT id, name, type, client, hostname, created FROM buckets").unwrap();
-        let buckets = stmt.query_map(&[] as &[&ToSql], |row| {
-            Bucket {
-                bid: row.get(0),
-                id: row.get(1),
-                _type: row.get(2),
-                client: row.get(3),
-                hostname: row.get(4),
-                created: row.get(5),
+    fn get_stored_buckets(&mut self, conn: &Connection) -> Result <(), DatastoreError> {
+        let mut stmt = match conn.prepare("SELECT id, name, type, client, hostname, created FROM buckets") {
+            Ok(stmt) => stmt,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare get_stored_buckets SQL statement: {}", err.to_string())))
+        };
+        let buckets = match stmt.query_map(&[] as &[&ToSql], |row| {
+            Ok(Bucket {
+                bid: row.get(0)?,
+                id: row.get(1)?,
+                _type: row.get(2)?,
+                client: row.get(3)?,
+                hostname: row.get(4)?,
+                created: row.get(5)?,
                 events: None,
-            }
-        }).unwrap();
+            })
+        }) {
+            Ok(buckets) => buckets,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to query get_stored_buckets SQL statement: {}", err)))
+        };
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
@@ -241,7 +261,7 @@ impl DatastoreInstance {
                 }
             }
         };
-        ()
+        Ok(())
     }
 
     fn create_bucket(&mut self, conn: &Connection, bucket: &Bucket) -> Result<(), DatastoreError> {
@@ -249,9 +269,12 @@ impl DatastoreInstance {
             Some(created) => created,
             None => Utc::now()
         };
-        let mut stmt = conn.prepare("
-            INSERT INTO buckets (name, type, client, hostname, created)
-            VALUES (?1, ?2, ?3, ?4, ?5)").unwrap();
+        let mut stmt = match conn.prepare("
+                INSERT INTO buckets (name, type, client, hostname, created)
+                VALUES (?1, ?2, ?3, ?4, ?5)") {
+            Ok(buckets) => buckets,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare create_bucket SQL statement: {}", err.to_string()))),
+        };
         let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &ToSql]);
 
         match res {
@@ -268,9 +291,9 @@ impl DatastoreInstance {
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
                     rusqlite::ErrorCode::ConstraintViolation => { return Err(DatastoreError::BucketAlreadyExists); },
-                    _ => { warn!("{}", err); return Err(DatastoreError::InternalError); }
+                    _ => return Err(DatastoreError::InternalError(format!("Failed to execute create_bucket SQL statement: {}", err)))
                 },
-                _ => { warn!("{}", err); return Err(DatastoreError::InternalError); }
+                _ => return Err(DatastoreError::InternalError(format!("Failed to execute create_bucket SQL statement: {}", err)))
             }
         };
         if let Some(ref events) = bucket.events {
@@ -284,7 +307,7 @@ impl DatastoreInstance {
         // Delete all events in bucket
         match conn.execute("DELETE FROM events WHERE bucketrow = ?1", &[&bucket.bid]) {
             Ok(_) => (),
-            Err(err) => { warn!("{}", err); return Err(DatastoreError::InternalError) }
+            Err(err) => return Err(DatastoreError::InternalError(err.to_string()))
         }
         // Delete bucket itself
         match conn.execute("DELETE FROM buckets WHERE id = ?1", &[&bucket.bid]) {
@@ -296,9 +319,9 @@ impl DatastoreInstance {
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
                     rusqlite::ErrorCode::ConstraintViolation => Err(DatastoreError::BucketAlreadyExists),
-                    _ => { warn!("{}", err); return Err(DatastoreError::InternalError) }
+                    _ => return Err(DatastoreError::InternalError(err.to_string()))
                 },
-                _ => { warn!("{}", err); return Err(DatastoreError::InternalError) }
+                _ => return Err(DatastoreError::InternalError(err.to_string()))
             }
         }
     }
@@ -319,19 +342,24 @@ impl DatastoreInstance {
     pub fn insert_events(&mut self, conn: &Connection, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
         let bucket = try!(self.get_bucket(&bucket_id));
 
-        let mut stmt = conn.prepare("
-            INSERT INTO events(bucketrow, starttime, endtime, data)
-            VALUES (?1, ?2, ?3, ?4)").unwrap();
+        let mut stmt = match conn.prepare("
+                INSERT INTO events(bucketrow, starttime, endtime, data)
+                VALUES (?1, ?2, ?3, ?4)") {
+            Ok(stmt) => stmt,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare insert_events SQL statement: {}", err)))
+        };
         for event in events {
             let starttime_nanos = event.timestamp.timestamp_nanos();
-            let duration_nanos = event.duration.num_nanoseconds().unwrap();
+            let duration_nanos = match event.duration.num_nanoseconds() {
+                Some(nanos) => nanos,
+                None => return Err(DatastoreError::InternalError("Failed to convert duration to nanoseconds".to_string()))
+            };
             let endtime_nanos = starttime_nanos + duration_nanos;
             let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]);
             match res {
                 Ok(_) => self.uncommited_events += 1,
-                Err(e) => {
-                    warn!("Failed to insert event: {:?}, {}", event, e);
-                    return Err(DatastoreError::InternalError);
+                Err(err) => {
+                    return Err(DatastoreError::InternalError(format!("Failed to insert event: {:?}, {}", event, err)));
                 }
             }
         }
@@ -341,17 +369,25 @@ impl DatastoreInstance {
     pub fn replace_last_event(&mut self, conn: &Connection, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
         let bucket = try!(self.get_bucket(&bucket_id));
 
-        let mut stmt = conn.prepare("
-            UPDATE events
-            SET starttime = ?2, endtime = ?3, data = ?4
-            WHERE bucketrow = ?1
-                AND endtime = (SELECT max(endtime) FROM events WHERE bucketrow = ?1)
-        ").unwrap();
+        let mut stmt = match conn.prepare("
+                UPDATE events
+                SET starttime = ?2, endtime = ?3, data = ?4
+                WHERE bucketrow = ?1
+                    AND endtime = (SELECT max(endtime) FROM events WHERE bucketrow = ?1)
+            ") {
+            Ok(stmt) => stmt,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare replace_last_event SQL statement: {}", err)))
+        };
         let starttime_nanos = event.timestamp.timestamp_nanos();
-        let duration_nanos = event.duration.num_nanoseconds().unwrap();
+        let duration_nanos = match event.duration.num_nanoseconds() {
+            Some(nanos) => nanos,
+            None => return Err(DatastoreError::InternalError("Failed to convert duration to nanoseconds".to_string()))
+        };
         let endtime_nanos = starttime_nanos + duration_nanos;
-        // TODO: handle error
-        stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]).unwrap();
+        match stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]) {
+            Ok(_) => (),
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to execute replace_last_event SQL statement: {}", err)))
+        }
         self.uncommited_events += 1;
         Ok(())
     }
@@ -414,21 +450,24 @@ impl DatastoreInstance {
             None => -1
         };
 
-        let mut stmt = conn.prepare("
-            SELECT id, starttime, endtime, data
-            FROM events
-            WHERE bucketrow = ?1
-                AND endtime >= ?2
-                AND starttime <= ?3
-            ORDER BY starttime DESC
-            LIMIT ?4
-        ;").unwrap();
+        let mut stmt = match conn.prepare("
+                SELECT id, starttime, endtime, data
+                FROM events
+                WHERE bucketrow = ?1
+                    AND endtime >= ?2
+                    AND starttime <= ?3
+                ORDER BY starttime DESC
+                LIMIT ?4
+            ;") {
+            Ok(stmt) => stmt,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare get_events SQL statement: {}", err)))
+        };
 
-        let rows = stmt.query_map(&[&bucket.bid.unwrap(), &starttime_filter_ns, &endtime_filter_ns, &limit], |row| {
-            let id = row.get(0);
-            let mut starttime_ns : i64 = row.get(1);
-            let mut endtime_ns : i64 = row.get(2);
-            let data = row.get(3);
+        let rows = match stmt.query_map(&[&bucket.bid.unwrap(), &starttime_filter_ns, &endtime_filter_ns, &limit], |row| {
+            let id = row.get(0)?;
+            let mut starttime_ns : i64 = row.get(1)?;
+            let mut endtime_ns : i64 = row.get(2)?;
+            let data = row.get(3)?;
 
             if starttime_ns < starttime_filter_ns { starttime_ns = starttime_filter_ns }
             if endtime_ns > endtime_filter_ns { endtime_ns = endtime_filter_ns }
@@ -437,16 +476,22 @@ impl DatastoreInstance {
             let time_seconds : i64 = (starttime_ns/1000000000) as i64;
             let time_subnanos : u32 = (starttime_ns%1000000000) as u32;
 
-            return Event {
+            return Ok(Event {
                 id: Some(id),
                 timestamp: DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time_seconds, time_subnanos), Utc),
                 duration: Duration::nanoseconds(duration_ns),
                 data: data,
-            }
-        }).unwrap();
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to map get_events SQL statement: {}", err)))
+        };
         for row in rows {
-            list.push(row.unwrap());
-        }
+            match row {
+                Ok(event) => list.push(event),
+                Err(err) => warn!("Corrupt event in bucket {}: {}", bucket_id, err)
+            };
+        };
         Ok(list)
     }
 
@@ -466,17 +511,22 @@ impl DatastoreInstance {
             return Ok(0);
         }
 
-        let mut stmt = conn.prepare("
+        let mut stmt = match conn.prepare("
             SELECT count(*) FROM events
             WHERE bucketrow = ?1
-                AND (starttime >= ?2 OR endtime <= ?3)"
-        ).unwrap();
+                AND (starttime >= ?2 OR endtime <= ?3)") {
+            Ok(stmt) => stmt,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare get_event_count SQL statement: {}", err)))
+        };
 
-        let ret = stmt.query_row(&[&bucket.bid.unwrap(), &starttime_filter_ns, &endtime_filter_ns],
+        let count = match stmt.query_row(&[&bucket.bid.unwrap(), &starttime_filter_ns, &endtime_filter_ns],
             |row| row.get(0)
-        ).unwrap();
+        ) {
+            Ok(count) => count,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to query get_event_count SQL statement: {}", err)))
+        };
 
-        return Ok(ret);
+        return Ok(count);
     }
 }
 

@@ -317,7 +317,7 @@ impl DatastoreInstance {
 
 
     pub fn insert_events(&mut self, conn: &Connection, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
-        let bucket = r#try!(self.get_bucket(&bucket_id));
+        let bucket = self.get_bucket(&bucket_id)?;
 
         let mut stmt = conn.prepare("
             INSERT INTO events(bucketrow, starttime, endtime, data)
@@ -339,7 +339,7 @@ impl DatastoreInstance {
     }
 
     pub fn replace_last_event(&mut self, conn: &Connection, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
-        let bucket = r#try!(self.get_bucket(&bucket_id));
+        let bucket = self.get_bucket(&bucket_id)?;
 
         let mut stmt = conn.prepare("
             UPDATE events
@@ -357,7 +357,7 @@ impl DatastoreInstance {
     }
 
     pub fn heartbeat(&mut self, conn: &Connection, bucket_id: &str, heartbeat: Event, pulsetime: f64, last_heartbeat: &mut HashMap<String, Option<Event>>) -> Result<(), DatastoreError> {
-        r#try!(self.get_bucket(&bucket_id));
+        self.get_bucket(&bucket_id)?;
         if !last_heartbeat.contains_key(bucket_id) {
             last_heartbeat.insert(bucket_id.to_string(), None);
         }
@@ -393,7 +393,7 @@ impl DatastoreInstance {
     }
 
     pub fn get_events(&mut self, conn: &Connection, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
-        let bucket = r#try!(self.get_bucket(&bucket_id));
+        let bucket = self.get_bucket(&bucket_id)?;
 
         let mut list = Vec::new();
 
@@ -451,7 +451,7 @@ impl DatastoreInstance {
     }
 
     pub fn get_event_count(&self, conn: &Connection, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, DatastoreError> {
-        let bucket = r#try!(self.get_bucket(&bucket_id));
+        let bucket = self.get_bucket(&bucket_id)?;
 
         let starttime_filter_ns = match starttime_opt {
             Some(dt) => dt.timestamp_nanos() as i64,

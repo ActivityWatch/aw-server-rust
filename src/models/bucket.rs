@@ -2,7 +2,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use std::collections::HashMap;
 
-use models::Event;
+use crate::models::Event;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Bucket {

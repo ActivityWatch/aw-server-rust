@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use models::Event;
+use crate::models::Event;
 use serde_json::value::Value;
 
 // TODO: Compare with aw-cores version to make sure it works correctly

@@ -26,7 +26,7 @@ mod import;
 mod cors;
 mod export;
 
-use datastore::Datastore;
+use crate::datastore::Datastore;
 
 pub struct ServerState {
     pub datastore: Mutex<Datastore>,
@@ -95,7 +95,7 @@ fn not_found() -> JsonValue {
     })
 }
 
-pub fn rocket(server_state: ServerState, config: Config) -> rocket::Rocket {
+pub fn build_rocket(server_state: ServerState, config: Config) -> rocket::Rocket {
     info!("Starting aw-server-rust at {}:{}", config.address, config.port);
     rocket::custom(config)
         .mount("/", routes![

@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use rocket::config::{Config, Environment, Limits};
 
-use dirs;
+use crate::dirs;
 
 #[derive(Serialize,Deserialize)]
 pub struct AWConfig {

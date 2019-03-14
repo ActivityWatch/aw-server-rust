@@ -1,6 +1,6 @@
-use query::DataType;
-use query::QueryError;
-use datastore::Datastore;
+use crate::query::DataType;
+use crate::query::QueryError;
+use crate::datastore::Datastore;
 use std::collections::HashMap;
 
 pub type QueryFn = fn(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError>;
@@ -21,10 +21,10 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
 }
 
 mod qfunctions {
-    use query::DataType;
-    use query::QueryError;
-    use datastore::Datastore;
-    use transform;
+    use crate::query::DataType;
+    use crate::query::QueryError;
+    use crate::datastore::Datastore;
+    use crate::transform;
     use super::validate;
 
     use std::collections::HashMap;
@@ -196,9 +196,9 @@ mod qfunctions {
 }
 
 mod validate {
-    use query::{QueryError, DataType};
-    use models::Event;
-    use models::TimeInterval;
+    use crate::query::{QueryError, DataType};
+    use crate::models::Event;
+    use crate::models::TimeInterval;
     use std::collections::HashMap;
 
     pub fn args_length(args: &Vec<DataType>, len: usize) -> Result<(), QueryError> {

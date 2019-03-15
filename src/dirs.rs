@@ -1,5 +1,7 @@
-use std::fs;
 use std::path::PathBuf;
+
+#[cfg(not(target_os="android"))]
+use std::fs;
 
 #[cfg(not(target_os="android"))]
 use appdirs;

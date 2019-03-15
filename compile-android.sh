@@ -3,6 +3,7 @@
 set -e
 
 if [ -z "$ANDROID_NDK_HOME" ]; then
+    # NOTE: I had some issues with this and cargo that magically resolved themselves when I made the path absolute.
     echo "Environment variable ANDROID_NDK_HOME not set, please set to location of Android NDK."
     exit 1
 fi
@@ -22,8 +23,8 @@ for archtargetstr in \
     echo "Building for $arch..."
 
     if [ -d "$NDK_ARCH_DIR" ]; then
-        env PATH="$NDK_ARCH_DIR:$ORIG_PATH" \
-            cargo build --target $target --lib $($RELEASE && echo '--release')
+        export PATH="$NDK_ARCH_DIR:$ORIG_PATH"
+        cargo build --target $target --lib $($RELEASE && echo '--release')
     else
         echo "Couldn't find directory for target $arch"
     fi

@@ -4,10 +4,11 @@
 use std::os::raw::{c_char};
 use std::ffi::{CString, CStr};
 use std::sync::Mutex;
-use dirs;
+
 
 mod logcat;
-use android::logcat::{redirect_stdout_to_logcat};
+use crate::dirs;
+use crate::android::logcat::{redirect_stdout_to_logcat};
 
 #[no_mangle]
 pub extern fn rust_greeting(to: *const c_char) -> *mut c_char {
@@ -29,8 +30,8 @@ pub mod android {
     use self::jni::JNIEnv;
     use self::jni::objects::{JClass, JString};
     use self::jni::sys::{jstring, jdouble};
-    use datastore::Datastore;
-    use models::{Event, Bucket};
+    use crate::datastore::Datastore;
+    use crate::models::{Event, Bucket};
 
     static mut DATASTORE: Option<Datastore> = None;
 
@@ -74,8 +75,9 @@ pub mod android {
     #[no_mangle]
     pub unsafe extern fn Java_net_activitywatch_android_RustInterface_startServer(env: JNIEnv, _: JClass, java_asset_path: JString) {
         use std::path::{PathBuf};
-        use endpoints;
         use rocket::config::{Config, Environment};
+
+        use crate::endpoints;
 
         println!("Building server state...");
 
@@ -93,7 +95,7 @@ pub mod android {
             .finalize().unwrap();
 
         println!("Starting server...");
-        endpoints::rocket(server_state, config).launch();
+        endpoints::build_rocket(server_state, config).launch();
         println!("Server exited");
     }
 

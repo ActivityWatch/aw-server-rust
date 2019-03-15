@@ -53,5 +53,5 @@ fn main() {
         asset_path: PathBuf::from("aw-webui").join("dist"),
     };
 
-    endpoints::rocket(server_state, config.to_rocket_config()).launch();
+    endpoints::build_rocket(server_state, config.to_rocket_config()).launch();
 }

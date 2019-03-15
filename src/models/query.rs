@@ -1,4 +1,4 @@
-use models::TimeInterval;
+use crate::models::TimeInterval;
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Query {

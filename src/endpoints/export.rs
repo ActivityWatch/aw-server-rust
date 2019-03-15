@@ -6,8 +6,8 @@ use rocket::response::Response;
 use rocket::http::Status;
 use rocket::State;
 
-use endpoints::ServerState;
-use models::BucketsExport;
+use crate::endpoints::ServerState;
+use crate::models::BucketsExport;
 
 #[get("/")]
 pub fn buckets_export(state: State<ServerState>) -> Result<Response, Status> {

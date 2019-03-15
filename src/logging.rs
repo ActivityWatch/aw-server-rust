@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use fern::colors::{Color, ColoredLevelConfig};
 
-use dirs;
+use crate::dirs;
 
 pub fn setup_logger() -> Result<(), fern::InitError> {
     let mut logfile_path: PathBuf = dirs::get_cache_dir().expect("Unable to get cache dir to store logs in");

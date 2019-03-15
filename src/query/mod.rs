@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use datastore::Datastore;
-use models::Event;
-use models::TimeInterval;
+use crate::datastore::Datastore;
+use crate::models::Event;
+use crate::models::TimeInterval;
 use serde::Serializer;
 
 /* TODO: add line numbers to errors? */
@@ -206,7 +206,7 @@ mod lexer {
 }
 
 mod ast {
-    use query::lexer::Span;
+    use crate::query::lexer::Span;
 
     use std::collections::HashMap;
 
@@ -241,9 +241,9 @@ mod ast {
 }
 
 mod parser {
-    use query::ast::*;
-    use query::lexer::Token::*;
-    use query::lexer::*;
+    use crate::query::ast::*;
+    use crate::query::lexer::Token::*;
+    use crate::query::lexer::*;
     use plex::parser;
 
     use std::collections::HashMap;
@@ -420,13 +420,13 @@ mod parser {
 mod functions;
 
 mod interpret {
-    use query;
-    use query::ast::*;
-    use query::DataType;
-    use query::QueryError;
+    use crate::query;
+    use crate::query::ast::*;
+    use crate::query::DataType;
+    use crate::query::QueryError;
     use std::collections::HashMap;
-    use datastore::Datastore;
-    use models::TimeInterval;
+    use crate::datastore::Datastore;
+    use crate::models::TimeInterval;
 
     fn init_env<'a>(ti: &TimeInterval) -> HashMap<&'a str, DataType> {
         let mut env = HashMap::new();
@@ -454,7 +454,7 @@ mod interpret {
     }
 
     fn interpret_expr<'a>(env: &mut HashMap<&'a str, DataType>, ds: &Datastore, expr: &'a Expr) -> Result<DataType, QueryError> {
-        use query::ast::Expr_::*;
+        use crate::query::ast::Expr_::*;
         match expr.node {
             Add(ref a, ref b) => {
                 let a_res = interpret_expr(env, ds, a)?;

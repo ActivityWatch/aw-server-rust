@@ -3,10 +3,10 @@ use rocket::http::Status;
 use rocket::response::status;
 use rocket_contrib::json::{Json, JsonValue};
 
-use query;
-use query::QueryError;
-use models::Query;
-use endpoints::ServerState;
+use crate::query;
+use crate::query::QueryError;
+use crate::models::Query;
+use crate::endpoints::ServerState;
 
 #[derive(Serialize)]
 struct QueryErrorJson {

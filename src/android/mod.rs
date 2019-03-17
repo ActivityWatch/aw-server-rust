@@ -75,7 +75,7 @@ pub mod android {
     #[no_mangle]
     pub unsafe extern fn Java_net_activitywatch_android_RustInterface_startServer(env: JNIEnv, _: JClass, java_asset_path: JString) {
         use std::path::{PathBuf};
-        use rocket::config::{Config, Environment};
+        use crate::config::AWConfig;
 
         use crate::endpoints;
 
@@ -89,14 +89,11 @@ pub mod android {
             asset_path: PathBuf::from(asset_path),
         };
 
-        let config = Config::build(Environment::Production)
-            .address("127.0.0.1")
-            .port(5600)
-            .finalize().unwrap();
-
-        println!("Starting server...");
-        endpoints::build_rocket(server_state, config).launch();
-        println!("Server exited");
+        let mut config = AWConfig::default();
+        config.port = 5600;
+        info!("Starting server...");
+        endpoints::build_rocket(server_state, &config).launch();
+        info!("Server exited");
     }
 
     static mut INITIALIZED: bool = false;

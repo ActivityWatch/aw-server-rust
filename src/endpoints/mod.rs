@@ -2,10 +2,11 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use rocket;
-use rocket::config::{Config};
 use rocket::response::{NamedFile};
 use rocket::State;
 use rocket_contrib::json::JsonValue;
+
+use crate::config::AWConfig;
 
 #[macro_export]
 macro_rules! endpoints_get_lock {
@@ -95,9 +96,9 @@ fn not_found() -> JsonValue {
     })
 }
 
-pub fn build_rocket(server_state: ServerState, config: Config) -> rocket::Rocket {
+pub fn build_rocket(server_state: ServerState, config: &AWConfig) -> rocket::Rocket {
     info!("Starting aw-server-rust at {}:{}", config.address, config.port);
-    rocket::custom(config)
+    rocket::custom(config.to_rocket_config())
         .mount("/", routes![
                root_index, root_favicon, root_static, root_css, root_css_map,
         ])
@@ -117,7 +118,7 @@ pub fn build_rocket(server_state: ServerState, config: Config) -> rocket::Rocket
         .mount("/api/0/export", routes![
                export::buckets_export
         ])
-        .attach(cors::cors())
+        .attach(cors::cors(&config))
         .register(catchers![not_modified, not_found])
         .manage(server_state)
 }

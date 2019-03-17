@@ -7,10 +7,12 @@ use crate::dirs;
 #[derive(Serialize,Deserialize)]
 pub struct AWConfig {
     #[serde(default = "default_address")]
-    address: String,
+    pub address: String,
     #[serde(default = "default_port")]
-    port: u16,
-    // TODO: add CORS origins once that is properly supported
+    pub port: u16,
+    #[serde(skip, default = "is_testing")]
+    pub testing: bool, // This is not written to the config file (serde(skip))
+    // TODO: add CORS origins
 }
 
 impl Default for AWConfig {
@@ -18,6 +20,7 @@ impl Default for AWConfig {
         AWConfig {
             address: default_address(),
             port: default_port(),
+            testing: is_testing(),
         }
     }
 }
@@ -49,13 +52,20 @@ fn default_port() -> u16 {
     }
 }
 
+fn is_testing() -> bool {
+    match Environment::active().expect("Failed to get current environment") {
+        Environment::Production => false,
+        Environment::Development => true,
+        Environment::Staging => panic!("Staging environment not supported"),
+    }
+}
+
 pub fn get_config() -> AWConfig {
     let mut config_path = dirs::get_config_dir().unwrap();
-    match Environment::active().expect("Failed to get current environment") {
-        Environment::Production => config_path.push("config.toml"),
-        Environment::Development => config_path.push("config-testing.toml"),
-        Environment::Staging => panic!("Staging environment not supported"),
-    };
+    match is_testing() {
+        false => config_path.push("config.toml"),
+        true => config_path.push("config-testing.toml")
+    }
 
     /* If there is no config file, create a new config file with default values but every value is
      * commented out by default in case we would change a default value at some point in the future */

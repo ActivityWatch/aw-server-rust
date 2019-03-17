@@ -141,10 +141,10 @@ mod query_tests {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("a=\"test\";");
+        let code = String::from("a=\"test \\\" with escaped quote\";");
         let ret = query::query(&code, &interval, &ds).unwrap();
         match ret {
-            query::DataType::String(s) => assert_eq!(s, "test"),
+            query::DataType::String(s) => assert_eq!(s, "test \" with escaped quote"),
             _ => panic!("Wrong datatype")
         }
     }

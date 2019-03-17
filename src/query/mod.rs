@@ -125,8 +125,8 @@ mod lexer {
 
         r#"return"# => (Token::Return, text),
 
-        r#"\"[^\"]*\""# => (
-            Token::String(text.to_owned()[1..text.len()-1].to_string()),
+        r#"\"([^\"]|(\\\"))*\""# => (
+            Token::String(text.to_owned()[1..text.len()-1].replace("\\\"", "\"").to_string()),
             text
         ),
         r#"[0-9]+[\.]?[0-9]*"# => {

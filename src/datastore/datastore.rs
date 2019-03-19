@@ -78,8 +78,18 @@ struct DatastoreWorker {
     quit: bool
 }
 
+/*
+ * ### Database version changelog ###
+ * 0: Uninitialized database
+ * 1: Initialized database
+ * 2: Added 'data' field to 'buckets' table
+ */
 fn _create_tables(conn: &Connection) {
-    /* Set up bucket table and index */
+    /* get DB version */
+    let version : i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))
+.unwrap();
+
+    /* Set up bucket table v1 */
     conn.execute("
         CREATE TABLE IF NOT EXISTS buckets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,10 +98,18 @@ fn _create_tables(conn: &Connection) {
             client TEXT NOT NULL,
             hostname TEXT NOT NULL,
             created TEXT NOT NULL
-        )", &[] as &[&ToSql]).expect("Failed to create buckets tabke");
+        )", &[] as &[&ToSql]).expect("Failed to create buckets table");
+    /* Set up index for bucket table */
     conn.execute("CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id)", &[] as &[&ToSql])
         .expect("Failed to create buckets index");
+    /* Upgrade bucket table to v2 */
+    if version < 2 {
+        info!("Upgrading database to v2, adding data field to buckets");
+        conn.execute("ALTER TABLE buckets ADD COLUMN data TEXT default '{}';", &[] as &[&ToSql])
+            .expect("Failed to upgrade database when adding data field to buckets");
+    }
 
+    /* Set up events table v1 */
     conn.execute("
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,12 +119,16 @@ fn _create_tables(conn: &Connection) {
             data TEXT NOT NULL,
             FOREIGN KEY (bucketrow) REFERENCES buckets(id)
         )", &[] as &[&ToSql]).expect("Failed to create events table");
+    /* Set up index for events table */
     conn.execute("CREATE INDEX IF NOT EXISTS events_bucketrow_index ON events(bucketrow)", &[] as &[&ToSql])
         .expect("Failed to create events_bucketrow index");
     conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[] as &[&ToSql])
         .expect("Failed to create events_starttime index");
     conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[] as &[&ToSql])
         .expect("Failed to create events_endtime index");
+
+    /* Update database version to current version */
+    conn.pragma_update(None, "user_version", &2).expect("Failed to update database version!");
 }
 
 struct DatastoreInstance {
@@ -233,11 +255,12 @@ impl DatastoreWorker {
 impl DatastoreInstance {
 
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result <(), DatastoreError> {
-        let mut stmt = match conn.prepare("SELECT id, name, type, client, hostname, created FROM buckets") {
+        let mut stmt = match conn.prepare("SELECT id, name, type, client, hostname, created, data FROM buckets") {
             Ok(stmt) => stmt,
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare get_stored_buckets SQL statement: {}", err.to_string())))
         };
         let buckets = match stmt.query_map(&[] as &[&ToSql], |row| {
+            let data_str : String = row.get(6)?;
             Ok(Bucket {
                 bid: row.get(0)?,
                 id: row.get(1)?,
@@ -245,6 +268,7 @@ impl DatastoreInstance {
                 client: row.get(3)?,
                 hostname: row.get(4)?,
                 created: row.get(5)?,
+                data: serde_json::from_str(&data_str).unwrap(),
                 events: None,
             })
         }) {
@@ -270,12 +294,12 @@ impl DatastoreInstance {
             None => Utc::now()
         };
         let mut stmt = match conn.prepare("
-                INSERT INTO buckets (name, type, client, hostname, created)
-                VALUES (?1, ?2, ?3, ?4, ?5)") {
+                INSERT INTO buckets (name, type, client, hostname, created, data)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)") {
             Ok(buckets) => buckets,
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare create_bucket SQL statement: {}", err.to_string()))),
         };
-        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &ToSql]);
+        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &ToSql, &bucket.data as &ToSql]);
 
         match res {
             Ok(_) => {

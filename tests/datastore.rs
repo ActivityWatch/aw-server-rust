@@ -28,6 +28,7 @@ mod datastore_tests {
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
             created: Some(Utc::now()),
+            data: json!("{}"),
             events: None
         };
         ds.create_bucket(&bucket).unwrap();

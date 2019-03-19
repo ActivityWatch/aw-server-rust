@@ -27,6 +27,7 @@ mod models_tests {
             client: "client".to_string(),
             hostname: "hostname".to_string(),
             created: None,
+            data: json!("{}"),
             events: None
         };
         debug!("bucket: {:?}", b);

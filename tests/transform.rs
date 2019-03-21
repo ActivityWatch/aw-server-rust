@@ -33,7 +33,9 @@ mod transform_tests {
 
         // Merge result
         let res_merge = transform::heartbeat(&event1, &heartbeat1, 2.0).unwrap();
-        assert!(res_merge.duration == Duration::seconds(3));
+        assert_eq!(res_merge.timestamp, now);
+        assert_eq!(res_merge.duration, Duration::seconds(3));
+        assert_eq!(res_merge.data, event1.data);
 
         // No merge result
         let res_no_merge = transform::heartbeat(&event1, &heartbeat1, 0.0);

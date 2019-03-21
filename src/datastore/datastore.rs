@@ -14,6 +14,7 @@ use rusqlite::TransactionBehavior;
 use mpsc_requests;
 
 use crate::models::Bucket;
+use crate::models::BucketMetadata;
 use crate::models::Event;
 use crate::transform;
 
@@ -53,7 +54,6 @@ pub enum Commands {
     GetBucket(String),
     GetBuckets(),
     InsertEvents(String, Vec<Event>),
-    ReplaceLastEvent(String, Event),
     Heartbeat(String, Event, f64),
     GetEvents(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<u64>),
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
@@ -209,15 +209,6 @@ impl DatastoreWorker {
                             Err(e) => Err(e)
                         }
                     },
-                    Commands::ReplaceLastEvent(bucketname, event) => {
-                        match ds.replace_last_event(&transaction, bucketname, event) {
-                            Ok(_) => {
-                                last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
-                                Ok(Responses::Empty())
-                            },
-                            Err(e) => Err(e)
-                        }
-                    },
                     Commands::Heartbeat(bucketname, event, pulsetime) => {
                         match ds.heartbeat(&transaction, bucketname, event.clone(), *pulsetime, &mut last_heartbeat) {
                             Ok(_) => Ok(Responses::Empty()),
@@ -249,18 +240,46 @@ impl DatastoreWorker {
             ds.uncommited_events = 0;
             if self.quit { break };
         }
+        info!("DB Worker thread finished");
     }
 }
 
 impl DatastoreInstance {
-
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result <(), DatastoreError> {
-        let mut stmt = match conn.prepare("SELECT id, name, type, client, hostname, created, data FROM buckets") {
+        let mut stmt = match conn.prepare("
+            SELECT  buckets.id, buckets.name, buckets.type, buckets.client,
+                    buckets.hostname, buckets.created, buckets.data,
+                    min(events.starttime), max(events.endtime)
+            FROM buckets
+            LEFT OUTER JOIN events ON buckets.id = events.bucketrow
+            GROUP BY buckets.id
+            ;") {
             Ok(stmt) => stmt,
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare get_stored_buckets SQL statement: {}", err.to_string())))
         };
         let buckets = match stmt.query_map(&[] as &[&ToSql], |row| {
             let data_str : String = row.get(6)?;
+
+            let opt_start_ns : Option<i64> = row.get(7)?;
+            let opt_start = match opt_start_ns {
+                Some(starttime_ns) => {
+                    let seconds : i64 = (starttime_ns/1000000000) as i64;
+                    let subnanos : u32 = (starttime_ns%1000000000) as u32;
+                    Some(DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(seconds, subnanos), Utc))
+                },
+                None => None
+            };
+
+            let opt_end_ns : Option<i64> = row.get(8)?;
+            let opt_end = match opt_end_ns {
+                Some(endtime_ns) => {
+                    let seconds : i64 = (endtime_ns/1000000000) as i64;
+                    let subnanos : u32 = (endtime_ns%1000000000) as u32;
+                    Some(DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(seconds, subnanos), Utc))
+                },
+                None => None
+            };
+
             Ok(Bucket {
                 bid: row.get(0)?,
                 id: row.get(1)?,
@@ -269,6 +288,10 @@ impl DatastoreInstance {
                 hostname: row.get(4)?,
                 created: row.get(5)?,
                 data: serde_json::from_str(&data_str).unwrap(),
+                metadata: BucketMetadata {
+                    start: opt_start,
+                    end: opt_end,
+                },
                 events: None,
             })
         }) {
@@ -364,7 +387,7 @@ impl DatastoreInstance {
 
 
     pub fn insert_events(&mut self, conn: &Connection, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
-        let bucket = self.get_bucket(&bucket_id)?;
+        let mut bucket = self.get_bucket(&bucket_id)?;
 
         let mut stmt = match conn.prepare("
                 INSERT INTO events(bucketrow, starttime, endtime, data)
@@ -381,17 +404,52 @@ impl DatastoreInstance {
             let endtime_nanos = starttime_nanos + duration_nanos;
             let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]);
             match res {
-                Ok(_) => self.uncommited_events += 1,
+                Ok(_) => self.update_endtime(&mut bucket, event),
                 Err(err) => {
                     return Err(DatastoreError::InternalError(format!("Failed to insert event: {:?}, {}", event, err)));
                 }
-            }
+            };
         }
         Ok(())
     }
 
+    fn update_endtime(&mut self, bucket: &mut Bucket, event: &Event) {
+        let mut update = false;
+        /* Potentially update start */
+        match bucket.metadata.start {
+            None => {
+                bucket.metadata.start = Some(event.timestamp.clone());
+                update = true;
+            },
+            Some(current_start) => {
+                if current_start > event.timestamp {
+                    bucket.metadata.start = Some(event.timestamp.clone());
+                    update = true;
+                }
+            }
+        }
+        /* Potentially update end */
+        let event_endtime = event.calculate_endtime();
+        match bucket.metadata.end {
+            None => {
+                bucket.metadata.end = Some(event_endtime);
+                update = true;
+            },
+            Some(current_end) => {
+                if current_end < event_endtime {
+                    bucket.metadata.end = Some(event_endtime);
+                    update = true;
+                }
+            }
+        }
+        /* Update buchets_cache if start or end has been updated */
+        if update {
+            self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
+        }
+    }
+
     pub fn replace_last_event(&mut self, conn: &Connection, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
-        let bucket = self.get_bucket(&bucket_id)?;
+        let mut bucket = self.get_bucket(&bucket_id)?;
 
         let mut stmt = match conn.prepare("
                 UPDATE events
@@ -409,9 +467,9 @@ impl DatastoreInstance {
         };
         let endtime_nanos = starttime_nanos + duration_nanos;
         match stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]) {
-            Ok(_) => (),
+            Ok(_) => self.update_endtime(&mut bucket, event),
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to execute replace_last_event SQL statement: {}", err)))
-        }
+        };
         self.uncommited_events += 1;
         Ok(())
     }
@@ -614,8 +672,8 @@ impl Datastore {
         }
     }
 
-    pub fn insert_events(&self, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
-        match self.requester.request(Commands::InsertEvents(bucket_id.to_string(), events.clone())) {
+    pub fn insert_events(&self, bucket_id: &str, events: &[Event]) -> Result<(), DatastoreError> {
+        match self.requester.request(Commands::InsertEvents(bucket_id.to_string(), events.to_vec())) {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
                 _ => panic!("Invalid response")
@@ -626,16 +684,6 @@ impl Datastore {
 
     pub fn heartbeat(&self, bucket_id: &str, heartbeat: Event, pulsetime: f64) -> Result<(), DatastoreError> {
         match self.requester.request(Commands::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime)) {
-            Ok(r) => match r {
-                Responses::Empty() => return Ok(()),
-                _ => panic!("Invalid response")
-            },
-            Err(e) => Err(e)
-        }
-    }
-
-    pub fn replace_last_event(&self, bucket_id: &str, event: &Event) -> Result<(), DatastoreError> {
-        match self.requester.request(Commands::ReplaceLastEvent(bucket_id.to_string(), event.clone())) {
             Ok(r) => match r {
                 Responses::Empty() => return Ok(()),
                 _ => panic!("Invalid response")

@@ -14,6 +14,7 @@ mod query_tests {
     use aw_server::query::DataType;
     use aw_server::datastore::Datastore;
     use aw_server::models::Bucket;
+    use aw_server::models::BucketMetadata;
     use aw_server::models::Event;
     use aw_server::models::TimeInterval;
 
@@ -35,6 +36,7 @@ mod query_tests {
             hostname: "testhost".to_string(),
             created: Some(chrono::Utc::now()),
             data: json!("{}"),
+            metadata: BucketMetadata::default(),
             events: None
         };
         ds.create_bucket(&bucket).unwrap();

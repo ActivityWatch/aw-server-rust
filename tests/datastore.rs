@@ -12,16 +12,11 @@ mod datastore_tests {
 
     use aw_server::datastore::Datastore;
     use aw_server::models::Bucket;
+    use aw_server::models::BucketMetadata;
     use aw_server::models::Event;
 
-    #[test]
-    fn test_datastore() {
-        // Setup datastore
-        let ds = Datastore::new_in_memory();
-        //let conn = ds.setup("/tmp/test.db".to_string());
-
-        // Create bucket
-        let bucket = Bucket {
+    fn test_bucket() -> Bucket {
+        Bucket {
             bid: None,
             id: "testid".to_string(),
             _type: "testtype".to_string(),
@@ -29,9 +24,22 @@ mod datastore_tests {
             hostname: "testhost".to_string(),
             created: Some(Utc::now()),
             data: json!("{}"),
+            metadata: BucketMetadata::default(),
             events: None
-        };
+        }
+    }
+
+    fn create_test_bucket(ds: &Datastore) -> Bucket {
+        let bucket = test_bucket();
         ds.create_bucket(&bucket).unwrap();
+        bucket
+    }
+
+    #[test]
+    fn test_bucket_create_delete() {
+        // Setup datastore
+        let ds = Datastore::new_in_memory();
+        let bucket = create_test_bucket(&ds);
 
         // Fetch bucket
         let bucket_fetched = ds.get_bucket(&bucket.id).unwrap();
@@ -40,10 +48,36 @@ mod datastore_tests {
         assert_eq!(bucket_fetched.client, bucket.client);
         assert_eq!(bucket_fetched.hostname, bucket.hostname);
         assert_eq!(bucket_fetched.created, bucket.created);
+        assert_eq!(bucket_fetched.metadata.end, None);
 
         // Fetch all buckets
         let fetched_buckets = ds.get_buckets().unwrap();
         assert_eq!(fetched_buckets.len(), 1);
+        assert!(fetched_buckets.contains_key(&bucket.id));
+        assert_eq!(fetched_buckets[&bucket.id].id, bucket.id);
+        assert_eq!(fetched_buckets[&bucket.id]._type, bucket._type);
+        assert_eq!(fetched_buckets[&bucket.id].client, bucket.client);
+        assert_eq!(fetched_buckets[&bucket.id].hostname, bucket.hostname);
+        assert_eq!(fetched_buckets[&bucket.id].created, bucket.created);
+        assert_eq!(fetched_buckets[&bucket.id].metadata.start, bucket.metadata.start);
+        assert_eq!(fetched_buckets[&bucket.id].metadata.end, bucket.metadata.end);
+
+        // Delete bucket
+        match ds.delete_bucket(&bucket.id) {
+            Ok(_) => info!("bucket successfully deleted"),
+            Err(e) => panic!(e)
+        }
+        match ds.get_bucket(&bucket.id) {
+            Ok(_) => panic!("Expected datastore to delete bucket but bucket seems to still be available"),
+            Err(_e) => ()
+        }
+    }
+
+    #[test]
+    fn test_events_get_filters() {
+        // Setup datastore
+        let ds = Datastore::new_in_memory();
+        let bucket = create_test_bucket(&ds);
 
         // Insert event
         let e1 = Event {
@@ -54,21 +88,20 @@ mod datastore_tests {
         };
         let mut e2 = e1.clone();
         e2.timestamp = e2.timestamp + Duration::nanoseconds(1);
-        let mut e_replace = e2.clone();
-        e_replace.data = json!({"key": "value2"});
-        e_replace.duration = Duration::seconds(2);
 
-        let mut event_list = Vec::new();
-        event_list.push(e1.clone());
-        event_list.push(e2.clone());
+        let event_list = [e1.clone(), e2.clone()];
 
         ds.insert_events(&bucket.id, &event_list).unwrap();
 
-        ds.replace_last_event(&bucket.id, &e_replace).unwrap();
+        // TODO: Move to a seperate test-case
+        // Validate correct start and end in bucket
+        let bucket_fetched = ds.get_bucket(&bucket.id).unwrap();
+        assert_eq!(bucket_fetched.metadata.start, Some(e1.timestamp));
+        assert_eq!(bucket_fetched.metadata.end, Some(e2.calculate_endtime()));
 
         // Get all events
         let fetched_events_all = ds.get_events(&bucket.id, None, None, None).unwrap();
-        let expected_fetched_events = vec![&e_replace, &e1];
+        let expected_fetched_events = vec![&e2, &e1];
         assert_eq!(fetched_events_all.len(), 2);
         for i in 0..fetched_events_all.len() {
             let expected = &expected_fetched_events[i];
@@ -81,16 +114,16 @@ mod datastore_tests {
         info!("Get events with limit filter");
         let fetched_events_limit = ds.get_events(&bucket.id, None, None, Some(1)).unwrap();
         assert_eq!(fetched_events_limit.len(), 1);
-        assert_eq!(fetched_events_limit[0].timestamp,e_replace.timestamp);
-        assert_eq!(fetched_events_limit[0].duration,e_replace.duration);
-        assert_eq!(fetched_events_limit[0].data,e_replace.data);
+        assert_eq!(fetched_events_limit[0].timestamp, e2.timestamp);
+        assert_eq!(fetched_events_limit[0].duration, e2.duration);
+        assert_eq!(fetched_events_limit[0].data, e2.data);
 
         info!("Get events with starttime filter");
         let fetched_events_start = ds.get_events(&bucket.id, Some(e2.timestamp.clone()), None, None).unwrap();
         assert_eq!(fetched_events_start.len(), 1);
-        assert_eq!(fetched_events_start[0].timestamp,e_replace.timestamp);
-        assert_eq!(fetched_events_start[0].duration,e_replace.duration);
-        assert_eq!(fetched_events_start[0].data,e_replace.data);
+        assert_eq!(fetched_events_start[0].timestamp, e2.timestamp);
+        assert_eq!(fetched_events_start[0].duration, e2.duration);
+        assert_eq!(fetched_events_start[0].data, e2.data);
 
         info!("Get events with endtime filter");
         let fetched_events_start = ds.get_events(&bucket.id, None, Some(e1.timestamp.clone()), None).unwrap();
@@ -102,15 +135,98 @@ mod datastore_tests {
         // Get eventcount
         let event_count = ds.get_event_count(&bucket.id, None, None).unwrap();
         assert_eq!(event_count, 2);
+    }
 
-        // Delete bucket
-        match ds.delete_bucket(&bucket.id) {
-            Ok(_) => info!("bucket successfully deleted"),
-            Err(e) => panic!(e)
+    #[test]
+    fn test_event_heartbeat() {
+        // Setup datastore
+        let ds = Datastore::new_in_memory();
+        let bucket = create_test_bucket(&ds);
+
+        // Insert event
+        let e1 = Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(0),
+            data: json!({"key": "value"})
+        };
+        let mut e2 = e1.clone();
+        e2.timestamp = e2.timestamp + Duration::seconds(1);
+
+        let mut e_diff_data = e2.clone();
+        e_diff_data.timestamp = e_diff_data.timestamp + Duration::seconds(1);
+        e_diff_data.data = json!({"key": "other value"});
+
+        // First event
+        ds.heartbeat(&bucket.id, e1.clone(), 10.0).unwrap();
+        let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(fetched_events.len(), 1);
+        assert_eq!(fetched_events[0].timestamp, e1.timestamp);
+        assert_eq!(fetched_events[0].duration, e1.duration);
+        assert_eq!(fetched_events[0].data, e1.data);
+
+        // Heartbeat match
+        ds.heartbeat(&bucket.id, e2.clone(), 10.0).unwrap();
+        let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(fetched_events.len(), 1);
+        assert_eq!(fetched_events[0].timestamp, e1.timestamp);
+        assert_eq!(fetched_events[0].duration, Duration::seconds(1));
+        assert_eq!(fetched_events[0].data, e1.data);
+
+        // Heartbeat diff
+        ds.heartbeat(&bucket.id, e_diff_data.clone(), 10.0).unwrap();
+        let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(fetched_events.len(), 2);
+        assert_eq!(fetched_events[0].timestamp, e_diff_data.timestamp);
+        assert_eq!(fetched_events[0].duration, e_diff_data.duration);
+        assert_eq!(fetched_events[0].data, e_diff_data.data);
+    }
+
+    #[test]
+    fn test_datastore_reload() {
+        // Create tmp datastore path
+        let mut db_path = aw_server::dirs::get_cache_dir().unwrap();
+        db_path.push("datastore-unittest.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+
+        if db_path.exists() {
+            std::fs::remove_file(db_path.clone())
+                .expect("Failed to remove datastore-unittest.db file");
         }
-        match ds.get_bucket(&bucket.id) {
-            Ok(_) => panic!("Expected datastore to delete bucket but bucket seems to still be available"),
-            Err(_e) => ()
+
+        let empty_bucket = test_bucket();
+        let mut populated_bucket = empty_bucket.clone();
+        populated_bucket.id = "testid2".to_string();
+        let e1 = Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(0),
+            data: json!({"key": "value"})
+        };
+        {
+            // Initialize database and create buckets
+            let ds = Datastore::new(db_path_str.clone());
+            ds.create_bucket(&empty_bucket).unwrap();
+            ds.create_bucket(&populated_bucket).unwrap();
+            // Insert event
+            ds.insert_events(&populated_bucket.id, &[e1.clone()]).unwrap();
+
+            // Check that all cached bucket data is correct
+            let buckets = ds.get_buckets().unwrap();
+            assert_eq!(buckets[&empty_bucket.id].metadata.start, None);
+            assert_eq!(buckets[&empty_bucket.id].metadata.end, None);
+            assert_eq!(buckets[&populated_bucket.id].metadata.start, Some(e1.calculate_endtime()));
+            assert_eq!(buckets[&populated_bucket.id].metadata.end, Some(e1.timestamp));
+        }
+        {   // Load database again
+            let ds = Datastore::new(db_path_str.clone());
+            // Check that all bucket data is correct after reload
+            let buckets = ds.get_buckets().unwrap();
+            assert_eq!(buckets.len(), 2);
+            assert_eq!(buckets[&empty_bucket.id].metadata.start, None);
+            assert_eq!(buckets[&empty_bucket.id].metadata.end, None);
+            assert_eq!(buckets[&populated_bucket.id].metadata.start, Some(e1.timestamp));
+            assert_eq!(buckets[&populated_bucket.id].metadata.end, Some(e1.calculate_endtime()));
         }
     }
 }

@@ -5,6 +5,8 @@ extern crate rocket;
 
 extern crate aw_server;
 
+// TODO: Validate return data on more places
+
 #[cfg(test)]
 mod api_tests {
     use std::path::PathBuf;
@@ -16,7 +18,7 @@ mod api_tests {
     use aw_server::datastore;
     use aw_server::endpoints;
 
-    use aw_server::models::BucketsExport;
+    use aw_server::models::{Bucket, BucketsExport};
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
@@ -86,6 +88,15 @@ mod api_tests {
             .dispatch();
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::Ok);
+        // Validate output
+        let bucket : Bucket = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        assert_eq!(bucket.id, "id");
+        assert_eq!(bucket._type, "type");
+        assert_eq!(bucket.client, "client");
+        assert_eq!(bucket.hostname, "hostname");
+        assert_eq!(bucket.events, None);
+        assert_eq!(bucket.metadata.start, None);
+        assert_eq!(bucket.metadata.end, None);
 
         // Get non-existing bucket
         res = client.get("/api/0/buckets/invalid_bucket")

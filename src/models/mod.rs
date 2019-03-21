@@ -5,6 +5,7 @@ mod timeinterval;
 mod query;
 
 pub use self::bucket::Bucket;
+pub use self::bucket::BucketMetadata;
 pub use self::bucket::BucketsExport;
 pub use self::event::Event;
 pub use self::timeinterval::TimeInterval;

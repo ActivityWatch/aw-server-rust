@@ -18,7 +18,25 @@ pub struct Bucket {
     pub created: Option<DateTime<Utc>>,
     #[serde(default)]
     pub data: Value,
+    #[serde(default, skip_deserializing)]
+    pub metadata: BucketMetadata,
     pub events: Option<Vec<Event>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BucketMetadata {
+    #[serde(default)]
+    pub start: Option<DateTime<Utc>>,
+    pub end: Option<DateTime<Utc>>,
+}
+
+impl Default for BucketMetadata {
+    fn default() -> BucketMetadata {
+        BucketMetadata {
+            start: None,
+            end: None,
+        }
+    }
 }
 
 #[derive(Clone,Serialize,Deserialize)]

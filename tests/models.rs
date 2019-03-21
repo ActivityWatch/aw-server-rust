@@ -15,6 +15,7 @@ mod models_tests {
     use chrono::Duration;
 
     use aw_server::models::Bucket;
+    use aw_server::models::BucketMetadata;
     use aw_server::models::Event;
     use aw_server::models::TimeInterval;
 
@@ -28,6 +29,7 @@ mod models_tests {
             hostname: "hostname".to_string(),
             created: None,
             data: json!("{}"),
+            metadata: BucketMetadata::default(),
             events: None
         };
         debug!("bucket: {:?}", b);

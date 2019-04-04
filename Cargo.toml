@@ -9,7 +9,7 @@ crate-type = ["lib", "cdylib"]
 path = "src/lib.rs"
 
 [[bin]]
-name = "aw_server"
+name = "aw-server-rust"
 path = "src/main.rs"
 
 [dependencies]

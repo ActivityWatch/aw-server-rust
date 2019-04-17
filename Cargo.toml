@@ -22,7 +22,6 @@ serde_json = "1.0"
 serde_derive = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.17", features = ["chrono", "serde_json", "bundled"]  }
-mpsc_requests = "0.2"
 plex = "0.2.3"
 appdirs = "0.2.0"
 lazy_static = "1.2"

@@ -29,6 +29,7 @@ lazy_static = "1.2"
 log = "0.4"
 fern = { version = "0.5", features = ["colored"] }
 toml = "0.5"
+crossbeam-channel = "0.3.8"
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.5", default-features = false }

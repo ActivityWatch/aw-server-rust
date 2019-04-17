@@ -135,7 +135,7 @@ pub mod android {
         };
         match openDatastore().create_bucket(&bucket_json) {
             Ok(()) => string_to_jstring(&env, "Bucket successfully created".to_string()),
-            Err(_) => create_error_object(&env, "Something went wrong when trying to create bucket".to_string())
+            Err(e) => create_error_object(&env, format!("Something went wrong when trying to create bucket: {:?}", e))
         }
     }
 
@@ -150,7 +150,7 @@ pub mod android {
         };
         match openDatastore().heartbeat(&bucket_id, event_json, pulsetime) {
             Ok(()) => string_to_jstring(&env, "Heartbeat successfully received".to_string()),
-            Err(_) => create_error_object(&env, "Something went wrong when trying to send heartbeat".to_string())
+            Err(e) => create_error_object(&env, format!("Something went wrong when trying to send heartbeat: {:?}", e))
         }
     }
 
@@ -159,7 +159,7 @@ pub mod android {
         let bucket_id = jstring_to_string(&env, java_bucket_id);
         match openDatastore().get_events(&bucket_id, None, None, None) {
             Ok(events) => string_to_jstring(&env, json!(events).to_string()),
-            Err(_) => create_error_object(&env, "Something went wrong when trying to send heartbeat".to_string())
+            Err(e) => create_error_object(&env, format!("Something went wrong when trying to get events: {:?}", e))
         }
     }
 }

@@ -13,6 +13,8 @@ extern crate serde_json;
 
 extern crate rusqlite;
 
+extern crate mpsc_requests;
+
 extern crate chrono;
 
 extern crate plex;

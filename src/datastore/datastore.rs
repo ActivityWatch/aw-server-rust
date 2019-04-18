@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use rusqlite::DropBehavior;
 use rusqlite::TransactionBehavior;
 
-use mpsc_requests;
+use crossbeam_requests;
 
 use crate::models::Bucket;
 use crate::models::BucketMetadata;
@@ -59,8 +59,8 @@ pub enum Commands {
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
 }
 
-type Requester = mpsc_requests::Requester<Commands, Result<Responses, DatastoreError>>;
-type Responder = mpsc_requests::Responder<Commands, Result<Responses, DatastoreError>>;
+type Requester = crossbeam_requests::Requester<Commands, Result<Responses, DatastoreError>>;
+type Responder = crossbeam_requests::Responder<Commands, Result<Responses, DatastoreError>>;
 
 #[derive(Clone)]
 pub struct Datastore {
@@ -138,7 +138,7 @@ struct DatastoreInstance {
 }
 
 impl DatastoreWorker {
-    pub fn new(responder: mpsc_requests::Responder<Commands, Result<Responses, DatastoreError>>) -> Self {
+    pub fn new(responder: crossbeam_requests::Responder<Commands, Result<Responses, DatastoreError>>) -> Self {
         DatastoreWorker {
             responder: responder,
             quit: false
@@ -625,7 +625,7 @@ impl Datastore {
     }
 
     fn _new_internal(method: DatastoreMethod) -> Self {
-        let (responder, requester) = mpsc_requests::channel::<Commands, Result<Responses, DatastoreError>>();
+        let (responder, requester) = crossbeam_requests::channel::<Commands, Result<Responses, DatastoreError>>();
         let _thread = thread::spawn(move || {
             let mut di = DatastoreWorker::new(responder);
             di.work_loop(method);

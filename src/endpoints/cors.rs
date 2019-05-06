@@ -14,6 +14,7 @@ pub fn cors(config: &AWConfig) -> rocket_cors::Cors {
     }
     let mut allowed_regex_origins = vec![
         "moz-extension://6b1794a0-5ae6-4443-aef9-7755717bb180".to_string(),
+        "moz-extension://02507908-8928-4ec3-86f5-2ae5dddf4c47".to_string(),  // The ID I got on Firefox for Android
         "chrome-extension://nglaklhklhcoonedhgnpgddginnjdadi".to_string(),
     ];
     if config.testing {

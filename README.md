@@ -6,10 +6,9 @@ aw-server-rust
 A reimplementation of aw-server in Rust
 
 Primary features missing:
-- Safe CORS (not allow all, fix dynamic CORS in rocket_cors upstream)
+- None?
 
 Caveats:
-- Some refactoring is needed
 - Lots of TODO and FIXME comments
 
 Bugs:
@@ -20,10 +19,22 @@ Features missing compared to aw-server python:
 
 ### How to compile
 
-cargo build --release
+Install rust nightly with rustup
+
+``` rustup default nightly ```
+
+Run cargo build to build
+
+``` cargo build --release ```
 
 ### How to run
 
-Install rust nightly and run
+After compilation you will have an executable at target/release/aw-server-rust
 
-cargo run
+``` ./target/release/aw-server-rust ```
+
+If you want to quick-compile for debugging, run cargo run from the project root
+
+*NOTE:* this will start aw-server-rust on the testing port 5666 instead of port 5600
+
+``` cargo run ```

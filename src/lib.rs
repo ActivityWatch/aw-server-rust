@@ -53,19 +53,19 @@ pub struct AwClient {
 }
 
 impl AwClient {
-    pub fn new(ip: String, port: String, name: String) -> AwClient {
+    pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
         let baseurl = String::from(format!("http://{}:{}", ip, port));
         let client = reqwest::Client::new();
         let hostname = gethostname::gethostname().into_string().unwrap();
         return AwClient {
             client: client,
             baseurl: baseurl,
-            name: name,
+            name: name.to_string(),
             hostname: hostname
         };
     }
 
-    pub fn get_bucket(&self, bucketname: &String) -> Result<Bucket, reqwest::Error> {
+    pub fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
         let bucket : Bucket = self.client.get(&url).send()?.json()?;
         Ok(bucket)
@@ -76,12 +76,12 @@ impl AwClient {
         Ok(self.client.get(&url).send()?.json()?)
     }
 
-    pub fn create_bucket(&self, bucketname: &String, buckettype: &String) -> Result<(), reqwest::Error> {
+    pub fn create_bucket(&self, bucketname: &str, buckettype: &str) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
         let data = Bucket {
-            id: bucketname.clone(),
+            id: bucketname.to_string(),
             client: self.name.clone(),
-            _type: buckettype.clone(),
+            _type: buckettype.to_string(),
             hostname: self.hostname.clone(),
             created: None,
             name: None,
@@ -91,18 +91,18 @@ impl AwClient {
         Ok(())
     }
 
-    pub fn delete_bucket(&self, bucketname: &String) -> Result<(), reqwest::Error> {
+    pub fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
         self.client.delete(&url).send()?;
         Ok(())
     }
 
-    pub fn get_events(&self, bucketname: &String) -> Result<Vec<Event>, reqwest::Error> {
+    pub fn get_events(&self, bucketname: &str) -> Result<Vec<Event>, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
         Ok(self.client.get(&url).send()?.json()?)
     }
 
-    pub fn insert_event(&self, bucketname: &String, event: &Event) -> Result<(), reqwest::Error> {
+    pub fn insert_event(&self, bucketname: &str, event: &Event) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
         let mut eventlist = Vec::new();
         eventlist.push(event.clone());

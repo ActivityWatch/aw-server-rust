@@ -12,20 +12,20 @@ mod test {
         let ip = String::from("127.0.0.1");
         let port = String::from("5666");
         let clientname = String::from("aw-client-rust-test");
-        let mut client : AwClient = AwClient::new(ip, port, clientname);
+        let client : AwClient = AwClient::new(ip, port, clientname);
 
-        let info = AwClient::get_info(&mut client).unwrap();
+        let info = client.get_info().unwrap();
         assert!(info.testing == true);
 
         let bucketname = format!("aw-client-rust-test_{}", client.hostname);
         let buckettype = String::from("test-type");
-        AwClient::create_bucket(&mut client, &bucketname, &buckettype).unwrap();
+        client.create_bucket(&bucketname, &buckettype).unwrap();
 
-        let bucket = AwClient::get_bucket(&mut client, &bucketname).unwrap();
+        let bucket = client.get_bucket(&bucketname).unwrap();
         assert!(bucket.id == bucketname);
         println!("{}", bucket.id);
 
-        let buckets = AwClient::get_buckets(&mut client).unwrap();
+        let buckets = client.get_buckets().unwrap();
         println!("Buckets: {:?}", buckets);
         let event = Event {
             id: None,
@@ -34,12 +34,12 @@ mod test {
             data: Map::new()
         };
         println!("{:?}", event);
-        AwClient::insert_event(&mut client, &bucketname, &event).unwrap();
+        client.insert_event(&bucketname, &event).unwrap();
 
-        let events = AwClient::get_events(&mut client, &bucketname).unwrap();
+        let events = client.get_events(&bucketname).unwrap();
         println!("Events: {:?}", events);
 
-        AwClient::delete_bucket(&mut client, &bucketname).unwrap();
+        client.delete_bucket(&bucketname).unwrap();
 
         // Uncomment to see stdout from "cargo test"
         // assert!(1==2);

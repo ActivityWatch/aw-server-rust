@@ -9,7 +9,7 @@ use serde_json::{Value, Map};
 use std::vec::Vec;
 use std::collections::HashMap;
 
-#[derive(Serialize,Deserialize,Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Bucket {
     #[serde(default)]
     pub id: String,
@@ -27,7 +27,7 @@ pub struct Bucket {
     pub last_updated: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Event {
     #[serde(default)]
     pub id: Option<i64>,
@@ -107,6 +107,12 @@ impl AwClient {
         let mut eventlist = Vec::new();
         eventlist.push(event.clone());
         self.client.post(&url).json(&eventlist).send()?;
+        Ok(())
+    }
+
+    pub fn heartbeat(&self, bucketname: &str, event: &Event, pulsetime: f64) -> Result<(), reqwest::Error> {
+        let url = format!("{}/api/0/buckets/{}/heartbeat?pulsetime={}", self.baseurl, bucketname, pulsetime);
+        self.client.post(&url).json(&event).send()?;
         Ok(())
     }
 

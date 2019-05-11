@@ -27,21 +27,24 @@ mod test {
 
         let buckets = client.get_buckets().unwrap();
         println!("Buckets: {:?}", buckets);
-        let event = Event {
+        let mut event = Event {
             id: None,
             timestamp: "2017-12-30T01:00:00+00:00".to_string(),
-            duration: 1.0,
+            duration: 0.0,
             data: Map::new()
         };
         println!("{:?}", event);
         client.insert_event(&bucketname, &event).unwrap();
+        event.timestamp = "2017-12-30T01:00:01+00:00".to_string();
+        client.heartbeat(&bucketname, &event, 10.0).unwrap();
 
         let events = client.get_events(&bucketname).unwrap();
         println!("Events: {:?}", events);
+        assert!(events[0].duration == 1.0);
 
         client.delete_bucket(&bucketname).unwrap();
 
         // Uncomment to see stdout from "cargo test"
-        // assert!(1==2);
+        //assert!(1==2);
     }
 }

@@ -73,8 +73,7 @@ mod query_tests {
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("True;False;a=True;True;");
-        let ret = query::query(&code, &interval, &ds).unwrap();
-        match ret {
+        match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Bool(b) => assert_eq!(b, true),
             ref data => panic!("Wrong datatype, {:?}", data)
         };
@@ -86,7 +85,10 @@ mod query_tests {
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("1;1.;1.1;");
-        query::query(&code, &interval, &ds).unwrap();
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Number(n) => assert_eq!(n, 1.1),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
     }
 
     #[test]
@@ -95,10 +97,16 @@ mod query_tests {
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("return 1;");
-        query::query(&code, &interval, &ds).unwrap();
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Number(n) => assert_eq!(n, 1.0),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
 
         let code = String::from("return 1+1;");
-        query::query(&code, &interval, &ds).unwrap();
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Number(n) => assert_eq!(n, 2.0),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
     }
 
     #[test]
@@ -107,34 +115,76 @@ mod query_tests {
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         // Test hardcoded True
-        let code = String::from("n=1; if True { n=2; }; return n;");
-        let ret = query::query(&code, &interval, &ds).unwrap();
-        match ret {
+        let code = String::from("
+            n=1;
+            if True { n=2; };
+            return n;");
+        match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 2.0),
             ref data => panic!("Wrong datatype, {:?}", data)
         };
 
         // Test hardcoded False
-        let code = String::from("n=1; if False { n=2; }; return n;");
-        let ret = query::query(&code, &interval, &ds).unwrap();
-        match ret {
+        let code = String::from("
+            n=1;
+            if False { n=2; };
+            return n;");
+        match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 1.0),
             ref data => panic!("Wrong datatype, {:?}", data)
         };
 
         // Test expression True
-        let code = String::from("b=True; n=1; if b { n=2; }; return n;");
-        let ret = query::query(&code, &interval, &ds).unwrap();
-        match ret {
+        let code = String::from("
+            a=True; n=1;
+            if a { n=2; };
+            return n;");
+        match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 2.0),
             ref data => panic!("Wrong datatype, {:?}", data)
         };
 
         // Test expression False
-        let code = String::from("b=False; n=1; if b { n=2; }; return n;");
-        let ret = query::query(&code, &interval, &ds).unwrap();
-        match ret {
+        let code = String::from("
+            a=False; n=1;
+            if a { n=2; };
+            return n;");
+        match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 1.0),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // Test if else
+        let code = String::from("
+            a=False; n=1;
+            if a { n=2; }
+            else { n=3; };
+            return n;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Number(n) => assert_eq!(n, 3.0),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // Test if else if
+        let code = String::from("
+            a=False; b=True; n=1;
+            if a { n=2; }
+            else if b { n=3; };
+            return n;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Number(n) => assert_eq!(n, 3.0),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // Test if else if else
+        let code = String::from("
+            a=False; b=True; n=1;
+            if a { n=2; }
+            else if a { n=3; }
+            else { n=4; };
+            return n;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Number(n) => assert_eq!(n, 4.0),
             ref data => panic!("Wrong datatype, {:?}", data)
         };
     }
@@ -179,12 +229,12 @@ mod query_tests {
 
         let code = format!(r#"
             events = flood(query_bucket("{}"));
+            print("test", "test2");
             events = concat(events, query_bucket("{}"));
             events = merge_events_by_keys(events, ["key"]);
             RETURN = events;"#,
             "testid", "testid");
-        let ret = query::query(&code, &interval, &ds).unwrap();
-        match ret {
+        match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::List(l) => l,
             ref data => panic!("Wrong datatype, {:?}", data)
         };
@@ -197,8 +247,7 @@ mod query_tests {
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("a=\"test \\\" with escaped quote\";");
-        let ret = query::query(&code, &interval, &ds).unwrap();
-        match ret {
+        match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::String(s) => assert_eq!(s, "test \" with escaped quote"),
             _ => panic!("Wrong datatype")
         }

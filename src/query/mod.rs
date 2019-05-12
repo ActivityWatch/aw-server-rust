@@ -5,7 +5,8 @@ use crate::models::Event;
 use crate::models::TimeInterval;
 use serde::Serializer;
 
-/* TODO: add line numbers to errors? */
+// TODO: add line numbers to errors
+// (works during lexing, but not during parsing I believe)
 
 #[derive(Debug)]
 pub enum QueryError {
@@ -28,7 +29,6 @@ impl fmt::Display for QueryError {
     }
 }
 
-/* TODO: Add support for bools */
 #[derive(Clone,Serialize)]
 #[serde(untagged)]
 pub enum DataType {
@@ -97,6 +97,7 @@ mod lexer {
         Ident(String),
 
         If,
+        Else,
         Return,
 
         Bool(bool),
@@ -119,17 +120,20 @@ mod lexer {
         Semi,
 
         Whitespace,
+        Newline,
         Comment,
     }
 
     lexer! {
         fn next_token(text: 'a) -> (Token, &'a str);
 
-        r#"[ \t\r\n]+"# => (Token::Whitespace, text),
+        r#"[ \t\r]+"# => (Token::Whitespace, text),
+        r#"\n"# => (Token::Newline, text),
         // Python-style comments (# ...)
         r#"#[^\n]*"# => (Token::Comment, text),
 
         r#"if"# => (Token::If, text),
+        r#"else"# => (Token::Else, text),
         r#"return"# => (Token::Return, text),
 
         r#"True"# => (Token::Bool(true), text),
@@ -140,12 +144,11 @@ mod lexer {
             text
         ),
         r#"[0-9]+[\.]?[0-9]*"# => {
-            (if let Ok(i) = text.parse() {
-                Token::Number(i)
-            } else {
-                // TODO: do not panic, send an error
-                panic!("integer {} is out of range", text)
-            }, text)
+            let tok = match text.parse() {
+                Ok(n) => Token::Number(n),
+                Err(e) => panic!("Integer {} is out of range: {}", text, e),
+            };
+            (tok, text)
         }
 
         r#"[a-zA-Z_][a-zA-Z0-9_]*"# => (Token::Ident(text.to_owned()), text),
@@ -170,11 +173,12 @@ mod lexer {
     pub struct Lexer<'a> {
         original: &'a str,
         remaining: &'a str,
+        line: usize,
     }
 
     impl<'a> Lexer<'a> {
         pub fn new(s: &'a str) -> Lexer<'a> {
-            Lexer { original: s, remaining: s }
+            Lexer { original: s, remaining: s , line: 1}
         }
     }
 
@@ -182,13 +186,15 @@ mod lexer {
     pub struct Span {
         pub lo: usize,
         pub hi: usize,
+        pub line: usize,
     }
 
-    fn span_in(s: &str, t: &str) -> Span {
+    fn span_in(s: &str, t: &str, l: usize) -> Span {
         let lo = s.as_ptr() as usize - t.as_ptr() as usize;
         Span {
             lo: lo,
             hi: lo + s.len(),
+            line: l,
         }
     }
 
@@ -206,8 +212,12 @@ mod lexer {
                     (Token::Whitespace, _) | (Token::Comment, _) => {
                         continue;
                     }
+                    (Token::Newline, _) => {
+                        self.line += 1;
+                        continue;
+                    }
                     (tok, span) => {
-                        return Some((tok, span_in(span, self.original)));
+                        return Some((tok, span_in(span, self.original, self.line)));
                     }
                 }
             }
@@ -242,7 +252,7 @@ mod ast {
         Assign(String, Box<Expr>),
         // TODO: multi-argument functions
         Function(String, Box<Expr>),
-        If(Box<Expr>, Vec<Expr>),
+        If(Vec<(Option<Box<Expr>>, Vec<Expr>)>),
         Return(Box<Expr>),
         Bool(bool),
         Number(f64),
@@ -268,6 +278,7 @@ mod parser {
             Span {
                 lo: a.lo,
                 hi: b.hi,
+                line: a.line,
             }
         }
 
@@ -327,15 +338,111 @@ mod parser {
                 span: span!(),
                 node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
             },
-            _if[x] => x
+            ifs[x] => x
+        }
+
+        ifs: Expr {
+            _if[l_ifs] => l_ifs,
+            _elif[l_ifs] => l_ifs,
+            _else[l_ifs] => l_ifs,
+            func[x] => x
         }
 
         _if: Expr {
             If term[cond] LBrace statements[block] RBrace => Expr {
                 span: span!(),
-                node: Expr_::If(Box::new(cond), block),
+                node: {
+                    let mut ifs = Vec::new();
+                    ifs.push((Some(Box::new(cond)), block));
+                    Expr_::If(ifs)
+                }
             },
-            func[x] => x
+        }
+
+        _elif: Expr {
+            // Else if
+            _if[l_ifs] Else _if[l_preceding_ifs] => Expr {
+                span: span!(),
+                node: {
+                    let mut l_new = Vec::new();
+                    match l_ifs.node {
+                        Expr_::If(l_ifs) => {
+                            for l_if in l_ifs {
+                                l_new.push(l_if.clone());
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+                    match l_preceding_ifs.node {
+                        Expr_::If(l_ifs) => {
+                            for l_if in l_ifs {
+                                l_new.push(l_if.clone());
+                            }
+                        },
+                        _ => unreachable!(),
+                    };
+                    Expr_::If(l_new)
+                }
+            },
+            // Else if else if
+            _elif[l_ifs] Else _if[l_preceding_ifs] => Expr {
+                span: span!(),
+                node: {
+                    let mut l_new = Vec::new();
+                    match l_ifs.node {
+                        Expr_::If(l_ifs) => {
+                            for l_if in l_ifs {
+                                l_new.push(l_if.clone());
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+                    match l_preceding_ifs.node {
+                        Expr_::If(l_ifs) => {
+                            for l_if in l_ifs {
+                                l_new.push(l_if.clone());
+                            }
+                        },
+                        _ => unreachable!(),
+                    };
+                    Expr_::If(l_new)
+                }
+            },
+        }
+
+        _else: Expr {
+            _if[l_ifs] Else LBrace statements[l_else_block] RBrace => Expr {
+                span: span!(),
+                node: {
+                    let mut l_new = Vec::new();
+                    match l_ifs.node {
+                        Expr_::If(l_ifs) => {
+                            for l_if in l_ifs {
+                                l_new.push(l_if.clone());
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+                    l_new.push((None, l_else_block));
+                    Expr_::If(l_new)
+                }
+            },
+            _elif[l_ifs] Else LBrace statements[l_else_block] RBrace => Expr {
+                span: span!(),
+                node: {
+                    let mut l_new = Vec::new();
+                    match l_ifs.node {
+                        Expr_::If(l_ifs) => {
+                            for l_if in l_ifs {
+                                l_new.push(l_if.clone());
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+                    l_new.push((None, l_else_block));
+                    Expr_::If(l_new)
+                }
+            },
         }
 
         func: Expr {
@@ -386,7 +493,7 @@ mod parser {
                             // FIXME: this can be incredibly slow
                             Expr_::List(l.clone())
                         },
-                        _ => panic!("a")
+                        _ => unreachable!(),
                     }
                 }
             },
@@ -410,7 +517,7 @@ mod parser {
                             // FIXME: this can be incredibly slow
                             Expr_::Dict(d.clone())
                         },
-                        _ => panic!("a")
+                        _ => unreachable!(),
                     }
                 }
             },
@@ -476,7 +583,7 @@ mod interpret {
             }
             i+=1;
         }
-        panic!("This should be unreachable!");
+        unreachable!();
     }
 
     fn interpret_expr<'a>(env: &mut HashMap<&'a str, DataType>, ds: &Datastore, expr: &'a Expr) -> Result<DataType, QueryError> {
@@ -585,11 +692,17 @@ mod interpret {
                 let val = interpret_expr(env, ds, e)?;
                 Ok(val)
             },
-            If(ref cond, ref block) => {
-                let c = interpret_expr(env, ds, cond)?;
-                if c == DataType::Bool(true) {
-                    for expr in block {
-                        interpret_expr(env, ds, expr)?;
+            If(ref ifs) => {
+                for (ref cond, ref block) in ifs {
+                    let c = match cond {
+                        Some(cond) => interpret_expr(env, ds, cond)?,
+                        None => DataType::Bool(true),
+                    };
+                    if c == DataType::Bool(true) {
+                        for expr in block {
+                            interpret_expr(env, ds, expr)?;
+                        }
+                        break;
                     }
                 }
                 Ok(DataType::None())
@@ -597,7 +710,7 @@ mod interpret {
             Function(ref fname, ref e) => {
                 let args = match interpret_expr(env, ds, e)? {
                     DataType::List(l) => l,
-                    _ => panic!("This should not be possible")
+                    _ => unreachable!(),
                 };
                 let var = match env.get(&fname[..]) {
                     Some(v) => v,

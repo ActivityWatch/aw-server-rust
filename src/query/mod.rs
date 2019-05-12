@@ -33,6 +33,7 @@ impl fmt::Display for QueryError {
 #[serde(untagged)]
 pub enum DataType {
     None(),
+    Bool(bool),
     Number(f64),
     String(String),
     Event(Event),
@@ -59,6 +60,7 @@ impl fmt::Debug for DataType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             DataType::None() => write!(f, "None()"),
+            DataType::Bool(b) => write!(f, "Bool({})", b),
             DataType::Number(n) => write!(f, "Number({})", n),
             DataType::String(s) => write!(f, "String({})", s),
             DataType::Event(e) => write!(f, "Event({:?})", e),
@@ -73,6 +75,8 @@ impl PartialEq for DataType {
     fn eq(&self, other: &DataType) -> bool {
         match (self, other) {
             (DataType::None(), DataType::None()) => true,
+            // TODO: Comparisons of bool == num, bool == str
+            (DataType::Bool(b1), DataType::Bool(b2)) => b1 == b2,
             (DataType::Number(n1), DataType::Number(n2)) => n1 == n2,
             (DataType::String(s1), DataType::String(s2)) => s1 == s2,
             // TODO: Properly implement event comparison
@@ -92,8 +96,10 @@ mod lexer {
     pub enum Token {
         Ident(String),
 
+        If,
         Return,
 
+        Bool(bool),
         Number(f64),
         String(String),
         Equals,
@@ -123,7 +129,11 @@ mod lexer {
         // Python-style comments (# ...)
         r#"#[^\n]*"# => (Token::Comment, text),
 
+        r#"if"# => (Token::If, text),
         r#"return"# => (Token::Return, text),
+
+        r#"True"# => (Token::Bool(true), text),
+        r#"False"# => (Token::Bool(false), text),
 
         r#"\"([^\"]|(\\\"))*\""# => (
             Token::String(text.to_owned()[1..text.len()-1].replace("\\\"", "\"").to_string()),
@@ -232,7 +242,9 @@ mod ast {
         Assign(String, Box<Expr>),
         // TODO: multi-argument functions
         Function(String, Box<Expr>),
+        If(Box<Expr>, Vec<Expr>),
         Return(Box<Expr>),
+        Bool(bool),
         Number(f64),
         String(String),
         List(Vec<Expr>),
@@ -315,27 +327,26 @@ mod parser {
                 span: span!(),
                 node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
             },
+            _if[x] => x
+        }
+
+        _if: Expr {
+            If term[cond] LBrace statements[block] RBrace => Expr {
+                span: span!(),
+                node: Expr_::If(Box::new(cond), block),
+            },
             func[x] => x
         }
 
         func: Expr {
-            Ident(fname) LParen list[l] RParen => Expr {
+            Ident(fname) LParen inner_list[l] RParen => Expr {
                 span: span!(),
-                node: {
-                    Expr_::Function(fname, Box::new(l))
-                }
+                node: Expr_::Function(fname, Box::new(l)),
             },
             object[o] => o,
         }
 
         object: Expr {
-            LBracket list[l] RBracket => l,
-            LBracket RBracket => Expr {
-                span: span!(),
-                node: {
-                    Expr_::List(Vec::new())
-                }
-            },
             LBrace dict[d] RBrace => d,
             LBrace RBrace => Expr {
                 span: span!(),
@@ -343,10 +354,21 @@ mod parser {
                     Expr_::Dict(HashMap::new())
                 }
             },
-            atom[a] => a
+            list[l] => l
         }
 
         list: Expr {
+            LBracket inner_list[l] RBracket => l,
+            LBracket RBracket => Expr {
+                span: span!(),
+                node: {
+                    Expr_::List(Vec::new())
+                }
+            },
+            atom[a] => a
+        }
+
+        inner_list: Expr {
             term[o] => Expr {
                 span: span!(),
                 node: {
@@ -355,7 +377,7 @@ mod parser {
                     Expr_::List(list)
                 }
             },
-            list[l] Comma term[o] => Expr {
+            inner_list[l] Comma term[o] => Expr {
                 span: span!(),
                 node: {
                     match l.node {
@@ -399,6 +421,10 @@ mod parser {
             Ident(v) => Expr {
                 span: span!(),
                 node: Expr_::Var(v),
+            },
+            Bool(b) => Expr {
+                span: span!(),
+                node: Expr_::Bool(b),
             },
             Number(i) => Expr {
                 span: span!(),
@@ -552,11 +578,21 @@ mod interpret {
                     None => Err(QueryError::VariableNotDefined(var.to_string()))
                 }
             },
+            Bool(lit) => Ok(DataType::Bool(lit)),
             Number(lit) => Ok(DataType::Number(lit)),
             String(ref litstr) => Ok(DataType::String(litstr.to_string())),
             Return(ref e) => {
                 let val = interpret_expr(env, ds, e)?;
                 Ok(val)
+            },
+            If(ref cond, ref block) => {
+                let c = interpret_expr(env, ds, cond)?;
+                if c == DataType::Bool(true) {
+                    for expr in block {
+                        interpret_expr(env, ds, expr)?;
+                    }
+                }
+                Ok(DataType::None())
             },
             Function(ref fname, ref e) => {
                 let args = match interpret_expr(env, ds, e)? {

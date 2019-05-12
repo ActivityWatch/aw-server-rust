@@ -179,9 +179,10 @@ mod query_tests {
 
         let code = format!(r#"
             events = flood(query_bucket("{}"));
+            events = concat(events, query_bucket("{}"));
             events = merge_events_by_keys(events, ["key"]);
             RETURN = events;"#,
-            "testid");
+            "testid", "testid");
         let ret = query::query(&code, &interval, &ds).unwrap();
         match ret {
             query::DataType::List(l) => l,

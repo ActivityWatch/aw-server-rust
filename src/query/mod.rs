@@ -79,8 +79,7 @@ impl PartialEq for DataType {
             (DataType::Bool(b1), DataType::Bool(b2)) => b1 == b2,
             (DataType::Number(n1), DataType::Number(n2)) => n1 == n2,
             (DataType::String(s1), DataType::String(s2)) => s1 == s2,
-            // TODO: Properly implement event comparison
-            (DataType::Event(e1), DataType::Event(e2)) => e1.data == e2.data, //e1 == e2
+            (DataType::Event(e1), DataType::Event(e2)) => e1 == e2,
             (DataType::List(l1), DataType::List(l2)) => l1 == l2,
             (DataType::Dict(d1), DataType::Dict(d2)) => d1 == d2,
             // We do not care about comparing functions
@@ -569,21 +568,15 @@ mod interpret {
     }
 
     pub fn interpret_prog<'a>(p: &'a Program, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
-        if p.stmts.len() == 0 {
-            return Err(QueryError::EmptyQuery());
-        }
-        let last_i = p.stmts.len()-1;
         let mut env = init_env(ti);
-        let mut i = 0;
+        let mut ret = None;
         for expr in &p.stmts {
-            let ret = interpret_expr(&mut env, ds, expr)?;
-            // FIXME: This is ugly
-            if i == last_i {
-                return Ok(ret);
-            }
-            i+=1;
+            ret = Some(interpret_expr(&mut env, ds, expr)?)
         }
-        unreachable!();
+        match ret {
+            Some(ret) => Ok(ret),
+            None => Err(QueryError::EmptyQuery())
+        }
     }
 
     fn interpret_expr<'a>(env: &mut HashMap<&'a str, DataType>, ds: &Datastore, expr: &'a Expr) -> Result<DataType, QueryError> {

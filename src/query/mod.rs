@@ -301,42 +301,6 @@ mod parser {
                 span: span!(),
                 node: Expr_::Return(Box::new(a)),
             },
-            assign[a] => a
-        }
-
-        assign: Expr {
-            Ident(var) Equals term[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Assign(var, Box::new(rhs)),
-            },
-            term[t] => t
-        }
-
-        term: Expr {
-            term[lhs] Plus fact[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Add(Box::new(lhs), Box::new(rhs)),
-            },
-            term[lhs] Minus fact[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Sub(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[x] => x
-        }
-
-        fact: Expr {
-            fact[lhs] Star func[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Mul(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[lhs] Slash func[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Div(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[lhs] Percent func[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
-            },
             ifs[x] => x
         }
 
@@ -344,7 +308,7 @@ mod parser {
             _if[l_ifs] => l_ifs,
             _elif[l_ifs] => l_ifs,
             _else[l_ifs] => l_ifs,
-            func[x] => x
+            assign[x] => x
         }
 
         _if: Expr {
@@ -410,6 +374,7 @@ mod parser {
         }
 
         _else: Expr {
+            // if else
             _if[l_ifs] Else LBrace statements[l_else_block] RBrace => Expr {
                 span: span!(),
                 node: {
@@ -426,6 +391,7 @@ mod parser {
                     Expr_::If(l_new)
                 }
             },
+            // else if else
             _elif[l_ifs] Else LBrace statements[l_else_block] RBrace => Expr {
                 span: span!(),
                 node: {
@@ -442,6 +408,42 @@ mod parser {
                     Expr_::If(l_new)
                 }
             },
+        }
+
+        assign: Expr {
+            Ident(var) Equals term[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Assign(var, Box::new(rhs)),
+            },
+            term[t] => t
+        }
+
+        term: Expr {
+            term[lhs] Plus fact[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Add(Box::new(lhs), Box::new(rhs)),
+            },
+            term[lhs] Minus fact[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Sub(Box::new(lhs), Box::new(rhs)),
+            },
+            fact[x] => x
+        }
+
+        fact: Expr {
+            fact[lhs] Star func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Mul(Box::new(lhs), Box::new(rhs)),
+            },
+            fact[lhs] Slash func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Div(Box::new(lhs), Box::new(rhs)),
+            },
+            fact[lhs] Percent func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
+            },
+            func[x] => x
         }
 
         func: Expr {

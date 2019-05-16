@@ -7,6 +7,7 @@ use serde::Serializer;
 
 // TODO: add line numbers to errors
 // (works during lexing, but not during parsing I believe)
+// TODO: greater/less comparisons
 
 #[derive(Debug)]
 pub enum QueryError {
@@ -71,6 +72,8 @@ impl fmt::Debug for DataType {
     }
 }
 
+/* TODO: Replace with own trait for Eq which can return an error when comparing
+ * incompatible types */
 impl PartialEq for DataType {
     fn eq(&self, other: &DataType) -> bool {
         match (self, other) {
@@ -102,12 +105,13 @@ mod lexer {
         Bool(bool),
         Number(f64),
         String(String),
-        Equals,
         Plus,
         Minus,
         Star,
         Slash,
         Percent,
+        Equals,
+        Assign,
         LParen,
         RParen,
         LBracket,
@@ -152,7 +156,8 @@ mod lexer {
 
         r#"[a-zA-Z_][a-zA-Z0-9_]*"# => (Token::Ident(text.to_owned()), text),
 
-        r#"="# => (Token::Equals, text),
+        r#"=="# => (Token::Equals, text),
+        r#"="# => (Token::Assign, text),
         r#"\+"# => (Token::Plus, text),
         r#"-"# => (Token::Minus, text),
         r#"\*"# => (Token::Star, text),
@@ -247,12 +252,15 @@ mod ast {
         Mul(Box<Expr>, Box<Expr>),
         Div(Box<Expr>, Box<Expr>),
         Mod(Box<Expr>, Box<Expr>),
+
+        Equal(Box<Expr>, Box<Expr>),
+
         Var(String),
         Assign(String, Box<Expr>),
-        // TODO: multi-argument functions
         Function(String, Box<Expr>),
         If(Vec<(Option<Box<Expr>>, Vec<Expr>)>),
         Return(Box<Expr>),
+
         Bool(bool),
         Number(f64),
         String(String),
@@ -312,7 +320,7 @@ mod parser {
         }
 
         _if: Expr {
-            If term[cond] LBrace statements[block] RBrace => Expr {
+            If binop[cond] LBrace statements[block] RBrace => Expr {
                 span: span!(),
                 node: {
                     let mut ifs = Vec::new();
@@ -411,43 +419,43 @@ mod parser {
         }
 
         assign: Expr {
-            Ident(var) Equals term[rhs] => Expr {
+            Ident(var) Assign binop[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Assign(var, Box::new(rhs)),
             },
-            term[t] => t
+            binop[x] => x
         }
 
-        term: Expr {
-            term[lhs] Plus fact[rhs] => Expr {
+        binop: Expr {
+            binop[lhs] Plus func[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Add(Box::new(lhs), Box::new(rhs)),
             },
-            term[lhs] Minus fact[rhs] => Expr {
+            binop[lhs] Minus func[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Sub(Box::new(lhs), Box::new(rhs)),
             },
-            fact[x] => x
-        }
-
-        fact: Expr {
-            fact[lhs] Star func[rhs] => Expr {
+            binop[lhs] Star func[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Mul(Box::new(lhs), Box::new(rhs)),
             },
-            fact[lhs] Slash func[rhs] => Expr {
+            binop[lhs] Slash func[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Div(Box::new(lhs), Box::new(rhs)),
             },
-            fact[lhs] Percent func[rhs] => Expr {
+            binop[lhs] Percent func[rhs] => Expr {
                 span: span!(),
                 node: Expr_::Mod(Box::new(lhs), Box::new(rhs)),
+            },
+            binop[lhs] Equals func[rhs] => Expr {
+                span: span!(),
+                node: Expr_::Equal(Box::new(lhs), Box::new(rhs)),
             },
             func[x] => x
         }
 
         func: Expr {
-            Ident(fname) LParen inner_list[l] RParen => Expr {
+            Ident(fname) LParen _inner_list[l] RParen => Expr {
                 span: span!(),
                 node: Expr_::Function(fname, Box::new(l)),
             },
@@ -466,7 +474,7 @@ mod parser {
         }
 
         list: Expr {
-            LBracket inner_list[l] RBracket => l,
+            LBracket _inner_list[l] RBracket => l,
             LBracket RBracket => Expr {
                 span: span!(),
                 node: {
@@ -476,8 +484,8 @@ mod parser {
             atom[a] => a
         }
 
-        inner_list: Expr {
-            term[o] => Expr {
+        _inner_list: Expr {
+            binop[o] => Expr {
                 span: span!(),
                 node: {
                     let mut list = Vec::new();
@@ -485,7 +493,7 @@ mod parser {
                     Expr_::List(list)
                 }
             },
-            inner_list[l] Comma term[o] => Expr {
+            _inner_list[l] Comma binop[o] => Expr {
                 span: span!(),
                 node: {
                     match l.node {
@@ -501,7 +509,7 @@ mod parser {
         }
 
         dict: Expr {
-            String(k) Colon term[v] => Expr {
+            String(k) Colon binop[v] => Expr {
                 span: span!(),
                 node: {
                     let mut dict = HashMap::new();
@@ -509,7 +517,7 @@ mod parser {
                     Expr_::Dict(dict)
                 }
             },
-            dict[d] Comma String(k) Colon term[v] => Expr {
+            dict[d] Comma String(k) Colon binop[v] => Expr {
                 span: span!(),
                 node: {
                     match d.node {
@@ -542,7 +550,7 @@ mod parser {
                 span: span!(),
                 node: Expr_::String(s),
             },
-            LParen term[a] RParen => a
+            LParen binop[x] RParen => x
         }
     }
 
@@ -666,6 +674,11 @@ mod interpret {
                     _ => return Err(QueryError::InvalidType("Cannot sub something that is not a number!".to_string()))
                 };
                 Ok(DataType::Number(a_num%b_num))
+            },
+            Equal(ref lhs, ref rhs) => {
+                let lhs_res = interpret_expr(env, ds, lhs)?;
+                let rhs_res = interpret_expr(env, ds, rhs)?;
+                Ok(DataType::Bool(lhs_res == rhs_res))
             },
             Assign(ref var, ref b) => {
                 let val = interpret_expr(env, ds, b)?;

@@ -92,6 +92,61 @@ mod query_tests {
     }
 
     #[test]
+    fn test_equals() {
+        let ds = setup_datastore_empty();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // number comparison true
+        let code = String::from("1==1;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Bool(b) => assert_eq!(b, true),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // number comparison false
+        let code = String::from("2==1;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Bool(b) => assert_eq!(b, false),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // string comparison true
+        let code = String::from(r#""a"=="a";"#);
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Bool(b) => assert_eq!(b, true),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // string comparison false
+        let code = String::from(r#""a"=="b";"#);
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Bool(b) => assert_eq!(b, false),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // bool comparison true
+        let code = String::from("True==True;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Bool(b) => assert_eq!(b, true),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // bool comparison false
+        let code = String::from("False==True;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Bool(b) => assert_eq!(b, false),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // different types comparison (always false)
+        let code = String::from("True==1;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Bool(b) => assert_eq!(b, false),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+    }
+
+    #[test]
     fn test_return() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();

@@ -99,6 +99,7 @@ mod lexer {
         Ident(String),
 
         If,
+        ElseIf,
         Else,
         Return,
 
@@ -136,6 +137,7 @@ mod lexer {
         r#"#[^\n]*"# => (Token::Comment, text),
 
         r#"if"# => (Token::If, text),
+        r#"elif"# => (Token::ElseIf, text),
         r#"else"# => (Token::Else, text),
         r#"return"# => (Token::Return, text),
 
@@ -277,6 +279,18 @@ mod parser {
 
     use std::collections::HashMap;
 
+    fn merge_if_vecs(lhs: Expr_, rhs: Expr_) -> Expr_ {
+        let mut ifs = match lhs {
+            Expr_::If(_ifs) => _ifs.clone(),
+            _ => unreachable!(),
+        };
+        match rhs {
+            Expr_::If(_ifs) => ifs.append(&mut _ifs.clone()),
+            _ => unreachable!(),
+        };
+        Expr_::If(ifs)
+    }
+
     parser! {
         fn parse_(Token, Span);
 
@@ -319,8 +333,8 @@ mod parser {
             assign[x] => x,
         }
 
-        _if: Expr {
-            If binop[cond] LBrace statements[block] RBrace => Expr {
+        _cond_block: Expr {
+            binop[cond] LBrace statements[block] RBrace => Expr {
                 span: span!(),
                 node: {
                     let mut ifs = Vec::new();
@@ -330,54 +344,20 @@ mod parser {
             },
         }
 
+        _if: Expr {
+            If _cond_block[x] => x
+        }
+
         _elif: Expr {
             // Else if
-            _if[l_ifs] Else _if[l_preceding_ifs] => Expr {
+            _if[l_ifs] ElseIf _cond_block[l_preceding_ifs] => Expr {
                 span: span!(),
-                node: {
-                    let mut l_new = Vec::new();
-                    match l_ifs.node {
-                        Expr_::If(l_ifs) => {
-                            for l_if in l_ifs {
-                                l_new.push(l_if.clone());
-                            }
-                        }
-                        _ => unreachable!(),
-                    };
-                    match l_preceding_ifs.node {
-                        Expr_::If(l_ifs) => {
-                            for l_if in l_ifs {
-                                l_new.push(l_if.clone());
-                            }
-                        },
-                        _ => unreachable!(),
-                    };
-                    Expr_::If(l_new)
-                }
+                node: merge_if_vecs(l_ifs.node, l_preceding_ifs.node),
             },
             // Else if else if
-            _elif[l_ifs] Else _if[l_preceding_ifs] => Expr {
+            _elif[l_ifs] ElseIf _cond_block[l_preceding_ifs] => Expr {
                 span: span!(),
-                node: {
-                    let mut l_new = Vec::new();
-                    match l_ifs.node {
-                        Expr_::If(l_ifs) => {
-                            for l_if in l_ifs {
-                                l_new.push(l_if.clone());
-                            }
-                        }
-                        _ => unreachable!(),
-                    };
-                    match l_preceding_ifs.node {
-                        Expr_::If(l_ifs) => {
-                            for l_if in l_ifs {
-                                l_new.push(l_if.clone());
-                            }
-                        },
-                        _ => unreachable!(),
-                    };
-                    Expr_::If(l_new)
-                }
+                node: merge_if_vecs(l_ifs.node, l_preceding_ifs.node),
             },
         }
 
@@ -386,13 +366,8 @@ mod parser {
             _if[l_ifs] Else LBrace statements[l_else_block] RBrace => Expr {
                 span: span!(),
                 node: {
-                    let mut l_new = Vec::new();
-                    match l_ifs.node {
-                        Expr_::If(l_ifs) => {
-                            for l_if in l_ifs {
-                                l_new.push(l_if.clone());
-                            }
-                        }
+                    let mut l_new = match l_ifs.node {
+                        Expr_::If(l_ifs) => l_ifs.clone(),
                         _ => unreachable!(),
                     };
                     let true_expr = Expr { span: span!(), node: Expr_::Bool(true) };
@@ -404,13 +379,8 @@ mod parser {
             _elif[l_ifs] Else LBrace statements[l_else_block] RBrace => Expr {
                 span: span!(),
                 node: {
-                    let mut l_new = Vec::new();
-                    match l_ifs.node {
-                        Expr_::If(l_ifs) => {
-                            for l_if in l_ifs {
-                                l_new.push(l_if.clone());
-                            }
-                        }
+                    let mut l_new = match l_ifs.node {
+                        Expr_::If(l_ifs) => l_ifs.clone(),
                         _ => unreachable!(),
                     };
                     let true_expr = Expr { span: span!(), node: Expr_::Bool(true) };

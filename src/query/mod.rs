@@ -435,6 +435,16 @@ mod parser {
                 span: span!(),
                 node: Expr_::Function(fname, Box::new(l)),
             },
+            Ident(fname) LParen RParen => Expr {
+                span: span!(),
+                node: {
+                    let empty_expr_list = Expr {
+                        span: span!(),
+                        node: Expr_::List(Vec::new())
+                    };
+                    Expr_::Function(fname, Box::new(empty_expr_list))
+                },
+            },
             object[o] => o,
         }
 

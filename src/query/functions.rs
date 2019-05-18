@@ -8,13 +8,14 @@ pub type QueryFn = fn(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &D
 pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
     env.insert("print", DataType::Function("print".to_string(), qfunctions::print));
     env.insert("query_bucket", DataType::Function("query_bucket".to_string(), qfunctions::query_bucket));
+    env.insert("query_bucket_names", DataType::Function("query_bucket_names".to_string(), qfunctions::query_bucket_names));
     env.insert("sort_by_duration", DataType::Function("sort_by_duration".to_string(), qfunctions::sort_by_duration));
     env.insert("sort_by_timestamp", DataType::Function("sort_by_timestamp".to_string(), qfunctions::sort_by_timestamp));
     env.insert("sum_durations", DataType::Function("sum_durations".to_string(), qfunctions::sum_durations));
     env.insert("limit_events", DataType::Function("limit_events".to_string(), qfunctions::limit_events));
     env.insert("flood", DataType::Function("flood".to_string(), qfunctions::flood));
     env.insert("merge_events_by_keys", DataType::Function("merge_events_by_keys".to_string(), qfunctions::merge_events_by_keys));
-    env.insert("chunk_events_by_key", DataType::Function("chunk_events_by_key".to_string(), qfunctions::chunk_events_by_keys));
+    env.insert("chunk_events_by_key", DataType::Function("chunk_events_by_key".to_string(), qfunctions::chunk_events_by_key));
     env.insert("filter_keyvals", DataType::Function("filter_keyvals".to_string(), qfunctions::filter_keyvals));
     env.insert("filter_period_intersect", DataType::Function("filter_period_intersect".to_string(), qfunctions::filter_period_intersect));
     env.insert("split_url_events", DataType::Function("split_url_events".to_string(), qfunctions::split_url_events));
@@ -52,6 +53,19 @@ mod qfunctions {
             ret.push(DataType::Event(event));
         };
         return Ok(DataType::List(ret));
+    }
+
+    pub fn query_bucket_names(args: Vec<DataType>, _env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
+        validate::args_length(&args, 0)?;
+        let mut bucketnames : Vec<DataType> = Vec::new();
+        let buckets = match ds.get_buckets() {
+            Ok(buckets) => buckets,
+            Err(e) => return Err(QueryError::BucketQueryError(format!("Failed to query bucket names: {:?}", e))),
+        };
+        for bucketname in buckets.keys() {
+            bucketnames.push(DataType::String(bucketname.to_string()));
+        }
+        return Ok(DataType::List(bucketnames));
     }
 
     pub fn flood(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
@@ -139,7 +153,7 @@ mod qfunctions {
         return Ok(DataType::List(merged_tagged_events));
     }
 
-    pub fn chunk_events_by_keys(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
+    pub fn chunk_events_by_key(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
         let events = validate::arg_type_event_list(&args[0])?;

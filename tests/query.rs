@@ -293,11 +293,21 @@ mod query_tests {
         query::query(&code, &interval, &ds).unwrap();
 
         let code = format!(r#"
-            events = flood(query_bucket("{}"));
-            print("test", "test2");
+            events = query_bucket("{}");
+            events = flood(events);
+            events = sort_by_duration(events);
+            events = limit_events(events, 10000);
+            events = sort_by_timestamp(events);
             events = concat(events, query_bucket("{}"));
-            events = merge_events_by_keys(events, ["key"]);
-            RETURN = events;"#,
+            total_duration = sum_durations(events);
+            bucketnames = query_bucket_names();
+            print("test", "test2");
+            url_events = split_url_events (events);
+            filtered_events = filter_period_intersect(events, events);
+            filtered_events = filter_keyvals(events, "key", ["value"]);
+            chunked_events = chunk_events_by_key(events, "key");
+            merged_events = merge_events_by_keys(events, ["key"]);
+            RETURN = merged_events;"#,
             "testid", "testid");
         match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::List(l) => l,

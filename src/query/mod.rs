@@ -309,8 +309,8 @@ mod parser {
 
         statements: Vec<Expr> {
             => vec![],
-            statements[mut st] ret[r] Semi => {
-                st.push(r);
+            statements[mut st] statement[x]  => {
+                st.push(x);
                 st
             },
             statements[st] Semi => {
@@ -318,19 +318,15 @@ mod parser {
             }
         }
 
-        ret: Expr {
-            Return assign[a] => Expr {
-                span: span!(),
-                node: Expr_::Return(Box::new(a)),
-            },
-            ifs[x] => x
+        statement: Expr {
+            ifs[x] => x,
+            ret[x] Semi => x,
         }
 
         ifs: Expr {
             _if[l_ifs] => l_ifs,
             _elif[l_ifs] => l_ifs,
             _else[l_ifs] => l_ifs,
-            assign[x] => x,
         }
 
         _cond_block: Expr {
@@ -388,6 +384,14 @@ mod parser {
                     Expr_::If(l_new)
                 }
             },
+        }
+
+         ret: Expr {
+            Return assign[a] => Expr {
+                span: span!(),
+                node: Expr_::Return(Box::new(a)),
+            },
+            assign[x] => x,
         }
 
         assign: Expr {

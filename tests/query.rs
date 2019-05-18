@@ -172,7 +172,7 @@ mod query_tests {
         // Test hardcoded True
         let code = String::from("
             n=1;
-            if True { n=2; };
+            if True { n=2; }
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 2.0),
@@ -182,7 +182,7 @@ mod query_tests {
         // Test hardcoded False
         let code = String::from("
             n=1;
-            if False { n=2; };
+            if False { n=2; }
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 1.0),
@@ -192,7 +192,7 @@ mod query_tests {
         // Test expression True
         let code = String::from("
             a=True; n=1;
-            if a { n=2; };
+            if a { n=2; }
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 2.0),
@@ -202,7 +202,7 @@ mod query_tests {
         // Test expression False
         let code = String::from("
             a=False; n=1;
-            if a { n=2; };
+            if a { n=2; }
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 1.0),
@@ -213,7 +213,7 @@ mod query_tests {
         let code = String::from("
             a=False; n=1;
             if a { n=2; }
-            else { n=3; };
+            else { n=3; }
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 3.0),
@@ -224,7 +224,7 @@ mod query_tests {
         let code = String::from("
             a=False; b=True; n=1;
             if a { n=2; }
-            elif b { n=3; };
+            elif b { n=3; }
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 3.0),
@@ -236,10 +236,20 @@ mod query_tests {
             a=False; b=True; n=1;
             if a { n=2; }
             elif a { n=3; }
-            else { n=4; };
+            else { n=4; }
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 4.0),
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        // Test if inside if
+        let code = String::from("
+            a=True; n=1;
+            if a { if a { n = 2; } }
+            return n;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::Number(n) => assert_eq!(n, 2.0),
             ref data => panic!("Wrong datatype, {:?}", data)
         };
     }

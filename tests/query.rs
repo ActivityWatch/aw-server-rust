@@ -224,7 +224,7 @@ mod query_tests {
         let code = String::from("
             a=False; b=True; n=1;
             if a { n=2; }
-            else if b { n=3; };
+            elif b { n=3; };
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::Number(n) => assert_eq!(n, 3.0),
@@ -235,7 +235,7 @@ mod query_tests {
         let code = String::from("
             a=False; b=True; n=1;
             if a { n=2; }
-            else if a { n=3; }
+            elif a { n=3; }
             else { n=4; };
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {

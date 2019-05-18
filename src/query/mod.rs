@@ -258,7 +258,7 @@ mod ast {
         Var(String),
         Assign(String, Box<Expr>),
         Function(String, Box<Expr>),
-        If(Vec<(Option<Box<Expr>>, Vec<Expr>)>),
+        If(Vec<(Box<Expr>, Vec<Expr>)>),
         Return(Box<Expr>),
 
         Bool(bool),
@@ -316,7 +316,7 @@ mod parser {
             _if[l_ifs] => l_ifs,
             _elif[l_ifs] => l_ifs,
             _else[l_ifs] => l_ifs,
-            assign[x] => x
+            assign[x] => x,
         }
 
         _if: Expr {
@@ -324,7 +324,7 @@ mod parser {
                 span: span!(),
                 node: {
                     let mut ifs = Vec::new();
-                    ifs.push((Some(Box::new(cond)), block));
+                    ifs.push((Box::new(cond), block));
                     Expr_::If(ifs)
                 }
             },
@@ -395,7 +395,8 @@ mod parser {
                         }
                         _ => unreachable!(),
                     };
-                    l_new.push((None, l_else_block));
+                    let true_expr = Expr { span: span!(), node: Expr_::Bool(true) };
+                    l_new.push((Box::new(true_expr), l_else_block));
                     Expr_::If(l_new)
                 }
             },
@@ -412,7 +413,8 @@ mod parser {
                         }
                         _ => unreachable!(),
                     };
-                    l_new.push((None, l_else_block));
+                    let true_expr = Expr { span: span!(), node: Expr_::Bool(true) };
+                    l_new.push((Box::new(true_expr), l_else_block));
                     Expr_::If(l_new)
                 }
             },
@@ -702,10 +704,7 @@ mod interpret {
             },
             If(ref ifs) => {
                 for (ref cond, ref block) in ifs {
-                    let c = match cond {
-                        Some(cond) => interpret_expr(env, ds, cond)?,
-                        None => DataType::Bool(true),
-                    };
+                    let c = interpret_expr(env, ds, cond)?;
                     if c == DataType::Bool(true) {
                         for expr in block {
                             interpret_expr(env, ds, expr)?;

@@ -1,3 +1,4 @@
+sudo: required
 language: rust
 rust:
   - nightly
@@ -28,21 +29,44 @@ before_install:
       ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch x86_64 --install-dir "${ANDROID_NDK_HOME}/x86_64";
       rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android;
     fi
+  - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ]; then
+        echo "Installing coverage tools";
+        cargo install cargo-kcov;
+        cargo kcov --print-install-kcov-sh | sh;
+    fi
 
 install:
   - if [ "$BUILD_ANDROID" == true ]; then
         ./compile-android.sh;
     else
-        cargo build --bin aw_server $($RELEASE && echo '--release');
+        cargo build --bin aw-server-rust $($RELEASE && echo '--release');
         cargo build --lib $($RELEASE && echo '--release');
     fi
 
 script:
   - cargo test --verbose $($RELEASE && echo '--release')
+  - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ]; then
+        echo "Running tests for coverage";
+        cargo kcov --verbose;
+        bash <(curl -s https://codecov.io/bash);
+    fi
 
 
 before_cache:
   - cargo prune
 
+addons:
+  apt:
+    packages:
+      - libcurl4-openssl-dev
+      - libelf-dev
+      - libdw-dev
+
 cache:
   cargo: true
+  apt: true
+  directories:
+    - target/debug/deps
+    - target/debug/build
+
+after_success:

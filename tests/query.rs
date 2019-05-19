@@ -212,7 +212,7 @@ mod query_tests {
         // Test if else
         let code = String::from("
             a=False; n=1;
-            if a { n=2; }
+            if a { }
             else { n=3; }
             return n;");
         match query::query(&code, &interval, &ds).unwrap() {
@@ -399,44 +399,58 @@ mod query_tests {
     }
 
     #[test]
+    fn test_contains() {
+        let ds = setup_datastore_empty();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // test list true
+        let code = String::from(r#"a = ["b", "a"]; return contains(a, "a");"#);
+        let res = query::query(&code, &interval, &ds).unwrap();
+        assert_eq!(res, DataType::Bool(true));
+
+        // test list false
+        let code = String::from(r#"a = ["b", "a"]; return contains(a, "c");"#);
+        let res = query::query(&code, &interval, &ds).unwrap();
+        assert_eq!(res, DataType::Bool(false));
+
+        // test dict true
+        let code = String::from(r#"a = {"a": 1}; return contains(a, "a");"#);
+        let res = query::query(&code, &interval, &ds).unwrap();
+        assert_eq!(res, DataType::Bool(true));
+
+        // test dict false
+        let code = String::from(r#"a = {"b": 1}; return contains(a, "a");"#);
+        let res = query::query(&code, &interval, &ds).unwrap();
+        assert_eq!(res, DataType::Bool(false));
+    }
+
+    #[test]
     fn test_math() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("1+1;");
-        match query::query(&code, &interval, &ds) {
-            Ok(r_type) => match r_type {
-                DataType::Number(n) => assert_eq!(n, 2.0),
-                num => panic!("Expected number, got {:?}", num)
-            },
-            Err(e) => panic!("Expected number, got {:?}", e)
+        match query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 2.0),
+            num => panic!("Expected number, got {:?}", num)
         };
 
         let code = String::from("1-1;");
-        match query::query(&code, &interval, &ds) {
-            Ok(r_type) => match r_type {
-                DataType::Number(n) => assert_eq!(n, 0.0),
-                num => panic!("Expected number, got {:?}", num)
-            },
-            Err(e) => panic!("Expected number, got {:?}", e)
+        match query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 0.0),
+            num => panic!("Expected number, got {:?}", num)
         };
 
         let code = String::from("3*5;");
-        match query::query(&code, &interval, &ds) {
-            Ok(r_type) => match r_type {
-                DataType::Number(n) => assert_eq!(n, 15.0),
-                num => panic!("Expected number, got {:?}", num)
-            },
-            Err(e) => panic!("Expected number, got {:?}", e)
+        match query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 15.0),
+            num => panic!("Expected number, got {:?}", num)
         };
 
         let code = String::from("4/2;");
-        match query::query(&code, &interval, &ds) {
-            Ok(r_type) => match r_type {
-                DataType::Number(n) => assert_eq!(n, 2.0),
-                num => panic!("Expected number, got {:?}", num)
-            },
-            Err(e) => panic!("Expected number, got {:?}", e)
+        match query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 2.0),
+            num => panic!("Expected number, got {:?}", num)
         };
 
         let code = String::from("1/0;");
@@ -449,12 +463,15 @@ mod query_tests {
         };
 
         let code = String::from("2.5%1;");
-        match query::query(&code, &interval, &ds) {
-            Ok(r_type) => match r_type {
-                DataType::Number(n) => assert_eq!(n, 0.5),
-                num => panic!("Expected number, got {:?}", num)
-            },
-            Err(e) => panic!("Expected number, got {:?}", e)
+        match query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 0.5),
+            num => panic!("Expected number, got {:?}", num)
+        };
+
+        let code = String::from("1+1+0+1;");
+        match query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 3.0),
+            num => panic!("Expected number, got {:?}", num)
         };
     }
 }

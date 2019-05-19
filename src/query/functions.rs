@@ -13,6 +13,7 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
     env.insert("sort_by_timestamp", DataType::Function("sort_by_timestamp".to_string(), qfunctions::sort_by_timestamp));
     env.insert("sum_durations", DataType::Function("sum_durations".to_string(), qfunctions::sum_durations));
     env.insert("limit_events", DataType::Function("limit_events".to_string(), qfunctions::limit_events));
+    env.insert("contains", DataType::Function("contains".to_string(), qfunctions::contains));
     env.insert("flood", DataType::Function("flood".to_string(), qfunctions::flood));
     env.insert("merge_events_by_keys", DataType::Function("merge_events_by_keys".to_string(), qfunctions::merge_events_by_keys));
     env.insert("chunk_events_by_key", DataType::Function("chunk_events_by_key".to_string(), qfunctions::chunk_events_by_key));
@@ -66,6 +67,24 @@ mod qfunctions {
             bucketnames.push(DataType::String(bucketname.to_string()));
         }
         return Ok(DataType::List(bucketnames));
+    }
+
+    pub fn contains(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 2)?;
+        match args[0] {
+            DataType::List(ref list) => {
+                return Ok(DataType::Bool(list.contains(&args[1])));
+            },
+            DataType::Dict(ref dict) => {
+                let s = match &args[1] {
+                    DataType::String(s) => s.to_string(),
+                    _ => return Err(QueryError::InvalidFunctionParameters(format!("function contains got first argument {:?}, expected type List or Dict", args[0]))),
+                };
+                return Ok(DataType::Bool(dict.contains_key(&s)));
+            },
+            _ => return Err(QueryError::InvalidFunctionParameters(format!("function contains got first argument {:?}, expected type List or Dict", args[0]))),
+        }
     }
 
     pub fn flood(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {

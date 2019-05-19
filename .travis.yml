@@ -44,11 +44,12 @@ install:
     fi
 
 script:
-  - cargo test --verbose $($RELEASE && echo '--release')
-  - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ]; then
-        echo "Running tests for coverage";
+  - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ] && [ -z "$RELEASE" ]; then
+        echo "Running tests with coverage";
         cargo kcov --verbose;
         bash <(curl -s https://codecov.io/bash);
+    else
+        cargo test --verbose $($RELEASE && echo '--release');
     fi
 
 

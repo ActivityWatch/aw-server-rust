@@ -2,6 +2,7 @@ aw-server-rust
 ==============
 
 [![Dependency Status](https://deps.rs/repo/github/activitywatch/aw-server-rust/status.svg)](https://deps.rs/repo/github/activitywatch/aw-server-rust)
+[![Build Status](https://travis-ci.org/ActivityWatch/aw-server-rust.svg?branch=master)](https://travis-ci.org/ActivityWatch/aw-server-rust)
 [![Coverage Status](https://codecov.io/gh/ActivityWatch/aw-server-rust/branch/master/graph/badge.svg)](https://codecov.io/gh/ActivityWatch/aw-server-rust)
 
 A reimplementation of aw-server in Rust

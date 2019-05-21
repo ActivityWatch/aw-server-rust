@@ -168,6 +168,7 @@ mod api_tests {
             .dispatch();
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.body_string().unwrap(), r#"{"id":null,"timestamp":"2018-01-01T01:01:01Z","duration":2.0,"data":{}}"#);
 
         // Get heartbeat event
         res = client.get("/api/0/buckets/id/events")

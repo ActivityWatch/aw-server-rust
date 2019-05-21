@@ -149,7 +149,7 @@ pub mod android {
             Err(err) => return create_error_object(&env, err.to_string())
         };
         match openDatastore().heartbeat(&bucket_id, event_json, pulsetime) {
-            Ok(()) => string_to_jstring(&env, "Heartbeat successfully received".to_string()),
+            Ok(_) => string_to_jstring(&env, "Heartbeat successfully received".to_string()),
             Err(e) => create_error_object(&env, format!("Something went wrong when trying to send heartbeat: {:?}", e))
         }
     }

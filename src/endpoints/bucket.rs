@@ -135,15 +135,15 @@ pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: 
 }
 
 #[post("/<bucket_id>/heartbeat?<pulsetime>", data = "<heartbeat_json>")]
-pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, pulsetime: f64, state: State<ServerState>) -> Result<(), Status> {
+pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, pulsetime: f64, state: State<ServerState>) -> Result<Json<Event>, Status> {
     let heartbeat = heartbeat_json.into_inner();
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.heartbeat(&bucket_id, heartbeat, pulsetime) {
-        Ok(_) => Ok(()),
-        Err(e) => match e {
+        Ok(e) => Ok(Json(e)),
+        Err(err) => match err {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
-            e => {
-                warn!("Heartbeat failed: {:?}", e);
+            err => {
+                warn!("Heartbeat failed: {:?}", err);
                 Err(Status::InternalServerError)
             }
         }

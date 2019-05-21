@@ -12,15 +12,10 @@ pub fn cors(config: &AWConfig) -> rocket_cors::Cors {
     if config.testing {
         allowed_exact_origins.push("http://127.0.0.1:27180".to_string());
     }
-    let mut allowed_regex_origins = vec![
-        "moz-extension://6b1794a0-5ae6-4443-aef9-7755717bb180".to_string(),
-        "moz-extension://02507908-8928-4ec3-86f5-2ae5dddf4c47".to_string(),  // The ID I got on Firefox for Android
-        "chrome-extension://nglaklhklhcoonedhgnpgddginnjdadi".to_string(),
+    let allowed_regex_origins = vec![
+        "moz-extension://.*".to_string(),
+        "chrome-extension://.*".to_string(),
     ];
-    if config.testing {
-        allowed_regex_origins.push("moz-extension://.*".to_string());
-        allowed_regex_origins.push("chrome-extension://.*".to_string());
-    }
 
     let allowed_origins = AllowedOrigins::some(&allowed_exact_origins, &allowed_regex_origins);
     let allowed_methods = vec![Method::Get, Method::Post, Method::Delete]

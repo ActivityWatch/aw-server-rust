@@ -30,6 +30,7 @@ pub enum Responses {
     Empty(),
     Bucket(Bucket),
     BucketMap(HashMap<String, Bucket>),
+    Event(Event),
     EventList(Vec<Event>),
     Count(i64)
 }
@@ -211,7 +212,7 @@ impl DatastoreWorker {
                     },
                     Commands::Heartbeat(bucketname, event, pulsetime) => {
                         match ds.heartbeat(&transaction, bucketname, event.clone(), *pulsetime, &mut last_heartbeat) {
-                            Ok(_) => Ok(Responses::Empty()),
+                            Ok(e) => Ok(Responses::Event(e)),
                             Err(e) => Err(e)
                         }
                     },
@@ -474,7 +475,7 @@ impl DatastoreInstance {
         Ok(())
     }
 
-    pub fn heartbeat(&mut self, conn: &Connection, bucket_id: &str, heartbeat: Event, pulsetime: f64, last_heartbeat: &mut HashMap<String, Option<Event>>) -> Result<(), DatastoreError> {
+    pub fn heartbeat(&mut self, conn: &Connection, bucket_id: &str, heartbeat: Event, pulsetime: f64, last_heartbeat: &mut HashMap<String, Option<Event>>) -> Result<Event, DatastoreError> {
         self.get_bucket(&bucket_id)?;
         if !last_heartbeat.contains_key(bucket_id) {
             last_heartbeat.insert(bucket_id.to_string(), None);
@@ -490,7 +491,7 @@ impl DatastoreInstance {
                     None => {
                         // There was no last event, insert and return
                         self.insert_events(conn, &bucket_id, &vec![heartbeat.clone()])?;
-                        return Ok(());
+                        return Ok(heartbeat.clone());
                     }
                 }
             }
@@ -506,8 +507,8 @@ impl DatastoreInstance {
                 heartbeat
             }
         };
-        last_heartbeat.insert(bucket_id.to_string(), Some(inserted_heartbeat));
-        Ok(())
+        last_heartbeat.insert(bucket_id.to_string(), Some(inserted_heartbeat.clone()));
+        Ok(inserted_heartbeat)
     }
 
     pub fn get_events(&mut self, conn: &Connection, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
@@ -682,10 +683,10 @@ impl Datastore {
         }
     }
 
-    pub fn heartbeat(&self, bucket_id: &str, heartbeat: Event, pulsetime: f64) -> Result<(), DatastoreError> {
+    pub fn heartbeat(&self, bucket_id: &str, heartbeat: Event, pulsetime: f64) -> Result<Event, DatastoreError> {
         match self.requester.request(Commands::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime)) {
             Ok(r) => match r {
-                Responses::Empty() => return Ok(()),
+                Responses::Event(e) => return Ok(e),
                 _ => panic!("Invalid response")
             },
             Err(e) => Err(e)

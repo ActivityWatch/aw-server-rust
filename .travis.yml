@@ -25,7 +25,8 @@ before_install:
       ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm64 --install-dir "${ANDROID_NDK_HOME}/arm64";
       ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm --install-dir "${ANDROID_NDK_HOME}/arm";
       ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch x86 --install-dir "${ANDROID_NDK_HOME}/x86";
-      rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android;
+      ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch x86_64 --install-dir "${ANDROID_NDK_HOME}/x86_64";
+      rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android;
     fi
 
 install:

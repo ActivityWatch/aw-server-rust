@@ -8,13 +8,19 @@ if [ -z "$ANDROID_NDK_HOME" ]; then
     exit 1
 fi
 
-# Ring won't build in the below target for whatever reason
-# 'arm armv7-linux-androideabi' \
+if [ $RELEASE ]; then
+    echo "Building in release mode... (slow)";
+else
+    echo "Building in debug mode... (fast)"
+fi
 
 ORIG_PATH="$PATH"
 
+# Ring won't build in the below target for whatever reason
+# 'arm armv7-linux-androideabi' \
 for archtargetstr in \
     'x86 i686-linux-android' \
+    'x86_64 x86_64-linux-android' \
     'arm64 aarch64-linux-android' \
 ; do
     arch=$(echo $archtargetstr | cut -d " " -f 1)

@@ -138,11 +138,11 @@ mod query_tests {
             ref data => panic!("Wrong datatype, {:?}", data)
         };
 
-        // different types comparison (always false)
+        // different types comparison (should raise an error)
         let code = String::from("True==1;");
-        match query::query(&code, &interval, &ds).unwrap() {
-            query::DataType::Bool(b) => assert_eq!(b, false),
-            ref data => panic!("Wrong datatype, {:?}", data)
+        match query::query(&code, &interval, &ds) {
+            Err(query::QueryError::InvalidType(_)) => (),
+            r => panic!("Expected an InvalidType error, got {:?}", r),
         };
     }
 

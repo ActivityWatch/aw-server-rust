@@ -72,8 +72,26 @@ impl fmt::Debug for DataType {
     }
 }
 
-/* TODO: Replace with own trait for Eq which can return an error when comparing
- * incompatible types */
+/* Like eq, but raises an error when comparing between different types.
+ * Should be used as often as possible */
+impl DataType {
+    fn query_eq(&self, other: &DataType) -> Result<bool, QueryError> {
+        match (self, other) {
+            // TODO: Comparisons of bool == num, bool == str
+            (DataType::None(), DataType::None()) => Ok(false),
+            (DataType::Bool(b1), DataType::Bool(b2)) => Ok(b1 == b2),
+            (DataType::Number(n1), DataType::Number(n2)) => Ok(n1 == n2),
+            (DataType::String(s1), DataType::String(s2)) => Ok(s1 == s2),
+            (DataType::Event(e1), DataType::Event(e2)) => Ok(e1 == e2),
+            (DataType::List(l1), DataType::List(l2)) => Ok(l1 == l2),
+            (DataType::Dict(d1), DataType::Dict(d2)) => Ok(d1 == d2),
+            // We do not care about comparing functions
+            _ => Err(QueryError::InvalidType(format!("Cannot compare values of different types {:?} and {:?}", self, other))),
+        }
+    }
+}
+
+/* Required for query_eq when comparing two dicts */
 impl PartialEq for DataType {
     fn eq(&self, other: &DataType) -> bool {
         match (self, other) {
@@ -90,6 +108,7 @@ impl PartialEq for DataType {
         }
     }
 }
+
 
 mod lexer {
     use plex::lexer;
@@ -661,7 +680,7 @@ mod interpret {
             Equal(ref lhs, ref rhs) => {
                 let lhs_res = interpret_expr(env, ds, lhs)?;
                 let rhs_res = interpret_expr(env, ds, rhs)?;
-                Ok(DataType::Bool(lhs_res == rhs_res))
+                Ok(DataType::Bool(lhs_res.query_eq(&rhs_res)?))
             },
             Assign(ref var, ref b) => {
                 let val = interpret_expr(env, ds, b)?;
@@ -686,7 +705,7 @@ mod interpret {
             If(ref ifs) => {
                 for (ref cond, ref block) in ifs {
                     let c = interpret_expr(env, ds, cond)?;
-                    if c == DataType::Bool(true) {
+                    if c.query_eq(&DataType::Bool(true))? {
                         for expr in block {
                             interpret_expr(env, ds, expr)?;
                         }

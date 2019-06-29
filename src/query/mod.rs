@@ -40,7 +40,6 @@ pub enum DataType {
     Event(Event),
     List(Vec<DataType>),
     Dict(HashMap<String, DataType>),
-    // Name, argc (-1=unlimited), func
     #[serde(serialize_with = "serialize_function")]
     Function(String, functions::QueryFn),
 }

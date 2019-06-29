@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 extern crate chrono;
+#[macro_use]
 extern crate aw_server;
 extern crate serde_json;
 
@@ -23,7 +24,7 @@ mod datastore_tests {
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
             created: Some(Utc::now()),
-            data: json!("{}"),
+            data: json_map!{},
             metadata: BucketMetadata::default(),
             events: None
         }
@@ -84,7 +85,7 @@ mod datastore_tests {
             id: None,
             timestamp: Utc::now(),
             duration: Duration::seconds(0),
-            data: json!({"key": "value"})
+            data: json_map!{"key": json!("value")}
         };
         let mut e2 = e1.clone();
         e2.timestamp = e2.timestamp + Duration::nanoseconds(1);
@@ -148,14 +149,14 @@ mod datastore_tests {
             id: None,
             timestamp: Utc::now(),
             duration: Duration::seconds(0),
-            data: json!({"key": "value"})
+            data: json_map!{"key": json!("value")}
         };
         let mut e2 = e1.clone();
         e2.timestamp = e2.timestamp + Duration::seconds(1);
 
         let mut e_diff_data = e2.clone();
         e_diff_data.timestamp = e_diff_data.timestamp + Duration::seconds(1);
-        e_diff_data.data = json!({"key": "other value"});
+        e_diff_data.data = json_map!{"key": json!("other value")};
 
         // First event
         ds.heartbeat(&bucket.id, e1.clone(), 10.0).unwrap();
@@ -201,7 +202,7 @@ mod datastore_tests {
             id: None,
             timestamp: Utc::now(),
             duration: Duration::seconds(0),
-            data: json!({"key": "value"})
+            data: json_map!{"key": json!("value")}
         };
         {
             // Initialize database and create buckets

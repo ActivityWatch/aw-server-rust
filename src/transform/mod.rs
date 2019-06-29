@@ -126,7 +126,7 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
     'event: for event in events {
         let mut key_values = Vec::new();
         'key: for key in &keys {
-            match event.data.get(&key) {
+            match event.data.get(key) {
                 Some(v) => key_values.push(v.to_string()),
                 None => continue 'event
             }
@@ -259,7 +259,6 @@ pub fn filter_period_intersect(events: &Vec<Event>, filter_events: &Vec<Event>) 
 
 pub fn split_url_event(event: &mut Event) {
     use rocket::http::uri::Absolute;
-    use serde_json::Value;
     let uri_str = match event.data.get("url") {
         None => return,
         Some(val) => match val {
@@ -271,13 +270,9 @@ pub fn split_url_event(event: &mut Event) {
         Ok(uri) => uri,
         Err(_) => return
     };
-    let data = match event.data {
-        Value::Object(ref mut o) => o,
-        _ => panic!("event data is not a object!")
-    };
     // Protocol
     let protocol = uri.scheme().to_string();
-    data.insert("protocol".to_string(), Value::String(protocol));
+    event.data.insert("protocol".to_string(), Value::String(protocol));
     // Domain
     let domain = match uri.authority() {
         Some(authority) => {
@@ -285,13 +280,13 @@ pub fn split_url_event(event: &mut Event) {
         },
         None => "".to_string(),
     };
-    data.insert("domain".to_string(), Value::String(domain));
+    event.data.insert("domain".to_string(), Value::String(domain));
     // Path
     let path = match uri.origin() {
         Some(origin) => origin.path().to_string(),
         None => "".to_string()
     };
-    data.insert("path".to_string(), Value::String(path));
+    event.data.insert("path".to_string(), Value::String(path));
     // Params
     // TODO: What's the difference between params and query?
     let params = match uri.origin() {
@@ -301,7 +296,7 @@ pub fn split_url_event(event: &mut Event) {
         },
         None => "".to_string()
     };
-    data.insert("params".to_string(), Value::String(params));
+    event.data.insert("params".to_string(), Value::String(params));
 
     // TODO: aw-server-python also has options and identifier
 }

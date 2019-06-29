@@ -1,7 +1,9 @@
 use serde_json::Value;
+use serde_json::Map;
 use chrono::DateTime;
 use chrono::Utc;
 use chrono::Duration;
+use std::collections::HashMap;
 
 use crate::models::duration::DurationSerialization;
 
@@ -11,7 +13,7 @@ pub struct Event {
     pub timestamp: DateTime<Utc>,
     #[serde(with = "DurationSerialization")]
     pub duration: Duration,
-    pub data: Value, /* TODO: force this to be a value::Object somehow */
+    pub data: Map<String, Value>,
 }
 
 impl Event {

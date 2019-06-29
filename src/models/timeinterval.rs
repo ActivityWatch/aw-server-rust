@@ -75,7 +75,6 @@ impl<'de> Visitor<'de> for TimeIntervalVisitor {
     where
         E: de::Error,
     {
-        // TODO: do not unwrap and return proper error
         match TimeInterval::new_from_string(&value) {
             Ok(ti) => Ok(ti),
             Err(e) => {

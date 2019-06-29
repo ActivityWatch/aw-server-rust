@@ -11,6 +11,8 @@ use rusqlite::Connection;
 use rusqlite::DropBehavior;
 use rusqlite::TransactionBehavior;
 
+use serde_json::value::Value;
+
 use crossbeam_requests;
 
 use crate::models::Bucket;
@@ -322,7 +324,8 @@ impl DatastoreInstance {
             Ok(buckets) => buckets,
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare create_bucket SQL statement: {}", err.to_string()))),
         };
-        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &ToSql, &bucket.data as &ToSql]);
+        let data = serde_json::to_string(&bucket.data).unwrap();
+        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &ToSql, &data]);
 
         match res {
             Ok(_) => {
@@ -402,7 +405,8 @@ impl DatastoreInstance {
                 None => return Err(DatastoreError::InternalError("Failed to convert duration to nanoseconds".to_string()))
             };
             let endtime_nanos = starttime_nanos + duration_nanos;
-            let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]);
+            let data = serde_json::to_string(&event.data).unwrap();
+            let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &data as &ToSql]);
             match res {
                 Ok(_) => self.update_endtime(&mut bucket, event),
                 Err(err) => {
@@ -466,7 +470,8 @@ impl DatastoreInstance {
             None => return Err(DatastoreError::InternalError("Failed to convert duration to nanoseconds".to_string()))
         };
         let endtime_nanos = starttime_nanos + duration_nanos;
-        match stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &event.data as &ToSql]) {
+        let data = serde_json::to_string(&event.data).unwrap();
+        match stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &data as &ToSql]) {
             Ok(_) => self.update_endtime(&mut bucket, event),
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to execute replace_last_event SQL statement: {}", err)))
         };
@@ -549,7 +554,7 @@ impl DatastoreInstance {
             let id = row.get(0)?;
             let mut starttime_ns : i64 = row.get(1)?;
             let mut endtime_ns : i64 = row.get(2)?;
-            let data = row.get(3)?;
+            let data_str : String = row.get(3)?;
 
             if starttime_ns < starttime_filter_ns { starttime_ns = starttime_filter_ns }
             if endtime_ns > endtime_filter_ns { endtime_ns = endtime_filter_ns }
@@ -557,6 +562,7 @@ impl DatastoreInstance {
 
             let time_seconds : i64 = (starttime_ns/1000000000) as i64;
             let time_subnanos : u32 = (starttime_ns%1000000000) as u32;
+            let data : serde_json::map::Map<String, Value> = serde_json::from_str(&data_str).unwrap();
 
             return Ok(Event {
                 id: Some(id),

@@ -3,7 +3,6 @@ use serde_json::Map;
 use chrono::DateTime;
 use chrono::Utc;
 use chrono::Duration;
-use std::collections::HashMap;
 
 use crate::models::duration::DurationSerialization;
 

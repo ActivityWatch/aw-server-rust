@@ -101,14 +101,14 @@ fn _create_tables(conn: &Connection) {
             client TEXT NOT NULL,
             hostname TEXT NOT NULL,
             created TEXT NOT NULL
-        )", &[] as &[&ToSql]).expect("Failed to create buckets table");
+        )", &[] as &[&dyn ToSql]).expect("Failed to create buckets table");
     /* Set up index for bucket table */
-    conn.execute("CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id)", &[] as &[&ToSql])
+    conn.execute("CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id)", &[] as &[&dyn ToSql])
         .expect("Failed to create buckets index");
     /* Upgrade bucket table to v2 */
     if version < 2 {
         info!("Upgrading database to v2, adding data field to buckets");
-        conn.execute("ALTER TABLE buckets ADD COLUMN data TEXT default '{}';", &[] as &[&ToSql])
+        conn.execute("ALTER TABLE buckets ADD COLUMN data TEXT default '{}';", &[] as &[&dyn ToSql])
             .expect("Failed to upgrade database when adding data field to buckets");
     }
 
@@ -121,13 +121,13 @@ fn _create_tables(conn: &Connection) {
             endtime INTEGER NOT NULL,
             data TEXT NOT NULL,
             FOREIGN KEY (bucketrow) REFERENCES buckets(id)
-        )", &[] as &[&ToSql]).expect("Failed to create events table");
+        )", &[] as &[&dyn ToSql]).expect("Failed to create events table");
     /* Set up index for events table */
-    conn.execute("CREATE INDEX IF NOT EXISTS events_bucketrow_index ON events(bucketrow)", &[] as &[&ToSql])
+    conn.execute("CREATE INDEX IF NOT EXISTS events_bucketrow_index ON events(bucketrow)", &[] as &[&dyn ToSql])
         .expect("Failed to create events_bucketrow index");
-    conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[] as &[&ToSql])
+    conn.execute("CREATE INDEX IF NOT EXISTS events_starttime_index ON events(starttime)", &[] as &[&dyn ToSql])
         .expect("Failed to create events_starttime index");
-    conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[] as &[&ToSql])
+    conn.execute("CREATE INDEX IF NOT EXISTS events_endtime_index ON events(endtime)", &[] as &[&dyn ToSql])
         .expect("Failed to create events_endtime index");
 
     /* Update database version to current version */
@@ -260,7 +260,7 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare get_stored_buckets SQL statement: {}", err.to_string())))
         };
-        let buckets = match stmt.query_map(&[] as &[&ToSql], |row| {
+        let buckets = match stmt.query_map(&[] as &[&dyn ToSql], |row| {
             let data_str : String = row.get(6)?;
 
             let opt_start_ns : Option<i64> = row.get(7)?;
@@ -326,7 +326,7 @@ impl DatastoreInstance {
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare create_bucket SQL statement: {}", err.to_string()))),
         };
         let data = serde_json::to_string(&bucket.data).unwrap();
-        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &ToSql, &data]);
+        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &dyn ToSql, &data]);
 
         match res {
             Ok(_) => {
@@ -407,7 +407,7 @@ impl DatastoreInstance {
             };
             let endtime_nanos = starttime_nanos + duration_nanos;
             let data = serde_json::to_string(&event.data).unwrap();
-            let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &data as &ToSql]);
+            let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &data as &dyn ToSql]);
             match res {
                 Ok(_) => self.update_endtime(&mut bucket, event),
                 Err(err) => {
@@ -472,7 +472,7 @@ impl DatastoreInstance {
         };
         let endtime_nanos = starttime_nanos + duration_nanos;
         let data = serde_json::to_string(&event.data).unwrap();
-        match stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &data as &ToSql]) {
+        match stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &data as &dyn ToSql]) {
             Ok(_) => self.update_endtime(&mut bucket, event),
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to execute replace_last_event SQL statement: {}", err)))
         };

@@ -1,6 +1,7 @@
 extern crate chrono;
 extern crate serde_json;
 
+#[macro_use]
 extern crate aw_server;
 
 #[cfg(test)]
@@ -22,13 +23,13 @@ mod transform_tests {
             id: None,
             timestamp: now,
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let heartbeat1 = Event {
             id: None,
             timestamp: now + Duration::seconds(2),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
 
         // Merge result
@@ -51,13 +52,13 @@ mod transform_tests {
             id: None,
             timestamp: now.clone(),
             duration: Duration::seconds(0),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let heartbeat_same_data = Event {
             id: None,
             timestamp: now.clone(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
 
         // Data is same, should merge
@@ -68,7 +69,7 @@ mod transform_tests {
             id: None,
             timestamp: now.clone(),
             duration: Duration::seconds(1),
-            data: json!({"test": 2})
+            data: json_map!{"test": json!(2)}
         };
         // Data is different, should not merge
         let res_merge = transform::heartbeat(&event, &heartbeat_different_data, 1.0);
@@ -81,13 +82,13 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let res = transform::sort_by_timestamp(vec![e2.clone(), e1.clone()]);
         assert_eq!(res, vec![e1, e2]);
@@ -99,13 +100,13 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
             duration: Duration::seconds(2),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let res = transform::sort_by_duration(vec![e2.clone(), e1.clone()]);
         assert_eq!(res, vec![e1, e2]);
@@ -118,19 +119,19 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let e_expected = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
             duration: Duration::seconds(4),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let res = transform::flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
         assert_eq!(1, res.len());
@@ -141,25 +142,25 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 2})
+            data: json_map!{"test": json!(2)}
         };
         let e1_expected = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
             duration: Duration::seconds(2),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let e2_expected = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:02Z").unwrap(),
             duration: Duration::seconds(2),
-            data: json!({"test": 2})
+            data: json_map!{"test": json!(2)}
         };
         let res = transform::flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
         assert_eq!(2, res.len());
@@ -173,25 +174,25 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
             duration: Duration::seconds(3),
-            data: json!({"test2": 3})
+            data: json_map!{"test2": json!(3)}
         };
         let e3 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:02Z").unwrap(),
             duration: Duration::seconds(7),
-            data: json!({"test": 6})
+            data: json_map!{"test": json!(6)}
         };
         let e4 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
             duration: Duration::seconds(9),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let in_events = vec![e1.clone(), e2.clone(), e3.clone(), e4.clone()];
         let res1 = transform::merge_events_by_keys (in_events, vec!["test".to_string()]);
@@ -202,13 +203,13 @@ mod transform_tests {
                 id: None,
                 timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
                 duration: Duration::seconds(10),
-                data: json!({"test": 1})
+                data: json_map!{"test": json!(1)}
             },
             Event {
                 id: None,
                 timestamp: DateTime::from_str("2000-01-01T00:00:02Z").unwrap(),
                 duration: Duration::seconds(7),
-                data: json!({"test": 6})
+                data: json_map!{"test": json!(6)}
             }
         ];
         assert_eq!(&res2, &expected);
@@ -220,12 +221,12 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let mut e2 = e1.clone();
-        e2.data = json!({"test": 2});
+        e2.data = json_map!{"test": json!(2)};
         let mut e3 = e1.clone();
-        e3.data = json!({"test2": 2});
+        e3.data = json_map!{"test2": json!(2)};
         let res = transform::filter_keyvals(vec![e1.clone(), e2, e3], "test", &vec![json!(1)]);
         assert_eq!(vec![e1], res);
     }
@@ -236,7 +237,7 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let mut e2 = e1.clone();
         e2.timestamp = DateTime::from_str("2000-01-01T00:00:02Z").unwrap();
@@ -251,7 +252,7 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:02.5Z").unwrap(),
             duration: Duration::seconds(2),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
 
         let filtered_events = transform::filter_period_intersect(&vec![e1, e2, e3, e4, e5], &vec![filter_event]);
@@ -274,13 +275,13 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         let mut e2 = e1.clone();
-        e2.data = json!({"test2": 1});
+        e2.data = json_map!{"test2": json!(1)};
         let e3 = e1.clone();
         let mut e4 = e1.clone();
-        e4.data = json!({"test": 2});
+        e4.data = json_map!{"test": json!(2)};
 
         let res = transform::chunk_events_by_key(vec![e1, e2, e3, e4], "test");
         assert_eq!(res.len(), 2);
@@ -294,15 +295,15 @@ mod transform_tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json!({"url": "http://www.google.com/path?query=1"})
+            data: json_map!{"url": "http://www.google.com/path?query=1"}
         };
         transform::split_url_event(&mut e1);
-        assert_eq!(e1.data, json!({
-            "url": "http://www.google.com/path?query=1",
-            "protocol": "http",
-            "domain": "google.com",
-            "path": "/path",
-            "params": "query=1"
-        }));
+        assert_eq!(e1.data, json_map!{
+            "url": json!("http://www.google.com/path?query=1"),
+            "protocol": json!("http"),
+            "domain": json!("google.com"),
+            "path": json!("/path"),
+            "params": json!("query=1")
+        });
     }
 }

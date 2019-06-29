@@ -3,6 +3,7 @@ extern crate log;
 extern crate chrono;
 extern crate serde_json;
 
+#[macro_use]
 extern crate aw_server;
 
 #[cfg(test)]
@@ -28,7 +29,7 @@ mod models_tests {
             client: "client".to_string(),
             hostname: "hostname".to_string(),
             created: None,
-            data: json!("{}"),
+            data: json_map!{},
             metadata: BucketMetadata::default(),
             events: None
         };
@@ -41,10 +42,11 @@ mod models_tests {
             id: None,
             timestamp: Utc::now(),
             duration: Duration::seconds(1),
-            data: json!({"test": 1})
+            data: json_map!{"test": json!(1)}
         };
         debug!("event: {:?}", e);
     }
+
 
     #[test]
     fn test_timeinterval() {

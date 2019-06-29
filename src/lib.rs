@@ -28,6 +28,7 @@ extern crate fern;
 
 extern crate toml;
 
+#[macro_use] pub mod macros;
 pub mod models;
 pub mod transform;
 pub mod datastore;

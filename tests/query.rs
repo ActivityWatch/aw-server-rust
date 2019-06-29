@@ -1,6 +1,7 @@
 extern crate chrono;
 extern crate serde_json;
 
+#[macro_use]
 extern crate aw_server;
 
 #[cfg(test)]
@@ -35,7 +36,7 @@ mod query_tests {
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
             created: Some(chrono::Utc::now()),
-            data: json!("{}"),
+            data: json_map!{},
             metadata: BucketMetadata::default(),
             events: None
         };
@@ -50,12 +51,12 @@ mod query_tests {
             id: None,
             timestamp: chrono::Utc::now(),
             duration: Duration::seconds(0),
-            data: json!({"key": "value"})
+            data: json_map!{"key": json!("value")}
         };
         let mut e2 = e1.clone();
         e2.timestamp = chrono::Utc::now();
         let mut e_replace = e2.clone();
-        e_replace.data = json!({"key": "value2"});
+        e_replace.data = json_map!{"key": json!("value2")};
         e_replace.duration = Duration::seconds(2);
 
         let mut event_list = Vec::new();

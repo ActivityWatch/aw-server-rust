@@ -2,6 +2,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use std::collections::HashMap;
 use serde_json::value::Value;
+use serde_json::map::Map;
 
 use crate::models::Event;
 
@@ -17,7 +18,7 @@ pub struct Bucket {
     pub hostname: String,
     pub created: Option<DateTime<Utc>>,
     #[serde(default)]
-    pub data: Value,
+    pub data: Map<String, Value>,
     #[serde(default, skip_deserializing)]
     pub metadata: BucketMetadata,
     pub events: Option<Vec<Event>>,

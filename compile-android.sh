@@ -19,9 +19,9 @@ ORIG_PATH="$PATH"
 # Ring won't build in the below target for whatever reason
 # 'arm armv7-linux-androideabi' \
 for archtargetstr in \
-    'x86 i686-linux-android' \
-    'x86_64 x86_64-linux-android' \
     'arm64 aarch64-linux-android' \
+    'x86_64 x86_64-linux-android' \
+    'x86 i686-linux-android' \
 ; do
     arch=$(echo $archtargetstr | cut -d " " -f 1)
     target=$(echo $archtargetstr | cut -d " " -f 2)

@@ -261,7 +261,12 @@ impl DatastoreInstance {
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare get_stored_buckets SQL statement: {}", err.to_string())))
         };
         let buckets = match stmt.query_map(&[] as &[&dyn ToSql], |row| {
-            let data_str : String = row.get(6)?;
+            // If data column is not set (possible on old installations), use an empty map as default
+            let data_str_raw : String = row.get(6)?;
+            let data_str : String = match data_str_raw.as_ref() {
+                "null" => "{}".to_string(),
+                 s => s.to_string(),
+            };
 
             let opt_start_ns : Option<i64> = row.get(7)?;
             let opt_start = match opt_start_ns {
@@ -283,23 +288,30 @@ impl DatastoreInstance {
                 None => None
             };
 
-            Ok(Bucket {
-                bid: row.get(0)?,
-                id: row.get(1)?,
-                _type: row.get(2)?,
-                client: row.get(3)?,
-                hostname: row.get(4)?,
-                created: row.get(5)?,
-                data: serde_json::from_str(&data_str).unwrap(),
-                metadata: BucketMetadata {
-                    start: opt_start,
-                    end: opt_end,
-                },
-                events: None,
-            })
+            match serde_json::from_str(&data_str) {
+                Ok(data) =>
+                    Ok(Bucket {
+                        bid: row.get(0)?,
+                        id: row.get(1)?,
+                        _type: row.get(2)?,
+                        client: row.get(3)?,
+                        hostname: row.get(4)?,
+                        created: row.get(5)?,
+                        data: data,
+                        metadata: BucketMetadata {
+                            start: opt_start,
+                            end: opt_end,
+                        },
+                        events: None,
+                    }),
+                Err(e) => {
+                    error!("Something went wrong when parsing JSON: {:?}", data_str);
+                    Err(rusqlite::Error::InvalidColumnName(format!("Failed to parse data to JSON: {:?}", e)))
+                }
+            }
         }) {
             Ok(buckets) => buckets,
-            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to query get_stored_buckets SQL statement: {}", err)))
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to query get_stored_buckets SQL statement: {:?}", err)))
         };
         for bucket in buckets {
             match bucket {
@@ -307,7 +319,7 @@ impl DatastoreInstance {
                     self.buckets_cache.insert(b.id.clone(), b.clone());
                 },
                 Err(e) => {
-                    error!("Failed to parse bucket from SQLite, database is corrupt! {}", e);
+                    return Err(DatastoreError::InternalError(format!("Failed to parse bucket from SQLite, database is corrupt! {:?}", e)))
                 }
             }
         };
@@ -673,7 +685,7 @@ impl Datastore {
         match self.requester.request(Commands::GetBuckets()) {
             Ok(r) => match r {
                 Responses::BucketMap(bm) => Ok(bm),
-                _ => panic!("Invalid response")
+                e => Err(DatastoreError::InternalError(format!("Invalid response: {:?}", e)))
             },
             Err(e) => Err(e)
         }

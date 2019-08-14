@@ -100,6 +100,10 @@ fn _create_tables(conn: &Connection) {
     if version < 2 {
         _migrate_v1_to_v2(conn);
     }
+
+    if version < 3 {
+        _migrate_v2_to_v3(conn);
+    }
 }
 
 fn _migrate_v0_to_v1(conn: &Connection) {
@@ -142,13 +146,30 @@ fn _migrate_v0_to_v1(conn: &Connection) {
 }
 
 fn _migrate_v1_to_v2(conn: &Connection) {
-    /* Upgrade bucket table to v2 */
     info!("Upgrading database to v2, adding data field to buckets");
-    conn.execute("ALTER TABLE buckets ADD COLUMN data TEXT default '{}';", &[] as &[&dyn ToSql])
+    conn.execute("ALTER TABLE buckets ADD COLUMN data TEXT DEFAULT '{}';", &[] as &[&dyn ToSql])
         .expect("Failed to upgrade database when adding data field to buckets");
 
-    /* Update database version */
     conn.pragma_update(None, "user_version", &2).expect("Failed to update database version!");
+}
+
+fn _migrate_v2_to_v3(conn: &Connection) {
+    // For details about why this migration was necessary, see: https://github.com/ActivityWatch/aw-server-rust/pull/52
+    info!("Upgrading database to v3, replacing the broken data field for buckets");
+
+    // Rename column, marking it as deprecated
+    match conn.execute("ALTER TABLE buckets RENAME COLUMN data TO data_deprecated;", &[] as &[&dyn ToSql]) {
+        Ok(_) => (),
+        // This error is okay, it still has the intended effects
+        Err(rusqlite::Error::ExecuteReturnedResults) => (),
+        Err(e) => panic!("Unexpected error: {:?}", e)
+    };
+
+    // Create new correct column
+    conn.execute("ALTER TABLE buckets ADD COLUMN data TEXT NOT NULL DEFAULT '{}';", &[] as &[&dyn ToSql])
+        .expect("Failed to upgrade database when adding new data field to buckets");
+
+    conn.pragma_update(None, "user_version", &3).expect("Failed to update database version!");
 }
 
 struct DatastoreInstance {
@@ -300,21 +321,10 @@ impl DatastoreInstance {
             };
 
             // If data column is not set (possible on old installations), use an empty map as default
-            let data_str_raw : String = row.get(8)?;
-            let data_str : String = match data_str_raw.as_ref() {
-                "null" => {
-                    warn!("Stumbled upon weird edge case that should be handled in db migration code");
-                    "{}".to_string()
-                },
-                 s => s.to_string(),
-            };
-
+            let data_str : String = row.get(8)?;
             let data_json = match serde_json::from_str(&data_str) {
                 Ok(data) => data,
-                Err(e) => {
-                    error!("Something went wrong when parsing JSON: {:?}", data_str);
-                    return Err(rusqlite::Error::InvalidColumnName(format!("Failed to parse data to JSON: {:?}", e)));
-                }
+                Err(e) => return Err(rusqlite::Error::InvalidColumnName(format!("Failed to parse data to JSON: {:?}", e)))
             };
 
             Ok(Bucket {

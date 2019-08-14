@@ -47,7 +47,7 @@ fn default_address() -> String {
 fn default_port() -> u16 {
     match Environment::active().expect("Failed to get current environment") {
         Environment::Production => 5600,
-        Environment::Development => 5666,
+        Environment::Development => 5667,
         Environment::Staging => panic!("Staging environment not supported"),
     }
 }

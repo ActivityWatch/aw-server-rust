@@ -20,16 +20,18 @@ use crate::endpoints::ServerState;
 
 use crate::datastore::DatastoreError;
 
-/*
- * TODO:
- * - Fix some unwraps
- */
-
 #[get("/")]
 pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Bucket>>, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
-    let bucketlist = datastore.get_buckets().unwrap();
-    return Ok(Json(bucketlist));
+    match datastore.get_buckets() {
+        Ok(bucketlist) => Ok(Json(bucketlist)),
+        Err(e) => match e {
+            _ => {
+                warn!("Unexpected error: {:?}", e);
+                Err(Status::InternalServerError)
+            }
+        }
+    }
 }
 
 #[get("/<bucket_id>")]

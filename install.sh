@@ -6,6 +6,15 @@
 # See aw-server-rust for more information
 
 set -e
-sudo cp target/release/aw-server-rust /usr/local/bin
-sudo mkdir -p /usr/local/share/aw-server-rust/aw-webui/dist
-sudo cp -r aw-webui/dist/* /usr/local/share/aw-server-rust/aw-webui/dist
+
+if [ -z "$PREFIX" ]; then
+    PREFIX="/usr/local"
+fi
+
+# Install aw-server-rust.service as a user service
+cp ./aw-server-rust.service ~/.config/systemd/user/
+# Copy aw-server-rust binary
+sudo cp ./target/release/aw-server-rust $PREFIX/bin/
+# Copy over webui static assets
+sudo mkdir -p $PREFIX/share/aw_server_rust/
+sudo cp -r ./aw-webui/dist $PREFIX/share/aw_server_rust/static

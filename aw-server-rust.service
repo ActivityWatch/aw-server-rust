@@ -2,12 +2,11 @@
 # aw-server-rust.service #
 ##########################
 #
-# 1. Build aw-server-rust with --release
-# 2. Build aw-webui
-# 3. Run 'install.sh'
-# 4. Run 'systemctl --user daemon-reload' to make systemd load in the new service file
-# 5. Run 'systemctl --user start aw-server-rust.service' to start aw-server-rust
-# 6. (Optional) Run 'systemctl --user enable aw-server-rust.service' to always start aw-server-rust when you log in
+# 1. Build and package aw-server-rust and aw-webui with "make"
+# 2. Install aw-server-rust with "sudo make install"
+# 3. Run 'systemctl --user daemon-reload' to make systemd load in the new service file
+# 4. Run 'systemctl --user start aw-server-rust.service' to start aw-server-rust
+# 5. (Optional) Run 'systemctl --user enable aw-server-rust.service' to always start aw-server-rust when you log in
 #
 # Now aw-server-rust should be running, you can now start whatever
 # ActivityWatch watchers you desire and can find the WebUI at
@@ -16,8 +15,7 @@
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/aw-server-rust
-WorkingDirectory=/usr/local/share/
+ExecStart=aw-server-rust
 
 [Unit]
 Description=ActivityWatch Server (Rust implementation)

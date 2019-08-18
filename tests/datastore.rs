@@ -23,7 +23,7 @@ mod datastore_tests {
             _type: "testtype".to_string(),
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
-            created: Some(Utc::now()),
+            created: None,
             data: json_map!{},
             metadata: BucketMetadata::default(),
             events: None
@@ -48,8 +48,16 @@ mod datastore_tests {
         assert_eq!(bucket_fetched._type, bucket._type);
         assert_eq!(bucket_fetched.client, bucket.client);
         assert_eq!(bucket_fetched.hostname, bucket.hostname);
-        assert_eq!(bucket_fetched.created, bucket.created);
         assert_eq!(bucket_fetched.metadata.end, None);
+
+        match bucket_fetched.created {
+            None => panic!("Expected 'None' in bucket to be replaced with current time"),
+            Some(created) => {
+                let now = Utc::now();
+                assert!(created < now);
+                assert!(created > now - Duration::seconds(10));
+            }
+        };
 
         // Fetch all buckets
         let fetched_buckets = ds.get_buckets().unwrap();
@@ -59,9 +67,17 @@ mod datastore_tests {
         assert_eq!(fetched_buckets[&bucket.id]._type, bucket._type);
         assert_eq!(fetched_buckets[&bucket.id].client, bucket.client);
         assert_eq!(fetched_buckets[&bucket.id].hostname, bucket.hostname);
-        assert_eq!(fetched_buckets[&bucket.id].created, bucket.created);
         assert_eq!(fetched_buckets[&bucket.id].metadata.start, bucket.metadata.start);
         assert_eq!(fetched_buckets[&bucket.id].metadata.end, bucket.metadata.end);
+
+        match fetched_buckets[&bucket.id].created {
+            None => panic!("Expected 'None' in bucket to be replaced with current time"),
+            Some(created) => {
+                let now = Utc::now();
+                assert!(created < now);
+                assert!(created > now - Duration::seconds(10));
+            }
+        };
 
         // Delete bucket
         match ds.delete_bucket(&bucket.id) {

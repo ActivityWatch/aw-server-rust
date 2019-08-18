@@ -221,7 +221,7 @@ impl DatastoreWorker {
                 };
                 let response = match request.body() {
                     Commands::CreateBucket(bucket) => {
-                        match ds.create_bucket(&transaction, bucket) {
+                        match ds.create_bucket(&transaction, bucket.clone()) {
                             Ok(_) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
@@ -358,10 +358,10 @@ impl DatastoreInstance {
         Ok(())
     }
 
-    fn create_bucket(&mut self, conn: &Connection, bucket: &Bucket) -> Result<(), DatastoreError> {
-        let created = match bucket.created {
-            Some(created) => created,
-            None => Utc::now()
+    fn create_bucket(&mut self, conn: &Connection, mut bucket: Bucket) -> Result<(), DatastoreError> {
+        bucket.created = match bucket.created {
+            Some(created) => Some(created),
+            None => Some(Utc::now())
         };
         let mut stmt = match conn.prepare("
                 INSERT INTO buckets (name, type, client, hostname, created, data)
@@ -370,7 +370,7 @@ impl DatastoreInstance {
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare create_bucket SQL statement: {}", err.to_string()))),
         };
         let data = serde_json::to_string(&bucket.data).unwrap();
-        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &created as &dyn ToSql, &data]);
+        let res = stmt.execute(&[&bucket.id, &bucket._type, &bucket.client, &bucket.hostname, &bucket.created as &dyn ToSql, &data]);
 
         match res {
             Ok(_) => {

@@ -148,6 +148,7 @@ mod api_tests {
             }]"#)
             .dispatch();
         debug!("{:?}", res.body_string());
+        assert_eq!(res.body_string().unwrap(), r#"[{"id":1,"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}]"#);
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Get inserted event

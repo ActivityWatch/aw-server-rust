@@ -121,11 +121,11 @@ pub fn bucket_events_get(bucket_id: String, start: Option<String>, end: Option<S
 }
 
 #[post("/<bucket_id>/events", data = "<events>")]
-pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: State<ServerState>) -> Result<(), Status> {
+pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: State<ServerState>) -> Result<Json<Vec<Event>>, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
     let res = datastore.insert_events(&bucket_id, &events);
     match res {
-        Ok(_) => Ok(()),
+        Ok(events) => Ok(Json(events)),
         Err(e) => match e {
             DatastoreError::NoSuchBucket => Err(Status::NotFound),
             e => {

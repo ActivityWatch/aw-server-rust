@@ -22,9 +22,9 @@ use crate::transform;
 
 use rusqlite::types::ToSql;
 
-/*
- * TODO:
- * - Needs refactoring?
+/* TODO
+ * - Replace some unwraps with MpscError
+ * - Improve DatastoreError
  */
 
 #[derive(Debug,Clone)]
@@ -46,7 +46,7 @@ pub enum DatastoreMethod {
 pub enum DatastoreError {
     NoSuchBucket,
     BucketAlreadyExists,
-    RequestLockTimeout,
+    MpscError,
     InternalError(String),
 }
 
@@ -62,12 +62,12 @@ pub enum Commands {
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
 }
 
-type Requester = crossbeam_requests::Requester<Commands, Result<Responses, DatastoreError>>;
-type Responder = crossbeam_requests::Responder<Commands, Result<Responses, DatastoreError>>;
+type RequestSender = crossbeam_requests::RequestSender<Commands, Result<Responses, DatastoreError>>;
+type RequestReceiver = crossbeam_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>;
 
 #[derive(Clone)]
 pub struct Datastore {
-    requester: Requester,
+    requester: RequestSender,
 }
 
 impl fmt::Debug for Datastore {
@@ -77,7 +77,7 @@ impl fmt::Debug for Datastore {
 }
 
 struct DatastoreWorker {
-    responder: Responder,
+    responder: RequestReceiver,
     quit: bool
 }
 
@@ -179,7 +179,7 @@ struct DatastoreInstance {
 }
 
 impl DatastoreWorker {
-    pub fn new(responder: crossbeam_requests::Responder<Commands, Result<Responses, DatastoreError>>) -> Self {
+    pub fn new(responder: crossbeam_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>) -> Self {
         DatastoreWorker {
             responder: responder,
             quit: false
@@ -211,15 +211,15 @@ impl DatastoreWorker {
             };
             transaction.set_drop_behavior(DropBehavior::Commit);
             loop {
-                let mut request = match self.responder.poll() {
-                    Ok(r) => r,
+                let (request, response_sender) = match self.responder.poll() {
+                    Ok((req, res_sender)) => (req, res_sender),
                     Err(_) => { // All references to responder is gone, quit
                         info!("DB worker quitting");
                         self.quit = true;
                         break;
                     }
                 };
-                let response = match request.body() {
+                let response = match request {
                     Commands::CreateBucket(bucket) => {
                         match ds.create_bucket(&transaction, bucket.clone()) {
                             Ok(_) => Ok(Responses::Empty()),
@@ -227,13 +227,13 @@ impl DatastoreWorker {
                         }
                     },
                     Commands::DeleteBucket(bucketname) => {
-                        match ds.delete_bucket(&transaction, bucketname) {
+                        match ds.delete_bucket(&transaction, &bucketname) {
                             Ok(_) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::GetBucket(bucketname) => {
-                        match ds.get_bucket(bucketname) {
+                        match ds.get_bucket(&bucketname) {
                             Ok(b) => Ok(Responses::Bucket(b)),
                             Err(e) => Err(e)
                         }
@@ -242,34 +242,34 @@ impl DatastoreWorker {
                         Ok(Responses::BucketMap(ds.get_buckets()))
                     },
                     Commands::InsertEvents(bucketname, events) => {
-                        match ds.insert_events(&transaction, bucketname, events) {
-                            Ok(_) => {
+                        match ds.insert_events(&transaction, &bucketname, events) {
+                            Ok(events) => {
                                 last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
-                                Ok(Responses::Empty())
+                                Ok(Responses::EventList(events))
                             },
                             Err(e) => Err(e)
                         }
                     },
                     Commands::Heartbeat(bucketname, event, pulsetime) => {
-                        match ds.heartbeat(&transaction, bucketname, event.clone(), *pulsetime, &mut last_heartbeat) {
+                        match ds.heartbeat(&transaction, &bucketname, event, pulsetime, &mut last_heartbeat) {
                             Ok(e) => Ok(Responses::Event(e)),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt) => {
-                        match ds.get_events(&transaction, bucketname, *starttime_opt, *endtime_opt, *limit_opt) {
+                        match ds.get_events(&transaction, &bucketname, starttime_opt, endtime_opt, limit_opt) {
                             Ok(el) => Ok(Responses::EventList(el)),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::GetEventCount(bucketname, starttime_opt, endtime_opt) => {
-                        match ds.get_event_count(&transaction, bucketname, *starttime_opt, *endtime_opt) {
+                        match ds.get_event_count(&transaction, &bucketname, starttime_opt, endtime_opt) {
                             Ok(n) => Ok(Responses::Count(n)),
                             Err(e) => Err(e)
                         }
                     },
                 };
-                request.respond(response);
+                response_sender.respond(response);
                 if ds.commit || ds.uncommited_events > 100 { break };
             }
             debug!("Commiting DB! Force commit {}, {} uncommited events", ds.commit, ds.uncommited_events);
@@ -391,7 +391,7 @@ impl DatastoreInstance {
                 _ => return Err(DatastoreError::InternalError(format!("Failed to execute create_bucket SQL statement: {}", err)))
             }
         };
-        if let Some(ref events) = bucket.events {
+        if let Some(events) = bucket.events {
             self.insert_events(conn, &bucket.id, events)?;
         }
         return Ok(());
@@ -434,16 +434,16 @@ impl DatastoreInstance {
     }
 
 
-    pub fn insert_events(&mut self, conn: &Connection, bucket_id: &str, events: &Vec<Event>) -> Result<(), DatastoreError> {
+    pub fn insert_events(&mut self, conn: &Connection, bucket_id: &str, mut events: Vec<Event>) -> Result<Vec<Event>, DatastoreError> {
         let mut bucket = self.get_bucket(&bucket_id)?;
 
         let mut stmt = match conn.prepare("
-                INSERT INTO events(bucketrow, starttime, endtime, data)
-                VALUES (?1, ?2, ?3, ?4)") {
+                INSERT OR REPLACE INTO events(bucketrow, id, starttime, endtime, data)
+                VALUES (?1, ?2, ?3, ?4, ?5)") {
             Ok(stmt) => stmt,
             Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare insert_events SQL statement: {}", err)))
         };
-        for event in events {
+        for event in &mut events {
             let starttime_nanos = event.timestamp.timestamp_nanos();
             let duration_nanos = match event.duration.num_nanoseconds() {
                 Some(nanos) => nanos,
@@ -451,15 +451,19 @@ impl DatastoreInstance {
             };
             let endtime_nanos = starttime_nanos + duration_nanos;
             let data = serde_json::to_string(&event.data).unwrap();
-            let res = stmt.execute(&[&bucket.bid.unwrap(), &starttime_nanos, &endtime_nanos, &data as &dyn ToSql]);
+            let res = stmt.execute(&[&bucket.bid.unwrap(), &event.id as &dyn ToSql, &starttime_nanos, &endtime_nanos, &data as &dyn ToSql]);
             match res {
-                Ok(_) => self.update_endtime(&mut bucket, event),
+                Ok(_) => {
+                    self.update_endtime(&mut bucket, &event);
+                    let rowid = conn.last_insert_rowid();
+                    event.id = Some(rowid);
+                },
                 Err(err) => {
                     return Err(DatastoreError::InternalError(format!("Failed to insert event: {:?}, {}", event, err)));
                 }
             };
         }
-        Ok(())
+        Ok(events)
     }
 
     fn update_endtime(&mut self, bucket: &mut Bucket, event: &Event) {
@@ -539,7 +543,7 @@ impl DatastoreInstance {
                     Some(last_event) => last_event,
                     None => {
                         // There was no last event, insert and return
-                        self.insert_events(conn, &bucket_id, &vec![heartbeat.clone()])?;
+                        self.insert_events(conn, &bucket_id, vec![heartbeat.clone()])?;
                         return Ok(heartbeat.clone());
                     }
                 }
@@ -552,7 +556,7 @@ impl DatastoreInstance {
             },
             None => {
                 debug!("Failed to merge heartbeat!");
-                self.insert_events(conn, &bucket_id, &vec![heartbeat.clone()])?;
+                self.insert_events(conn, &bucket_id, vec![heartbeat.clone()])?;
                 heartbeat
             }
         };
@@ -676,25 +680,29 @@ impl Datastore {
     }
 
     fn _new_internal(method: DatastoreMethod) -> Self {
-        let (responder, requester) = crossbeam_requests::channel::<Commands, Result<Responses, DatastoreError>>();
+        let (requester, responder) = crossbeam_requests::channel::<Commands, Result<Responses, DatastoreError>>();
         let _thread = thread::spawn(move || {
             let mut di = DatastoreWorker::new(responder);
             di.work_loop(method);
         });
         Datastore {
-            requester: requester,
+            requester,
         }
     }
 
     pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        match self.requester.request(Commands::CreateBucket(bucket.clone())) {
+        let cmd = Commands::CreateBucket(bucket.clone());
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
             Ok(_) => Ok(()),
             Err(e) => Err(e)
         }
     }
 
     pub fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError>{
-        match self.requester.request(Commands::DeleteBucket(bucket_id.to_string())) {
+        let cmd = Commands::DeleteBucket(bucket_id.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
                 _ => panic!("Invalid response")
@@ -704,7 +712,9 @@ impl Datastore {
     }
 
     pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        match self.requester.request(Commands::GetBucket(bucket_id.to_string())) {
+        let cmd = Commands::GetBucket(bucket_id.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::Bucket(b) => Ok(b),
                 _ => panic!("Invalid response")
@@ -714,7 +724,9 @@ impl Datastore {
     }
 
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
-        match self.requester.request(Commands::GetBuckets()) {
+        let cmd = Commands::GetBuckets();
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::BucketMap(bm) => Ok(bm),
                 e => Err(DatastoreError::InternalError(format!("Invalid response: {:?}", e)))
@@ -723,10 +735,12 @@ impl Datastore {
         }
     }
 
-    pub fn insert_events(&self, bucket_id: &str, events: &[Event]) -> Result<(), DatastoreError> {
-        match self.requester.request(Commands::InsertEvents(bucket_id.to_string(), events.to_vec())) {
+    pub fn insert_events(&self, bucket_id: &str, events: &[Event]) -> Result<Vec<Event>, DatastoreError> {
+        let cmd = Commands::InsertEvents(bucket_id.to_string(), events.to_vec());
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
             Ok(r) => match r {
-                Responses::Empty() => Ok(()),
+                Responses::EventList(events) => Ok(events),
                 _ => panic!("Invalid response")
             },
             Err(e) => Err(e)
@@ -734,7 +748,9 @@ impl Datastore {
     }
 
     pub fn heartbeat(&self, bucket_id: &str, heartbeat: Event, pulsetime: f64) -> Result<Event, DatastoreError> {
-        match self.requester.request(Commands::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime)) {
+        let cmd = Commands::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime);
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::Event(e) => return Ok(e),
                 _ => panic!("Invalid response")
@@ -744,7 +760,9 @@ impl Datastore {
     }
 
     pub fn get_events(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>, limit_opt: Option<u64>) -> Result<Vec<Event>, DatastoreError> {
-        match self.requester.request(Commands::GetEvents(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone(), limit_opt.clone())) {
+        let cmd = Commands::GetEvents(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone(), limit_opt.clone());
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::EventList(el) => Ok(el),
                 _ => panic!("Invalid response")
@@ -754,7 +772,9 @@ impl Datastore {
     }
 
     pub fn get_event_count(&self, bucket_id: &str, starttime_opt: Option<DateTime<Utc>>, endtime_opt: Option<DateTime<Utc>>) -> Result<i64, DatastoreError> {
-        match self.requester.request(Commands::GetEventCount(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone())) {
+        let cmd = Commands::GetEventCount(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone());
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::Count(n) => Ok(n),
                 _ => panic!("Invalid response")

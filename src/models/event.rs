@@ -10,7 +10,7 @@ use crate::models::duration::DurationSerialization;
 pub struct Event {
     pub id: Option<i64>,
     pub timestamp: DateTime<Utc>,
-    #[serde(with = "DurationSerialization")]
+    #[serde(with = "DurationSerialization", default = "default_duration")]
     pub duration: Duration,
     pub data: Map<String, Value>,
 }
@@ -28,4 +28,8 @@ impl PartialEq for Event {
         if self.data != other.data { return false; }
         return true;
     }
+}
+
+fn default_duration() -> Duration {
+    Duration::seconds(0)
 }

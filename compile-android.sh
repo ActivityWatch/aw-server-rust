@@ -12,6 +12,7 @@ if [ $RELEASE ]; then
     echo "Building in release mode... (slow)";
 else
     echo "Building in debug mode... (fast)"
+    RELEASE=false;
 fi
 
 ORIG_PATH="$PATH"

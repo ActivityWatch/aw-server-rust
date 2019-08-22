@@ -1,14 +1,17 @@
 // Based On the following guide from Mozilla:
 //   https://mozilla.github.io/firefox-browser-architecture/experiments/2017-09-21-rust-on-android.html
 
+extern crate android_logger;
+
 use std::os::raw::{c_char};
 use std::ffi::{CString, CStr};
 use std::sync::Mutex;
 
-
-mod logcat;
 use crate::dirs;
-use crate::android::logcat::{redirect_stdout_to_logcat};
+
+use log::Level;
+use android_logger::Config;
+
 
 #[no_mangle]
 pub extern fn rust_greeting(to: *const c_char) -> *mut c_char {
@@ -101,9 +104,17 @@ pub mod android {
     #[no_mangle]
     pub unsafe extern fn Java_net_activitywatch_android_RustInterface_initialize(env: JNIEnv, _: JClass) {
         if !INITIALIZED {
-            redirect_stdout_to_logcat();
+            android_logger::init_once(
+                Config::default()
+                    .with_min_level(Level::Trace) // limit log level
+                    .with_tag("aw-server-rust") // logs will show under mytag tag
+                    //.with_filter( // configure messages for specific crate
+                    //    FilterBuilder::new()
+                    //        .parse("debug,hello::crate=error")
+                    //        .build())
+                );
             println!("Initializing aw-server-rust...");
-            println!("Redirecting aw-server-rust stdout/stderr to logcat");
+            println!("Redirected aw-server-rust stdout/stderr to logcat");
         } else {
             println!("Already initialized");
         }

@@ -73,11 +73,11 @@ fn server_info() -> JsonValue {
     }
 
     let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
-    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+    const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
     json!({
         "hostname": hostname,
-        "version": format!("aw-server-rust v{}", VERSION),
+        "version": format!("aw-server-rust v{}", VERSION.unwrap_or("(unknown)")),
         "testing": testing
     })
 }

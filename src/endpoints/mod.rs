@@ -5,6 +5,7 @@ use rocket;
 use rocket::response::{NamedFile};
 use rocket::State;
 use rocket_contrib::json::JsonValue;
+use gethostname::gethostname;
 
 use crate::config::AWConfig;
 
@@ -71,9 +72,12 @@ fn server_info() -> JsonValue {
         testing = false;
     }
 
+    let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
+    const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
+
     json!({
-        "hostname": "johan-desktop",
-        "version": "aw-server-rust_v0.1",
+        "hostname": hostname,
+        "version": format!("aw-server-rust v{}", VERSION.unwrap_or("(unknown)")),
         "testing": testing
     })
 }

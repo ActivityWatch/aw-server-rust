@@ -34,7 +34,7 @@ mod qfunctions {
 
     pub fn print(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         for arg in args {
-            println!("{:?}", arg);
+            info!("{:?}", arg);
         }
         return Ok(DataType::None());
     }

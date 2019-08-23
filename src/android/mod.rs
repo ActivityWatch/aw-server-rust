@@ -1,14 +1,17 @@
 // Based On the following guide from Mozilla:
 //   https://mozilla.github.io/firefox-browser-architecture/experiments/2017-09-21-rust-on-android.html
 
+extern crate android_logger;
+
 use std::os::raw::{c_char};
 use std::ffi::{CString, CStr};
 use std::sync::Mutex;
 
-
-mod logcat;
 use crate::dirs;
-use crate::android::logcat::{redirect_stdout_to_logcat};
+
+use log::Level;
+use android_logger::Config;
+
 
 #[no_mangle]
 pub extern fn rust_greeting(to: *const c_char) -> *mut c_char {
@@ -79,10 +82,10 @@ pub mod android {
 
         use crate::endpoints;
 
-        println!("Building server state...");
+        info!("Building server state...");
 
         let asset_path = jstring_to_string(&env, java_asset_path);
-        println!("Using asset dir: {}", asset_path);
+        info!("Using asset dir: {}", asset_path);
 
         let server_state = endpoints::ServerState {
             datastore: Mutex::new(openDatastore()),
@@ -101,11 +104,19 @@ pub mod android {
     #[no_mangle]
     pub unsafe extern fn Java_net_activitywatch_android_RustInterface_initialize(env: JNIEnv, _: JClass) {
         if !INITIALIZED {
-            redirect_stdout_to_logcat();
-            println!("Initializing aw-server-rust...");
-            println!("Redirecting aw-server-rust stdout/stderr to logcat");
+            android_logger::init_once(
+                Config::default()
+                    .with_min_level(Level::Trace) // limit log level
+                    .with_tag("aw-server-rust") // logs will show under mytag tag
+                    //.with_filter( // configure messages for specific crate
+                    //    FilterBuilder::new()
+                    //        .parse("debug,hello::crate=error")
+                    //        .build())
+                );
+            info!("Initializing aw-server-rust...");
+            debug!("Redirected aw-server-rust stdout/stderr to logcat");
         } else {
-            println!("Already initialized");
+            info!("Already initialized");
         }
         INITIALIZED = true;
 
@@ -116,7 +127,7 @@ pub mod android {
 
     #[no_mangle]
     pub unsafe extern fn Java_net_activitywatch_android_RustInterface_setDataDir(env: JNIEnv, _: JClass, java_dir: JString) {
-        println!("Setting android data dir");
+        debug!("Setting android data dir");
         dirs::set_android_data_dir(&jstring_to_string(&env, java_dir));
     }
 

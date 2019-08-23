@@ -92,7 +92,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
         if gap < pulsetime {
             if e1.data == e2.data {
                 if chrono::Duration::seconds(0) > gap && !warned_negative_gap_safe {
-                    println!("Gap was of negative duration ({}s), but could be safely merged. This error will only show once per batch.", gap);
+                    warn!("Gap was of negative duration ({}s), but could be safely merged. This error will only show once per batch.", gap);
                     warned_negative_gap_safe = true;
                 }
                 // Extend e1 to the middle between e1 and e2
@@ -102,7 +102,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
             } else {
                 if chrono::Duration::seconds(0) > gap {
                     if !warned_negative_gap_unsafe {
-                        println!("Gap was of negative duration ({}s) and could NOT be safely merged. This error will only show once per batch.", gap);
+                        warn!("Gap was of negative duration ({}s) and could NOT be safely merged. This error will only show once per batch.", gap);
                         warned_negative_gap_unsafe = true;
                     }
                     continue;

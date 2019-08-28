@@ -3,14 +3,20 @@ name = "aw_server"
 version = "0.1.0"
 authors = ["Johan Bjäreholt <johan@bjareho.lt>", "Erik Bjäreholt <erik@bjareho.lt>"]
 edition = "2018"
+default-run = "aw-server-rust"
 
 [lib]
+name = "activitywatch"
 crate-type = ["lib", "cdylib"]
 path = "src/lib.rs"
 
 [[bin]]
 name = "aw-server-rust"
 path = "src/main.rs"
+
+[[bin]]
+name = "aw-sync-rust"
+path = "src/sync.rs"
 
 [dependencies]
 rocket = "0.4"

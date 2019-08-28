@@ -1,6 +1,6 @@
 #[macro_use] extern crate log;
 
-use activitywatch::*;
+use aw_server::*;
 
 fn main() {
     use std::path::PathBuf;

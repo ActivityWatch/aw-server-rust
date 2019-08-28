@@ -6,7 +6,7 @@ edition = "2018"
 default-run = "aw-server-rust"
 
 [lib]
-name = "activitywatch"
+name = "aw_server"
 crate-type = ["lib", "cdylib"]
 path = "src/lib.rs"
 

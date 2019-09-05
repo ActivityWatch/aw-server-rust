@@ -37,6 +37,7 @@ pub enum Responses {
     Count(i64)
 }
 
+#[derive(Debug,Clone)]
 pub enum DatastoreMethod {
     Memory(),
     File(String),
@@ -67,12 +68,13 @@ type Responder = crossbeam_requests::Responder<Commands, Result<Responses, Datas
 
 #[derive(Clone)]
 pub struct Datastore {
+    method: DatastoreMethod,
     requester: Requester,
 }
 
 impl fmt::Debug for Datastore {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Datastore()")
+        write!(f, "Datastore({:?})", self.method)
     }
 }
 
@@ -677,11 +679,13 @@ impl Datastore {
 
     fn _new_internal(method: DatastoreMethod) -> Self {
         let (responder, requester) = crossbeam_requests::channel::<Commands, Result<Responses, DatastoreError>>();
+        let method_clone = method.clone();
         let _thread = thread::spawn(move || {
             let mut di = DatastoreWorker::new(responder);
-            di.work_loop(method);
+            di.work_loop(method_clone);
         });
         Datastore {
+            method: method,
             requester: requester,
         }
     }

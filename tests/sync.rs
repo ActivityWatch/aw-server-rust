@@ -43,14 +43,17 @@ mod sync_tests {
     }
 
     fn create_event(data_str: &str) -> Event {
+        // A workaround needed because otherwise events might get same timestamp if
+        // call is repeated quickly on platforms with a low-precision clock.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
         let timestamp: DateTime<Utc> = Utc::now();
         let event_jsonstr = format!(r#"{{
             "timestamp": "{}",
             "duration": 0,
             "data": {{"test": {} }}
         }}"#, timestamp.to_rfc3339(), data_str);
-        let event = serde_json::from_str(&event_jsonstr).unwrap();
-        event
+        serde_json::from_str(&event_jsonstr).unwrap()
     }
 
     fn create_events(ds: &Datastore, bucket_id: &str, n: i64) {

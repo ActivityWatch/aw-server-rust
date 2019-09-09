@@ -221,7 +221,7 @@ impl DatastoreWorker {
                 };
                 let response = match request {
                     Commands::CreateBucket(bucket) => {
-                        match ds.create_bucket(&transaction, bucket.clone()) {
+                        match ds.create_bucket(&transaction, bucket) {
                             Ok(_) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
@@ -374,27 +374,32 @@ impl DatastoreInstance {
 
         match res {
             Ok(_) => {
-                let rowid = conn.last_insert_rowid();
-                let mut inserted_bucket = bucket.clone();
-                inserted_bucket.bid = Some(rowid);
-
-                info!("Created bucket {}", inserted_bucket.id);
-                self.buckets_cache.insert(bucket.id.clone(), inserted_bucket);
+                info!("Created bucket {}", bucket.id);
+                // Get and set rowid
+                let rowid : i64 = conn.last_insert_rowid();
+                bucket.bid = Some(rowid);
+                // Take out events from struct before caching
+                let events = bucket.events;
+                bucket.events = None;
+                // Cache bucket
+                self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
                 self.commit = true;
+                // Insert events
+                if let Some(events) = events {
+                    self.insert_events(conn, &bucket.id, events)?;
+                    bucket.events = None;
+                }
+                Ok(())
             },
             // FIXME: This match is ugly, is it possible to write it in a cleaner way?
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _} => match sqlerr.code {
-                    rusqlite::ErrorCode::ConstraintViolation => { return Err(DatastoreError::BucketAlreadyExists); },
-                    _ => return Err(DatastoreError::InternalError(format!("Failed to execute create_bucket SQL statement: {}", err)))
+                    rusqlite::ErrorCode::ConstraintViolation => Err(DatastoreError::BucketAlreadyExists),
+                    _ => Err(DatastoreError::InternalError(format!("Failed to execute create_bucket SQL statement: {}", err)))
                 },
-                _ => return Err(DatastoreError::InternalError(format!("Failed to execute create_bucket SQL statement: {}", err)))
+                _ => Err(DatastoreError::InternalError(format!("Failed to execute create_bucket SQL statement: {}", err)))
             }
-        };
-        if let Some(events) = bucket.events {
-            self.insert_events(conn, &bucket.id, events)?;
         }
-        return Ok(());
     }
 
     fn delete_bucket(&mut self, conn: &Connection, bucket_id: &str) -> Result<(), DatastoreError>{

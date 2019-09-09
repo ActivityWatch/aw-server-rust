@@ -8,7 +8,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::collections::HashMap;
 
 use chrono::{DateTime, Utc, Duration};
 use serde_json;
@@ -16,16 +15,18 @@ use serde_json;
 use crate::datastore::{Datastore, DatastoreError};
 use crate::models::{Event, Bucket};
 
-pub fn sync_run() -> std::io::Result<()> {
+/// Performs a single sync pass
+pub fn sync_run() {
     // TODO: Get path using dirs module
     let sync_directory = Path::new("/tmp/aw-sync-rust/testing");
-    fs::create_dir_all(sync_directory)?;
+    fs::create_dir_all(sync_directory).unwrap();
 
-    let ds_local = setup(sync_directory)?;
+    // TODO: Use the local datastore here, preferably passed from main
+    let ds_local = Datastore::new(sync_directory.join("test-local.db").into_os_string().into_string().unwrap());
     info!("Set up local datastore");
     //log_buckets(&ds_local)?;
 
-    let ds_remotes = setup_test(sync_directory)?;
+    let ds_remotes = setup_test(sync_directory).unwrap();
     info!("Set up remote datastores");
 
     // FIXME: These are not the datastores that should actually be synced, I'm just testing
@@ -33,67 +34,11 @@ pub fn sync_run() -> std::io::Result<()> {
         sync_datastores(&ds_from, &ds_local);
     }
 
-    ds_local.commit().unwrap();
-    log_buckets(&ds_local)?;
+    log_buckets(&ds_local);
     for ds_from in &ds_remotes {
         ds_from.commit().unwrap();
-        log_buckets(&ds_from)?;
+        log_buckets(&ds_from);
     }
-
-    test(&ds_local, &ds_remotes);
-
-    Ok(())
-}
-
-fn test(ds_local: &Datastore, ds_remotes: &Vec<Datastore>) {
-    // Post-sync test
-    info!("Running tests...");
-
-    let buckets_local: HashMap<String, Bucket> = ds_local.get_buckets().unwrap();
-    let buckets_remote: HashMap<String, Bucket> = ds_remotes.iter().fold(HashMap::new(), |mut acc, x| {
-        let buckets = x.get_buckets().unwrap();
-        for bucket in buckets.values() {
-            let bucket_copy = bucket.clone();
-            assert!(!acc.contains_key(&bucket.id));
-            acc.insert(bucket_copy.id.clone(), bucket_copy.clone());
-        };
-        acc
-    });
-    assert!(buckets_local.len() == buckets_remote.len());
-
-    let mut all_buckets: Vec<(&Datastore, Bucket)> = Vec::new();
-    for bucket in buckets_local.values() {
-        all_buckets.push((ds_local, bucket.clone()));
-    }
-    for ds_remote in ds_remotes {
-        let buckets = ds_remote.get_buckets().unwrap();
-        for bucket in buckets.values() {
-            all_buckets.push((ds_remote, bucket.clone()));
-        }
-    }
-
-    let all_buckets_map: HashMap<String, _> = all_buckets.iter().cloned().map(|(ds, b)| (b.id.clone(), (ds, b))).collect();
-
-    // Check that all synced buckets are identical to source bucket
-    for (ds, bucket) in all_buckets {
-        if bucket.id.contains("-synced") {
-            let bucket_src_id = bucket.id.replace("-synced", "");
-            let (ds_src, bucket_src) = all_buckets_map.get(&bucket_src_id).unwrap();
-            let events_synced = ds.get_events(bucket.id.as_str(), None, None, None).unwrap();
-            let events_src = ds_src.get_events(bucket_src.id.as_str(), None, None, None).unwrap();
-            //info!("{:?}", events_synced);
-            //info!("{:?}", events_src);
-            assert!(events_synced == events_src);
-        }
-    }
-}
-
-fn setup(sync_directory: &Path) -> std::io::Result<Datastore> {
-    // Setup the local sync db
-
-    // TODO: better filename
-    let ds = Datastore::new(sync_directory.join("test-local.db").into_os_string().into_string().unwrap());
-    Ok(ds)
 }
 
 fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
@@ -140,9 +85,11 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
     Ok(datastores)
 }
 
+/// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
 fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &Datastore) -> Bucket {
-    // Check if bucket exists in destination, if not then create
-    let new_id = format!("{}-synced", bucket_from.id);
+    // Ensure the bucket ID ends in "-synced"
+    let new_id = format!("{}-synced", bucket_from.id.replace("-synced", ""));
+
     match ds_to.get_bucket(new_id.as_str()) {
         Ok(bucket) => bucket,
         Err(DatastoreError::NoSuchBucket) => {
@@ -155,7 +102,10 @@ fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &Datastore) -> Bucket 
     }
 }
 
-pub fn sync_datastores(ds_from: &Datastore, ds_to: &Datastore) -> () {
+/// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
+pub fn sync_datastores(ds_from: &Datastore, ds_to: &Datastore) {
+    // FIXME: "-synced" should only be appended when synced to the local database, not to the
+    // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
 
     let buckets_from = ds_from.get_buckets().unwrap();
@@ -187,24 +137,21 @@ pub fn sync_datastores(ds_from: &Datastore, ds_to: &Datastore) -> () {
         events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         //info!("{:?}", events);
         for event in events {
-            ds_to.heartbeat(bucket_to.id.as_str(), event, 1.0).unwrap();
+            ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
         }
 
         ds_to.commit().unwrap();
         let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str(), None, None).unwrap();
         info!("Synced {} new events", eventcount_to_new - eventcount_to_old);
     }
-    ()
 }
 
-fn log_buckets(ds: &Datastore) -> std::io::Result<()> {
+fn log_buckets(ds: &Datastore) {
     // Logs all buckets and some metadata for a given datastore
     let buckets = ds.get_buckets().unwrap();
     info!("Buckets in {:?}:", ds);
     for bucket in buckets.values() {
         info!(" - {}", bucket.id.as_str());
         info!("   eventcount: {:?}", ds.get_event_count(bucket.id.as_str(), None, None).unwrap());
-    }
-
-    Ok(())
+    };
 }

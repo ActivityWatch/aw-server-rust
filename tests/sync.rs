@@ -42,16 +42,20 @@ mod sync_tests {
         bucket_id
     }
 
+    fn create_event(data_str: &str) -> Event {
+        let timestamp: DateTime<Utc> = Utc::now();
+        let event_jsonstr = format!(r#"{{
+            "timestamp": "{}",
+            "duration": 0,
+            "data": {{"test": {} }}
+        }}"#, timestamp.to_rfc3339(), data_str);
+        let event = serde_json::from_str(&event_jsonstr).unwrap();
+        event
+    }
+
     fn create_events(ds: &Datastore, bucket_id: &str, n: i64) {
         let events: Vec<Event> = (0..n).map(|i| {
-            let timestamp: DateTime<Utc> = Utc::now();
-            let event_jsonstr = format!(r#"{{
-                "timestamp": "{}",
-                "duration": 0,
-                "data": {{"test": {} }}
-            }}"#, timestamp.to_rfc3339(), i);
-            let event = serde_json::from_str(&event_jsonstr).unwrap();
-            event
+            create_event(format!("{}", i).as_str())
         }).collect::<Vec<Event>>();
 
         ds.insert_events(bucket_id, &events[..]).unwrap();
@@ -103,8 +107,32 @@ mod sync_tests {
     }
 
     #[test]
+    fn test_one_updated_event() {
+        // This tests the syncing of one single event that is then updated by a heartbeat after the
+        // first sync pass.
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        state.ds_src.heartbeat(bucket_id.as_str(), create_event("1"), 1.0).unwrap();
+
+        aw_server::sync::sync_datastores(&state.ds_src, &state.ds_dest);
+
+        let all_datastores: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].iter().cloned().collect();
+        let all_buckets_map = get_all_buckets_map(all_datastores);
+
+        // Check that all synced buckets are identical to source bucket
+        check_synced_buckets_equal_to_src(&all_buckets_map);
+
+        // Add some more events
+        state.ds_src.heartbeat(bucket_id.as_str(), create_event("1"), 1.0).unwrap();
+        aw_server::sync::sync_datastores(&state.ds_src, &state.ds_dest);
+
+        // Check again that new events were indeed synced
+        check_synced_buckets_equal_to_src(&all_buckets_map);
+    }
+
+    #[test]
     fn test_events() {
-        // TODO: Split up this test
         let state = init_teststate();
 
         let bucket_id = create_bucket(&state.ds_src, 0);
@@ -122,6 +150,7 @@ mod sync_tests {
         create_events(&state.ds_src, bucket_id.as_str(), 10);
         aw_server::sync::sync_datastores(&state.ds_src, &state.ds_dest);
 
+        // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);
     }
 }

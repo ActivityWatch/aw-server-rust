@@ -38,7 +38,7 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
             })
             .chain(std::io::stdout())
             .level(log::LevelFilter::Info)
-            .level_for("aw_server", log::LevelFilter::Debug)
+            //.level_for("aw_server", log::LevelFilter::Debug)
         )
         // No color and lower log levels to logfile
         .chain(fern::Dispatch::new()

@@ -61,6 +61,7 @@ pub enum Commands {
     Heartbeat(String, Event, f64),
     GetEvents(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<u64>),
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
+    ForceCommit(),
 }
 
 type Requester = crossbeam_requests::Requester<Commands, Result<Responses, DatastoreError>>;
@@ -215,35 +216,40 @@ impl DatastoreWorker {
             loop {
                 let mut request = match self.responder.poll() {
                     Ok(r) => r,
-                    Err(_) => { // All references to responder is gone, quit
-                        info!("DB worker quitting");
+                    Err(e) => { // All references to responder is gone, quit
+                        info!("DB worker quitting due to {:?}", e);
                         self.quit = true;
                         break;
                     }
                 };
                 let response = match request.body() {
                     Commands::CreateBucket(bucket) => {
+                        ds.commit = true;
                         match ds.create_bucket(&transaction, bucket.clone()) {
                             Ok(_) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::DeleteBucket(bucketname) => {
+                        ds.commit = true;
                         match ds.delete_bucket(&transaction, bucketname) {
                             Ok(_) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::GetBucket(bucketname) => {
+                        ds.commit = true;
                         match ds.get_bucket(bucketname) {
                             Ok(b) => Ok(Responses::Bucket(b)),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::GetBuckets() => {
+                        ds.commit = true;
                         Ok(Responses::BucketMap(ds.get_buckets()))
                     },
                     Commands::InsertEvents(bucketname, events) => {
+                        ds.commit = true;
                         match ds.insert_events(&transaction, bucketname, events) {
                             Ok(_) => {
                                 last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
@@ -259,16 +265,22 @@ impl DatastoreWorker {
                         }
                     },
                     Commands::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt) => {
+                        ds.commit = true;
                         match ds.get_events(&transaction, bucketname, *starttime_opt, *endtime_opt, *limit_opt) {
                             Ok(el) => Ok(Responses::EventList(el)),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::GetEventCount(bucketname, starttime_opt, endtime_opt) => {
+                        ds.commit = true;
                         match ds.get_event_count(&transaction, bucketname, *starttime_opt, *endtime_opt) {
                             Ok(n) => Ok(Responses::Count(n)),
                             Err(e) => Err(e)
                         }
+                    },
+                    Commands::ForceCommit() => {
+                        ds.commit = true;
+                        Ok(Responses::Empty())
                     },
                 };
                 request.respond(response);
@@ -382,7 +394,6 @@ impl DatastoreInstance {
 
                 info!("Created bucket {}", inserted_bucket.id);
                 self.buckets_cache.insert(bucket.id.clone(), inserted_bucket);
-                self.commit = true;
             },
             // FIXME: This match is ugly, is it possible to write it in a cleaner way?
             Err(err) => match err {
@@ -410,7 +421,6 @@ impl DatastoreInstance {
         match conn.execute("DELETE FROM buckets WHERE id = ?1", &[&bucket.bid]) {
             Ok(_) => {
                 self.buckets_cache.remove(bucket_id);
-                self.commit = true;
                 return Ok(());
             },
             Err(err) => match err {
@@ -761,6 +771,16 @@ impl Datastore {
         match self.requester.request(Commands::GetEventCount(bucket_id.to_string(), starttime_opt.clone(), endtime_opt.clone())) {
             Ok(r) => match r {
                 Responses::Count(n) => Ok(n),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn commit(&self) -> Result<(), DatastoreError> {
+        match self.requester.request(Commands::ForceCommit()) {
+            Ok(r) => match r {
+                Responses::Empty() => Ok(()),
                 _ => panic!("Invalid response")
             },
             Err(e) => Err(e)

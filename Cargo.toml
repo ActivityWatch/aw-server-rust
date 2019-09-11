@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "aw-sync-rust"
-path = "src/sync_main.rs"
+path = "src/sync/main.rs"
 
 [dependencies]
 rocket = "0.4"

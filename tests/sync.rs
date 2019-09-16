@@ -62,7 +62,7 @@ mod sync_tests {
         }).collect::<Vec<Event>>();
 
         ds.insert_events(bucket_id, &events[..]).unwrap();
-        ds.commit().unwrap();
+        ds.force_commit().unwrap();
     }
 
     fn get_all_buckets(datastores: Vec<&Datastore>) -> Vec<(&Datastore, Bucket)> {

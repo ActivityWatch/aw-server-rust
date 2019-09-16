@@ -803,7 +803,7 @@ impl Datastore {
         }
     }
 
-    pub fn commit(&self) -> Result<(), DatastoreError> {
+    pub fn force_commit(&self) -> Result<(), DatastoreError> {
         let cmd = Commands::ForceCommit();
         let receiver = self.requester.request(cmd).unwrap();
         match receiver.collect().unwrap() {

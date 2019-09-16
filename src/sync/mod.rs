@@ -36,7 +36,7 @@ pub fn sync_run() {
 
     log_buckets(&ds_local);
     for ds_from in &ds_remotes {
-        ds_from.commit().unwrap();
+        ds_from.force_commit().unwrap();
         log_buckets(&ds_from);
     }
 }
@@ -77,7 +77,7 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         }).collect::<Vec<Event>>();
 
         ds.insert_events(bucket.id.as_str(), &events[..]).unwrap();
-        ds.commit().unwrap();
+        ds.force_commit().unwrap();
         //let new_eventcount = ds.get_event_count(bucket.id.as_str(), None, None).unwrap();
         //info!("Eventcount: {:?} ({} new)", new_eventcount, events.len());
         datastores.push(ds);
@@ -111,7 +111,7 @@ pub fn sync_datastores(ds_from: &Datastore, ds_to: &Datastore) {
     let buckets_from = ds_from.get_buckets().unwrap();
     for bucket_from in buckets_from.values() {
         let bucket_to = get_or_create_sync_bucket(bucket_from, ds_to);
-        ds_to.commit().unwrap();
+        ds_to.force_commit().unwrap();
         let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str(), None, None).unwrap();
         //info!("{:?}", bucket_to);
 
@@ -140,7 +140,7 @@ pub fn sync_datastores(ds_from: &Datastore, ds_to: &Datastore) {
             ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
         }
 
-        ds_to.commit().unwrap();
+        ds_to.force_commit().unwrap();
         let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str(), None, None).unwrap();
         info!("Synced {} new events", eventcount_to_new - eventcount_to_old);
     }

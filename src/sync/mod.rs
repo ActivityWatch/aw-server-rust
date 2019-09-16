@@ -95,6 +95,9 @@ fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &Datastore) -> Bucket 
         Err(DatastoreError::NoSuchBucket) => {
             let mut bucket_new = bucket_from.clone();
             bucket_new.id = new_id.clone();
+            // TODO: Replace sync origin with hostname/GUID and discuss how we will treat the data
+            // attributes for internal use.
+            bucket_new.data.insert("$aw.sync.origin".to_string(), json!("test"));
             ds_to.create_bucket(&bucket_new).unwrap();
             ds_to.get_bucket(new_id.as_str()).unwrap()
         },

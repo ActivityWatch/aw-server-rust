@@ -21,7 +21,7 @@ pub struct Bucket {
     pub data: Map<String, Value>,
     #[serde(default, skip_deserializing)]
     pub metadata: BucketMetadata,
-    pub events: Option<Vec<Event>>,
+    pub events: Option<Vec<Event>>, /* Should only be set during import/export */
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

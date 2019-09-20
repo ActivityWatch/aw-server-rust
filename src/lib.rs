@@ -21,6 +21,7 @@ extern crate plex;
 
 extern crate appdirs;
 
+#[cfg(target_os="android")]
 #[macro_use] extern crate lazy_static;
 
 #[macro_use] extern crate log;

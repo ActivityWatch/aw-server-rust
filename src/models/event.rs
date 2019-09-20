@@ -16,6 +16,17 @@ pub struct Event {
 }
 
 impl Event {
+    pub fn new_test() -> Event {
+        let mut e = Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(42),
+            data: serde_json::Map::new()
+        };
+        e.data.insert("test".into(), serde_json::json!("just a test"));
+        return e;
+    }
+
     pub fn calculate_endtime(&self) -> DateTime<Utc> {
         self.timestamp + chrono::Duration::nanoseconds(self.duration.num_nanoseconds().unwrap() as i64)
     }

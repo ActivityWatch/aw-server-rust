@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use crate::models::Event;
 use serde_json::value::Value;
 
+pub mod classify;
+
 // TODO: Compare with aw-cores version to make sure it works correctly
 pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Option<Event> {
     // Verify that data is the same

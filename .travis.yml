@@ -39,8 +39,9 @@ install:
   - if [ "$BUILD_ANDROID" == true ]; then
         ./compile-android.sh;
     else
-        cargo build --bin aw-server-rust $($RELEASE && echo '--release');
         cargo build --lib $($RELEASE && echo '--release');
+        cargo build --bin aw-server-rust $($RELEASE && echo '--release');
+        cargo build --bin aw-sync $($RELEASE && echo '--release');
     fi
 
 script:

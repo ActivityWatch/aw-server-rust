@@ -1,7 +1,7 @@
+use std::collections::HashMap;
 use crate::query::DataType;
 use crate::query::QueryError;
 use crate::datastore::Datastore;
-use std::collections::HashMap;
 
 pub type QueryFn = fn(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError>;
 
@@ -21,16 +21,19 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
     env.insert("filter_period_intersect", DataType::Function("filter_period_intersect".to_string(), qfunctions::filter_period_intersect));
     env.insert("split_url_events", DataType::Function("split_url_events".to_string(), qfunctions::split_url_events));
     env.insert("concat", DataType::Function("concat".to_string(), qfunctions::concat));
+    env.insert("classify", DataType::Function("classify".into(), qfunctions::classify));
 }
 
 mod qfunctions {
+    use std::collections::HashMap;
+    use regex::Regex;
+
     use crate::query::DataType;
     use crate::query::QueryError;
     use crate::datastore::Datastore;
     use crate::transform;
     use super::validate;
 
-    use std::collections::HashMap;
 
     pub fn print(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         for arg in args {
@@ -93,6 +96,25 @@ mod qfunctions {
         let events = validate::arg_type_event_list(&args[0])?.clone();
         // Run flood
         let mut flooded_events = transform::flood(events, chrono::Duration::seconds(5));
+        // Put events back into DataType::Event container
+        let mut tagged_flooded_events = Vec::new();
+        for event in flooded_events.drain(..) {
+            tagged_flooded_events.push(DataType::Event(event));
+        }
+        return Ok(DataType::List(tagged_flooded_events));
+    }
+
+    pub fn classify(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 2)?;
+        let events = validate::arg_type_event_list(&args[0])?.clone();
+        let classes = validate::arg_type_list_of_list_of_strings(&args[1])?.clone();
+        // Run classify
+        let classes_tuples: Vec<(Regex, String)> = classes
+            .iter()
+            .map(|l| (Regex::new(l.get(0).unwrap()).unwrap(), l.get(1).unwrap().to_string()))
+            .collect();
+        let mut flooded_events = transform::classify::classify(events, classes_tuples);
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
@@ -280,6 +302,20 @@ mod validate {
                 format!("Expected function parameter of type List, got {:?}", invalid_type)
             ))
         }
+    }
+
+    pub fn arg_type_list_of_list_of_strings (arg: &DataType) -> Result<Vec<Vec<String>>, QueryError> {
+        let mut tagged_lists = arg_type_list(arg)?.clone();
+        let mut lists: Vec<Vec<String>> = Vec::new();
+        for list in tagged_lists.drain(..) {
+            match list {
+                DataType::List(_) => lists.push(arg_type_string_list(&list)?.clone()),
+                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
+                    format!("Expected function parameter of type list of tuples of strings, list contains {:?}", invalid_type)
+                ))
+            }
+        }
+        return Ok(lists);
     }
 
     pub fn arg_type_event_list (arg: &DataType) -> Result<Vec<Event>, QueryError> {

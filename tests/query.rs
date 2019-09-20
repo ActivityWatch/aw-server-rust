@@ -300,6 +300,7 @@ mod query_tests {
             events = limit_events(events, 10000);
             events = sort_by_timestamp(events);
             events = concat(events, query_bucket("{}"));
+            events = classify(events, [["test", "\#test-tag"], ["just", "Test -> Testing"]]);
             total_duration = sum_durations(events);
             bucketnames = query_bucket_names();
             print("test", "test2");
@@ -315,6 +316,30 @@ mod query_tests {
             ref data => panic!("Wrong datatype, {:?}", data)
         };
         // TODO: assert_eq result
+    }
+
+    #[test]
+    fn test_classify() {
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let code = String::from("query_bucket(\"testid\");");
+        query::query(&code, &interval, &ds).unwrap();
+
+        let code = format!(r#"
+            events = query_bucket("{}");
+            events = classify(events, [["test-tag", "^value$"], ["Test -> Subtest", "^value$"]]);
+            RETURN = events;"#,
+            "testid");
+        let events = match query::query(&code, &interval, &ds).unwrap() {
+            query::DataType::List(l) => l,
+            ref data => panic!("Wrong datatype, {:?}", data)
+        };
+
+        println!("{:?}", events.first().unwrap());
+        // TODO: assert_eq result
+        //assert_eq!(events.first().unwrap().data.get("$tags").unwrap().len(), 2);
+        //assert_eq!(events.first().unwrap().data.get("$category").unwrap(), "Test -> Subtest");
     }
 
     #[test]

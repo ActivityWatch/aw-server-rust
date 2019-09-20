@@ -8,14 +8,14 @@ use serde_json;
 use std::collections::HashSet;
 use crate::models::Event;
 
-pub fn classify(events: Vec<Event>, classes: Vec<(Regex, String)>) -> Vec<Event> {
+pub fn classify(events: Vec<Event>, classes: Vec<(String, Regex)>) -> Vec<Event> {
     // TODO: There is probably a better way that avoids the clone?
     events.iter().map(|e| classify_one(e.clone(), &classes)).collect()
 }
 
-fn classify_one(mut event: Event, classes: &Vec<(Regex, String)>) -> Event {
+fn classify_one(mut event: Event, classes: &Vec<(String, Regex)>) -> Event {
     let mut tags: HashSet<String> = HashSet::new();
-    for (re, cls) in classes {
+    for (cls, re) in classes {
         for val in event.data.values() {
             // TODO: Recurse if value is object/array
             if val.is_string() && re.is_match(val.as_str().unwrap()) {
@@ -50,11 +50,11 @@ fn choose_category(tags: HashSet<String>) -> String {
 fn test_classify() {
     let e = Event::new_test();
     let events = vec!(e);
-    let classes: Vec<(Regex, String)> = vec!(
-        (Regex::new(r"test").unwrap(), "#test-tag".into()),
-        (Regex::new(r"test").unwrap(), "Test".into()),
-        (Regex::new(r"test").unwrap(), "Test -> Subtest".into()),
-        (Regex::new(r"nonmatching").unwrap(), "Other".into()),
+    let classes: Vec<(String, Regex)> = vec!(
+        ("#test-tag".into(), Regex::new(r"test").unwrap()),
+        ("Test".into(), Regex::new(r"test").unwrap()),
+        ("Test -> Subtest".into(), Regex::new(r"test").unwrap()),
+        ("Other".into(), Regex::new(r"nonmatching").unwrap()),
     );
     let events_classified = classify(events, classes);
 

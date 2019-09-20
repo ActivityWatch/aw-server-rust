@@ -110,9 +110,9 @@ mod qfunctions {
         let events = validate::arg_type_event_list(&args[0])?.clone();
         let classes = validate::arg_type_list_of_list_of_strings(&args[1])?.clone();
         // Run classify
-        let classes_tuples: Vec<(Regex, String)> = classes
+        let classes_tuples: Vec<(String, Regex)> = classes
             .iter()
-            .map(|l| (Regex::new(l.get(0).unwrap()).unwrap(), l.get(1).unwrap().to_string()))
+            .map(|l| (l.get(0).unwrap().to_string(), Regex::new(l.get(1).unwrap()).unwrap()))
             .collect();
         let mut flooded_events = transform::classify::classify(events, classes_tuples);
         // Put events back into DataType::Event container

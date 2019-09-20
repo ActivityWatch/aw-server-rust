@@ -41,7 +41,7 @@ install:
     else
         cargo build --lib $($RELEASE && echo '--release');
         cargo build --bin aw-server-rust $($RELEASE && echo '--release');
-        cargo build --bin aw-sync $($RELEASE && echo '--release');
+        cargo build --bin aw-sync-rust $($RELEASE && echo '--release');
     fi
 
 script:

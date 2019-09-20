@@ -31,7 +31,7 @@ before_install:
     fi
   - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ]; then
         echo "Installing coverage tools";
-        cargo install cargo-kcov;
+        cargo install --force cargo-kcov;
         cargo kcov --print-install-kcov-sh | sh;
     fi
 

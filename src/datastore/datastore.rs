@@ -37,6 +37,7 @@ pub enum Responses {
     Count(i64)
 }
 
+#[derive(Debug,Clone)]
 pub enum DatastoreMethod {
     Memory(),
     File(String),
@@ -60,6 +61,7 @@ pub enum Commands {
     Heartbeat(String, Event, f64),
     GetEvents(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<u64>),
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
+    ForceCommit(),
 }
 
 type RequestSender = crossbeam_requests::RequestSender<Commands, Result<Responses, DatastoreError>>;
@@ -67,12 +69,13 @@ type RequestReceiver = crossbeam_requests::RequestReceiver<Commands, Result<Resp
 
 #[derive(Clone)]
 pub struct Datastore {
+    method: DatastoreMethod,
     requester: RequestSender,
 }
 
 impl fmt::Debug for Datastore {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Datastore()")
+        write!(f, "Datastore({:?})", self.method)
     }
 }
 
@@ -213,35 +216,40 @@ impl DatastoreWorker {
             loop {
                 let (request, response_sender) = match self.responder.poll() {
                     Ok((req, res_sender)) => (req, res_sender),
-                    Err(_) => { // All references to responder is gone, quit
-                        info!("DB worker quitting");
+                    Err(e) => { // All references to responder is gone, quit
+                        info!("DB worker quitting due to {:?}", e);
                         self.quit = true;
                         break;
                     }
                 };
                 let response = match request {
                     Commands::CreateBucket(bucket) => {
+                        ds.commit = true;
                         match ds.create_bucket(&transaction, bucket) {
                             Ok(_) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::DeleteBucket(bucketname) => {
+                        ds.commit = true;
                         match ds.delete_bucket(&transaction, &bucketname) {
                             Ok(_) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::GetBucket(bucketname) => {
+                        ds.commit = true;
                         match ds.get_bucket(&bucketname) {
                             Ok(b) => Ok(Responses::Bucket(b)),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::GetBuckets() => {
+                        ds.commit = true;
                         Ok(Responses::BucketMap(ds.get_buckets()))
                     },
                     Commands::InsertEvents(bucketname, events) => {
+                        ds.commit = true;
                         match ds.insert_events(&transaction, &bucketname, events) {
                             Ok(events) => {
                                 last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
@@ -257,16 +265,22 @@ impl DatastoreWorker {
                         }
                     },
                     Commands::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt) => {
+                        ds.commit = true;
                         match ds.get_events(&transaction, &bucketname, starttime_opt, endtime_opt, limit_opt) {
                             Ok(el) => Ok(Responses::EventList(el)),
                             Err(e) => Err(e)
                         }
                     },
                     Commands::GetEventCount(bucketname, starttime_opt, endtime_opt) => {
+                        ds.commit = true;
                         match ds.get_event_count(&transaction, &bucketname, starttime_opt, endtime_opt) {
                             Ok(n) => Ok(Responses::Count(n)),
                             Err(e) => Err(e)
                         }
+                    },
+                    Commands::ForceCommit() => {
+                        ds.commit = true;
+                        Ok(Responses::Empty())
                     },
                 };
                 response_sender.respond(response);
@@ -413,7 +427,6 @@ impl DatastoreInstance {
         match conn.execute("DELETE FROM buckets WHERE id = ?1", &[&bucket.bid]) {
             Ok(_) => {
                 self.buckets_cache.remove(bucket_id);
-                self.commit = true;
                 return Ok(());
             },
             Err(err) => match err {
@@ -686,11 +699,13 @@ impl Datastore {
 
     fn _new_internal(method: DatastoreMethod) -> Self {
         let (requester, responder) = crossbeam_requests::channel::<Commands, Result<Responses, DatastoreError>>();
+        let method_clone = method.clone();
         let _thread = thread::spawn(move || {
             let mut di = DatastoreWorker::new(responder);
-            di.work_loop(method);
+            di.work_loop(method_clone);
         });
         Datastore {
+            method,
             requester,
         }
     }
@@ -782,6 +797,18 @@ impl Datastore {
         match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::Count(n) => Ok(n),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn force_commit(&self) -> Result<(), DatastoreError> {
+        let cmd = Commands::ForceCommit();
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Responses::Empty() => Ok(()),
                 _ => panic!("Invalid response")
             },
             Err(e) => Err(e)

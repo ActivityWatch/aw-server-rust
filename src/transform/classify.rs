@@ -48,7 +48,9 @@ fn choose_category(tags: HashSet<String>) -> String {
 
 #[test]
 fn test_classify() {
-    let e = Event::new_test();
+    let mut e = Event::new();
+    e.data.insert("test".into(), serde_json::json!("just a test"));
+
     let events = vec!(e);
     let classes: Vec<(String, Regex)> = vec!(
         ("#test-tag".into(), Regex::new(r"test").unwrap()),

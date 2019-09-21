@@ -8,9 +8,12 @@ use serde_json;
 use std::collections::HashSet;
 use crate::models::Event;
 
-pub fn classify(events: Vec<Event>, classes: Vec<(String, Regex)>) -> Vec<Event> {
-    // TODO: There is probably a better way that avoids the clone?
-    events.iter().map(|e| classify_one(e.clone(), &classes)).collect()
+pub fn classify(mut events: Vec<Event>, classes: Vec<(String, Regex)>) -> Vec<Event> {
+    let mut classified_events = Vec::new();
+    for event in events.drain(..) {
+        classified_events.push(classify_one(event, &classes));
+    }
+    return classified_events;
 }
 
 fn classify_one(mut event: Event, classes: &Vec<(String, Regex)>) -> Event {

@@ -71,3 +71,19 @@ fn test_classify() {
     assert_eq!(events_classified.first().unwrap().data.get("$tags").unwrap().as_array().unwrap().len(), 3);
     assert_eq!(events_classified.first().unwrap().data.get("$category").unwrap(), &serde_json::json!("Test -> Subtest"));
 }
+
+
+#[test]
+fn test_classify_uncategorized() {
+    // Checks that the category correctly becomes uncategorized when no category matches
+    let mut e = Event::default();
+    e.data.insert("test".into(), serde_json::json!("just a test"));
+
+    let classes: Vec<(String, Regex)> = vec!(
+        ("#test-tag".into(), Regex::new(r"test").unwrap()),
+    );
+    let events_classified = classify(vec!(e), &classes);
+    assert_eq!(events_classified.len(), 1);
+    assert_eq!(events_classified.first().unwrap().data.get("$tags").unwrap().as_array().unwrap().len(), 1);
+    assert_eq!(events_classified.first().unwrap().data.get("$category").unwrap(), &serde_json::json!("Uncategorized"));
+}

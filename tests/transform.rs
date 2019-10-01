@@ -300,10 +300,10 @@ mod transform_tests {
         transform::split_url_event(&mut e1);
         assert_eq!(e1.data, json_map!{
             "url": json!("http://www.google.com/path?query=1"),
-            "protocol": json!("http"),
-            "domain": json!("google.com"),
-            "path": json!("/path"),
-            "params": json!("query=1")
+            "$protocol": json!("http"),
+            "$domain": json!("google.com"),
+            "$path": json!("/path"),
+            "$params": json!("query=1")
         });
     }
 }

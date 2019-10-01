@@ -16,15 +16,6 @@ pub struct Event {
 }
 
 impl Event {
-    pub fn new() -> Event {
-        return Event {
-            id: None,
-            timestamp: Utc::now(),
-            duration: Duration::seconds(0),
-            data: serde_json::Map::new()
-        };
-    }
-
     pub fn calculate_endtime(&self) -> DateTime<Utc> {
         self.timestamp + chrono::Duration::nanoseconds(self.duration.num_nanoseconds().unwrap() as i64)
     }
@@ -36,6 +27,17 @@ impl PartialEq for Event {
         if self.duration != other.duration { return false; }
         if self.data != other.data { return false; }
         return true;
+    }
+}
+
+impl Default for Event {
+    fn default() -> Self {
+        Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(0),
+            data: serde_json::Map::new()
+        }
     }
 }
 

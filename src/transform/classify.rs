@@ -8,10 +8,10 @@ use serde_json;
 use std::collections::HashSet;
 use crate::models::Event;
 
-pub fn classify(mut events: Vec<Event>, classes: Vec<(String, Regex)>) -> Vec<Event> {
+pub fn classify(mut events: Vec<Event>, classes: &Vec<(String, Regex)>) -> Vec<Event> {
     let mut classified_events = Vec::new();
     for event in events.drain(..) {
-        classified_events.push(classify_one(event, &classes));
+        classified_events.push(classify_one(event, classes));
     }
     return classified_events;
 }
@@ -34,14 +34,18 @@ fn classify_one(mut event: Event, classes: &Vec<(String, Regex)>) -> Event {
     // An event can only have one category, although the category may have a hierarchy,
     // for instance: "Work -> ActivityWatch -> aw-server-rust"
     // A category is chosed out of the tags used some rule (such as picking the one that's deepest in the hierarchy)
-    let category = choose_category(tags);
+    let category = choose_category(&tags);
     event.data.insert("$category".into(), serde_json::json!(category));
     event
 }
 
-fn choose_category(tags: HashSet<String>) -> String {
+fn choose_category(tags: &HashSet<String>) -> String {
     tags.iter().fold(&"Uncategorized".to_string(), |acc: &String, item: &String| {
-        if item.matches("->").count() >= acc.matches("->").count() {
+        if item.starts_with('#') {
+            // If tag is not a category, then skip.
+            acc
+        } else if item.matches("->").count() >= acc.matches("->").count() {
+            // If tag is category with greater or equal depth than current, then choose the new one instead.
             item
         } else {
             acc
@@ -51,7 +55,7 @@ fn choose_category(tags: HashSet<String>) -> String {
 
 #[test]
 fn test_classify() {
-    let mut e = Event::new();
+    let mut e = Event::default();
     e.data.insert("test".into(), serde_json::json!("just a test"));
 
     let events = vec!(e);
@@ -61,7 +65,7 @@ fn test_classify() {
         ("Test -> Subtest".into(), Regex::new(r"test").unwrap()),
         ("Other".into(), Regex::new(r"nonmatching").unwrap()),
     );
-    let events_classified = classify(events, classes);
+    let events_classified = classify(events, &classes);
 
     assert_eq!(events_classified.len(), 1);
     assert_eq!(events_classified.first().unwrap().data.get("$tags").unwrap().as_array().unwrap().len(), 3);

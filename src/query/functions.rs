@@ -114,7 +114,7 @@ mod qfunctions {
             .iter()
             .map(|l| (l.get(0).unwrap().to_string(), Regex::new(l.get(1).unwrap()).unwrap()))
             .collect();
-        let mut flooded_events = transform::classify::classify(events, classes_tuples);
+        let mut flooded_events = transform::classify::classify(events, &classes_tuples);
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {

@@ -274,7 +274,7 @@ pub fn split_url_event(event: &mut Event) {
     };
     // Protocol
     let protocol = uri.scheme().to_string();
-    event.data.insert("protocol".to_string(), Value::String(protocol));
+    event.data.insert("$protocol".to_string(), Value::String(protocol));
     // Domain
     let domain = match uri.authority() {
         Some(authority) => {
@@ -282,13 +282,13 @@ pub fn split_url_event(event: &mut Event) {
         },
         None => "".to_string(),
     };
-    event.data.insert("domain".to_string(), Value::String(domain));
+    event.data.insert("$domain".to_string(), Value::String(domain));
     // Path
     let path = match uri.origin() {
         Some(origin) => origin.path().to_string(),
         None => "".to_string()
     };
-    event.data.insert("path".to_string(), Value::String(path));
+    event.data.insert("$path".to_string(), Value::String(path));
     // Params
     // TODO: What's the difference between params and query?
     let params = match uri.origin() {
@@ -298,7 +298,7 @@ pub fn split_url_event(event: &mut Event) {
         },
         None => "".to_string()
     };
-    event.data.insert("params".to_string(), Value::String(params));
+    event.data.insert("$params".to_string(), Value::String(params));
 
     // TODO: aw-server-python also has options and identifier
 }

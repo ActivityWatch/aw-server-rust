@@ -26,15 +26,11 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
 
 mod qfunctions {
     use std::collections::HashMap;
-    use regex::Regex;
-
     use crate::query::DataType;
     use crate::query::QueryError;
     use crate::datastore::Datastore;
     use crate::transform;
     use super::validate;
-    use crate::transform::classify::Rule;
-
 
     pub fn print(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         for arg in args {
@@ -315,8 +311,24 @@ mod validate {
         for list in tagged_lists.drain(..) {
             match list {
                 DataType::List(ref l) => {
-                    let regex: Regex = Regex::new(arg_type_string(l.get(1).unwrap())?).unwrap();
-                    lists.push((arg_type_string_list(l.get(0).unwrap())?.clone(), Rule::from(regex)));
+                    let category = arg_type_string_list(l.get(0).unwrap())?.clone();
+                    //let regex: Regex = Regex::new(arg_type_string(l.get(1).unwrap())?).unwrap();
+                    let rulemap: HashMap<String, String> = (match l.get(1).unwrap() {
+                        DataType::Dict(d) => {
+                            let map: HashMap<String, String> = d.iter().map(|(k, v)| { (k.clone(), arg_type_string(v).unwrap().clone()) }).collect();
+                            Ok(map)
+                        },
+                        DataType::String(s) => {
+                            let regex_str: String = s.clone();
+                            let tuple: Vec<(String, String)> = vec![("regex".into(), regex_str)];
+                            let map: HashMap<String, String> = tuple.iter().cloned().collect();
+                            Ok(map)
+                        }
+                        _ => Err(QueryError::InvalidFunctionParameters(
+                                format!("Expected function parameter of ruleset, found something else")
+                        ))
+                    })?;
+                    lists.push((category, Rule::from(rulemap)));
                 },
                 ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
                     format!("Expected function parameter of type list of category rules, list contains {:?}", invalid_type)

@@ -2,6 +2,7 @@
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
 use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::models::Event;
 use regex::Regex;
@@ -35,6 +36,14 @@ impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
         Self {
             regex: Some(re.clone()),
+        }
+    }
+}
+
+impl From<HashMap<String, String>> for Rule {
+    fn from(obj: HashMap<String, String>) -> Self {
+        Self {
+            regex: Some(Regex::new(obj.get("regex").unwrap()).unwrap()),
         }
     }
 }

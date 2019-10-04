@@ -331,6 +331,8 @@ mod query_tests {
             r#"
             events = query_bucket("{}");
             events = categorize(events, [[["Test", "Subtest"], "^value$"]]);
+            events = categorize(events, [[["Test", "Subtest"], {{ "regex": "^value$" }}]]);
+            test = {{}};
             RETURN = events;"#,
             "testid"
         );

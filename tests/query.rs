@@ -293,14 +293,15 @@ mod query_tests {
         let code = String::from("query_bucket(\"testid\");");
         query::query(&code, &interval, &ds).unwrap();
 
-        let code = format!(r#"
+        let code = format!(
+            r#"
             events = query_bucket("{}");
             events = flood(events);
             events = sort_by_duration(events);
             events = limit_events(events, 10000);
             events = sort_by_timestamp(events);
             events = concat(events, query_bucket("{}"));
-            events = classify(events, [["test", "\#test-tag"], ["just", "Test -> Testing"]]);
+            events = categorize(events, [[["test"], "test$"], [["test", "testing"], "test-pat$"]]);
             total_duration = sum_durations(events);
             bucketnames = query_bucket_names();
             print("test", "test2");
@@ -326,14 +327,16 @@ mod query_tests {
         let code = String::from("query_bucket(\"testid\");");
         query::query(&code, &interval, &ds).unwrap();
 
-        let code = format!(r#"
+        let code = format!(
+            r#"
             events = query_bucket("{}");
-            events = classify(events, [["test-tag", "^value$"], ["Test -> Subtest", "^value$"]]);
+            events = categorize(events, [[["Test", "Subtest"], "^value$"]]);
             RETURN = events;"#,
-            "testid");
+            "testid"
+        );
         let events = match query::query(&code, &interval, &ds).unwrap() {
             query::DataType::List(l) => l,
-            ref data => panic!("Wrong datatype, {:?}", data)
+            ref data => panic!("Wrong datatype, {:?}", data),
         };
 
         println!("{:?}", events.first().unwrap());

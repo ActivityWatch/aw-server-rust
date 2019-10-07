@@ -118,10 +118,10 @@ impl TryFrom<&DataType> for String {
 impl TryFrom<&DataType> for Vec<String> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_strings: Vec<DataType> = Vec::try_from(value)?;
+        let mut tagged_strings: Vec<DataType> = value.try_into()?;
         let mut strings = Vec::new();
         for string in tagged_strings.drain(..) {
-            let s: String = String::try_from(&string)?;
+            let s: String = (&string).try_into()?;
             strings.push(s);
         }
         return Ok(strings);
@@ -134,7 +134,7 @@ impl TryFrom<&DataType> for Rule {
         let rulemap: HashMap<String, String> = (match value {
             DataType::Dict(d) => {
                 let map: HashMap<String, String> = d.iter().map(|(k, v)| {
-                    let s: String = String::try_from(v).unwrap();
+                    let s: String = v.try_into().unwrap();
                     (k.clone(), s.clone())
                 }).collect();
                 Ok(map)
@@ -156,7 +156,7 @@ impl TryFrom<&DataType> for Rule {
 impl TryFrom<&DataType> for Vec<Event> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_events = Vec::try_from(value)?;
+        let mut tagged_events: Vec<DataType> = value.try_into()?;
         let mut events = Vec::new();
         for event in tagged_events.drain(..) {
             match event {
@@ -173,17 +173,17 @@ impl TryFrom<&DataType> for Vec<Event> {
 impl TryFrom<&DataType> for Vec<(String, Rule)> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_lists: Vec<DataType> = Vec::try_from(value)?;
+        let mut tagged_lists: Vec<DataType> = value.try_into()?;
         let mut lists: Vec<(String, Rule)> = Vec::new();
         for list in tagged_lists.drain(..) {
             match list {
                 DataType::List(ref l) => {
-                    let category: String = String::try_from(l.get(0).unwrap())?;
-                    let rule = Rule::try_from(l.get(1).unwrap())?;
-                    lists.push((category, rule));
+                    let tag: String = l.get(0).unwrap().try_into()?;
+                    let rule: Rule = l.get(1).unwrap().try_into()?;
+                    lists.push((tag, rule));
                 },
                 ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type list of category rules, list contains {:?}", invalid_type)
+                    format!("Expected function parameter of type list of (tag, rule) tuples, list contains {:?}", invalid_type)
                 ))
             }
         }
@@ -194,17 +194,17 @@ impl TryFrom<&DataType> for Vec<(String, Rule)> {
 impl TryFrom<&DataType> for Vec<(Vec<String>, Rule)> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_lists: Vec<DataType> = Vec::try_from(value)?;
+        let mut tagged_lists: Vec<DataType> = value.try_into()?;
         let mut lists: Vec<(Vec<String>, Rule)> = Vec::new();
         for list in tagged_lists.drain(..) {
             match list {
                 DataType::List(ref l) => {
-                    let category: Vec<String> = Vec::try_from(l.get(0).unwrap())?;
-                    let rule = Rule::try_from(l.get(1).unwrap())?;
+                    let category: Vec<String> = l.get(0).unwrap().try_into()?;
+                    let rule: Rule = l.get(1).unwrap().try_into()?;
                     lists.push((category, rule));
                 },
                 ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type list of category rules, list contains {:?}", invalid_type)
+                    format!("Expected function parameter of type list of (category, rule) tuples, list contains {:?}", invalid_type)
                 ))
             }
         }

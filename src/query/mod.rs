@@ -108,6 +108,144 @@ impl PartialEq for DataType {
     }
 }
 
+use std::convert::TryFrom;
+
+impl TryFrom<&DataType> for Vec<DataType> {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        match value {
+            DataType::List(ref s) => Ok(s.clone()),
+            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
+                format!("Expected function parameter of type List, got {:?}", invalid_type)
+            ))
+        }
+    }
+}
+
+impl TryFrom<&DataType> for String {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        match value {
+            DataType::String(s) => Ok(s.clone()),
+            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
+                format!("Expected function parameter of type List of Strings, list contains {:?}", invalid_type)
+            ))
+        }
+    }
+}
+
+impl TryFrom<&DataType> for Vec<String> {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        let mut tagged_strings: Vec<DataType> = Vec::try_from(value)?;
+        let mut strings = Vec::new();
+        for string in tagged_strings.drain(..) {
+            let s: String = String::try_from(&string)?;
+            strings.push(s);
+        }
+        return Ok(strings);
+    }
+}
+
+impl TryFrom<&DataType> for Rule {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        let rulemap: HashMap<String, String> = (match value {
+            DataType::Dict(d) => {
+                let map: HashMap<String, String> = d.iter().map(|(k, v)| {
+                    let s: String = String::try_from(v).unwrap();
+                    (k.clone(), s.clone())
+                }).collect();
+                Ok(map)
+            },
+            DataType::String(s) => {
+                let regex_str: String = s.clone();
+                let tuple: Vec<(String, String)> = vec![("regex".into(), regex_str)];
+                let map: HashMap<String, String> = tuple.iter().cloned().collect();
+                Ok(map)
+            }
+            _ => Err(QueryError::InvalidFunctionParameters(
+                    format!("Expected rule, found something else")
+                    ))
+        })?;
+        Ok(Rule::from(rulemap))
+    }
+}
+
+impl TryFrom<&DataType> for Vec<Event> {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        let mut tagged_events = Vec::try_from(value)?;
+        let mut events = Vec::new();
+        for event in tagged_events.drain(..) {
+            match event {
+                DataType::Event(e) => events.push(e.clone()),
+                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
+                    format!("Expected function parameter of type List of Events, list contains {:?}", invalid_type)
+                ))
+            }
+        }
+        return Ok(events);
+    }
+}
+
+use crate::transform::classify::Rule;
+
+impl TryFrom<&DataType> for Vec<(String, Rule)> {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        let mut tagged_lists: Vec<DataType> = Vec::try_from(value)?;
+        let mut lists: Vec<(String, Rule)> = Vec::new();
+        for list in tagged_lists.drain(..) {
+            match list {
+                DataType::List(ref l) => {
+                    let category: String = String::try_from(l.get(0).unwrap())?;
+                    let rule = Rule::try_from(l.get(1).unwrap())?;
+                    lists.push((category, rule));
+                },
+                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
+                    format!("Expected function parameter of type list of category rules, list contains {:?}", invalid_type)
+                ))
+            }
+        }
+        return Ok(lists);
+    }
+}
+
+impl TryFrom<&DataType> for Vec<(Vec<String>, Rule)> {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        let mut tagged_lists: Vec<DataType> = Vec::try_from(value)?;
+        let mut lists: Vec<(Vec<String>, Rule)> = Vec::new();
+        for list in tagged_lists.drain(..) {
+            match list {
+                DataType::List(ref l) => {
+                    let category: Vec<String> = Vec::try_from(l.get(0).unwrap())?;
+                    let rule = Rule::try_from(l.get(1).unwrap())?;
+                    lists.push((category, rule));
+                },
+                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
+                    format!("Expected function parameter of type list of category rules, list contains {:?}", invalid_type)
+                ))
+            }
+        }
+        return Ok(lists);
+    }
+}
+
+
+impl TryFrom<&DataType> for f64 {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        match value {
+            DataType::Number(f) => Ok(*f),
+            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
+                format!("Expected function parameter of type Number, got {:?}", invalid_type)
+            ))
+        }
+    }
+}
+
 
 mod lexer {
     use plex::lexer;

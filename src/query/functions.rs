@@ -22,13 +22,17 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
     env.insert("split_url_events", DataType::Function("split_url_events".to_string(), qfunctions::split_url_events));
     env.insert("concat", DataType::Function("concat".to_string(), qfunctions::concat));
     env.insert("categorize", DataType::Function("categorize".into(), qfunctions::categorize));
+    env.insert("tag", DataType::Function("tag".into(), qfunctions::tag));
 }
 
 mod qfunctions {
+    use std::convert::TryFrom;
     use std::collections::HashMap;
+    use crate::transform::classify::Rule;
     use crate::query::DataType;
     use crate::query::QueryError;
     use crate::datastore::Datastore;
+    use crate::models::Event;
     use crate::transform;
     use super::validate;
 
@@ -45,7 +49,7 @@ mod qfunctions {
         let bucket_id = validate::arg_type_string(&args[0])?;
         let interval = validate::get_timeinterval (env)?;
 
-        let events = match ds.get_events(bucket_id, Some(interval.start().clone()), Some(interval.end().clone()), None) {
+        let events = match ds.get_events(bucket_id.as_str(), Some(interval.start().clone()), Some(interval.end().clone()), None) {
             Ok(events) => events,
             Err(e) => return Err(QueryError::BucketQueryError(format!("Failed to query bucket: {:?}", e)))
         };
@@ -108,10 +112,29 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events = validate::arg_type_event_list(&args[0])?.clone();
-        let rules = validate::arg_type_list_of_category_rules(&args[1])?;
+        let events: Vec<Event> = Vec::try_from(&args[0])?;
+        let rules: Vec<(Vec<String>, Rule)> = Vec::try_from(&args[1])?;
         // Run categorize
         let mut flooded_events = transform::classify::categorize(events, &rules);
+        // Put events back into DataType::Event container
+        let mut tagged_flooded_events = Vec::new();
+        for event in flooded_events.drain(..) {
+            tagged_flooded_events.push(DataType::Event(event));
+        }
+        return Ok(DataType::List(tagged_flooded_events));
+    }
+
+    pub fn tag(
+        args: Vec<DataType>,
+        _env: &HashMap<&str, DataType>,
+        _ds: &Datastore,
+    ) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 2)?;
+        let events: Vec<Event> = Vec::try_from(&args[0])?;
+        let rules: Vec<(String, Rule)> = Vec::try_from(&args[1])?;
+        // Run categorize
+        let mut flooded_events = transform::classify::tag(events, &rules);
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
@@ -263,9 +286,8 @@ mod validate {
     use crate::query::{QueryError, DataType};
     use crate::models::Event;
     use crate::models::TimeInterval;
-    use crate::transform::classify::Rule;
-    use regex::Regex;
     use std::collections::HashMap;
+    use std::convert::TryFrom;
 
     pub fn args_length(args: &Vec<DataType>, len: usize) -> Result<(), QueryError> {
         if args.len() != len {
@@ -276,94 +298,24 @@ mod validate {
         return Ok(());
     }
 
-    pub fn arg_type_string (arg: &DataType) -> Result<&String, QueryError> {
-        match arg {
-            DataType::String(ref s) => Ok(s),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type String, got {:?}", invalid_type)
-            ))
-        }
+    pub fn arg_type_string (arg: &DataType) -> Result<String, QueryError> {
+        String::try_from(arg)
     }
 
     pub fn arg_type_number (arg: &DataType) -> Result<f64, QueryError> {
-        match arg {
-            DataType::Number(f) => Ok(*f),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type Number, got {:?}", invalid_type)
-            ))
-        }
+        f64::try_from(arg)
     }
 
-    pub fn arg_type_list (arg: &DataType) -> Result<&Vec<DataType>, QueryError> {
-        match arg {
-            DataType::List(ref s) => Ok(s),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type List, got {:?}", invalid_type)
-            ))
-        }
-    }
-
-    pub fn arg_type_list_of_category_rules(
-        arg: &DataType,
-    ) -> Result<Vec<(Vec<String>, Rule)>, QueryError> {
-        let mut tagged_lists = arg_type_list(arg)?.clone();
-        let mut lists: Vec<(Vec<String>, Rule)> = Vec::new();
-        for list in tagged_lists.drain(..) {
-            match list {
-                DataType::List(ref l) => {
-                    let category = arg_type_string_list(l.get(0).unwrap())?.clone();
-                    //let regex: Regex = Regex::new(arg_type_string(l.get(1).unwrap())?).unwrap();
-                    let rulemap: HashMap<String, String> = (match l.get(1).unwrap() {
-                        DataType::Dict(d) => {
-                            let map: HashMap<String, String> = d.iter().map(|(k, v)| { (k.clone(), arg_type_string(v).unwrap().clone()) }).collect();
-                            Ok(map)
-                        },
-                        DataType::String(s) => {
-                            let regex_str: String = s.clone();
-                            let tuple: Vec<(String, String)> = vec![("regex".into(), regex_str)];
-                            let map: HashMap<String, String> = tuple.iter().cloned().collect();
-                            Ok(map)
-                        }
-                        _ => Err(QueryError::InvalidFunctionParameters(
-                                format!("Expected function parameter of ruleset, found something else")
-                        ))
-                    })?;
-                    lists.push((category, Rule::from(rulemap)));
-                },
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type list of category rules, list contains {:?}", invalid_type)
-                ))
-            }
-        }
-        return Ok(lists);
+    pub fn arg_type_list (arg: &DataType) -> Result<Vec<DataType>, QueryError> {
+        Vec::try_from(arg)
     }
 
     pub fn arg_type_event_list (arg: &DataType) -> Result<Vec<Event>, QueryError> {
-        let mut tagged_events = arg_type_list(arg)?.clone();
-        let mut events = Vec::new();
-        for event in tagged_events.drain(..) {
-            match event {
-                DataType::Event(e) => events.push(e.clone()),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type List of Events, list contains {:?}", invalid_type)
-                ))
-            }
-        }
-        return Ok(events);
+        Vec::try_from(arg)
     }
 
     pub fn arg_type_string_list (arg: &DataType) -> Result<Vec<String>, QueryError> {
-        let mut tagged_strings = arg_type_list(arg)?.clone();
-        let mut strings = Vec::new();
-        for string in tagged_strings.drain(..) {
-            match string {
-                DataType::String(s) => strings.push(s.clone()),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type List of Strings, list contains {:?}", invalid_type)
-                ))
-            }
-        }
-        return Ok(strings);
+        Vec::try_from(arg)
     }
 
     use serde_json::value::Value;

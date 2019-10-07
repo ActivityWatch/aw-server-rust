@@ -1,8 +1,8 @@
+use std::collections::HashMap;
 /// Transforms for classifying (tagging and categorizing) events.
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
 use std::collections::HashSet;
-use std::collections::HashMap;
 
 use crate::models::Event;
 use regex::Regex;
@@ -52,7 +52,7 @@ impl From<HashMap<String, String>> for Rule {
 ///
 /// An event can only have one category, although the category may have a hierarchy,
 /// for instance: "Work -> ActivityWatch -> aw-server-rust"
-/// A category is chosed out of the tags used some rule (such as picking the one that's deepest in the hierarchy)
+/// If multiple categories match, the deepest one will be chosen.
 pub fn categorize(mut events: Vec<Event>, rules: &Vec<(Vec<String>, Rule)>) -> Vec<Event> {
     let mut classified_events = Vec::new();
     for event in events.drain(..) {
@@ -74,32 +74,29 @@ fn categorize_one(mut event: Event, rules: &Vec<(Vec<String>, Rule)>) -> Event {
     return event;
 }
 
-pub fn autotag(mut events: Vec<Event>, rules: &Vec<(String, Rule)>) -> Vec<Event> {
+/// Tags a list of events
+///
+/// An event can have many tags (as opposed to only one category) which will be put into the `$tags` key of
+/// the event data object.
+pub fn tag(mut events: Vec<Event>, rules: &Vec<(String, Rule)>) -> Vec<Event> {
     let mut events_tagged = Vec::new();
     for event in events.drain(..) {
-        events_tagged.push(autotag_one(event, &rules));
+        events_tagged.push(tag_one(event, &rules));
     }
     return events_tagged;
 }
 
-fn autotag_one(mut event: Event, rules: &Vec<(String, Rule)>) -> Event {
-    let mut tags: HashSet<String> = HashSet::new();
+fn tag_one(mut event: Event, rules: &Vec<(String, Rule)>) -> Event {
+    let mut tags: Vec<String> = Vec::new();
     for (cls, rule) in rules {
         if rule.matches(&event) {
-            tags.insert(cls.clone());
+            tags.push(cls.clone());
         }
     }
+    tags.sort_unstable();
+    tags.dedup();
     event.data.insert("$tags".into(), serde_json::json!(tags));
     event
-}
-
-fn _match(event: &Event, re: &Regex) -> bool {
-    for val in event.data.values() {
-        if val.is_string() && re.is_match(val.as_str().unwrap()) {
-            return true;
-        }
-    }
-    return false;
 }
 
 fn _pick_highest_ranking_category(acc: Vec<String>, item: &Vec<String>) -> Vec<String> {
@@ -171,7 +168,7 @@ fn test_categorize_uncategorized() {
 }
 
 #[test]
-fn test_autotag() {
+fn test_tag() {
     let mut e = Event::default();
     e.data
         .insert("test".into(), serde_json::json!("just a test"));
@@ -185,19 +182,11 @@ fn test_autotag() {
             Rule::from(Regex::new(r"nomatch").unwrap()),
         ),
     ];
-    events = autotag(events, &rules);
+    events = tag(events, &rules);
 
     assert_eq!(events.len(), 1);
-    assert_eq!(
-        events
-            .first()
-            .unwrap()
-            .data
-            .get("$tags")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+
+    let event = events.first().unwrap();
+    let tags = event.data.get("$tags").unwrap();
+    assert_eq!(tags, &serde_json::json!(vec!["test", "test-2"]));
 }

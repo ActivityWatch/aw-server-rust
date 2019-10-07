@@ -9,6 +9,7 @@ mod query_tests {
     use chrono;
     use chrono::Duration;
     use serde_json::json;
+    use std::convert::TryFrom;
 
     use aw_server::query;
     use aw_server::query::QueryError;
@@ -301,7 +302,8 @@ mod query_tests {
             events = limit_events(events, 10000);
             events = sort_by_timestamp(events);
             events = concat(events, query_bucket("{}"));
-            events = categorize(events, [[["test"], "test$"], [["test", "testing"], "test-pat$"]]);
+            events = categorize(events, [[["test"], "value$"], [["test", "testing"], "value$"]]);
+            events = tag(events, [["testtag", "test$"], ["another testtag", "test-pat$"]]);
             total_duration = sum_durations(events);
             bucketnames = query_bucket_names();
             print("test", "test2");
@@ -332,19 +334,19 @@ mod query_tests {
             events = query_bucket("{}");
             events = categorize(events, [[["Test", "Subtest"], "^value$"]]);
             events = categorize(events, [[["Test", "Subtest"], {{ "regex": "^value$" }}]]);
+            events = tag(events, [["testtag", "value$"], ["another testtag", "value$"]]);
             test = {{}};
             RETURN = events;"#,
             "testid"
         );
-        let events = match query::query(&code, &interval, &ds).unwrap() {
-            query::DataType::List(l) => l,
-            ref data => panic!("Wrong datatype, {:?}", data),
-        };
+        let result: DataType = query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
 
-        println!("{:?}", events.first().unwrap());
-        // TODO: assert_eq result
-        //assert_eq!(events.first().unwrap().data.get("$tags").unwrap().len(), 2);
-        //assert_eq!(events.first().unwrap().data.get("$category").unwrap(), "Test -> Subtest");
+        let event = events.first().unwrap();
+        let tags = event.data.get("$tags").unwrap().as_array().unwrap();
+        let cats = event.data.get("$category").unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(cats, &serde_json::json!(vec!["Test", "Subtest"]));
     }
 
     #[test]

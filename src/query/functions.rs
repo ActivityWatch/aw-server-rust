@@ -27,6 +27,7 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
 
 mod qfunctions {
     use std::convert::TryFrom;
+    use std::convert::TryInto;
     use std::collections::HashMap;
     use crate::transform::classify::Rule;
     use crate::query::DataType;
@@ -46,7 +47,7 @@ mod qfunctions {
     pub fn query_bucket(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
         // Typecheck
         validate::args_length(&args, 1)?;
-        let bucket_id = validate::arg_type_string(&args[0])?;
+        let bucket_id: String = (&args[0]).try_into()?;
         let interval = validate::get_timeinterval (env)?;
 
         let events = match ds.get_events(bucket_id.as_str(), Some(interval.start().clone()), Some(interval.end().clone()), None) {
@@ -94,7 +95,7 @@ mod qfunctions {
     pub fn flood(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let events = validate::arg_type_event_list(&args[0])?.clone();
+        let events: Vec<Event> = (&args[0]).try_into()?;
         // Run flood
         let mut flooded_events = transform::flood(events, chrono::Duration::seconds(5));
         // Put events back into DataType::Event container
@@ -146,7 +147,7 @@ mod qfunctions {
     pub fn sort_by_duration(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let events = validate::arg_type_event_list(&args[0])?;
+        let events: Vec<Event> = (&args[0]).try_into()?;
 
         // Sort by duration
         let mut sorted_events = transform::sort_by_duration(events);
@@ -161,8 +162,8 @@ mod qfunctions {
     pub fn limit_events(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let mut events = validate::arg_type_event_list(&args[0])?.clone();
-        let mut limit = validate::arg_type_number(&args[1])? as usize;
+        let mut events: Vec<Event> = (&args[0]).try_into()?;
+        let mut limit: usize = (&args[1]).try_into()?;
 
         if events.len() < limit { limit = events.len() }
         let mut limited_tagged_events = Vec::new();
@@ -175,7 +176,7 @@ mod qfunctions {
     pub fn sort_by_timestamp(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let events = validate::arg_type_event_list(&args[0])?;
+        let events: Vec<Event> = (&args[0]).try_into()?;
 
         // Sort by duration
         let mut sorted_events = transform::sort_by_timestamp(events);
@@ -190,7 +191,7 @@ mod qfunctions {
     pub fn sum_durations(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let mut events = validate::arg_type_event_list(&args[0])?.clone();
+        let mut events: Vec<Event> = (&args[0]).try_into()?;
 
         // Sort by duration
         let mut sum_durations = chrono::Duration::zero();
@@ -203,8 +204,8 @@ mod qfunctions {
     pub fn merge_events_by_keys(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events = validate::arg_type_event_list(&args[0])?;
-        let keys  = validate::arg_type_string_list(&args[1])?;
+        let events: Vec<Event> = (&args[0]).try_into()?;
+        let keys: Vec<String> = (&args[1]).try_into()?;
 
         let mut merged_events = transform::merge_events_by_keys(events, keys);
         let mut merged_tagged_events = Vec::new();
@@ -217,8 +218,8 @@ mod qfunctions {
     pub fn chunk_events_by_key(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events = validate::arg_type_event_list(&args[0])?;
-        let key  = validate::arg_type_string(&args[1])?;
+        let events: Vec<Event> = (&args[0]).try_into()?;
+        let key: String = (&args[1]).try_into()?;
 
         let mut merged_events = transform::chunk_events_by_key(events, &key);
         let mut merged_tagged_events = Vec::new();
@@ -231,9 +232,9 @@ mod qfunctions {
     pub fn filter_keyvals(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 3)?;
-        let events = validate::arg_type_event_list(&args[0])?;
-        let key  = validate::arg_type_string(&args[1])?;
-        let vals = validate::arg_type_value_list(&args[2])?;
+        let events = (&args[0]).try_into()?;
+        let key: String  = (&args[1]).try_into()?;
+        let vals: Vec<_> = (&args[2]).try_into()?;
 
         let mut filtered_events = transform::filter_keyvals(events, &key, &vals);
         let mut filtered_tagged_events = Vec::new();
@@ -246,8 +247,8 @@ mod qfunctions {
     pub fn filter_period_intersect(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events = validate::arg_type_event_list(&args[0])?;
-        let filter_events = validate::arg_type_event_list(&args[1])?;
+        let events = (&args[0]).try_into()?;
+        let filter_events = (&args[1]).try_into()?;
 
         let mut filtered_events = transform::filter_period_intersect(&events, &filter_events);
         let mut filtered_tagged_events = Vec::new();
@@ -260,7 +261,7 @@ mod qfunctions {
     pub fn split_url_events(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let mut events = validate::arg_type_event_list(&args[0])?;
+        let mut events: Vec<Event> = (&args[0]).try_into()?;
 
         let mut tagged_split_url_events = Vec::new();
         for mut event in events.drain(..) {
@@ -273,7 +274,7 @@ mod qfunctions {
     pub fn concat(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         let mut event_list = Vec::new();
         for arg in args {
-            let mut events = validate::arg_type_event_list(&arg)?;
+            let mut events: Vec<Event> = (&arg).try_into()?;
             for event in events.drain(..) {
                 event_list.push(DataType::Event(event));
             }
@@ -284,10 +285,8 @@ mod qfunctions {
 
 mod validate {
     use crate::query::{QueryError, DataType};
-    use crate::models::Event;
     use crate::models::TimeInterval;
     use std::collections::HashMap;
-    use std::convert::TryFrom;
 
     pub fn args_length(args: &Vec<DataType>, len: usize) -> Result<(), QueryError> {
         if args.len() != len {
@@ -296,45 +295,6 @@ mod validate {
             ));
         }
         return Ok(());
-    }
-
-    pub fn arg_type_string (arg: &DataType) -> Result<String, QueryError> {
-        String::try_from(arg)
-    }
-
-    pub fn arg_type_number (arg: &DataType) -> Result<f64, QueryError> {
-        f64::try_from(arg)
-    }
-
-    pub fn arg_type_list (arg: &DataType) -> Result<Vec<DataType>, QueryError> {
-        Vec::try_from(arg)
-    }
-
-    pub fn arg_type_event_list (arg: &DataType) -> Result<Vec<Event>, QueryError> {
-        Vec::try_from(arg)
-    }
-
-    pub fn arg_type_string_list (arg: &DataType) -> Result<Vec<String>, QueryError> {
-        Vec::try_from(arg)
-    }
-
-    use serde_json::value::Value;
-    use serde_json::Number;
-    pub fn arg_type_value_list (arg: &DataType) -> Result<Vec<Value>, QueryError> {
-        let mut tagged_strings = arg_type_list(arg)?.clone();
-        let mut strings = Vec::new();
-        for string in tagged_strings.drain(..) {
-            match string {
-                DataType::String(s) => strings.push(Value::String(s)),
-                DataType::Number(n) => strings.push(Value::Number(Number::from_f64(n).unwrap())),
-                //DataType::Bool(b) => strings.push(json!(b)),
-                DataType::None() => strings.push(Value::Null),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Query2 support for parsing values is limited and only supports strings, numbers and null, list contains {:?}", invalid_type)
-                ))
-            }
-        }
-        return Ok(strings);
     }
 
     pub fn get_timeinterval (env: &HashMap<&str, DataType>) -> Result<TimeInterval, QueryError> {

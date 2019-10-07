@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 /// Transforms for classifying (tagging and categorizing) events.
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
-use std::collections::HashSet;
 
+use std::collections::HashMap;
 use crate::models::Event;
 use regex::Regex;
 use serde_json;

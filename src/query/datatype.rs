@@ -139,12 +139,6 @@ impl TryFrom<&DataType> for Rule {
                 }).collect();
                 Ok(map)
             },
-            DataType::String(s) => {
-                let regex_str: String = s.clone();
-                let tuple: Vec<(String, String)> = vec![("regex".into(), regex_str)];
-                let map: HashMap<String, String> = tuple.iter().cloned().collect();
-                Ok(map)
-            }
             _ => Err(QueryError::InvalidFunctionParameters(
                     format!("Expected rule, found something else")
                     ))

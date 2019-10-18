@@ -1,13 +1,14 @@
-use std::collections::HashMap;
+use std::fmt;
 
 use crate::datastore::Datastore;
-use crate::models::Event;
 use crate::models::TimeInterval;
-use serde::Serializer;
+
+pub mod datatype;
+
+pub use crate::query::datatype::DataType;
 
 // TODO: add line numbers to errors
 // (works during lexing, but not during parsing I believe)
-// TODO: greater/less comparisons
 
 #[derive(Debug)]
 pub enum QueryError {
@@ -29,85 +30,6 @@ impl fmt::Display for QueryError {
         write!(f, "{:?}", self)
     }
 }
-
-#[derive(Clone,Serialize)]
-#[serde(untagged)]
-pub enum DataType {
-    None(),
-    Bool(bool),
-    Number(f64),
-    String(String),
-    Event(Event),
-    List(Vec<DataType>),
-    Dict(HashMap<String, DataType>),
-    #[serde(serialize_with = "serialize_function")]
-    Function(String, functions::QueryFn),
-}
-
-fn serialize_function<S>(_element: &String, _fun: &functions::QueryFn, _serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer
-{
-    panic!("Query function was unevaluated and was attempted to be serialized, panic!");
-    //element.id.serialize(serializer)
-}
-
-use std::fmt;
-
-// Needed because of a limitation in rust where you cannot derive(Debug) on a
-// enum which has a fn with reference parameters which our QueryFn has
-// https://stackoverflow.com/questions/53380040/function-pointer-with-a-reference-argument-cannot-derive-debug
-impl fmt::Debug for DataType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            DataType::None() => write!(f, "None()"),
-            DataType::Bool(b) => write!(f, "Bool({})", b),
-            DataType::Number(n) => write!(f, "Number({})", n),
-            DataType::String(s) => write!(f, "String({})", s),
-            DataType::Event(e) => write!(f, "Event({:?})", e),
-            DataType::List(l) => write!(f, "List({:?})", l),
-            DataType::Dict(d) => write!(f, "Dict({:?})", d),
-            DataType::Function(name, _fun) => write!(f, "Function({})", name),
-        }
-    }
-}
-
-/* Like eq, but raises an error when comparing between different types.
- * Should be used as often as possible */
-impl DataType {
-    fn query_eq(&self, other: &DataType) -> Result<bool, QueryError> {
-        match (self, other) {
-            // TODO: Comparisons of bool == num, bool == str
-            (DataType::None(), DataType::None()) => Ok(false),
-            (DataType::Bool(b1), DataType::Bool(b2)) => Ok(b1 == b2),
-            (DataType::Number(n1), DataType::Number(n2)) => Ok(n1 == n2),
-            (DataType::String(s1), DataType::String(s2)) => Ok(s1 == s2),
-            (DataType::Event(e1), DataType::Event(e2)) => Ok(e1 == e2),
-            (DataType::List(l1), DataType::List(l2)) => Ok(l1 == l2),
-            (DataType::Dict(d1), DataType::Dict(d2)) => Ok(d1 == d2),
-            // We do not care about comparing functions
-            _ => Err(QueryError::InvalidType(format!("Cannot compare values of different types {:?} and {:?}", self, other))),
-        }
-    }
-}
-
-/* Required for query_eq when comparing two dicts */
-impl PartialEq for DataType {
-    fn eq(&self, other: &DataType) -> bool {
-        match (self, other) {
-            (DataType::None(), DataType::None()) => true,
-            // TODO: Comparisons of bool == num, bool == str
-            (DataType::Bool(b1), DataType::Bool(b2)) => b1 == b2,
-            (DataType::Number(n1), DataType::Number(n2)) => n1 == n2,
-            (DataType::String(s1), DataType::String(s2)) => s1 == s2,
-            (DataType::Event(e1), DataType::Event(e2)) => e1 == e2,
-            (DataType::List(l1), DataType::List(l2)) => l1 == l2,
-            (DataType::Dict(d1), DataType::Dict(d2)) => d1 == d2,
-            // We do not care about comparing functions
-            _ => false
-        }
-    }
-}
-
 
 mod lexer {
     use plex::lexer;

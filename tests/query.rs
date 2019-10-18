@@ -9,6 +9,7 @@ mod query_tests {
     use chrono;
     use chrono::Duration;
     use serde_json::json;
+    use std::convert::TryFrom;
 
     use aw_server::query;
     use aw_server::query::QueryError;
@@ -293,13 +294,16 @@ mod query_tests {
         let code = String::from("query_bucket(\"testid\");");
         query::query(&code, &interval, &ds).unwrap();
 
-        let code = format!(r#"
+        let code = format!(
+            r#"
             events = query_bucket("{}");
             events = flood(events);
             events = sort_by_duration(events);
             events = limit_events(events, 10000);
             events = sort_by_timestamp(events);
             events = concat(events, query_bucket("{}"));
+            events = categorize(events, [[["test"], {{ "regex": "value$" }}], [["test", "testing"], {{ "regex": "value$" }}]]);
+            events = tag(events, [["testtag", {{ "regex": "test$" }}], ["another testtag", {{ "regex": "test-pat$" }}]]);
             total_duration = sum_durations(events);
             bucketnames = query_bucket_names();
             print("test", "test2");
@@ -315,6 +319,33 @@ mod query_tests {
             ref data => panic!("Wrong datatype, {:?}", data)
         };
         // TODO: assert_eq result
+    }
+
+    #[test]
+    fn test_classify() {
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let code = String::from("query_bucket(\"testid\");");
+        query::query(&code, &interval, &ds).unwrap();
+
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = categorize(events, [[["Test", "Subtest"], {{ "regex": "^value$" }}]]);
+            events = tag(events, [["testtag", {{ "regex": "value$" }}], ["another testtag", {{ "regex": "value$" }}]]);
+            test = {{}};
+            RETURN = events;"#,
+            "testid"
+        );
+        let result: DataType = query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+
+        let event = events.first().unwrap();
+        let tags = event.data.get("$tags").unwrap().as_array().unwrap();
+        let cats = event.data.get("$category").unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(cats, &serde_json::json!(vec!["Test", "Subtest"]));
     }
 
     #[test]

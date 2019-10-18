@@ -30,6 +30,17 @@ impl PartialEq for Event {
     }
 }
 
+impl Default for Event {
+    fn default() -> Self {
+        Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(0),
+            data: serde_json::Map::new()
+        }
+    }
+}
+
 fn default_duration() -> Duration {
     Duration::seconds(0)
 }

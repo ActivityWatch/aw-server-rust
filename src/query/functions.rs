@@ -1,7 +1,7 @@
+use std::collections::HashMap;
 use crate::query::DataType;
 use crate::query::QueryError;
 use crate::datastore::Datastore;
-use std::collections::HashMap;
 
 pub type QueryFn = fn(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError>;
 
@@ -21,16 +21,21 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
     env.insert("filter_period_intersect", DataType::Function("filter_period_intersect".to_string(), qfunctions::filter_period_intersect));
     env.insert("split_url_events", DataType::Function("split_url_events".to_string(), qfunctions::split_url_events));
     env.insert("concat", DataType::Function("concat".to_string(), qfunctions::concat));
+    env.insert("categorize", DataType::Function("categorize".into(), qfunctions::categorize));
+    env.insert("tag", DataType::Function("tag".into(), qfunctions::tag));
 }
 
 mod qfunctions {
+    use std::convert::TryFrom;
+    use std::convert::TryInto;
+    use std::collections::HashMap;
+    use crate::transform::classify::Rule;
     use crate::query::DataType;
     use crate::query::QueryError;
     use crate::datastore::Datastore;
+    use crate::models::Event;
     use crate::transform;
     use super::validate;
-
-    use std::collections::HashMap;
 
     pub fn print(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         for arg in args {
@@ -42,10 +47,10 @@ mod qfunctions {
     pub fn query_bucket(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
         // Typecheck
         validate::args_length(&args, 1)?;
-        let bucket_id = validate::arg_type_string(&args[0])?;
+        let bucket_id: String = (&args[0]).try_into()?;
         let interval = validate::get_timeinterval (env)?;
 
-        let events = match ds.get_events(bucket_id, Some(interval.start().clone()), Some(interval.end().clone()), None) {
+        let events = match ds.get_events(bucket_id.as_str(), Some(interval.start().clone()), Some(interval.end().clone()), None) {
             Ok(events) => events,
             Err(e) => return Err(QueryError::BucketQueryError(format!("Failed to query bucket: {:?}", e)))
         };
@@ -90,9 +95,47 @@ mod qfunctions {
     pub fn flood(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let events = validate::arg_type_event_list(&args[0])?.clone();
+        let events: Vec<Event> = (&args[0]).try_into()?;
         // Run flood
         let mut flooded_events = transform::flood(events, chrono::Duration::seconds(5));
+        // Put events back into DataType::Event container
+        let mut tagged_flooded_events = Vec::new();
+        for event in flooded_events.drain(..) {
+            tagged_flooded_events.push(DataType::Event(event));
+        }
+        return Ok(DataType::List(tagged_flooded_events));
+    }
+
+    pub fn categorize(
+        args: Vec<DataType>,
+        _env: &HashMap<&str, DataType>,
+        _ds: &Datastore,
+    ) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 2)?;
+        let events: Vec<Event> = Vec::try_from(&args[0])?;
+        let rules: Vec<(Vec<String>, Rule)> = Vec::try_from(&args[1])?;
+        // Run categorize
+        let mut flooded_events = transform::classify::categorize(events, &rules);
+        // Put events back into DataType::Event container
+        let mut tagged_flooded_events = Vec::new();
+        for event in flooded_events.drain(..) {
+            tagged_flooded_events.push(DataType::Event(event));
+        }
+        return Ok(DataType::List(tagged_flooded_events));
+    }
+
+    pub fn tag(
+        args: Vec<DataType>,
+        _env: &HashMap<&str, DataType>,
+        _ds: &Datastore,
+    ) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 2)?;
+        let events: Vec<Event> = Vec::try_from(&args[0])?;
+        let rules: Vec<(String, Rule)> = Vec::try_from(&args[1])?;
+        // Run categorize
+        let mut flooded_events = transform::classify::tag(events, &rules);
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
@@ -104,7 +147,7 @@ mod qfunctions {
     pub fn sort_by_duration(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let events = validate::arg_type_event_list(&args[0])?;
+        let events: Vec<Event> = (&args[0]).try_into()?;
 
         // Sort by duration
         let mut sorted_events = transform::sort_by_duration(events);
@@ -119,8 +162,8 @@ mod qfunctions {
     pub fn limit_events(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let mut events = validate::arg_type_event_list(&args[0])?.clone();
-        let mut limit = validate::arg_type_number(&args[1])? as usize;
+        let mut events: Vec<Event> = (&args[0]).try_into()?;
+        let mut limit: usize = (&args[1]).try_into()?;
 
         if events.len() < limit { limit = events.len() }
         let mut limited_tagged_events = Vec::new();
@@ -133,7 +176,7 @@ mod qfunctions {
     pub fn sort_by_timestamp(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let events = validate::arg_type_event_list(&args[0])?;
+        let events: Vec<Event> = (&args[0]).try_into()?;
 
         // Sort by duration
         let mut sorted_events = transform::sort_by_timestamp(events);
@@ -148,7 +191,7 @@ mod qfunctions {
     pub fn sum_durations(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let mut events = validate::arg_type_event_list(&args[0])?.clone();
+        let mut events: Vec<Event> = (&args[0]).try_into()?;
 
         // Sort by duration
         let mut sum_durations = chrono::Duration::zero();
@@ -161,8 +204,8 @@ mod qfunctions {
     pub fn merge_events_by_keys(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events = validate::arg_type_event_list(&args[0])?;
-        let keys  = validate::arg_type_string_list(&args[1])?;
+        let events: Vec<Event> = (&args[0]).try_into()?;
+        let keys: Vec<String> = (&args[1]).try_into()?;
 
         let mut merged_events = transform::merge_events_by_keys(events, keys);
         let mut merged_tagged_events = Vec::new();
@@ -175,8 +218,8 @@ mod qfunctions {
     pub fn chunk_events_by_key(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events = validate::arg_type_event_list(&args[0])?;
-        let key  = validate::arg_type_string(&args[1])?;
+        let events: Vec<Event> = (&args[0]).try_into()?;
+        let key: String = (&args[1]).try_into()?;
 
         let mut merged_events = transform::chunk_events_by_key(events, &key);
         let mut merged_tagged_events = Vec::new();
@@ -189,9 +232,9 @@ mod qfunctions {
     pub fn filter_keyvals(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 3)?;
-        let events = validate::arg_type_event_list(&args[0])?;
-        let key  = validate::arg_type_string(&args[1])?;
-        let vals = validate::arg_type_value_list(&args[2])?;
+        let events = (&args[0]).try_into()?;
+        let key: String  = (&args[1]).try_into()?;
+        let vals: Vec<_> = (&args[2]).try_into()?;
 
         let mut filtered_events = transform::filter_keyvals(events, &key, &vals);
         let mut filtered_tagged_events = Vec::new();
@@ -204,8 +247,8 @@ mod qfunctions {
     pub fn filter_period_intersect(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events = validate::arg_type_event_list(&args[0])?;
-        let filter_events = validate::arg_type_event_list(&args[1])?;
+        let events = (&args[0]).try_into()?;
+        let filter_events = (&args[1]).try_into()?;
 
         let mut filtered_events = transform::filter_period_intersect(&events, &filter_events);
         let mut filtered_tagged_events = Vec::new();
@@ -218,7 +261,7 @@ mod qfunctions {
     pub fn split_url_events(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let mut events = validate::arg_type_event_list(&args[0])?;
+        let mut events: Vec<Event> = (&args[0]).try_into()?;
 
         let mut tagged_split_url_events = Vec::new();
         for mut event in events.drain(..) {
@@ -231,7 +274,7 @@ mod qfunctions {
     pub fn concat(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
         let mut event_list = Vec::new();
         for arg in args {
-            let mut events = validate::arg_type_event_list(&arg)?;
+            let mut events: Vec<Event> = (&arg).try_into()?;
             for event in events.drain(..) {
                 event_list.push(DataType::Event(event));
             }
@@ -242,7 +285,6 @@ mod qfunctions {
 
 mod validate {
     use crate::query::{QueryError, DataType};
-    use crate::models::Event;
     use crate::models::TimeInterval;
     use std::collections::HashMap;
 
@@ -253,80 +295,6 @@ mod validate {
             ));
         }
         return Ok(());
-    }
-
-    pub fn arg_type_string (arg: &DataType) -> Result<&String, QueryError> {
-        match arg {
-            DataType::String(ref s) => Ok(s),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type String, got {:?}", invalid_type)
-            ))
-        }
-    }
-
-    pub fn arg_type_number (arg: &DataType) -> Result<f64, QueryError> {
-        match arg {
-            DataType::Number(f) => Ok(*f),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type Number, got {:?}", invalid_type)
-            ))
-        }
-    }
-
-    pub fn arg_type_list (arg: &DataType) -> Result<&Vec<DataType>, QueryError> {
-        match arg {
-            DataType::List(ref s) => Ok(s),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type List, got {:?}", invalid_type)
-            ))
-        }
-    }
-
-    pub fn arg_type_event_list (arg: &DataType) -> Result<Vec<Event>, QueryError> {
-        let mut tagged_events = arg_type_list(arg)?.clone();
-        let mut events = Vec::new();
-        for event in tagged_events.drain(..) {
-            match event {
-                DataType::Event(e) => events.push(e.clone()),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type List of Events, list contains {:?}", invalid_type)
-                ))
-            }
-        }
-        return Ok(events);
-    }
-
-    pub fn arg_type_string_list (arg: &DataType) -> Result<Vec<String>, QueryError> {
-        let mut tagged_strings = arg_type_list(arg)?.clone();
-        let mut strings = Vec::new();
-        for string in tagged_strings.drain(..) {
-            match string {
-                DataType::String(s) => strings.push(s.clone()),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type List of Strings, list contains {:?}", invalid_type)
-                ))
-            }
-        }
-        return Ok(strings);
-    }
-
-    use serde_json::value::Value;
-    use serde_json::Number;
-    pub fn arg_type_value_list (arg: &DataType) -> Result<Vec<Value>, QueryError> {
-        let mut tagged_strings = arg_type_list(arg)?.clone();
-        let mut strings = Vec::new();
-        for string in tagged_strings.drain(..) {
-            match string {
-                DataType::String(s) => strings.push(Value::String(s)),
-                DataType::Number(n) => strings.push(Value::Number(Number::from_f64(n).unwrap())),
-                //DataType::Bool(b) => strings.push(json!(b)),
-                DataType::None() => strings.push(Value::Null),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Query2 support for parsing values is limited and only supports strings, numbers and null, list contains {:?}", invalid_type)
-                ))
-            }
-        }
-        return Ok(strings);
     }
 
     pub fn get_timeinterval (env: &HashMap<&str, DataType>) -> Result<TimeInterval, QueryError> {

@@ -1,5 +1,6 @@
 mod datastore;
 mod worker;
+mod legacy_import;
 
 pub use self::datastore::DatastoreInstance;
 pub use self::worker::Datastore;

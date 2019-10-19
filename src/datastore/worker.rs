@@ -83,8 +83,26 @@ impl DatastoreWorker {
             DatastoreMethod::File(path) => Connection::open(path)
                 .expect("Failed to create datastore")
         };
-        let mut ds = DatastoreInstance::new(&conn).unwrap();
+        let mut ds = DatastoreInstance::new(&mut conn).unwrap();
         let mut last_heartbeat = HashMap::new();
+
+        // Ensure legacy import
+        {
+            let mut transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
+                Ok(transaction) => transaction,
+                Err(err) => panic!("Unable to start immediate transaction on SQLite database! {}", err)
+            };
+            match ds.ensure_legacy_import(&mut transaction) {
+                Ok(_) => (),
+                Err(err) => error!("Failed to do legacy import: {:?}", err),
+            }
+            match transaction.commit() {
+                Ok(_) => (),
+                Err(err) => panic!("Failed to commit datastore transaction! {}", err)
+            }
+        }
+
+        // Start handling and respond to requests
         loop {
             let mut transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
                 Ok(transaction) => transaction,

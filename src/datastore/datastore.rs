@@ -16,7 +16,8 @@ use crate::transform;
 
 use rusqlite::types::ToSql;
 
-use crate::datastore::DatastoreError;
+use super::DatastoreError;
+use super::legacy_import::legacy_import;
 
 /*
  * ### Database version changelog ###
@@ -24,13 +25,15 @@ use crate::datastore::DatastoreError;
  * 1: Initialized database
  * 2: Added 'data' field to 'buckets' table
  */
-fn _create_tables(conn: &Connection) {
+fn _create_tables(conn: &Connection) -> bool {
+    let mut first_init = false;
     /* get DB version */
     let version : i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))
 .unwrap();
     info!("DB version: {}", version);
 
     if version < 1 {
+        first_init = true;
         _migrate_v0_to_v1(conn);
     }
 
@@ -41,6 +44,8 @@ fn _create_tables(conn: &Connection) {
     if version < 3 {
         _migrate_v2_to_v3(conn);
     }
+
+    first_init
 }
 
 fn _migrate_v0_to_v1(conn: &Connection) {
@@ -111,14 +116,16 @@ fn _migrate_v2_to_v3(conn: &Connection) {
 
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
+    first_init: bool,
 }
 
 impl DatastoreInstance {
     pub fn new(conn: &Connection) -> Result<DatastoreInstance, DatastoreError> {
+        let first_init = _create_tables(&conn);
         let mut ds = DatastoreInstance {
             buckets_cache: HashMap::new(),
+            first_init,
         };
-        _create_tables(&conn);
         ds.get_stored_buckets(&conn)?;
         Ok(ds)
     }
@@ -194,6 +201,25 @@ impl DatastoreInstance {
             }
         };
         Ok(())
+    }
+
+    pub fn ensure_legacy_import(&mut self, conn: &Connection) -> Result<bool, ()> {
+        if !self.first_init {
+            return Ok(false);
+        } else {
+            self.first_init = false;
+            match legacy_import(self, &conn) {
+                Ok(_) => {
+                    info!("Successfully imported legacy database");
+                    self.get_stored_buckets(&conn).unwrap();
+                    return Ok(true);
+                },
+                Err(err) => {
+                    warn!("Failed to import legacy database: {:?}", err);
+                    return Err(());
+                }
+            };
+        }
     }
 
     pub fn create_bucket(&mut self, conn: &Connection, mut bucket: Bucket) -> Result<(), DatastoreError> {

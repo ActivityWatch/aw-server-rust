@@ -5,6 +5,10 @@ authors = ["Johan Bjäreholt <johan@bjareho.lt>", "Erik Bjäreholt <erik@bjareho
 edition = "2018"
 default-run = "aw-server-rust"
 
+[features]
+default = [] # no features by default
+legacy_datastore_tests = []
+
 [workspace]
 members = [
     "aw-client-rust",

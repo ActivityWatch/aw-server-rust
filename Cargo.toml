@@ -37,6 +37,7 @@ fern = { version = "0.5", features = ["colored"] }
 toml = "0.5"
 gethostname = "0.2"
 regex = "1.0"
+uuid = { version = "0.8", features = ["serde", "v4"] }
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.5", default-features = false }

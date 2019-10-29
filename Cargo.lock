@@ -81,6 +81,7 @@ name = "aw_client_rust"
 version = "0.1.0"
 dependencies = [
  "aw_server 0.8.0",
+ "chrono 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "gethostname 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "reqwest 0.9.22 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.99 (registry+https://github.com/rust-lang/crates.io-index)",

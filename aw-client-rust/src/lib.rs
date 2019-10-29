@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde_json::Map;
 
-use aw_server::models::{Bucket, BucketMetadata, Event};
+pub use aw_server::models::{Bucket, BucketMetadata, Event};
 
 #[derive(Deserialize)]
 pub struct Info {

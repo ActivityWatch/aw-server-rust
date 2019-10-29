@@ -26,7 +26,8 @@ mod datastore_tests {
             created: None,
             data: json_map!{},
             metadata: BucketMetadata::default(),
-            events: None
+            events: None,
+            last_updated: None,
         }
     }
 

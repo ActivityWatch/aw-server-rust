@@ -1,11 +1,13 @@
 extern crate aw_client_rust;
 extern crate serde_json;
+extern crate chrono;
 
 #[cfg(test)]
 mod test {
     use aw_client_rust::AwClient;
     use aw_client_rust::Event;
     use serde_json::Map;
+    use chrono::{DateTime, Utc, Duration};
 
     #[test]
     fn test_full() {
@@ -29,18 +31,19 @@ mod test {
         println!("Buckets: {:?}", buckets);
         let mut event = Event {
             id: None,
-            timestamp: "2017-12-30T01:00:00+00:00".to_string(),
-            duration: 0.0,
+            timestamp: DateTime::from_utc(DateTime::parse_from_rfc3339("2017-12-30T01:00:00+00:00").unwrap().naive_utc(), Utc),
+            duration: Duration::seconds(0),
             data: Map::new()
         };
         println!("{:?}", event);
         client.insert_event(&bucketname, &event).unwrap();
-        event.timestamp = "2017-12-30T01:00:01+00:00".to_string();
+        // Ugly way to create a UTC from timestamp, see https://github.com/chronotope/chrono/issues/263
+        event.timestamp = DateTime::from_utc(DateTime::parse_from_rfc3339("2017-12-30T01:00:01+00:00").unwrap().naive_utc(), Utc);
         client.heartbeat(&bucketname, &event, 10.0).unwrap();
 
         let events = client.get_events(&bucketname).unwrap();
         println!("Events: {:?}", events);
-        assert!(events[0].duration == 1.0);
+        assert!(events[0].duration == Duration::seconds(1));
 
         client.delete_bucket(&bucketname).unwrap();
 

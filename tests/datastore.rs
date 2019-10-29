@@ -74,7 +74,7 @@ mod datastore_tests {
             None => panic!("Expected 'None' in bucket to be replaced with current time"),
             Some(created) => {
                 let now = Utc::now();
-                assert!(created < now);
+                assert!(created <= now);
                 assert!(created > now - Duration::seconds(10));
             }
         };

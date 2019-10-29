@@ -8,12 +8,59 @@
 
 use std::fs;
 use std::path::Path;
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc, Duration};
 use serde_json;
+use aw_client_rust::{AwClient};
 
 use crate::datastore::{Datastore, DatastoreError};
 use crate::models::{Event, Bucket};
+
+trait AccessMethod {
+    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String>;
+    fn get_events(&self, bucket_id: &str, limit: Option<u64>) -> Result<Vec<Event>, String>;
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String>;
+    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
+}
+
+struct DirectDatastore {
+    ds: Datastore,
+}
+
+impl AccessMethod for DirectDatastore {
+    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
+        Ok(self.ds.get_buckets().unwrap())
+    }
+    fn get_events(&self, bucket_id: &str, limit: Option<u64>) -> Result<Vec<Event>, String> {
+        Ok(self.ds.get_events(bucket_id, None, None, limit).unwrap())
+    }
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String> {
+        Ok(self.ds.insert_events(bucket_id, &events[..]).unwrap())
+    }
+    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
+        Ok(self.ds.get_event_count(bucket_id, None, None).unwrap())
+    }
+}
+
+struct APIDatastore {
+    awc: AwClient,
+}
+
+//impl AccessMethod for APIDatastore {
+//    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
+//        Ok(self.awc.get_buckets().unwrap())
+//    }
+//    fn get_events(&self, bucket_id: &str, limit: Option<u64>) -> Result<Vec<Event>, String> {
+//        Ok(self.awc.get_events(bucket_id, None, None, limit).unwrap())
+//    }
+//    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String> {
+//        Ok(self.awc.insert_events(bucket_id, &events[..]).unwrap())
+//    }
+//    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
+//        Ok(self.awc.get_event_count(bucket_id, None, None).unwrap())
+//    }
+//}
 
 /// Performs a single sync pass
 pub fn sync_run() {

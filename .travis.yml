@@ -45,7 +45,9 @@ install:
     fi
 
 before_script:
-  - env RUST_BACKTRACE=1 cargo run --bin aw-server-rust $($RELEASE && echo '--release') &
+  - |
+    env RUST_BACKTRACE=1 cargo run --bin aw-server-rust $($RELEASE && echo '--release') &
+    SERVER_PID=$!
 
 script:
   - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ] && [ -z "$RELEASE" ]; then
@@ -57,8 +59,7 @@ script:
     fi
 
 after_script:
-  - pkill aw-server-rust
-
+  - kill $SERVER_PID
 
 before_cache:
   - cargo prune

@@ -3,41 +3,14 @@ extern crate gethostname;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
-
-use serde_json::{Value, Map};
+extern crate aw_server;
 
 use std::vec::Vec;
 use std::collections::HashMap;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Bucket {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub created: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(rename = "type")]
-    pub _type: String,
-    #[serde(default)]
-    pub client: String,
-    #[serde(default)]
-    pub hostname: String,
-    #[serde(default)]
-    pub last_updated: Option<String>,
-}
+use serde_json::Map;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Event {
-    #[serde(default)]
-    pub id: Option<i64>,
-    #[serde(default)]
-    pub timestamp: String,
-    #[serde(default)]
-    pub duration: f64,
-    #[serde(default)]
-    pub data: Map<String, Value>,
-}
+use aw_server::models::{Bucket, BucketMetadata, Event};
 
 #[derive(Deserialize)]
 pub struct Info {
@@ -79,12 +52,15 @@ impl AwClient {
     pub fn create_bucket(&self, bucketname: &str, buckettype: &str) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
         let data = Bucket {
+            bid: None,
             id: bucketname.to_string(),
             client: self.name.clone(),
             _type: buckettype.to_string(),
             hostname: self.hostname.clone(),
+            data: Map::default(),
+            metadata: BucketMetadata::default(),
+            events: None,
             created: None,
-            name: None,
             last_updated: None,
         };
         self.client.post(&url).json(&data).send()?;

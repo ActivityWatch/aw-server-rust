@@ -79,18 +79,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "aw_client_rust"
 version = "0.1.0"
-source = "git+https://github.com/ActivityWatch/aw-client-rust#caea2b441877eb8000786d0464c09034380f999f"
-dependencies = [
- "gethostname 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "reqwest 0.9.22 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde 1.0.99 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde_derive 1.0.99 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde_json 1.0.40 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "aw_client_rust"
-version = "0.1.0"
 dependencies = [
  "aw_server 0.8.0",
  "chrono 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -107,7 +95,6 @@ version = "0.8.0"
 dependencies = [
  "android_logger 0.8.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "appdirs 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "aw_client_rust 0.1.0 (git+https://github.com/ActivityWatch/aw-client-rust)",
  "chrono 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "crossbeam_requests 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "fern 0.5.8 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -128,6 +115,17 @@ dependencies = [
  "serde_json 1.0.40 (registry+https://github.com/rust-lang/crates.io-index)",
  "toml 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "uuid 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "aw_sync"
+version = "0.1.0"
+dependencies = [
+ "aw_client_rust 0.1.0",
+ "aw_server 0.8.0",
+ "chrono 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
+ "log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json 1.0.40 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -2335,7 +2333,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum ascii 0.8.7 (registry+https://github.com/rust-lang/crates.io-index)" = "97be891acc47ca214468e09425d02cef3af2c94d0d82081cd02061f996802f14"
 "checksum atty 0.2.13 (registry+https://github.com/rust-lang/crates.io-index)" = "1803c647a3ec87095e7ae7acfca019e98de5ec9a7d01343f611cf3152ed71a90"
 "checksum autocfg 0.1.6 (registry+https://github.com/rust-lang/crates.io-index)" = "b671c8fb71b457dd4ae18c4ba1e59aa81793daacc361d82fcd410cef0d491875"
-"checksum aw_client_rust 0.1.0 (git+https://github.com/ActivityWatch/aw-client-rust)" = "<none>"
 "checksum backtrace 0.3.40 (registry+https://github.com/rust-lang/crates.io-index)" = "924c76597f0d9ca25d762c25a4d369d51267536465dc5064bdf0eb073ed477ea"
 "checksum backtrace-sys 0.1.32 (registry+https://github.com/rust-lang/crates.io-index)" = "5d6575f128516de27e3ce99689419835fce9643a9b215a14d2b5b685be018491"
 "checksum base64 0.10.1 (registry+https://github.com/rust-lang/crates.io-index)" = "0b25d992356d2eb0ed82172f5248873db5560c4721f564b13cb5193bda5e668e"

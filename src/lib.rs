@@ -41,5 +41,3 @@ pub mod config;
 
 #[cfg(target_os="android")]
 pub mod android;
-
-pub mod sync;

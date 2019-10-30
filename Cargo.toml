@@ -8,6 +8,7 @@ default-run = "aw-server-rust"
 [workspace]
 members = [
     "aw-client-rust",
+    "aw-sync-rust",
 ]
 
 [lib]
@@ -18,10 +19,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "aw-server-rust"
 path = "src/main.rs"
-
-[[bin]]
-name = "aw-sync-rust"
-path = "src/sync/main.rs"
 
 [dependencies]
 rocket = "0.4"
@@ -43,7 +40,6 @@ toml = "0.5"
 gethostname = "0.2"
 regex = "1.0"
 uuid = { version = "0.8", features = ["serde", "v4"] }
-aw_client_rust = { git = "https://github.com/ActivityWatch/aw-client-rust" }
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.5", default-features = false }

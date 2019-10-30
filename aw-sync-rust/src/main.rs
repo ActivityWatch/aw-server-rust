@@ -11,7 +11,7 @@ fn main() {
     println!("Started aw-sync-rust...");
     logging::setup_logger().expect("Failed to setup logging");
 
-    aw_server::sync::sync_run();
+    aw_sync::sync_run();
     info!("Finished successfully, exiting...");
 
     // Needed to give the datastores some time to commit before program is shut down.

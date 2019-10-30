@@ -6,16 +6,19 @@
 /// It manages a sync-folder by syncing the aw-server datastore with a copy/staging datastore in the folder (one for each host).
 /// The sync folder is then synced with remotes using Syncthing/Dropbox/whatever.
 
+#[macro_use] extern crate log;
+extern crate chrono;
+extern crate serde_json;
+
 use std::fs;
 use std::path::Path;
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc, Duration};
-use serde_json;
 use aw_client_rust::{AwClient};
 
-use crate::datastore::{Datastore, DatastoreError};
-use crate::models::{Event, Bucket};
+use aw_server::datastore::{Datastore, DatastoreError};
+use aw_server::models::{Event, Bucket};
 
 trait AccessMethod {
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String>;

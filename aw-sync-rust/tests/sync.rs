@@ -5,6 +5,7 @@ mod sync_tests {
     use std::collections::{HashMap};
     use chrono::{DateTime, Utc};
 
+    use aw_sync;
     use aw_server::models::{Bucket, Event};
     use aw_server::datastore::{Datastore, DatastoreError};
 
@@ -88,7 +89,7 @@ mod sync_tests {
         let state = init_teststate();
         create_bucket(&state.ds_src, 0);
 
-        aw_server::sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
 
         let buckets_src: HashMap<String, Bucket> = state.ds_src.get_buckets().unwrap();
         let buckets_dest: HashMap<String, Bucket> = state.ds_dest.get_buckets().unwrap();
@@ -118,7 +119,7 @@ mod sync_tests {
         let bucket_id = create_bucket(&state.ds_src, 0);
         state.ds_src.heartbeat(bucket_id.as_str(), create_event("1"), 1.0).unwrap();
 
-        aw_server::sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
 
         let all_datastores: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].iter().cloned().collect();
         let all_buckets_map = get_all_buckets_map(all_datastores);
@@ -128,7 +129,7 @@ mod sync_tests {
 
         // Add some more events
         state.ds_src.heartbeat(bucket_id.as_str(), create_event("1"), 1.0).unwrap();
-        aw_server::sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);
@@ -141,7 +142,7 @@ mod sync_tests {
         let bucket_id = create_bucket(&state.ds_src, 0);
         create_events(&state.ds_src, bucket_id.as_str(), 10);
 
-        aw_server::sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
 
         let all_datastores: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].iter().cloned().collect();
         let all_buckets_map = get_all_buckets_map(all_datastores);
@@ -151,7 +152,7 @@ mod sync_tests {
 
         // Add some more events
         create_events(&state.ds_src, bucket_id.as_str(), 10);
-        aw_server::sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);

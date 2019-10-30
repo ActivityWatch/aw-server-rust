@@ -177,6 +177,7 @@ impl DatastoreInstance {
                     end: opt_end,
                 },
                 events: None,
+                last_updated: None,
             })
         }) {
             Ok(buckets) => buckets,

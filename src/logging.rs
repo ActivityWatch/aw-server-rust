@@ -11,11 +11,11 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
     fs::create_dir_all(logfile_path.clone()).expect("Unable to create folder for logs");
     #[cfg(debug_assertions)]
     {
-        logfile_path.push(chrono::Local::now().format("aw-server-testing_%Y-%m-%dT%H:%M:%S%z.log").to_string());
+        logfile_path.push(chrono::Local::now().format("aw-server-testing_%Y-%m-%dT%H-%M-%S%z.log").to_string());
     }
     #[cfg(not(debug_assertions))]
     {
-        logfile_path.push(chrono::Local::now().format("aw-server_%Y-%m-%dT%H:%M:%S%z.log").to_string());
+        logfile_path.push(chrono::Local::now().format("aw-server_%Y-%m-%dT%H-%M-%S%z.log").to_string());
     }
 
     let colors = ColoredLevelConfig::new()

@@ -95,10 +95,14 @@ fn get_asset_path () -> PathBuf {
 
     // usr_path
     // (for linux usr installs)
-    let mut usr_path = site_data_dir(Some("aw_server_rust"), None).unwrap();
-    usr_path.push("static");
-    if usr_path.as_path().exists() {
-        return usr_path;
+    match site_data_dir(Some("aw_server_rust"), None) {
+        Ok(mut usr_path) => {
+            usr_path.push("static");
+            if usr_path.as_path().exists() {
+                return usr_path;
+            }
+        }
+        Err(_) => {}
     }
 
     warn!("Unable to find an aw-webui asset path which exists, falling back to ./aw-webui/dist");

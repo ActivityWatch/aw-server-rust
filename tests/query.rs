@@ -39,7 +39,8 @@ mod query_tests {
             created: Some(chrono::Utc::now()),
             data: json_map!{},
             metadata: BucketMetadata::default(),
-            events: None
+            events: None,
+            last_updated: None,
         };
         ds.create_bucket(&bucket).unwrap();
         return ds;

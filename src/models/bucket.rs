@@ -22,6 +22,7 @@ pub struct Bucket {
     #[serde(default, skip_deserializing)]
     pub metadata: BucketMetadata,
     pub events: Option<Vec<Event>>, /* Should only be set during import/export */
+    pub last_updated: Option<DateTime<Utc>>, // TODO: Should probably be moved into metadata field
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

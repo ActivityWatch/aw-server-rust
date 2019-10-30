@@ -18,6 +18,7 @@ pub struct Info {
   pub testing: bool,
 }
 
+#[derive(Debug)]
 pub struct AwClient {
     client: reqwest::Client,
     pub baseurl: String,

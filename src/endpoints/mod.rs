@@ -43,14 +43,19 @@ fn root_index(state: State<ServerState>) -> Option<NamedFile> {
     NamedFile::open(state.asset_path.join("index.html")).ok()
 }
 
-#[get("/0.css")]
-fn root_css(state: State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("0.css")).ok()
+#[get("/css/<file..>")]
+fn root_css(file: PathBuf, state: State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("css").join(file)).ok()
 }
 
-#[get("/0.css.map")]
-fn root_css_map(state: State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("0.css.map")).ok()
+#[get("/fonts/<file..>")]
+fn root_fonts(file: PathBuf, state: State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("fonts").join(file)).ok()
+}
+
+#[get("/js/<file..>")]
+fn root_js(file: PathBuf, state: State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("js").join(file)).ok()
 }
 
 #[get("/static/<file..>")]
@@ -125,7 +130,8 @@ pub fn build_rocket(server_state: ServerState, config: &AWConfig) -> rocket::Roc
     info!("Starting aw-server-rust at {}:{}", config.address, config.port);
     rocket::custom(config.to_rocket_config())
         .mount("/", routes![
-               root_index, root_favicon, root_static, root_css, root_css_map,
+               root_index, root_favicon,
+               root_fonts, root_css, root_js, root_static,
         ])
         .mount("/api/0/info", routes![server_info])
         .mount("/api/0/buckets", routes![

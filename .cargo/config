@@ -1,15 +1,15 @@
 [target.aarch64-linux-android]
-ar = './NDK/arm64/bin/aarch64-linux-android-ar'
-linker = './NDK/arm64/bin/aarch64-linux-android-clang'
+ar = './NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-ar'
+linker = './NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang'
 
 [target.armv7-linux-androideabi]
-ar = './NDK/arm/bin/arm-linux-androideabi-ar'
-linker = './NDK/arm/bin/arm-linux-androideabi-clang'
+ar = './NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi-ar'
+linker = './NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi-clang'
 
 [target.i686-linux-android]
-ar = './NDK/x86/bin/i686-linux-android-ar'
-linker = './NDK/x86/bin/i686-linux-android-clang'
+ar = './NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-ar'
+linker = './NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-clang'
 
 [target.x86_64-linux-android]
-ar = './NDK/x86_64/bin/x86_64-linux-android-ar'
-linker = './NDK/x86_64/bin/x86_64-linux-android-clang'
+ar = './NDK/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-ar'
+linker = './NDK/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang'

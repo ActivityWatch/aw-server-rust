@@ -11,12 +11,6 @@ if [ -z "$ANDROID_NDK_HOME" ]; then
     ANDROID_NDK_HOME=`pwd`/NDK;
 fi
 
-#export NDK_TOOLCHAIN_LOC=`pwd`/NDK;
-#${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm64 --install-dir "${NDK_TOOLCHAIN_LOC}/arm64" || true;
-#${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm --install-dir "${NDK_TOOLCHAIN_LOC}/arm" || true;
-#${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch x86 --install-dir "${NDK_TOOLCHAIN_LOC}/x86" || true;
-#${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch x86_64 --install-dir "${NDK_TOOLCHAIN_LOC}/x86_64" || true;
-
 # Needed since dependency 'ring' doesn't respect .cargo/config
 NDK_TOOLCHAIN_BIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
 for arch in \

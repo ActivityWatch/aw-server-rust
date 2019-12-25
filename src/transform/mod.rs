@@ -127,7 +127,7 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
     let mut merged_events_map : HashMap<String, Event> = HashMap::new();
     'event: for event in events {
         let mut key_values = Vec::new();
-        'key: for key in &keys {
+        for key in &keys {
             match event.data.get(key) {
                 Some(v) => key_values.push(v.to_string()),
                 None => continue 'event

@@ -1,6 +1,5 @@
 #![feature(plugin)]
 #![feature(proc_macro_hygiene)]
-#![feature(custom_attribute)]
 #![feature(decl_macro)]
 #[macro_use] extern crate rocket;
 #[macro_use] extern crate rocket_contrib;

@@ -82,6 +82,9 @@ mod lexer {
         r#"else"# => (Token::Else, text),
         r#"return"# => (Token::Return, text),
 
+        r#"true"# => (Token::Bool(true), text),
+        r#"false"# => (Token::Bool(false), text),
+        // TODO: Deprecate/Remove?
         r#"True"# => (Token::Bool(true), text),
         r#"False"# => (Token::Bool(false), text),
 

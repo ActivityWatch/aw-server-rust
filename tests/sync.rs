@@ -6,7 +6,7 @@ mod sync_tests {
     use chrono::{DateTime, Utc};
 
     use aw_models::{Bucket, Event};
-    use aw_server::datastore::{Datastore, DatastoreError};
+    use aw_datastore::{Datastore, DatastoreError};
 
     struct TestState {
         ds_src: Datastore,

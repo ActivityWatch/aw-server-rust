@@ -2,8 +2,10 @@
 extern crate log;
 extern crate chrono;
 #[macro_use]
-extern crate aw_server;
+extern crate aw_datastore;
 extern crate serde_json;
+
+extern crate appdirs;
 
 #[cfg(test)]
 mod datastore_tests {
@@ -11,7 +13,7 @@ mod datastore_tests {
     use chrono::Duration;
     use serde_json::json;
 
-    use aw_server::datastore::Datastore;
+    use aw_datastore::Datastore;
 
     use aw_models::Bucket;
     use aw_models::BucketMetadata;
@@ -29,6 +31,26 @@ mod datastore_tests {
             metadata: BucketMetadata::default(),
             events: None,
             last_updated: None,
+        }
+    }
+
+    #[cfg(not(target_os="android"))]
+    use appdirs;
+    #[cfg(not(target_os="android"))]
+    use std::fs;
+    use std::path::PathBuf;
+    pub fn get_cache_dir() -> Result<PathBuf, ()> {
+        #[cfg(not(target_os="android"))]
+        {
+            let mut dir = appdirs::user_cache_dir(Some("activitywatch"), None)?;
+            dir.push("aw-server-rust");
+            fs::create_dir_all(dir.clone()).expect("Unable to create cache dir");
+            return Ok(dir);
+        }
+
+        #[cfg(target_os="android")]
+        {
+            panic!("not implemented on Android");
         }
     }
 
@@ -63,7 +85,6 @@ mod datastore_tests {
 
         // Fetch all buckets
         let fetched_buckets = ds.get_buckets().unwrap();
-        assert_eq!(fetched_buckets.len(), 1);
         assert!(fetched_buckets.contains_key(&bucket.id));
         assert_eq!(fetched_buckets[&bucket.id].id, bucket.id);
         assert_eq!(fetched_buckets[&bucket.id]._type, bucket._type);
@@ -246,7 +267,7 @@ mod datastore_tests {
     #[test]
     fn test_datastore_reload() {
         // Create tmp datastore path
-        let mut db_path = aw_server::dirs::get_cache_dir().unwrap();
+        let mut db_path = get_cache_dir().unwrap();
         db_path.push("datastore-unittest.db");
         let db_path_str = db_path.to_str().unwrap().to_string();
 
@@ -283,7 +304,6 @@ mod datastore_tests {
             let ds = Datastore::new(db_path_str.clone());
             // Check that all bucket data is correct after reload
             let buckets = ds.get_buckets().unwrap();
-            assert_eq!(buckets.len(), 2);
             assert_eq!(buckets[&empty_bucket.id].metadata.start, None);
             assert_eq!(buckets[&empty_bucket.id].metadata.end, None);
             assert_eq!(buckets[&populated_bucket.id].metadata.start, Some(e1.timestamp));

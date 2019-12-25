@@ -14,7 +14,8 @@ mod query_tests {
     use aw_server::query;
     use aw_server::query::QueryError;
     use aw_server::query::DataType;
-    use aw_server::datastore::Datastore;
+
+    use aw_datastore::Datastore;
 
     use aw_models::Bucket;
     use aw_models::BucketMetadata;

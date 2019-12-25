@@ -29,7 +29,6 @@ extern crate fern;
 extern crate toml;
 
 #[macro_use] pub mod macros;
-pub mod datastore;
 pub mod query;
 pub mod endpoints;
 pub mod dirs;
@@ -41,5 +40,6 @@ pub mod android;
 
 pub mod sync;
 
+extern crate aw_datastore;
 extern crate aw_models;
 extern crate aw_transform;

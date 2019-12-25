@@ -16,7 +16,7 @@ fn main() {
     info!("Using aw-webui assets at path {:?}", asset_path);
 
     let server_state = endpoints::ServerState {
-        datastore: Mutex::new(datastore::Datastore::new(db_path)),
+        datastore: Mutex::new(aw_datastore::Datastore::new(db_path)),
         asset_path: asset_path,
     };
 

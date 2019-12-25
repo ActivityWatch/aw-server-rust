@@ -18,7 +18,7 @@ use rocket::http::Status;
 
 use crate::endpoints::ServerState;
 
-use crate::datastore::DatastoreError;
+use aw_datastore::DatastoreError;
 
 #[get("/")]
 pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Bucket>>, Status> {

@@ -4,6 +4,7 @@ extern crate log;
 extern crate rocket;
 
 extern crate aw_server;
+extern crate aw_datastore;
 
 // TODO: Validate return data on more places
 
@@ -15,14 +16,13 @@ mod api_tests {
     use rocket::http::ContentType;
 
     use aw_server::config;
-    use aw_server::datastore;
     use aw_server::endpoints;
 
     use aw_models::{Bucket, BucketsExport};
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
-            datastore: Mutex::new(datastore::Datastore::new_in_memory()),
+            datastore: Mutex::new(aw_datastore::Datastore::new_in_memory()),
             asset_path: PathBuf::from("aw-webui/dist"),
         };
         let aw_config = config::AWConfig::default();

@@ -12,7 +12,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc, Duration};
 use serde_json;
 
-use crate::datastore::{Datastore, DatastoreError};
+use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Event, Bucket};
 
 /// Performs a single sync pass

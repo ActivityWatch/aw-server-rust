@@ -12,9 +12,9 @@ use rusqlite::TransactionBehavior;
 use aw_models::Bucket;
 use aw_models::Event;
 
-use crate::datastore::DatastoreError;
-use crate::datastore::DatastoreMethod;
-use crate::datastore::DatastoreInstance;
+use crate::DatastoreError;
+use crate::DatastoreMethod;
+use crate::DatastoreInstance;
 
 use crossbeam_requests;
 

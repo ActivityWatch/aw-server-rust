@@ -31,7 +31,7 @@ mod import;
 mod cors;
 mod export;
 
-use crate::datastore::Datastore;
+use aw_datastore::Datastore;
 
 pub struct ServerState {
     pub datastore: Mutex<Datastore>,

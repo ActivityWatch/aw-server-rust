@@ -11,7 +11,8 @@ use std::sync::Mutex;
 
 use aw_models::BucketsExport;
 
-use crate::datastore::Datastore;
+use aw_datastore::Datastore;
+
 use crate::endpoints::ServerState;
 
 fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), Status> {

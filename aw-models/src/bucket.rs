@@ -45,3 +45,20 @@ impl Default for BucketMetadata {
 pub struct BucketsExport {
     pub buckets: HashMap<String, Bucket>,
 }
+
+#[test]
+fn test_bucket() {
+    let b = Bucket {
+        bid: None,
+        id: "id".to_string(),
+        _type: "type".to_string(),
+        client: "client".to_string(),
+        hostname: "hostname".to_string(),
+        created: None,
+        data: json_map!{},
+        metadata: BucketMetadata::default(),
+        events: None,
+        last_updated: None,
+    };
+    debug!("bucket: {:?}", b);
+}

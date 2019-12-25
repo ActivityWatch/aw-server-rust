@@ -13,7 +13,7 @@ use aw_models::Bucket;
 use aw_models::BucketMetadata;
 use aw_models::Event;
 
-use crate::transform;
+use aw_transform;
 
 use rusqlite::types::ToSql;
 
@@ -416,7 +416,7 @@ impl DatastoreInstance {
                 }
             }
         };
-        let inserted_heartbeat = match transform::heartbeat(&last_event, &heartbeat, pulsetime) {
+        let inserted_heartbeat = match aw_transform::heartbeat(&last_event, &heartbeat, pulsetime) {
             Some(merged_heartbeat) => {
                 self.replace_last_event(conn, &bucket_id, &merged_heartbeat)?;
                 merged_heartbeat

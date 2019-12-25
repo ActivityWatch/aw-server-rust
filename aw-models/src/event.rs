@@ -44,3 +44,14 @@ impl Default for Event {
 fn default_duration() -> Duration {
     Duration::seconds(0)
 }
+
+#[test]
+fn test_event() {
+    let e = Event {
+        id: None,
+        timestamp: Utc::now(),
+        duration: Duration::seconds(1),
+        data: json_map!{"test": json!(1)}
+    };
+    debug!("event: {:?}", e);
+}

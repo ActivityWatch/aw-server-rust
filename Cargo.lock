@@ -77,6 +77,17 @@ version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
+name = "aw-models"
+version = "0.1.0"
+dependencies = [
+ "chrono 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
+ "log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde 1.0.99 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_derive 1.0.99 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json 1.0.40 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "aw_client_rust"
 version = "0.1.0"
 dependencies = [
@@ -95,6 +106,7 @@ version = "0.8.0"
 dependencies = [
  "android_logger 0.8.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "appdirs 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "aw-models 0.1.0",
  "chrono 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "crossbeam_requests 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "fern 0.5.8 (registry+https://github.com/rust-lang/crates.io-index)",

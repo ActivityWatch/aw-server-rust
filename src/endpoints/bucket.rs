@@ -6,9 +6,9 @@ use rocket_contrib::json::Json;
 use chrono::DateTime;
 use chrono::Utc;
 
-use crate::models::Bucket;
-use crate::models::BucketsExport;
-use crate::models::Event;
+use aw_models::Bucket;
+use aw_models::BucketsExport;
+use aw_models::Event;
 
 use rocket::State;
 use rocket::response::status;

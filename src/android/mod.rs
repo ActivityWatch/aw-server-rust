@@ -34,7 +34,7 @@ pub mod android {
     use self::jni::objects::{JClass, JString};
     use self::jni::sys::{jstring, jdouble};
     use crate::datastore::Datastore;
-    use crate::models::{Event, Bucket};
+    use aw_models::{Event, Bucket};
 
     static mut DATASTORE: Option<Datastore> = None;
 

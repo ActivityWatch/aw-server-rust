@@ -4,7 +4,7 @@ extern crate chrono;
 extern crate serde_json;
 
 #[macro_use]
-extern crate aw_server;
+extern crate aw_models;
 
 #[cfg(test)]
 mod models_tests {
@@ -15,10 +15,10 @@ mod models_tests {
     use chrono::Utc;
     use chrono::Duration;
 
-    use aw_server::models::Bucket;
-    use aw_server::models::BucketMetadata;
-    use aw_server::models::Event;
-    use aw_server::models::TimeInterval;
+    use aw_models::Bucket;
+    use aw_models::BucketMetadata;
+    use aw_models::Event;
+    use aw_models::TimeInterval;
 
     #[test]
     fn test_bucket() {

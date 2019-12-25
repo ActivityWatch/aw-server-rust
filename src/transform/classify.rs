@@ -3,7 +3,7 @@
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
 
 use std::collections::HashMap;
-use crate::models::Event;
+use aw_models::Event;
 use regex::Regex;
 use serde_json;
 

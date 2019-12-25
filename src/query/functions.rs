@@ -29,11 +29,13 @@ mod qfunctions {
     use std::convert::TryFrom;
     use std::convert::TryInto;
     use std::collections::HashMap;
+
+    use aw_models::Event;
+
     use crate::transform::classify::Rule;
     use crate::query::DataType;
     use crate::query::QueryError;
     use crate::datastore::Datastore;
-    use crate::models::Event;
     use crate::transform;
     use super::validate;
 
@@ -285,7 +287,7 @@ mod qfunctions {
 
 mod validate {
     use crate::query::{QueryError, DataType};
-    use crate::models::TimeInterval;
+    use aw_models::TimeInterval;
     use std::collections::HashMap;
 
     pub fn args_length(args: &Vec<DataType>, len: usize) -> Result<(), QueryError> {

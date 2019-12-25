@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::convert::{TryFrom,TryInto};
 
-use crate::models::Event;
+use aw_models::Event;
 use crate::transform::classify::Rule;
 use super::QueryError;
 use super::functions;

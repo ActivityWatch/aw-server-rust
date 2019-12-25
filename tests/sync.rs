@@ -5,7 +5,7 @@ mod sync_tests {
     use std::collections::{HashMap};
     use chrono::{DateTime, Utc};
 
-    use aw_server::models::{Bucket, Event};
+    use aw_models::{Bucket, Event};
     use aw_server::datastore::{Datastore, DatastoreError};
 
     struct TestState {

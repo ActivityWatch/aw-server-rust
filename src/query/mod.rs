@@ -1,7 +1,8 @@
 use std::fmt;
 
+use aw_models::TimeInterval;
+
 use crate::datastore::Datastore;
-use crate::models::TimeInterval;
 
 pub mod datatype;
 
@@ -485,13 +486,15 @@ mod parser {
 mod functions;
 
 mod interpret {
+    use std::collections::HashMap;
+
+    use aw_models::TimeInterval;
+
     use crate::query;
     use crate::query::ast::*;
     use crate::query::DataType;
     use crate::query::QueryError;
-    use std::collections::HashMap;
     use crate::datastore::Datastore;
-    use crate::models::TimeInterval;
 
     fn init_env<'a>(ti: &TimeInterval) -> HashMap<&'a str, DataType> {
         let mut env = HashMap::new();

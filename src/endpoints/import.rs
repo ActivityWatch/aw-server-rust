@@ -9,7 +9,8 @@ use multipart::server::Multipart;
 use std::io::Read;
 use std::sync::Mutex;
 
-use crate::models::BucketsExport;
+use aw_models::BucketsExport;
+
 use crate::datastore::Datastore;
 use crate::endpoints::ServerState;
 

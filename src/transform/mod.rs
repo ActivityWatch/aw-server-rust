@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use crate::models::Event;
 use serde_json::value::Value;
+use aw_models::Event;
 
 pub mod classify;
 

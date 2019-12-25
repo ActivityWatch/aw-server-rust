@@ -9,9 +9,10 @@ use rusqlite::Connection;
 
 use serde_json::value::Value;
 
-use crate::models::Bucket;
-use crate::models::BucketMetadata;
-use crate::models::Event;
+use aw_models::Bucket;
+use aw_models::BucketMetadata;
+use aw_models::Event;
+
 use crate::transform;
 
 use rusqlite::types::ToSql;

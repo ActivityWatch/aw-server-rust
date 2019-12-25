@@ -12,9 +12,10 @@ mod datastore_tests {
     use serde_json::json;
 
     use aw_server::datastore::Datastore;
-    use aw_server::models::Bucket;
-    use aw_server::models::BucketMetadata;
-    use aw_server::models::Event;
+
+    use aw_models::Bucket;
+    use aw_models::BucketMetadata;
+    use aw_models::Event;
 
     fn test_bucket() -> Bucket {
         Bucket {

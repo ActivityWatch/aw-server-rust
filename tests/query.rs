@@ -15,10 +15,11 @@ mod query_tests {
     use aw_server::query::QueryError;
     use aw_server::query::DataType;
     use aw_server::datastore::Datastore;
-    use aw_server::models::Bucket;
-    use aw_server::models::BucketMetadata;
-    use aw_server::models::Event;
-    use aw_server::models::TimeInterval;
+
+    use aw_models::Bucket;
+    use aw_models::BucketMetadata;
+    use aw_models::Event;
+    use aw_models::TimeInterval;
 
     static TIME_INTERVAL : &str = "1980-01-01T00:00:00Z/2080-01-02T00:00:00Z";
     static BUCKET_ID : &str = "testid";

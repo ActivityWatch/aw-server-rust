@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use serde_json::value::Value;
 use serde_json::map::Map;
 
-use crate::models::Event;
+use crate::Event;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Bucket {

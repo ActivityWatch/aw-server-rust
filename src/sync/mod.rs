@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc, Duration};
 use serde_json;
 
 use crate::datastore::{Datastore, DatastoreError};
-use crate::models::{Event, Bucket};
+use aw_models::{Event, Bucket};
 
 /// Performs a single sync pass
 pub fn sync_run() {

@@ -18,7 +18,7 @@ mod api_tests {
     use aw_server::datastore;
     use aw_server::endpoints;
 
-    use aw_server::models::{Bucket, BucketsExport};
+    use aw_models::{Bucket, BucketsExport};
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {

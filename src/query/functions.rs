@@ -32,11 +32,11 @@ mod qfunctions {
 
     use aw_models::Event;
 
-    use crate::transform::classify::Rule;
+    use aw_transform::classify::Rule;
     use crate::query::DataType;
     use crate::query::QueryError;
     use crate::datastore::Datastore;
-    use crate::transform;
+    use aw_transform;
     use super::validate;
 
     pub fn print(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {
@@ -99,7 +99,7 @@ mod qfunctions {
         validate::args_length(&args, 1)?;
         let events: Vec<Event> = (&args[0]).try_into()?;
         // Run flood
-        let mut flooded_events = transform::flood(events, chrono::Duration::seconds(5));
+        let mut flooded_events = aw_transform::flood(events, chrono::Duration::seconds(5));
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
@@ -118,7 +118,7 @@ mod qfunctions {
         let events: Vec<Event> = Vec::try_from(&args[0])?;
         let rules: Vec<(Vec<String>, Rule)> = Vec::try_from(&args[1])?;
         // Run categorize
-        let mut flooded_events = transform::classify::categorize(events, &rules);
+        let mut flooded_events = aw_transform::classify::categorize(events, &rules);
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
@@ -137,7 +137,7 @@ mod qfunctions {
         let events: Vec<Event> = Vec::try_from(&args[0])?;
         let rules: Vec<(String, Rule)> = Vec::try_from(&args[1])?;
         // Run categorize
-        let mut flooded_events = transform::classify::tag(events, &rules);
+        let mut flooded_events = aw_transform::classify::tag(events, &rules);
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
@@ -152,7 +152,7 @@ mod qfunctions {
         let events: Vec<Event> = (&args[0]).try_into()?;
 
         // Sort by duration
-        let mut sorted_events = transform::sort_by_duration(events);
+        let mut sorted_events = aw_transform::sort_by_duration(events);
         // Put events back into DataType::Event container
         let mut tagged_sorted_events = Vec::new();
         for event in sorted_events.drain(..) {
@@ -181,7 +181,7 @@ mod qfunctions {
         let events: Vec<Event> = (&args[0]).try_into()?;
 
         // Sort by duration
-        let mut sorted_events = transform::sort_by_timestamp(events);
+        let mut sorted_events = aw_transform::sort_by_timestamp(events);
         // Put events back into DataType::Event container
         let mut tagged_sorted_events = Vec::new();
         for event in sorted_events.drain(..) {
@@ -209,7 +209,7 @@ mod qfunctions {
         let events: Vec<Event> = (&args[0]).try_into()?;
         let keys: Vec<String> = (&args[1]).try_into()?;
 
-        let mut merged_events = transform::merge_events_by_keys(events, keys);
+        let mut merged_events = aw_transform::merge_events_by_keys(events, keys);
         let mut merged_tagged_events = Vec::new();
         for event in merged_events.drain(..) {
             merged_tagged_events.push(DataType::Event(event));
@@ -223,7 +223,7 @@ mod qfunctions {
         let events: Vec<Event> = (&args[0]).try_into()?;
         let key: String = (&args[1]).try_into()?;
 
-        let mut merged_events = transform::chunk_events_by_key(events, &key);
+        let mut merged_events = aw_transform::chunk_events_by_key(events, &key);
         let mut merged_tagged_events = Vec::new();
         for event in merged_events.drain(..) {
             merged_tagged_events.push(DataType::Event(event));
@@ -238,7 +238,7 @@ mod qfunctions {
         let key: String  = (&args[1]).try_into()?;
         let vals: Vec<_> = (&args[2]).try_into()?;
 
-        let mut filtered_events = transform::filter_keyvals(events, &key, &vals);
+        let mut filtered_events = aw_transform::filter_keyvals(events, &key, &vals);
         let mut filtered_tagged_events = Vec::new();
         for event in filtered_events.drain(..) {
             filtered_tagged_events.push(DataType::Event(event));
@@ -252,7 +252,7 @@ mod qfunctions {
         let events = (&args[0]).try_into()?;
         let filter_events = (&args[1]).try_into()?;
 
-        let mut filtered_events = transform::filter_period_intersect(&events, &filter_events);
+        let mut filtered_events = aw_transform::filter_period_intersect(&events, &filter_events);
         let mut filtered_tagged_events = Vec::new();
         for event in filtered_events.drain(..) {
             filtered_tagged_events.push(DataType::Event(event));
@@ -267,7 +267,7 @@ mod qfunctions {
 
         let mut tagged_split_url_events = Vec::new();
         for mut event in events.drain(..) {
-            transform::split_url_event(&mut event);
+            aw_transform::split_url_event(&mut event);
             tagged_split_url_events.push(DataType::Event(event));
         }
         return Ok(DataType::List(tagged_split_url_events));

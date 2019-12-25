@@ -3,7 +3,7 @@ use std::fmt;
 use std::convert::{TryFrom,TryInto};
 
 use aw_models::Event;
-use crate::transform::classify::Rule;
+use aw_transform::classify::Rule;
 use super::QueryError;
 use super::functions;
 

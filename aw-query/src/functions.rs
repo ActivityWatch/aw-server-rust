@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use crate::query::DataType;
-use crate::query::QueryError;
+use crate::DataType;
+use crate::QueryError;
 use aw_datastore::Datastore;
 
 pub type QueryFn = fn(args: Vec<DataType>, env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError>;
@@ -34,8 +34,8 @@ mod qfunctions {
     use aw_datastore::Datastore;
     use aw_transform::classify::Rule;
 
-    use crate::query::DataType;
-    use crate::query::QueryError;
+    use crate::DataType;
+    use crate::QueryError;
     use aw_transform;
     use super::validate;
 
@@ -286,7 +286,7 @@ mod qfunctions {
 }
 
 mod validate {
-    use crate::query::{QueryError, DataType};
+    use crate::{QueryError, DataType};
     use aw_models::TimeInterval;
     use std::collections::HashMap;
 

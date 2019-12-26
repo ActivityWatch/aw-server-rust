@@ -45,19 +45,19 @@ install:
 before_script:
   - |
     if [ "$TRAVIS_OS_NAME" = "windows" ]; then  # Needed because otherwise the Windows build fails when a later build step tries to overwrite the file
-        cargo build --bin aw-server-rust $($RELEASE && echo '--release');
-        mv target/*/aw-server-rust.exe target/aw-server-rust-copy.exe;
-        env RUST_BACKTRACE=1 ./target/aw-server-rust-copy.exe &
+        cargo build -p aw-server --bin aw-server $($RELEASE && echo '--release');
+        mv target/*/aw-server.exe target/aw-server-copy.exe;
+        env RUST_BACKTRACE=1 ./target/aw-server-copy.exe &
         SERVER_PID=$!;
     else
-        env RUST_BACKTRACE=1 cargo run --bin aw-server-rust $($RELEASE && echo '--release') &
+        env RUST_BACKTRACE=1 cargo run --bin aw-server $($RELEASE && echo '--release') &
         SERVER_PID=$!;
     fi
 
 script:
-  - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ] && [ -z "$RELEASE" ]; then
+  - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ]; then
         echo "Running tests with coverage";
-        cargo kcov --all --verbose;
+        cargo kcov --all --verbose $($RELEASE && echo '--release');
         bash <(curl -s https://codecov.io/bash);
     else
         cargo test --workspace --verbose $($RELEASE && echo '--release');

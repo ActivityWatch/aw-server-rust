@@ -4,10 +4,6 @@ version = "0.8.0"
 authors = ["Johan Bjäreholt <johan@bjareho.lt>", "Erik Bjäreholt <erik@bjareho.lt>"]
 edition = "2018"
 
-[features]
-default = [] # no features by default
-legacy_datastore_tests = []
-
 [lib]
 name = "aw_server"
 crate-type = ["lib", "cdylib"]
@@ -34,12 +30,16 @@ toml = "0.5"
 gethostname = "0.2"
 uuid = { version = "0.8", features = ["serde", "v4"] }
 
-aw-datastore = { path = "../aw-datastore" }
 aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# aw-datastore has legacy_import enabled on non-android platforms
+aw-datastore = { path = "../aw-datastore", features = ["legacy_import"] }
+
 [target.'cfg(target_os="android")'.dependencies]
+aw-datastore = { path = "../aw-datastore" }
 jni = { version = "0.5", default-features = false }
 libc = "0.2"
 android_logger = "0.8"

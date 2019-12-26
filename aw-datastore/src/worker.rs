@@ -83,7 +83,7 @@ impl DatastoreWorker {
             DatastoreMethod::File(path) => Connection::open(path)
                 .expect("Failed to create datastore")
         };
-        let mut ds = DatastoreInstance::new(&mut conn).unwrap();
+        let mut ds = DatastoreInstance::new(&mut conn, true).unwrap();
         let mut last_heartbeat = HashMap::new();
 
         // Ensure legacy import

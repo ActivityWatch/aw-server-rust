@@ -39,9 +39,7 @@ install:
   - if [ "$BUILD_ANDROID" == true ]; then
         ./compile-android.sh;
     else
-        cargo build --lib $($RELEASE && echo '--release');
-        cargo build --bin aw-server-rust $($RELEASE && echo '--release');
-        cargo build --bin aw-sync-rust $($RELEASE && echo '--release');
+        cargo build --workspace $($RELEASE && echo '--release');
     fi
 
 before_script:
@@ -62,7 +60,7 @@ script:
         cargo kcov --all --verbose;
         bash <(curl -s https://codecov.io/bash);
     else
-        cargo test --all --verbose $($RELEASE && echo '--release');
+        cargo test --workspace --verbose $($RELEASE && echo '--release');
     fi
 
 after_script:

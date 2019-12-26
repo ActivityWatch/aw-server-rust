@@ -31,7 +31,7 @@ for archtargetstr in \
 
     if [ -d "$NDK_ARCH_DIR" ]; then
         export PATH="$NDK_ARCH_DIR:$ORIG_PATH"
-        cargo build --target $target --lib $($RELEASE && echo '--release')
+        cargo build -p aw-server --target $target --lib $($RELEASE && echo '--release')
     else
         echo "Couldn't find directory for target $arch"
     fi

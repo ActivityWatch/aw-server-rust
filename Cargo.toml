@@ -1,55 +1,10 @@
-[package]
-name = "aw_server"
-version = "0.8.0"
-authors = ["Johan Bjäreholt <johan@bjareho.lt>", "Erik Bjäreholt <erik@bjareho.lt>"]
-edition = "2018"
-default-run = "aw-server-rust"
-
-[features]
-default = [] # no features by default
-legacy_datastore_tests = []
-
 [workspace]
 members = [
     "aw-client-rust",
     "aw-datastore",
     "aw-models",
     "aw-transform",
+    "aw-server",
     "aw-sync",
     "aw-query",
 ]
-
-[lib]
-name = "aw_server"
-crate-type = ["lib", "cdylib"]
-path = "src/lib.rs"
-
-[[bin]]
-name = "aw-server-rust"
-path = "src/main.rs"
-
-[dependencies]
-rocket = "0.4"
-rocket_contrib = { version = "*", default-features = false, features = ["json"] }
-rocket_cors = "0.5.0"
-multipart = "0.16"
-serde = "1.0"
-serde_json = "1.0"
-serde_derive = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-appdirs = "0.2.0"
-lazy_static = "1.2"
-log = "0.4"
-fern = { version = "0.5", features = ["colored"] }
-toml = "0.5"
-gethostname = "0.2"
-uuid = { version = "0.8", features = ["serde", "v4"] }
-aw-datastore = { path = "aw-datastore" }
-aw-models = { path = "aw-models" }
-aw-transform = { path = "aw-transform" }
-aw-query = { path = "aw-query" }
-
-[target.'cfg(target_os="android")'.dependencies]
-jni = { version = "0.5", default-features = false }
-libc = "0.2"
-android_logger = "0.8"

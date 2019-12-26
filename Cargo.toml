@@ -37,16 +37,12 @@ serde = "1.0"
 serde_json = "1.0"
 serde_derive = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.20", features = ["chrono", "serde_json", "bundled"]  }
-crossbeam_requests = "0.3"
-plex = "0.2.3"
 appdirs = "0.2.0"
 lazy_static = "1.2"
 log = "0.4"
 fern = { version = "0.5", features = ["colored"] }
 toml = "0.5"
 gethostname = "0.2"
-regex = "1.0"
 uuid = { version = "0.8", features = ["serde", "v4"] }
 aw-datastore = { path = "aw-datastore" }
 aw-models = { path = "aw-models" }

@@ -15,6 +15,7 @@ members = [
     "aw-datastore",
     "aw-models",
     "aw-transform",
+    "aw-sync",
 ]
 
 [lib]
@@ -25,10 +26,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "aw-server-rust"
 path = "src/main.rs"
-
-[[bin]]
-name = "aw-sync-rust"
-path = "src/sync/main.rs"
 
 [dependencies]
 rocket = "0.4"

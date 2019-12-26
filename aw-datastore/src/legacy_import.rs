@@ -150,6 +150,13 @@ pub fn legacy_import(new_ds: &mut DatastoreInstance, new_conn: &Connection) -> R
     Ok(())
 }
 
+// TODO: Instead of using #cfg for disabling legacy import on android, add
+// legacy_import as an rust feature and don't enable it on android
+#[cfg(target_os="android")]
+pub fn legacy_import(new_ds: &mut DatastoreInstance, new_conn: &Connection) -> Result<(), LegacyDatastoreImportError> {
+    Ok(())
+}
+
 /* This test is disabled because it requires manual set-up of a old aw-server database
  * Can be run with:
  * cargo test --features legacy_datastore_tests -- datastore::legacy_import::test_legacy_import */
@@ -170,11 +177,4 @@ fn test_legacy_import() {
         num_events += events.len();
     }
     assert!(num_events > 0);
-}
-
-// TODO: Instead of using #cfg for disabling legacy import on android, add
-// legacy_import as an rust feature and don't enable it on android
-#[cfg(target_os="android")]
-pub fn legacy_import(new_ds: &mut DatastoreInstance, new_conn: &Connection) -> Result<(), LegacyDatastoreImportError> {
-    Ok(())
 }

@@ -1,6 +1,9 @@
 #[macro_use] extern crate log;
+extern crate chrono;
+extern crate serde;
+extern crate serde_json;
 
-use aw_server::*;
+mod sync;
 
 fn main() {
     // What needs to be done:
@@ -9,9 +12,9 @@ fn main() {
     //  - Import buckets and sync events from remotes
 
     println!("Started aw-sync-rust...");
-    logging::setup_logger().expect("Failed to setup logging");
+    aw_server::logging::setup_logger().expect("Failed to setup logging");
 
-    aw_server::sync::sync_run();
+    sync::sync_run();
     info!("Finished successfully, exiting...");
 
     // Needed to give the datastores some time to commit before program is shut down.

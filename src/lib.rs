@@ -38,8 +38,6 @@ pub mod config;
 #[cfg(target_os="android")]
 pub mod android;
 
-pub mod sync;
-
 extern crate aw_datastore;
 extern crate aw_models;
 extern crate aw_transform;

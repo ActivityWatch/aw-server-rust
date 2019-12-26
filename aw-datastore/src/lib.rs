@@ -32,6 +32,8 @@ pub enum DatastoreError {
     NoSuchBucket,
     BucketAlreadyExists,
     MpscError,
-    ReadOnly,
     InternalError(String),
+    // Errors specific to when migrate is disabled
+    Uninitialized(String),
+    OldDbVersion(String),
 }

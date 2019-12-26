@@ -20,18 +20,22 @@ use rusqlite::types::ToSql;
 use super::DatastoreError;
 use super::legacy_import::legacy_import;
 
+fn _get_db_version(conn: &Connection) -> i32 {
+    conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap()
+}
+
 /*
  * ### Database version changelog ###
  * 0: Uninitialized database
  * 1: Initialized database
  * 2: Added 'data' field to 'buckets' table
  */
-fn _create_tables(conn: &Connection) -> bool {
+static NEWEST_DB_VERSION : i32 = 3;
+
+fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;
-    /* get DB version */
-    let version : i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))
-.unwrap();
-    info!("DB version: {}", version);
 
     if version < 1 {
         first_init = true;
@@ -118,20 +122,41 @@ fn _migrate_v2_to_v3(conn: &Connection) {
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
     first_init: bool,
+    pub db_version: i32,
 }
 
 impl DatastoreInstance {
-    pub fn new(conn: &Connection) -> Result<DatastoreInstance, DatastoreError> {
-        let first_init = _create_tables(&conn);
+    pub fn new(conn: &Connection, migrate_enabled: bool)
+            -> Result<DatastoreInstance, DatastoreError> {
+        let mut first_init = false;
+        let db_version = _get_db_version(&conn);
+
+        match migrate_enabled {
+            true => { first_init = _create_tables(&conn, db_version) },
+            false => {
+                if db_version <= 0 {
+                    return Err(DatastoreError::Uninitialized(
+                        "Tried to open an uninitialized datastore with migration disabled".to_string()));
+                } else if db_version != NEWEST_DB_VERSION {
+                    return Err(DatastoreError::OldDbVersion(format!("\
+                        Tried to open an database with an incompatible database version!
+                        Database has version {} while the supported version is {}",
+                        db_version, NEWEST_DB_VERSION)));
+                }
+            }
+        };
+
         let mut ds = DatastoreInstance {
             buckets_cache: HashMap::new(),
             first_init,
+            db_version,
         };
         ds.get_stored_buckets(&conn)?;
         Ok(ds)
     }
 
-    fn get_stored_buckets(&mut self, conn: &Connection) -> Result <(), DatastoreError> {
+    fn get_stored_buckets(&mut self, conn: &Connection)
+            -> Result <(), DatastoreError> {
         let mut stmt = match conn.prepare("
             SELECT  buckets.id, buckets.name, buckets.type, buckets.client,
                     buckets.hostname, buckets.created,
@@ -142,7 +167,9 @@ impl DatastoreInstance {
             GROUP BY buckets.id
             ;") {
             Ok(stmt) => stmt,
-            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare get_stored_buckets SQL statement: {}", err.to_string())))
+            Err(err) => return Err(DatastoreError::InternalError(format!(
+                "Failed to prepare get_stored_buckets SQL statement: {}",
+                err.to_string())))
         };
         let buckets = match stmt.query_map(&[] as &[&dyn ToSql], |row| {
             let opt_start_ns : Option<i64> = row.get(6)?;

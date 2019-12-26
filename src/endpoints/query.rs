@@ -5,8 +5,8 @@ use rocket_contrib::json::{Json, JsonValue};
 
 use aw_models::Query;
 
-use crate::query;
-use crate::query::QueryError;
+use aw_query;
+use aw_query::QueryError;
 use crate::endpoints::ServerState;
 
 #[derive(Serialize)]
@@ -18,7 +18,7 @@ struct QueryErrorJson {
 
 /* TODO: Slightly ugly code with ok() and error() */
 
-fn ok(data: Vec<query::DataType>) -> status::Custom<JsonValue> {
+fn ok(data: Vec<aw_query::DataType>) -> status::Custom<JsonValue> {
     status::Custom(Status::Ok, json!(data))
 }
 
@@ -51,7 +51,7 @@ pub fn query(query_req: Json<Query>, state: State<ServerState>) -> status::Custo
                 return status::Custom(Status::ServiceUnavailable, json!(body));
             }
         };
-        let result = match query::query(&query_code, &interval, &datastore) {
+        let result = match aw_query::query(&query_code, &interval, &datastore) {
             Ok(data) => data,
             Err(e) => {
                 warn!("Query failed: {:?}", e);

@@ -104,6 +104,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aw-query"
+version = "0.1.0"
+dependencies = [
+ "aw-datastore 0.1.0",
+ "aw-models 0.1.0",
+ "aw-transform 0.1.0",
+ "chrono 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
+ "log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "plex 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "regex 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde 1.0.99 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_derive 1.0.99 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json 1.0.40 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "aw-sync"
 version = "0.1.0"
 dependencies = [
@@ -150,6 +166,7 @@ dependencies = [
  "appdirs 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "aw-datastore 0.1.0",
  "aw-models 0.1.0",
+ "aw-query 0.1.0",
  "aw-transform 0.1.0",
  "chrono 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "crossbeam_requests 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",

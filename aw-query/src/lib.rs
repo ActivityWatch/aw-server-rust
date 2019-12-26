@@ -1,3 +1,8 @@
+#[macro_use] extern crate log;
+extern crate serde;
+extern crate serde_json;
+#[macro_use] extern crate serde_derive;
+
 use std::fmt;
 
 use aw_models::TimeInterval;
@@ -6,7 +11,7 @@ use aw_datastore::Datastore;
 
 pub mod datatype;
 
-pub use crate::query::datatype::DataType;
+pub use crate::datatype::DataType;
 
 // TODO: add line numbers to errors
 // (works during lexing, but not during parsing I believe)
@@ -176,7 +181,7 @@ mod lexer {
 }
 
 mod ast {
-    use crate::query::lexer::Span;
+    use crate::lexer::Span;
 
     use std::collections::HashMap;
 
@@ -216,9 +221,9 @@ mod ast {
 }
 
 mod parser {
-    use crate::query::ast::*;
-    use crate::query::lexer::Token::*;
-    use crate::query::lexer::*;
+    use crate::ast::*;
+    use crate::lexer::Token::*;
+    use crate::lexer::*;
     use plex::parser;
 
     use std::collections::HashMap;
@@ -491,18 +496,19 @@ mod functions;
 mod interpret {
     use std::collections::HashMap;
 
+    use crate::functions;
+
     use aw_models::TimeInterval;
     use aw_datastore::Datastore;
 
-    use crate::query;
-    use crate::query::ast::*;
-    use crate::query::DataType;
-    use crate::query::QueryError;
+    use crate::ast::*;
+    use crate::DataType;
+    use crate::QueryError;
 
     fn init_env<'a>(ti: &TimeInterval) -> HashMap<&'a str, DataType> {
         let mut env = HashMap::new();
         env.insert("TIMEINTERVAL", DataType::String(ti.to_string()));
-        query::functions::fill_env(&mut env);
+        functions::fill_env(&mut env);
         return env;
     }
 
@@ -519,7 +525,7 @@ mod interpret {
     }
 
     fn interpret_expr<'a>(env: &mut HashMap<&'a str, DataType>, ds: &Datastore, expr: &'a Expr) -> Result<DataType, QueryError> {
-        use crate::query::ast::Expr_::*;
+        use crate::ast::Expr_::*;
         match expr.node {
             Add(ref a, ref b) => {
                 let a_res = interpret_expr(env, ds, a)?;

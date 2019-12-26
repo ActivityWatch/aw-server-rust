@@ -19,7 +19,6 @@ pub enum LegacyDatastoreImportError {
     SQLMapError(String),
 }
 
-#[cfg(not(target_os="android"))]
 fn dbfile_path() -> PathBuf {
     let mut dir = appdirs::user_data_dir(Some("activitywatch"), None, false)
         .unwrap();
@@ -28,7 +27,6 @@ fn dbfile_path() -> PathBuf {
     dir
 }
 
-#[cfg(not(target_os="android"))]
 fn get_legacy_buckets(conn: &Connection) -> Result<Vec<Bucket>, LegacyDatastoreImportError> {
     let mut stmt = match conn.prepare(
         "SELECT key, id, type, client, hostname, created FROM bucketmodel") {
@@ -67,7 +65,6 @@ fn get_legacy_buckets(conn: &Connection) -> Result<Vec<Bucket>, LegacyDatastoreI
     Ok(buckets)
 }
 
-#[cfg(not(target_os="android"))]
 fn get_legacy_events(conn: &Connection, bucket_id: &i64) -> Result<Vec<Event>, LegacyDatastoreImportError> {
     let mut stmt = match conn.prepare("
             SELECT timestamp, duration, datastr
@@ -120,7 +117,6 @@ fn get_legacy_events(conn: &Connection, bucket_id: &i64) -> Result<Vec<Event>, L
     Ok(list)
 }
 
-#[cfg(not(target_os="android"))]
 pub fn legacy_import(new_ds: &mut DatastoreInstance, new_conn: &Connection) -> Result<(), LegacyDatastoreImportError> {
     let legacy_db_path = dbfile_path();
     if !legacy_db_path.exists() {
@@ -150,19 +146,11 @@ pub fn legacy_import(new_ds: &mut DatastoreInstance, new_conn: &Connection) -> R
     Ok(())
 }
 
-// TODO: Instead of using #cfg for disabling legacy import on android, add
-// legacy_import as an rust feature and don't enable it on android
-#[cfg(target_os="android")]
-pub fn legacy_import(new_ds: &mut DatastoreInstance, new_conn: &Connection) -> Result<(), LegacyDatastoreImportError> {
-    Ok(())
-}
-
 /* This test is disabled because it requires manual set-up of a old aw-server database
  * Can be run with:
- * cargo test --features legacy_datastore_tests -- datastore::legacy_import::test_legacy_import */
+ * cargo test --features legacy_import,legacy_import_tests -- datastore::legacy_import::test_legacy_import */
 #[test]
-#[cfg_attr(not(feature = "legacy_datastore_tests"), ignore)]
-#[cfg(not(target_os="android"))]
+#[cfg_attr(not(feature = "legacy_import_tests"), ignore)]
 fn test_legacy_import() {
     assert!(dbfile_path().exists());
     let mut new_conn = Connection::open_in_memory()

@@ -18,7 +18,6 @@ use aw_transform;
 use rusqlite::types::ToSql;
 
 use super::DatastoreError;
-use super::legacy_import::legacy_import;
 
 fn _get_db_version(conn: &Connection) -> i32 {
     conn
@@ -231,7 +230,9 @@ impl DatastoreInstance {
         Ok(())
     }
 
+    #[cfg(feature = "legacy_import")]
     pub fn ensure_legacy_import(&mut self, conn: &Connection) -> Result<bool, ()> {
+        use super::legacy_import::legacy_import;
         if !self.first_init {
             return Ok(false);
         } else {

@@ -87,6 +87,7 @@ impl DatastoreWorker {
         let mut last_heartbeat = HashMap::new();
 
         // Ensure legacy import
+        #[cfg(feature = "legacy_import")]
         {
             let mut transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
                 Ok(transaction) => transaction,

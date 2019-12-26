@@ -3,14 +3,14 @@ extern crate gethostname;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
-extern crate aw_server;
+extern crate aw_models;
 
 use std::vec::Vec;
 use std::collections::HashMap;
 
 use serde_json::Map;
 
-pub use aw_server::models::{Bucket, BucketMetadata, Event};
+pub use aw_models::{Bucket, BucketMetadata, Event};
 
 #[derive(Deserialize)]
 pub struct Info {

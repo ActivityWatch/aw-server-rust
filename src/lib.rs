@@ -10,13 +10,7 @@ extern crate serde;
 extern crate serde_json;
 #[macro_use] extern crate serde_derive;
 
-extern crate rusqlite;
-
-extern crate crossbeam_requests;
-
 extern crate chrono;
-
-extern crate plex;
 
 extern crate appdirs;
 

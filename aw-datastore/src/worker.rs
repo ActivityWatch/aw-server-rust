@@ -16,10 +16,10 @@ use crate::DatastoreError;
 use crate::DatastoreMethod;
 use crate::DatastoreInstance;
 
-use crossbeam_requests;
+use mpsc_requests;
 
-type RequestSender = crossbeam_requests::RequestSender<Commands, Result<Responses, DatastoreError>>;
-type RequestReceiver = crossbeam_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>;
+type RequestSender = mpsc_requests::RequestSender<Commands, Result<Responses, DatastoreError>>;
+type RequestReceiver = mpsc_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>;
 
 
 #[derive(Clone)]
@@ -68,7 +68,7 @@ struct DatastoreWorker {
 }
 
 impl DatastoreWorker {
-    pub fn new(responder: crossbeam_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>) -> Self {
+    pub fn new(responder: mpsc_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>) -> Self {
         DatastoreWorker {
             responder,
             quit: false,
@@ -212,7 +212,7 @@ impl Datastore {
     }
 
     fn _new_internal(method: DatastoreMethod) -> Self {
-        let (requester, responder) = crossbeam_requests::channel::<Commands, Result<Responses, DatastoreError>>();
+        let (requester, responder) = mpsc_requests::channel::<Commands, Result<Responses, DatastoreError>>();
         let _thread = thread::spawn(move || {
             let mut di = DatastoreWorker::new(responder);
             di.work_loop(method);

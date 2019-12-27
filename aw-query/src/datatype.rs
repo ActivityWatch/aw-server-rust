@@ -13,6 +13,7 @@ use serde_json::Number;
 
 
 // TODO: greater/less comparisons
+// TODO: Remove some unwraps
 
 #[derive(Clone,Serialize)]
 #[serde(untagged)]
@@ -109,7 +110,7 @@ impl TryFrom<&DataType> for String {
         match value {
             DataType::String(s) => Ok(s.clone()),
             ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type List of Strings, list contains {:?}", invalid_type)
+                format!("Expected function parameter of type String, list contains {:?}", invalid_type)
             ))
         }
     }
@@ -133,10 +134,12 @@ impl TryFrom<&DataType> for Rule {
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
         let rulemap: HashMap<String, String> = (match value {
             DataType::Dict(d) => {
-                let map: HashMap<String, String> = d.iter().map(|(k, v)| {
-                    let s: String = v.try_into().unwrap();
-                    (k.clone(), s.clone())
-                }).collect();
+                let mut map: HashMap<String, String> = HashMap::new();
+                for (k, v) in d {
+                    let k2 = k.clone();
+                    let v2 = v.try_into()?;
+                    map.insert(k2, v2);
+                }
                 Ok(map)
             },
             _ => Err(QueryError::InvalidFunctionParameters(

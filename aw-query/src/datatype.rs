@@ -3,7 +3,7 @@ use std::fmt;
 use std::convert::{TryFrom,TryInto};
 
 use aw_models::Event;
-use aw_transform::classify::Rule;
+use aw_transform::classify::{Rule, RegexRule};
 use super::QueryError;
 use super::functions;
 
@@ -13,7 +13,6 @@ use serde_json::Number;
 
 
 // TODO: greater/less comparisons
-// TODO: Remove some unwraps
 
 #[derive(Clone,Serialize)]
 #[serde(untagged)]
@@ -129,27 +128,6 @@ impl TryFrom<&DataType> for Vec<String> {
     }
 }
 
-impl TryFrom<&DataType> for Rule {
-    type Error = QueryError;
-    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let rulemap: HashMap<String, String> = (match value {
-            DataType::Dict(d) => {
-                let mut map: HashMap<String, String> = HashMap::new();
-                for (k, v) in d {
-                    let k2 = k.clone();
-                    let v2 = v.try_into()?;
-                    map.insert(k2, v2);
-                }
-                Ok(map)
-            },
-            _ => Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected rule, found something else")
-                    ))
-        })?;
-        Ok(Rule::from(rulemap))
-    }
-}
-
 impl TryFrom<&DataType> for Vec<Event> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
@@ -175,12 +153,20 @@ impl TryFrom<&DataType> for Vec<(String, Rule)> {
         for list in tagged_lists.drain(..) {
             match list {
                 DataType::List(ref l) => {
-                    let tag: String = l.get(0).unwrap().try_into()?;
-                    let rule: Rule = l.get(1).unwrap().try_into()?;
+                    let tag: String = match l.get(0) {
+                        Some(tag) => tag.try_into()?,
+                        None => return Err(QueryError::InvalidFunctionParameters(
+                            format!("Expected function parameter of type list of (tag, rule) tuples, list contains {:?}", l)))
+                    };
+                    let rule: Rule = match l.get(1) {
+                        Some(rule) => rule.try_into()?,
+                        None => return Err(QueryError::InvalidFunctionParameters(
+                            format!("Expected function parameter of type list of (tag, rule) tuples, list contains {:?}", l)))
+                    };
                     lists.push((tag, rule));
                 },
                 ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type list of (tag, rule) tuples, list contains {:?}", invalid_type)
+                    format!("Expected function parameter of type list of (tag, rule) tuples, got {:?}", invalid_type)
                 ))
             }
         }
@@ -196,12 +182,20 @@ impl TryFrom<&DataType> for Vec<(Vec<String>, Rule)> {
         for list in tagged_lists.drain(..) {
             match list {
                 DataType::List(ref l) => {
-                    let category: Vec<String> = l.get(0).unwrap().try_into()?;
-                    let rule: Rule = l.get(1).unwrap().try_into()?;
+                    let category: Vec<String> = match l.get(0) {
+                        Some(category) => category.try_into()?,
+                        None => return Err(QueryError::InvalidFunctionParameters(
+                            format!("Expected function parameter of type list of (category, rule) tuples, list contains {:?}", l)))
+                    };
+                    let rule: Rule = match l.get(1) {
+                        Some(rule) => rule.try_into()?,
+                        None => return Err(QueryError::InvalidFunctionParameters(
+                            format!("Expected function parameter of type list of (category, rule) tuples, list contains {:?}", l)))
+                    };
                     lists.push((category, rule));
                 },
                 ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type list of (category, rule) tuples, list contains {:?}", invalid_type)
+                    format!("Expected function parameter of type list of (category, rule) tuples, got {:?}", invalid_type)
                 ))
             }
         }
@@ -246,5 +240,60 @@ impl TryFrom<&DataType> for Vec<Value> {
             }
         }
         return Ok(strings);
+    }
+}
+
+impl TryFrom<&DataType> for Rule {
+    type Error = QueryError;
+
+    fn try_from(data: &DataType) -> Result<Self, Self::Error> {
+        let obj = match data {
+            DataType::Dict(dict) => dict,
+            _ => return Err(QueryError::InvalidFunctionParameters(
+                "test".to_string())),
+        };
+        let rtype_val = match obj.get("type") {
+            Some(rtype) => rtype,
+            None => return Err(QueryError::InvalidFunctionParameters(
+                "rule does not have a type".to_string())),
+        };
+        let rtype = match rtype_val {
+            DataType::String(s) => s,
+            _ => return Err(QueryError::InvalidFunctionParameters(
+                "rule type is not a string".to_string())),
+        };
+        if rtype == "none" {
+            return Ok(Self::None);
+        }
+        else if rtype == "regex" {
+            let regex_val = match obj.get("regex"){
+                Some(regex_val) => regex_val,
+                None => return Err(QueryError::InvalidFunctionParameters(
+                    "regex rule is missing the 'regex' field".to_string())),
+            };
+            let regex_str = match regex_val {
+                DataType::String(s) => s,
+                _ => return Err(QueryError::InvalidFunctionParameters(
+                    "the regex field of the regex rule is not a string".to_string())),
+            };
+            let ignore_case_val = match obj.get("ignore_case"){
+                Some(case_val) => case_val,
+                None => &DataType::Bool(false),
+            };
+            let ignore_case = match ignore_case_val {
+                DataType::Bool(b) => b,
+                _ => return Err(QueryError::InvalidFunctionParameters(
+                    "the ignore_case field of the regex rule is not a bool".to_string())),
+            };
+            let regex_rule = match RegexRule::new(regex_str, *ignore_case) {
+                Ok(regex_rule) => regex_rule,
+                Err(err) => return Err(QueryError::InvalidFunctionParameters(
+                    format!("Failed to compile regex string '{}': '{:?}", regex_str, err))),
+            };
+            return Ok(Self::Regex( regex_rule ));
+        } else {
+            return Err(QueryError::InvalidFunctionParameters(
+                format!("Unknown rule type '{}'", rtype)));
+        }
     }
 }

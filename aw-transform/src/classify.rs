@@ -124,12 +124,25 @@ fn _pick_highest_ranking_category(acc: Vec<String>, item: &Vec<String>) -> Vec<S
     }
 }
 
-fn _cat_format_to_vec(cat: String) -> Vec<String> {
-    cat.split("->").map(|s| s.trim().into()).collect()
-}
+#[test]
+fn test_rule() {
+    let mut e_match = Event::default();
+    e_match.data
+        .insert("test".into(), serde_json::json!("just a test"));
 
-fn _cat_vec_to_format(cat: Vec<String>) -> String {
-    cat.join(" -> ")
+    let mut e_no_match = Event::default();
+    e_no_match.data
+        .insert("nonono".into(), serde_json::json!("no match!"));
+
+    let rule_from_regex = Rule::from(Regex::new("test").unwrap());
+    let rule_from_new = Rule::Regex(RegexRule::new("test", false).unwrap());
+    let rule_none = Rule::None;
+    assert_eq!(rule_from_regex.matches(&e_match), true);
+    assert_eq!(rule_from_new.matches(&e_match), true);
+    assert_eq!(rule_from_regex.matches(&e_no_match), false);
+    assert_eq!(rule_from_new.matches(&e_no_match), false);
+
+    assert_eq!(rule_none.matches(&e_match), false);
 }
 
 #[test]

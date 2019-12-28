@@ -17,7 +17,7 @@ macro_rules! json_map {
 mod datastore;
 mod worker;
 
-#[cfg(feature = "legacy_import")]
+#[cfg(all(feature = "legacy_import"))]
 mod legacy_import;
 
 pub use self::datastore::DatastoreInstance;

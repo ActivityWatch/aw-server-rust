@@ -35,6 +35,7 @@ pub enum QueryError {
     InvalidFunctionParameters(String),
     TimeIntervalError(String),
     BucketQueryError(String),
+    RegexCompileError(String),
 }
 
 impl fmt::Display for QueryError {

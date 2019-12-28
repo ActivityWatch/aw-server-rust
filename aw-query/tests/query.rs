@@ -158,10 +158,8 @@ mod query_tests {
 
         // different types comparison (should raise an error)
         let code = String::from("True==1;");
-        match aw_query::query(&code, &interval, &ds) {
-            Err(aw_query::QueryError::InvalidType(_)) => (),
-            r => panic!("Expected an InvalidType error, got {:?}", r),
-        };
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::InvalidType("".to_string()));
     }
 
     #[test]
@@ -338,19 +336,32 @@ mod query_tests {
     }
 
     #[test]
-    fn test_classify() {
+    fn test_categorize() {
         let ds = setup_datastore_populated();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("query_bucket(\"testid\");");
-        aw_query::query(&code, &interval, &ds).unwrap();
-
-        let code = format!(
-            r#"
+        let code = format!(r#"
             events = query_bucket("{}");
             events = categorize(events, [[["Test", "Subtest"], {{ "type": "regex", "regex": "^value$" }}]]);
+            RETURN = events;"#,
+            "testid"
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+
+        let event = events.first().unwrap();
+        let cats = event.data.get("$category").unwrap();
+        assert_eq!(cats, &serde_json::json!(vec!["Test", "Subtest"]));
+    }
+
+    #[test]
+    fn test_tag() {
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let code = format!(r#"
+            events = query_bucket("{}");
             events = tag(events, [["testtag", {{ "type": "regex", "regex": "value$" }}], ["another testtag", {{ "type": "regex", "regex": "value$" }}]]);
-            test = {{}};
             RETURN = events;"#,
             "testid"
         );
@@ -359,9 +370,102 @@ mod query_tests {
 
         let event = events.first().unwrap();
         let tags = event.data.get("$tags").unwrap().as_array().unwrap();
-        let cats = event.data.get("$category").unwrap();
         assert_eq!(tags.len(), 2);
-        assert_eq!(cats, &serde_json::json!(vec!["Test", "Subtest"]));
+    }
+
+    fn assert_err_type(result: Result<DataType, QueryError>, err_type: QueryError) {
+        match result {
+            Ok(_) => panic!("Expected error {:?}, got {:?}", err_type, result),
+            Err(e) => match e {
+                err_type => (),
+                _ => panic!("Expected {:?}, got {:?}", err_type, e),
+            },
+        };
+
+    }
+
+    #[test]
+    fn test_rule_parsing() {
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // Test rule where rule is not a dict
+        let code = r#"
+            events = [];
+            events = tag(events, ["test", false]);
+            RETURN = events;"#;
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+
+        // Test rule without type
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { }]]);
+            RETURN = events;"#;
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+
+        // Test invalid rule type
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": false }]]);
+            RETURN = events;"#;
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+
+        // Test invalid rule name
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "rgex" }]]);
+            RETURN = events;"#;
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+
+        // Test "none" rule type
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "none" }]]);
+            RETURN = events;"#;
+        aw_query::query(&code, &interval, &ds).unwrap();
+
+        // Test regex rule where regex field has wrong type
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "regex", "regex": true }]]);
+            RETURN = events;"#;
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+
+        // Test regex rule where regex field is not set
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "regex" }]]);
+            RETURN = events;"#;
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+
+        // Test regex rule with ignore_case field
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "regex", "regex": "test", "ignore_case": false }]]);
+            RETURN = events;"#;
+        aw_query::query(&code, &interval, &ds).unwrap();
+
+        // Test regex rule where ignore_case field is of invalid type
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "regex", "regex": "test", "ignore_case": "" }]]);
+            RETURN = events;"#;
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+
+        // Test regex rule where uncompilable regex is supplied
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "regex", "regex": "!#¤%&/(=" }]]);
+            RETURN = events;"#;
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::RegexCompileError("".to_string()));
     }
 
     #[test]
@@ -502,13 +606,8 @@ mod query_tests {
         };
 
         let code = String::from("1/0;");
-        match aw_query::query(&code, &interval, &ds) {
-            Err(e) => match e {
-                QueryError::MathError(_) => (),
-                qe => panic!("Expected division by zero error, got {:?}", qe)
-            }
-            Ok(res) => panic!("Expected division by zero error, got {:?}", res)
-        };
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type(res, QueryError::MathError("".to_string()));
 
         let code = String::from("2.5%1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {

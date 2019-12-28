@@ -250,7 +250,7 @@ impl TryFrom<&DataType> for Rule {
         let obj = match data {
             DataType::Dict(dict) => dict,
             _ => return Err(QueryError::InvalidFunctionParameters(
-                "test".to_string())),
+                format!("Expected rule dict, got {:?}", data))),
         };
         let rtype_val = match obj.get("type") {
             Some(rtype) => rtype,
@@ -287,7 +287,7 @@ impl TryFrom<&DataType> for Rule {
             };
             let regex_rule = match RegexRule::new(regex_str, *ignore_case) {
                 Ok(regex_rule) => regex_rule,
-                Err(err) => return Err(QueryError::InvalidFunctionParameters(
+                Err(err) => return Err(QueryError::RegexCompileError(
                     format!("Failed to compile regex string '{}': '{:?}", regex_str, err))),
             };
             return Ok(Self::Regex( regex_rule ));

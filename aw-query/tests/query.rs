@@ -318,8 +318,8 @@ mod query_tests {
             events = limit_events(events, 10000);
             events = sort_by_timestamp(events);
             events = concat(events, query_bucket("{}"));
-            events = categorize(events, [[["test"], {{ "regex": "value$" }}], [["test", "testing"], {{ "regex": "value$" }}]]);
-            events = tag(events, [["testtag", {{ "regex": "test$" }}], ["another testtag", {{ "regex": "test-pat$" }}]]);
+            events = categorize(events, [[["test"], {{ "type": "regex", "regex": "value$" }}], [["test", "testing"], {{ "type": "regex", "regex": "value$" }}]]);
+            events = tag(events, [["testtag", {{ "type": "regex", "regex": "test$" }}], ["another testtag", {{ "type": "regex", "regex": "test-pat$" }}]]);
             total_duration = sum_durations(events);
             bucketnames = query_bucket_names();
             print("test", "test2");
@@ -348,8 +348,8 @@ mod query_tests {
         let code = format!(
             r#"
             events = query_bucket("{}");
-            events = categorize(events, [[["Test", "Subtest"], {{ "regex": "^value$" }}]]);
-            events = tag(events, [["testtag", {{ "regex": "value$" }}], ["another testtag", {{ "regex": "value$" }}]]);
+            events = categorize(events, [[["Test", "Subtest"], {{ "type": "regex", "regex": "^value$" }}]]);
+            events = tag(events, [["testtag", {{ "type": "regex", "regex": "value$" }}], ["another testtag", {{ "type": "regex", "regex": "value$" }}]]);
             test = {{}};
             RETURN = events;"#,
             "testid"

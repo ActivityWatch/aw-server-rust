@@ -2,48 +2,65 @@
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
 
-use std::collections::HashMap;
 use aw_models::Event;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde_json;
+
+pub enum Rule {
+    None,
+    Regex(RegexRule),
+}
+
+impl RuleTrait for Rule {
+    fn matches(&self, event: &Event) -> bool {
+        match self {
+            Rule::None => false,
+            Rule::Regex(rule) => rule.matches(event),
+        }
+    }
+}
+
+trait RuleTrait {
+    fn matches(&self, event: &Event) -> bool;
+}
+
+pub struct RegexRule {
+    regex: Regex,
+}
+
+impl RegexRule {
+    pub fn new(regex_str: &str, ignore_case: bool) -> Result<RegexRule, regex::Error> {
+        let mut regex_builder = RegexBuilder::new(regex_str);
+        regex_builder.case_insensitive(ignore_case);
+        let regex = regex_builder.build()?;
+        Ok(RegexRule {
+            regex,
+        })
+    }
+}
 
 /// This struct defines the rules for classification.
 /// For now it just needs to contain the regex to match with, but in the future it might contain a
 /// glob-pattern, or other options for classifying.
 /// It's puropse is to make the API easy to extend in the future without having to break backwards
 /// compatibility (or have to maintain "old" query2 functions).
-pub struct Rule {
-    regex: Option<Regex>,
-}
-
-impl Rule {
+impl RuleTrait for RegexRule {
     fn matches(&self, event: &Event) -> bool {
         event
             .data
             .values()
             .filter(|val| val.is_string())
             .any(|val| {
-                return match &self.regex {
-                    Some(re) => re.is_match(val.as_str().unwrap()),
-                    None => false,
-                };
+                return self.regex.is_match(val.as_str().unwrap());
             })
     }
 }
 
 impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
-        Self {
-            regex: Some(re.clone()),
-        }
-    }
-}
-
-impl From<HashMap<String, String>> for Rule {
-    fn from(obj: HashMap<String, String>) -> Self {
-        Self {
-            regex: Some(Regex::new(obj.get("regex").unwrap()).unwrap()),
-        }
+        Rule::Regex(RegexRule {
+            regex: re,
+        })
     }
 }
 

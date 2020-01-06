@@ -233,35 +233,55 @@ mod datastore_tests {
         let bucket = create_test_bucket(&ds);
 
         // Insert event
-        let e1 = Event {
+        let e = Event {
             id: None,
             timestamp: Utc::now(),
             duration: Duration::seconds(0),
             data: json_map!{"key": json!("value")}
         };
-        ds.insert_events(&bucket.id, &[e1.clone()]).unwrap();
+        let mut e1 = e.clone();
+        e1.data = json_map!{"key": json!("value1")};
+        let mut e2 = e.clone();
+        e2.data = json_map!{"key": json!("value2")};
+        let mut e3 = e.clone();
+        e3.data = json_map!{"key": json!("value3")};
 
-        // Get inserted event
-        let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
-        assert_eq!(fetched_events.len(), 1);
-        assert_eq!(fetched_events[0], e1);
+        let events_init = &[e1.clone(), e2.clone(), e3.clone()];
+        let events_ret = ds.insert_events(&bucket.id, events_init).unwrap();
+        // Validate return from insert
+        assert_eq!(events_ret[0].id, Some(1));
+        assert_eq!(events_ret[1].id, Some(2));
+        assert_eq!(events_ret[2].id, Some(3));
+        assert_eq!(events_ret.len(), 3);
+        assert_eq!(events_ret[0], events_init[0]);
+        assert_eq!(events_ret[1], events_init[1]);
+        assert_eq!(events_ret[2], events_init[2]);
 
-        // Make new event with same id and same data
-        let e2 = fetched_events[0].clone();
-        ds.insert_events(&bucket.id, &[e2.clone()]).unwrap();
-        let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
-        assert_eq!(fetched_events.len(), 1);
-        assert_eq!(fetched_events[0], e2);
+        let events_init = events_ret;
+
+        // Insert e2 with identical data and id (which means a replace)
+        {
+            let events_ret = ds.insert_events(&bucket.id, &[events_init[1].clone()]).unwrap();
+            assert_eq!(events_ret.len(), 1);
+            assert_eq!(events_ret[0], events_init[1]);
+            let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
+            assert_eq!(fetched_events, events_init);
+        }
 
         // Make new event with same id but different data
-        let mut e3 = fetched_events[0].clone();
-        e3.data = json_map!{"key": json!("value2")};
-        let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
-        assert_eq!(fetched_events.len(), 1);
-        assert_eq!(fetched_events[0].id, e3.id);
-        assert_eq!(fetched_events[0].duration, e3.duration);
-        assert_eq!(fetched_events[0].timestamp, e3.timestamp);
-        assert_ne!(fetched_events[0].data, e3.data);
+        {
+            let mut e2 = events_init[1].clone();
+            e2.data = json_map!{"key": json!("value2_modified")};
+            let events_ret = ds.insert_events(&bucket.id, &[e2.clone()]).unwrap();
+            assert_eq!(events_ret.len(), 1);
+            assert_eq!(events_ret[0], e2);
+            let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
+            assert_eq!(fetched_events.len(), 3);
+            assert_eq!(fetched_events[1], e2);
+            assert_eq!(fetched_events[0].id, Some(1));
+            assert_eq!(fetched_events[1].id, Some(2));
+            assert_eq!(fetched_events[2].id, Some(3));
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
-.PHONY: all aw-server aw-webui build install package
+.PHONY: all aw-server aw-webui build install package test
 
-all: aw-server aw-webui
-build: aw-server
+all: build
+build: aw-server aw-webui
 
 DESTDIR :=
 PREFIX := /usr/local
@@ -11,6 +11,9 @@ aw-server:
 
 aw-webui:
 	make -C ./aw-webui build
+
+test:
+	cargo test
 
 package:
 	# Clean and prepare target/package folder

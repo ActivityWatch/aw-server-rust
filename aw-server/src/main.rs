@@ -85,7 +85,7 @@ fn get_asset_path () -> PathBuf {
     match current_exe() {
         Ok(mut current_exe_path) => {
             current_exe_path.pop(); // remove name of executable
-            current_exe_path.push("aw_server_rust/static/");
+            current_exe_path.push("aw-server/static/");
             if current_exe_path.as_path().exists() {
                 return current_exe_path;
             }
@@ -95,7 +95,7 @@ fn get_asset_path () -> PathBuf {
 
     // usr_path
     // (for linux usr installs)
-    match site_data_dir(Some("aw_server_rust"), None) {
+    match site_data_dir(Some("aw-server"), None) {
         Ok(mut usr_path) => {
             usr_path.push("static");
             if usr_path.as_path().exists() {

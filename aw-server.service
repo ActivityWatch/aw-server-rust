@@ -15,7 +15,7 @@
 
 [Service]
 Type=simple
-ExecStart=aw-server-rust
+ExecStart=aw-server
 
 [Unit]
 Description=ActivityWatch Server (Rust implementation)

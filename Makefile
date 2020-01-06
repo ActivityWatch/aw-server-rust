@@ -12,17 +12,16 @@ aw-server:
 aw-webui:
 	make -C ./aw-webui build
 
-package: aw-server aw-webui
+package:
 	# Clean and prepare target/package folder
 	rm -rf target/package
 	mkdir -p target/package
 	# Copy binary
 	cp target/release/aw-server target/package
 	# Copy webui assets
-	mkdir -p target/package/aw-server
-	cp -rf aw-webui/dist target/package/aw-server/static
+	cp -rf aw-webui/dist target/package/static
 	# Copy service file
-	cp -f aw-server.service target/package/aw-server
+	cp -f aw-server.service target/package/aw-server.service
 
 install:
 	# Install aw-server executable

@@ -85,7 +85,7 @@ fn get_asset_path () -> PathBuf {
     match current_exe() {
         Ok(mut current_exe_path) => {
             current_exe_path.pop(); // remove name of executable
-            current_exe_path.push("aw-server/static/");
+            current_exe_path.push("./static/");
             if current_exe_path.as_path().exists() {
                 return current_exe_path;
             }

@@ -20,7 +20,7 @@ package:
 	rm -rf target/package
 	mkdir -p target/package
 	# Copy binary
-	cp target/release/aw-server target/package
+	cp target/release/aw-server target/package/aw-server-rust
 	# Copy webui assets
 	cp -rf aw-webui/dist target/package/static
 	# Copy service file

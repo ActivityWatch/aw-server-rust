@@ -1,6 +1,8 @@
 extern crate aw_client_rust;
 extern crate serde_json;
 extern crate chrono;
+extern crate aw_server;
+extern crate aw_datastore;
 
 #[cfg(test)]
 mod test {
@@ -8,13 +10,60 @@ mod test {
     use aw_client_rust::Event;
     use serde_json::Map;
     use chrono::{DateTime, Utc, Duration};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::thread;
+
+    // A random port, but still not guaranteed to not be bound
+    // FIXME: Bind to a port that is free for certain and use that for the client instead
+    static PORT: u16 = 41293;
+
+    fn wait_for_server(timeout_s: u32, client: &AwClient) -> () {
+        for i in 0.. {
+            match client.get_info() {
+                Ok(_) => break,
+                Err(err) => {
+                    if i == timeout_s {
+                        panic!("Timed out starting aw-server after {}s: {:?}",
+                               timeout_s, err);
+                    }
+                },
+            }
+            use std::time;
+            let duration = time::Duration::from_secs(1);
+            thread::sleep(duration);
+        }
+    }
+
+    fn setup_testserver() -> () {
+        // Start testserver and wait 10s for it to start up
+        // TODO: Properly shutdown
+        use aw_server::endpoints::ServerState;
+        let state = ServerState {
+            // TODO: This currently has legacy_import enabled so it can become very slow on
+            // machines with a legacy database on them if it's large
+            datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
+            asset_path: PathBuf::from("."), // webui won't be used, so it's invalidly set
+        };
+        let mut aw_config = aw_server::config::AWConfig::default();
+        aw_config.port = PORT;
+        let server = aw_server::endpoints::build_rocket(state, &aw_config);
+
+        thread::spawn(move || {
+            server.launch();
+        });
+    }
 
     #[test]
     fn test_full() {
         let ip = "127.0.0.1";
-        let port = "5666";
+        let port : String = PORT.to_string();
         let clientname = "aw-client-rust-test";
-        let client : AwClient = AwClient::new(ip, port, clientname);
+        let client : AwClient = AwClient::new(ip, &port, clientname);
+
+        setup_testserver();
+
+        wait_for_server(10, &client);
 
         let info = client.get_info().unwrap();
         assert!(info.testing == true);
@@ -46,8 +95,5 @@ mod test {
         assert!(events[0].duration == Duration::seconds(1));
 
         client.delete_bucket(&bucketname).unwrap();
-
-        // Uncomment to see stdout from "cargo test"
-        //assert!(1==2);
     }
 }

@@ -173,7 +173,9 @@ dependencies = [
 name = "aw_client_rust"
 version = "0.1.0"
 dependencies = [
+ "aw-datastore",
  "aw-models",
+ "aw-server",
  "chrono",
  "gethostname",
  "reqwest",

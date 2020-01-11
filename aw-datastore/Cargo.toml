@@ -6,7 +6,6 @@ edition = "2018"
 
 [features]
 default = [] # no features by default
-legacy_import = []
 legacy_import_tests = []
 
 [dependencies]

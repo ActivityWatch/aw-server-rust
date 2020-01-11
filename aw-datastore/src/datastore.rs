@@ -230,7 +230,6 @@ impl DatastoreInstance {
         Ok(())
     }
 
-    #[cfg(feature = "legacy_import")]
     pub fn ensure_legacy_import(&mut self, conn: &Connection) -> Result<bool, ()> {
         use super::legacy_import::legacy_import;
         if !self.first_init {

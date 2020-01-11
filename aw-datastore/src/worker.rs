@@ -64,13 +64,15 @@ pub enum Commands {
 
 struct DatastoreWorker {
     responder: RequestReceiver,
+    legacy_import: bool,
     quit: bool
 }
 
 impl DatastoreWorker {
-    pub fn new(responder: mpsc_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>) -> Self {
+    pub fn new(responder: mpsc_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>, legacy_import: bool) -> Self {
         DatastoreWorker {
             responder,
+            legacy_import,
             quit: false,
         }
     }
@@ -87,8 +89,7 @@ impl DatastoreWorker {
         let mut last_heartbeat = HashMap::new();
 
         // Ensure legacy import
-        #[cfg(feature = "legacy_import")]
-        {
+        if self.legacy_import {
             let mut transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
                 Ok(transaction) => transaction,
                 Err(err) => panic!("Unable to start immediate transaction on SQLite database! {}", err)
@@ -201,20 +202,20 @@ impl DatastoreWorker {
 
 impl Datastore {
 
-    pub fn new(dbpath: String) -> Self {
+    pub fn new(dbpath: String, legacy_import: bool) -> Self {
         let method = DatastoreMethod::File(dbpath);
-        Datastore::_new_internal(method)
+        Datastore::_new_internal(method, legacy_import)
     }
 
-    pub fn new_in_memory() -> Self {
+    pub fn new_in_memory(legacy_import: bool) -> Self {
         let method = DatastoreMethod::Memory();
-        Datastore::_new_internal(method)
+        Datastore::_new_internal(method, legacy_import)
     }
 
-    fn _new_internal(method: DatastoreMethod) -> Self {
+    fn _new_internal(method: DatastoreMethod, legacy_import: bool) -> Self {
         let (requester, responder) = mpsc_requests::channel::<Commands, Result<Responses, DatastoreError>>();
         let _thread = thread::spawn(move || {
-            let mut di = DatastoreWorker::new(responder);
+            let mut di = DatastoreWorker::new(responder, legacy_import);
             di.work_loop(method);
         });
         Datastore {

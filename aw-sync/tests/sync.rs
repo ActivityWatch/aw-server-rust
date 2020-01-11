@@ -16,8 +16,8 @@ mod sync_tests {
 
     fn init_teststate() -> TestState {
         return TestState {
-            ds_src: Datastore::new_in_memory(),
-            ds_dest: Datastore::new_in_memory(),
+            ds_src: Datastore::new_in_memory(false),
+            ds_dest: Datastore::new_in_memory(false),
         }
     }
 

@@ -63,7 +63,7 @@ mod datastore_tests {
     #[test]
     fn test_bucket_create_delete() {
         // Setup datastore
-        let ds = Datastore::new_in_memory();
+        let ds = Datastore::new_in_memory(false);
         let bucket = create_test_bucket(&ds);
 
         // Fetch bucket
@@ -116,7 +116,7 @@ mod datastore_tests {
     #[test]
     fn test_events_get_filters() {
         // Setup datastore
-        let ds = Datastore::new_in_memory();
+        let ds = Datastore::new_in_memory(false);
         let bucket = create_test_bucket(&ds);
 
         // Insert event
@@ -180,7 +180,7 @@ mod datastore_tests {
     #[test]
     fn test_event_heartbeat() {
         // Setup datastore
-        let ds = Datastore::new_in_memory();
+        let ds = Datastore::new_in_memory(false);
         let bucket = create_test_bucket(&ds);
 
         // Insert event
@@ -229,7 +229,7 @@ mod datastore_tests {
     #[test]
     fn test_event_replace() {
         // Setup datastore
-        let ds = Datastore::new_in_memory();
+        let ds = Datastore::new_in_memory(false);
         let bucket = create_test_bucket(&ds);
 
         // Insert event
@@ -307,7 +307,7 @@ mod datastore_tests {
         };
         {
             // Initialize database and create buckets
-            let ds = Datastore::new(db_path_str.clone());
+            let ds = Datastore::new(db_path_str.clone(), false);
             ds.create_bucket(&empty_bucket).unwrap();
             ds.create_bucket(&populated_bucket).unwrap();
             // Insert event
@@ -321,7 +321,7 @@ mod datastore_tests {
             assert_eq!(buckets[&populated_bucket.id].metadata.end, Some(e1.timestamp));
         }
         {   // Load database again
-            let ds = Datastore::new(db_path_str.clone());
+            let ds = Datastore::new(db_path_str.clone(), false);
             // Check that all bucket data is correct after reload
             let buckets = ds.get_buckets().unwrap();
             assert_eq!(buckets[&empty_bucket.id].metadata.start, None);

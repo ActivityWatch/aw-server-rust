@@ -22,7 +22,7 @@ pub fn sync_run() {
     fs::create_dir_all(sync_directory).unwrap();
 
     // TODO: Use the local datastore here, preferably passed from main
-    let ds_local = Datastore::new(sync_directory.join("test-local.db").into_os_string().into_string().unwrap());
+    let ds_local = Datastore::new(sync_directory.join("test-local.db").into_os_string().into_string().unwrap(), false);
     info!("Set up local datastore");
     //log_buckets(&ds_local)?;
 
@@ -44,7 +44,7 @@ pub fn sync_run() {
 fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
     let mut datastores: Vec<Datastore> = Vec::new();
     for n in 0..2 {
-        let ds = Datastore::new(sync_directory.join(format!("test-remote-{}.db", n)).to_str().unwrap().to_string());
+        let ds = Datastore::new(sync_directory.join(format!("test-remote-{}.db", n)).to_str().unwrap().to_string(), false);
 
         // Create a bucket
         let bucket_jsonstr = format!(r#"{{

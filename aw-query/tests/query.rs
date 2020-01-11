@@ -39,7 +39,7 @@ mod query_tests {
     static BUCKET_ID : &str = "testid";
 
     fn setup_datastore_empty() -> Datastore {
-        return Datastore::new_in_memory();
+        return Datastore::new_in_memory(false);
     }
 
     fn setup_datastore_with_bucket() -> Datastore {

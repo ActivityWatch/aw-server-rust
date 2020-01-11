@@ -16,7 +16,9 @@ fn main() {
     info!("Using aw-webui assets at path {:?}", asset_path);
 
     let server_state = endpoints::ServerState {
-        datastore: Mutex::new(aw_datastore::Datastore::new(db_path)),
+        // Even if legacy_import is set to true it is disabled on Android so
+        // it will not happen there
+        datastore: Mutex::new(aw_datastore::Datastore::new(db_path, true)),
         asset_path: asset_path,
     };
 

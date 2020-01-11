@@ -22,7 +22,7 @@ mod api_tests {
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
-            datastore: Mutex::new(aw_datastore::Datastore::new_in_memory()),
+            datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
             asset_path: PathBuf::from("aw-webui/dist"),
         };
         let aw_config = config::AWConfig::default();

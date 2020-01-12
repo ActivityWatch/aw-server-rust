@@ -59,6 +59,7 @@ pub enum Commands {
     Heartbeat(String, Event, f64),
     GetEvents(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<u64>),
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
+    DeleteEventsById(String, Vec<i64>),
     ForceCommit(),
 }
 
@@ -178,6 +179,12 @@ impl DatastoreWorker {
                     Commands::GetEventCount(bucketname, starttime_opt, endtime_opt) => {
                         match ds.get_event_count(&transaction, &bucketname, starttime_opt, endtime_opt) {
                             Ok(n) => Ok(Responses::Count(n)),
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::DeleteEventsById(bucketname, event_ids) => {
+                        match ds.delete_events_by_id(&transaction, &bucketname, event_ids) {
+                            Ok(()) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
                     },
@@ -315,6 +322,19 @@ impl Datastore {
             Err(e) => Err(e)
         }
     }
+
+    pub fn delete_events_by_id(&self, bucket_id: &str, event_ids: Vec<i64>) -> Result<(), DatastoreError> {
+        let cmd = Commands::DeleteEventsById(bucket_id.to_string(), event_ids);
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Responses::Empty() => Ok(()),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
 
     pub fn force_commit(&self) -> Result<(), DatastoreError> {
         let cmd = Commands::ForceCommit();

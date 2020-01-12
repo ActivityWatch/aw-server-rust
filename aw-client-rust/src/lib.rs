@@ -92,6 +92,22 @@ impl AwClient {
         Ok(())
     }
 
+    pub fn delete_event(&self, bucketname: &str, event_id: i64) -> Result<(), reqwest::Error> {
+        let url = format!("{}/api/0/buckets/{}/events/{}", self.baseurl, bucketname, event_id);
+        self.client.delete(&url).send()?;
+        Ok(())
+    }
+
+    pub fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
+        let url = format!("{}/api/0/buckets/{}/events/count", self.baseurl, bucketname);
+        let res = self.client.get(&url).send()?.text()?;
+        let count : i64 = match res.parse() {
+            Ok(count) => count,
+            Err(err) => panic!("could not parse get_event_count response: {:?}", err),
+        };
+        Ok(count)
+    }
+
     pub fn get_info(&self) -> Result<Info, reqwest::Error> {
         let url = format!("{}/api/0/info", self.baseurl);
         Ok(self.client.get(&url).send()?.json()?)

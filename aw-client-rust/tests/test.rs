@@ -94,6 +94,11 @@ mod test {
         println!("Events: {:?}", events);
         assert!(events[0].duration == Duration::seconds(1));
 
+        client.delete_event(&bucketname, events[0].id.unwrap()).unwrap();
+
+        let count = client.get_event_count(&bucketname).unwrap();
+        assert_eq!(count, 0);
+
         client.delete_bucket(&bucketname).unwrap();
     }
 }

@@ -133,12 +133,6 @@ mod datastore_tests {
 
         ds.insert_events(&bucket.id, &event_list).unwrap();
 
-        // TODO: Move to a seperate test-case
-        // Validate correct start and end in bucket
-        let bucket_fetched = ds.get_bucket(&bucket.id).unwrap();
-        assert_eq!(bucket_fetched.metadata.start, Some(e1.timestamp));
-        assert_eq!(bucket_fetched.metadata.end, Some(e2.calculate_endtime()));
-
         // Get all events
         let fetched_events_all = ds.get_events(&bucket.id, None, None, None).unwrap();
         let expected_fetched_events = vec![&e2, &e1];
@@ -175,6 +169,32 @@ mod datastore_tests {
         // Get eventcount
         let event_count = ds.get_event_count(&bucket.id, None, None).unwrap();
         assert_eq!(event_count, 2);
+    }
+
+    #[test]
+    fn test_bucket_metadata_start_end() {
+        // Setup datastore
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+
+        // Insert event
+        let e1 = Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(0),
+            data: json_map!{"key": json!("value")}
+        };
+        let mut e2 = e1.clone();
+        e2.timestamp = e2.timestamp + Duration::nanoseconds(1);
+
+        let event_list = [e1.clone(), e2.clone()];
+
+        ds.insert_events(&bucket.id, &event_list).unwrap();
+
+        // Validate correct start and end in bucket
+        let bucket_fetched = ds.get_bucket(&bucket.id).unwrap();
+        assert_eq!(bucket_fetched.metadata.start, Some(e1.timestamp));
+        assert_eq!(bucket_fetched.metadata.end, Some(e2.calculate_endtime()));
     }
 
     #[test]

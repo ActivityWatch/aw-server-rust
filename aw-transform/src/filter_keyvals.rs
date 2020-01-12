@@ -6,46 +6,12 @@ pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &Vec<Value>) -> Vec<E
     let mut filtered_events = Vec::new();
     for event in events {
         match event.data.get(key) {
-            Some(v) => match v {
-                Value::Null => {
-                    for val in vals {
-                        match val {
-                            Value::Null => filtered_events.push(event.clone()),
-                            _ => break
-                        }
+            Some(v) => {
+                for val in vals {
+                    if val == v {
+                        filtered_events.push(event.clone());
+                        break;
                     }
-                },
-                Value::Bool(b1) => {
-                    for val in vals {
-                        match val {
-                            Value::Bool(ref b2) => if b1 == b2 { filtered_events.push(event.clone()) },
-                            _ => break
-                        }
-                    }
-                },
-                Value::Number(n1) => {
-                    for val in vals {
-                        match val {
-                            Value::Number(ref n2) => if n1 == n2 { filtered_events.push(event.clone()) },
-                            _ => break
-                        }
-                    }
-                },
-                Value::String(s1) => {
-                    for val in vals {
-                        match val {
-                            Value::String(ref s2) => if s1 == s2 { filtered_events.push(event.clone()) },
-                            _ => break
-                        }
-                    }
-                },
-                Value::Array(_) => {
-                    // TODO: cannot match objects
-                    break
-                },
-                Value::Object(_) => {
-                    // TODO: cannot match objects
-                    break
                 }
             }
             None => break
@@ -75,10 +41,10 @@ mod tests {
             data: json_map!{"test": json!(1)}
         };
         let mut e2 = e1.clone();
-        e2.data = json_map!{"test": json!(2)};
+        e2.data = json_map!{"test": json!(1), "test2": json!(1)};
         let mut e3 = e1.clone();
         e3.data = json_map!{"test2": json!(2)};
-        let res = filter_keyvals(vec![e1.clone(), e2, e3], "test", &vec![json!(1)]);
-        assert_eq!(vec![e1], res);
+        let res = filter_keyvals(vec![e1.clone(), e2.clone(), e3], "test", &vec![json!(1)]);
+        assert_eq!(vec![e1, e2], res);
     }
 }

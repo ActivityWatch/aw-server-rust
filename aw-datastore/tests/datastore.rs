@@ -172,6 +172,57 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_events_delete() {
+        // Setup datastore
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+
+        // Insert event
+        let e1 = Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(0),
+            data: json_map!{"key": json!("value")}
+        };
+        let mut e2 = e1.clone();
+        e2.timestamp = e2.timestamp + Duration::seconds(1);
+
+        let event_list = [e1.clone(), e2.clone()];
+
+        ds.insert_events(&bucket.id, &event_list).unwrap();
+
+        // Get all events
+        let fetched_events_all = ds.get_events(&bucket.id, None, None, None).unwrap();
+        let expected_fetched_events = vec![&e2, &e1];
+        assert_eq!(fetched_events_all.len(), 2);
+        for i in 0..fetched_events_all.len() {
+            let expected = &expected_fetched_events[i];
+            let new = &fetched_events_all[i];
+            assert_eq!(new.timestamp, expected.timestamp);
+            assert_eq!(new.duration, expected.duration);
+            assert_eq!(new.data, expected.data);
+        }
+        let e1 = &fetched_events_all[0];
+        let e2 = &fetched_events_all[1];
+
+        // Delete one event
+        ds.delete_events_by_id(&bucket.id, vec![e1.id.unwrap()]).unwrap();
+
+        // Get all events
+        let fetched_events_all = ds.get_events(&bucket.id, None, None, None).unwrap();
+        let expected_fetched_events = vec![e2];
+        assert_eq!(fetched_events_all.len(), 1);
+        for i in 0..fetched_events_all.len() {
+            let expected = &expected_fetched_events[i];
+            let new = &fetched_events_all[i];
+            assert_eq!(new.id, expected.id);
+            assert_eq!(new.timestamp, expected.timestamp);
+            assert_eq!(new.duration, expected.duration);
+            assert_eq!(new.data, expected.data);
+        }
+    }
+
+    #[test]
     fn test_bucket_metadata_start_end() {
         // Setup datastore
         let ds = Datastore::new_in_memory(false);

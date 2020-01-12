@@ -361,6 +361,28 @@ impl DatastoreInstance {
         Ok(events)
     }
 
+    pub fn delete_events_by_id(&self, conn: &Connection, bucket_id: &str, event_ids: Vec<i64>) -> Result<(), DatastoreError> {
+        let bucket = self.get_bucket(&bucket_id)?;
+        let mut stmt = match conn.prepare("
+                DELETE FROM events
+                WHERE bucketrow = ?1 AND id = ?2") {
+            Ok(stmt) => stmt,
+            Err(err) => return Err(DatastoreError::InternalError(format!("Failed to prepare insert_events SQL statement: {}", err)))
+        };
+        for id in event_ids {
+            let res = stmt.execute(&[&bucket.bid.unwrap(), &id as &dyn ToSql]);
+            match res {
+                Ok(_) => {},
+                Err(err) => {
+                    return Err(DatastoreError::InternalError(format!("Failed to delete event with id {} in bucket {}: {:?}", id, bucket_id, err)));
+                }
+            };
+        }
+        Ok(())
+    }
+
+    // TODO: Function for deleteing events by timerange with limit
+
     fn update_endtime(&mut self, bucket: &mut Bucket, event: &Event) {
         let mut update = false;
         /* Potentially update start */

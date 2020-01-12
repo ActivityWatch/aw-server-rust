@@ -168,6 +168,21 @@ pub fn bucket_event_count(bucket_id: String, state: State<ServerState>) -> Resul
     }
 }
 
+#[delete("/<bucket_id>/events/<event_id>")]
+pub fn bucket_events_delete_by_id(bucket_id: String, event_id: i64, state: State<ServerState>) -> Result<(), Status> {
+    let datastore = endpoints_get_lock!(state.datastore);
+    match datastore.delete_events_by_id(&bucket_id, vec![event_id]) {
+        Ok(_) => Ok(()),
+        Err(err) => match err {
+            DatastoreError::NoSuchBucket => Err(Status::NotFound),
+            err => {
+                warn!("Delete events by id failed: {:?}", err);
+                Err(Status::InternalServerError)
+            }
+        }
+    }
+}
+
 #[get("/<bucket_id>/export")]
 pub fn bucket_export(bucket_id: String, state: State<ServerState>) -> Result<Response, Status> {
     let datastore = endpoints_get_lock!(state.datastore);

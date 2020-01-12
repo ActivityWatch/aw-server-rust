@@ -178,11 +178,14 @@ mod api_tests {
         assert_eq!(res.body_string().unwrap(), r#"[{"id":1,"timestamp":"2018-01-01T01:01:01Z","duration":2.0,"data":{}}]"#);
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
+        // Delete event
+        client.delete("/api/0/buckets/id/events/1").dispatch();
+
         // Get eventcount
         res = client.get("/api/0/buckets/id/events/count")
             .header(ContentType::JSON)
             .dispatch();
-        assert_eq!(res.body_string().unwrap(), "1");
+        assert_eq!(res.body_string().unwrap(), "0");
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         // Delete bucket

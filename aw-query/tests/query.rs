@@ -323,7 +323,7 @@ mod query_tests {
             print("test", "test2");
             url_events = split_url_events (events);
             filtered_events = filter_period_intersect(events, events);
-            filtered_events = filter_keyvals(events, "key", ["value"]);
+            filtered_events = filter_keyvals(events, "$category", [["Uncategorized"]]);
             chunked_events = chunk_events_by_key(events, "key");
             merged_events = merge_events_by_keys(events, ["key"]);
             RETURN = merged_events;"#,

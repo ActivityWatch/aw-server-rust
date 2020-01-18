@@ -85,6 +85,18 @@ mod query_tests {
         return ds;
     }
 
+    macro_rules! assert_err_type {
+        ($v:expr, $p:pat) => (
+            match $v {
+                Ok(_) => panic!("Expected an error, got {:?}", $v),
+                Err(e) => match e {
+                    $p => (),
+                    _ => panic!("Expected an error of another type, got {:?}", e),
+                },
+            }
+        );
+    }
+
     #[test]
     fn test_bool() {
         let ds = setup_datastore_empty();
@@ -159,7 +171,7 @@ mod query_tests {
         // different types comparison (should raise an error)
         let code = String::from("True==1;");
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::InvalidType("".to_string()));
+        assert_err_type!(res, QueryError::InvalidType(_));
     }
 
     #[test]
@@ -373,17 +385,6 @@ mod query_tests {
         assert_eq!(tags.len(), 2);
     }
 
-    fn assert_err_type(result: Result<DataType, QueryError>, err_type: QueryError) {
-        match result {
-            Ok(_) => panic!("Expected error {:?}, got {:?}", err_type, result),
-            Err(e) => match e {
-                err_type => (),
-                _ => panic!("Expected {:?}, got {:?}", err_type, e),
-            },
-        };
-
-    }
-
     #[test]
     fn test_rule_parsing() {
         let ds = setup_datastore_populated();
@@ -395,7 +396,7 @@ mod query_tests {
             events = tag(events, ["test", false]);
             RETURN = events;"#;
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
         // Test rule without type
         let code = r#"
@@ -403,7 +404,7 @@ mod query_tests {
             events = tag(events, [["testtag", { }]]);
             RETURN = events;"#;
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
         // Test invalid rule type
         let code = r#"
@@ -411,7 +412,7 @@ mod query_tests {
             events = tag(events, [["testtag", { "type": false }]]);
             RETURN = events;"#;
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
         // Test invalid rule name
         let code = r#"
@@ -419,7 +420,7 @@ mod query_tests {
             events = tag(events, [["testtag", { "type": "rgex" }]]);
             RETURN = events;"#;
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
         // Test "none" rule type
         let code = r#"
@@ -434,7 +435,7 @@ mod query_tests {
             events = tag(events, [["testtag", { "type": "regex", "regex": true }]]);
             RETURN = events;"#;
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
         // Test regex rule where regex field is not set
         let code = r#"
@@ -442,7 +443,7 @@ mod query_tests {
             events = tag(events, [["testtag", { "type": "regex" }]]);
             RETURN = events;"#;
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
         // Test regex rule with ignore_case field
         let code = r#"
@@ -457,7 +458,7 @@ mod query_tests {
             events = tag(events, [["testtag", { "type": "regex", "regex": "test", "ignore_case": "" }]]);
             RETURN = events;"#;
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::InvalidFunctionParameters("".to_string()));
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
         // Test regex rule where uncompilable regex is supplied
         let code = r#"
@@ -465,7 +466,7 @@ mod query_tests {
             events = tag(events, [["testtag", { "type": "regex", "regex": "!#¤%&/(=" }]]);
             RETURN = events;"#;
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::RegexCompileError("".to_string()));
+        assert_err_type!(res, QueryError::RegexCompileError(_));
     }
 
     #[test]
@@ -607,7 +608,7 @@ mod query_tests {
 
         let code = String::from("1/0;");
         let res = aw_query::query(&code, &interval, &ds);
-        assert_err_type(res, QueryError::MathError("".to_string()));
+        assert_err_type!(res, QueryError::MathError(_));
 
         let code = String::from("2.5%1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {

@@ -223,23 +223,38 @@ impl TryFrom<&DataType> for usize {
     }
 }
 
+impl TryFrom<&DataType> for Value {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        match value {
+            DataType::None() => Ok(Value::Null),
+            DataType::Bool(b) => Ok(Value::Bool(*b)),
+            DataType::Number(n) => Ok(Value::Number(Number::from_f64(*n).unwrap())),
+            DataType::String(s) => Ok(Value::String(s.to_string())),
+            DataType::List(l) => {
+                let mut tagged_values: Vec<DataType> = value.try_into()?;
+                let mut values: Vec<Value> = Vec::new();
+                for value in tagged_values.drain(..) {
+                    values.push((&value).try_into()?);
+                }
+                return Ok(Value::Array(values));
+            },
+            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
+                    format!("Query2 support for parsing values is limited, does not support parsing {:?}", invalid_type)
+                    ))
+        }
+    }
+}
+
 impl TryFrom<&DataType> for Vec<Value> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_strings: Vec<DataType> = value.try_into()?;
-        let mut strings = Vec::new();
-        for string in tagged_strings.drain(..) {
-            match string {
-                DataType::String(s) => strings.push(Value::String(s)),
-                DataType::Number(n) => strings.push(Value::Number(Number::from_f64(n).unwrap())),
-                //DataType::Bool(b) => strings.push(json!(b)),
-                DataType::None() => strings.push(Value::Null),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                        format!("Query2 support for parsing values is limited and only supports strings, numbers and null, list contains {:?}", invalid_type)
-                        ))
-            }
+        let mut tagged_values: Vec<DataType> = value.try_into()?;
+        let mut values: Vec<Value> = Vec::new();
+        for value in tagged_values.drain(..) {
+            values.push((&value).try_into()?);
         }
-        return Ok(strings);
+        return Ok(values);
     }
 }
 

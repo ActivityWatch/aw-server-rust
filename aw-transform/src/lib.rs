@@ -21,6 +21,9 @@ pub mod classify;
 mod heartbeat;
 pub use heartbeat::heartbeat;
 
+mod find_bucket;
+pub use find_bucket::find_bucket;
+
 mod flood;
 pub use flood::flood;
 

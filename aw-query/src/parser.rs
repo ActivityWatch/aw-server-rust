@@ -39,6 +39,7 @@ parser! {
             st.push(x);
             st
         },
+        statements[st] Semi => st,
     }
 
     statement: Expr {

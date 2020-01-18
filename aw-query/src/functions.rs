@@ -15,6 +15,7 @@ pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
     env.insert("limit_events", DataType::Function("limit_events".to_string(), qfunctions::limit_events));
     env.insert("contains", DataType::Function("contains".to_string(), qfunctions::contains));
     env.insert("flood", DataType::Function("flood".to_string(), qfunctions::flood));
+    env.insert("find_bucket", DataType::Function("find_bucket".to_string(), qfunctions::find_bucket));
     env.insert("merge_events_by_keys", DataType::Function("merge_events_by_keys".to_string(), qfunctions::merge_events_by_keys));
     env.insert("chunk_events_by_key", DataType::Function("chunk_events_by_key".to_string(), qfunctions::chunk_events_by_key));
     env.insert("filter_keyvals", DataType::Function("filter_keyvals".to_string(), qfunctions::filter_keyvals));
@@ -74,6 +75,20 @@ mod qfunctions {
             bucketnames.push(DataType::String(bucketname.to_string()));
         }
         return Ok(DataType::List(bucketnames));
+    }
+
+    pub fn find_bucket(args: Vec<DataType>, _env: &HashMap<&str, DataType>, ds: &Datastore) -> Result<DataType, QueryError> {
+        validate::args_length(&args, 1)?;
+        let bucket_filter: String = (&args[0]).try_into()?;
+        let buckets = match ds.get_buckets() {
+            Ok(buckets) => buckets,
+            Err(e) => return Err(QueryError::BucketQueryError(format!("Failed to query bucket names: {:?}", e))),
+        };
+        let bucketname = match aw_transform::find_bucket(&bucket_filter, buckets.keys()) {
+            Some(bucketname) => bucketname,
+            None => return Err(QueryError::BucketQueryError(format!("Couldn't find any bucket which starts with {}", bucket_filter))),
+        };
+        return Ok(DataType::String(bucketname));
     }
 
     pub fn contains(args: Vec<DataType>, _env: &HashMap<&str, DataType>, _ds: &Datastore) -> Result<DataType, QueryError> {

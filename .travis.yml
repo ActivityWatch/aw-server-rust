@@ -68,6 +68,7 @@ after_script:
 
 before_cache:
   - cargo prune
+  - rm -rf ./target
 
 addons:
   apt:

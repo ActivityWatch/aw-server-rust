@@ -310,7 +310,7 @@ mod query_tests {
 
         let code = format!(
             r#"
-            events = query_bucket("{}");
+            events = query_bucket(find_bucket("{}"));
             events = flood(events);
             events = sort_by_duration(events);
             events = limit_events(events, 10000);

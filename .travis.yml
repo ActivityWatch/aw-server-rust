@@ -58,6 +58,7 @@ script:
   - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ]; then
         echo "Running tests with coverage";
         cargo kcov --all --verbose $($RELEASE && echo '--release');
+        cp target/cov/kcov-merged/cobertura.xml target;
         bash <(curl -s https://codecov.io/bash);
     else
         cargo test --workspace --verbose $($RELEASE && echo '--release');
@@ -76,6 +77,7 @@ addons:
       - libcurl4-openssl-dev
       - libelf-dev
       - libdw-dev
+      - pkg-config
 
 cache:
   cargo: true

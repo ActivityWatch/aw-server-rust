@@ -14,13 +14,13 @@ pub fn value_new(state: State<ServerState>, key: String, message: Json<String>)
     let data = message.into_inner();
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
     let result = datastore.create_value(&key, &data);
-    return result.expect("Value not created")
+    return Ok(result.expect("Value not created"))
 }
 
-#[get("/<key>")]
+#[get("/<key>")] // Is the json in the return type required?
 pub fn value_get(state: State<ServerState>, key: String) -> Result<Json<String>, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
-    return Ok(datastore.get_value(&key).expect("Error getting value {}"))
+    return Ok(Json(datastore.get_value(&key).expect("Error getting value {}")))
 }
 
 #[delete("/<key>")]

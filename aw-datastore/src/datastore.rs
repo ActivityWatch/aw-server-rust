@@ -630,6 +630,7 @@ impl DatastoreInstance {
             ))
         };
         let result: String= stmt.query_row(&[key as &str], |row|{
+            // TODO: actually return a valid response if no value received
             row.get(0)
         }).expect(&"Invalid type value received from db query.");
 

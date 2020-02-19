@@ -17,6 +17,7 @@ use crate::DatastoreMethod;
 use crate::DatastoreInstance;
 
 use mpsc_requests;
+use mpsc_requests::ResponseReceiver;
 
 type RequestSender = mpsc_requests::RequestSender<Commands, Result<Responses, DatastoreError>>;
 type RequestReceiver = mpsc_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>;
@@ -46,7 +47,8 @@ pub enum Responses {
     BucketMap(HashMap<String, Bucket>),
     Event(Event),
     EventList(Vec<Event>),
-    Count(i64)
+    Count(i64),
+    String(String)
 }
 
 #[derive(Debug,Clone)]
@@ -61,12 +63,26 @@ pub enum Commands {
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
     DeleteEventsById(String, Vec<i64>),
     ForceCommit(),
+    CreateValue(String, String),
+    GetValue(String),
+    DeleteValue(String),
 }
 
 struct DatastoreWorker {
     responder: RequestReceiver,
     legacy_import: bool,
     quit: bool
+}
+
+fn _unwrap_response(receiver: ResponseReceiver<Result<Responses, DatastoreError>>)
+                    -> Result<(), DatastoreError> {
+    match receiver.collect().unwrap() {
+        Ok(r) => match r {
+            Responses::Empty() => Ok(()),
+            _ => panic!("Invalid response")
+        },
+        Err(e) => Err(e)
+    }
 }
 
 impl DatastoreWorker {
@@ -191,6 +207,24 @@ impl DatastoreWorker {
                     Commands::ForceCommit() => {
                         commit = true;
                         Ok(Responses::Empty())
+                    },
+                    Commands::CreateValue(key, data) => {
+                        match ds.create_value(&transaction, &key, &data) {
+                            Ok(()) => Ok(Responses::Empty()),
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::GetValue(key) => {
+                        match ds.get_value(&transaction, &key) {
+                            Ok(result) => Ok(Responses::String(result)),
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::DeleteValue(key) => {
+                        match ds.delete_value(&transaction, &key) {
+                            Ok(()) => Ok(Responses::Empty()),
+                            Err(e) => Err(e)
+                        }
                     },
                 };
                 response_sender.respond(response);
@@ -347,4 +381,33 @@ impl Datastore {
             Err(e) => Err(e)
         }
     }
+
+    pub fn create_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
+        let cmd = Commands::CreateValue(key.to_string(), data.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+
+        _unwrap_response(receiver)
+    }
+
+    pub fn delete_value(&self, key: &str) -> Result<(), DatastoreError>{
+        let cmd = Commands::DeleteValue(key.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+
+        _unwrap_response(receiver)
+    }
+
+    pub fn get_value(&self, key: &str) -> Result<String, DatastoreError> {
+        let cmd = Commands::GetValue(key.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Responses::String(value) => return Ok(value),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+
 }

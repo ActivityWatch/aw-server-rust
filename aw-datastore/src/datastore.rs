@@ -30,8 +30,10 @@ fn _get_db_version(conn: &Connection) -> i32 {
  * 0: Uninitialized database
  * 1: Initialized database
  * 2: Added 'data' field to 'buckets' table
+ * 3: see: https://github.com/ActivityWatch/aw-server-rust/pull/52
+ * 4: Added 'key_value' table for storing key - value pairs
  */
-static NEWEST_DB_VERSION : i32 = 3;
+static NEWEST_DB_VERSION : i32 = 4;
 
 fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;
@@ -607,19 +609,17 @@ impl DatastoreInstance {
                 format!("Failed to prepare insert_value SQL statement: {}", err)
             ))
         };
-
         stmt.execute(&[key as &str, data as &str]).expect(
                 &format!("Failed to insert key-value pair: {}", key)
         );
-        Ok(())
+        return Ok(())
     }
 
     pub fn delete_value(&self, conn: &Connection, key: &str) -> Result<(), DatastoreError>{
         conn.execute("DELETE FROM key_value WHERE key = ?1", &[key])
             .expect("Error deleting value from database");
-        Ok(())
+        return Ok(())
     }
-
 
     pub fn get_value(&self, conn: &Connection, key: &str) -> Result<String, DatastoreError>{
         let mut stmt = match conn.prepare("
@@ -629,11 +629,10 @@ impl DatastoreInstance {
                 format!("Failed to prepare get_value SQL statement: {}", err)
             ))
         };
-
         let result: String= stmt.query_row(&[key as &str], |row|{
             row.get(0)
         }).expect(&"Invalid type value received from db query.");
 
-        Ok(result)
+        return Ok(result)
     }
 }

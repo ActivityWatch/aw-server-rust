@@ -93,6 +93,7 @@ fn server_info() -> JsonValue {
     {
         testing = true;
     }
+    //TODO: Should this be commented?
     #[cfg(not(debug_assertions))]
     {
         testing = false;
@@ -152,7 +153,7 @@ pub fn build_rocket(server_state: ServerState, config: &AWConfig) -> rocket::Roc
                export::buckets_export
         ])
         .mount("/api/0/key_value", routes![
-            key_value::value_get, key_value::value_new
+            key_value::value_get, key_value::value_new, key_value::value_delete
         ])
         .attach(cors::cors(&config))
         .register(catchers![not_modified, not_found])

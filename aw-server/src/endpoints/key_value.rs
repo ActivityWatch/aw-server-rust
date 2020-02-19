@@ -17,10 +17,18 @@ pub fn value_new(state: State<ServerState>, key: String, message: Json<String>)
     return Ok(result.expect("Value not created"))
 }
 
-#[get("/<key>")] // Is the json in the return type required?
-pub fn value_get(state: State<ServerState>, key: String) -> Result<Json<String>, Status> {
+#[get("/<key>")]
+pub fn value_get(state: State<ServerState>, key: String) -> Result<String, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
-    return Ok(Json(datastore.get_value(&key).expect("Error getting value {}")))
+    return match datastore.get_value(&key) {
+        Ok(result) =>
+            if result == "QueryReturnedNoRows" {
+                Ok(Status::NoContent.to_string())
+            } else {
+                Ok(result)
+            },
+        Err(err) => Err(Status::InternalServerError)
+    }
 }
 
 #[delete("/<key>")]

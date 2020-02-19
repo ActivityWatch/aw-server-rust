@@ -602,7 +602,7 @@ impl DatastoreInstance {
         -> Result<(), DatastoreError> {
 
         let mut stmt = match conn.prepare("
-                INSERT OR REPLACE INTO key_value(key, data)
+                INSERT OR REPLACE INTO key_value(key, value)
                 VALUES (?1, ?2)") {
             Ok(stmt) => stmt,
             Err(err) => return Err(DatastoreError::InternalError(
@@ -610,7 +610,7 @@ impl DatastoreInstance {
             ))
         };
         stmt.execute(&[key as &str, data as &str]).expect(
-                &format!("Failed to insert key-value pair: {}", key)
+            &format!("Failed to insert key-value pair: {}", key)
         );
         return Ok(())
     }
@@ -629,11 +629,18 @@ impl DatastoreInstance {
                 format!("Failed to prepare get_value SQL statement: {}", err)
             ))
         };
-        let result: String= stmt.query_row(&[key as &str], |row|{
-            // TODO: actually return a valid response if no value received
-            row.get(0)
-        }).expect(&"Invalid type value received from db query.");
 
-        return Ok(result)
+        return match stmt.query_row(&[key as &str], |row|{
+            row.get(1)
+        }) {
+            Ok(result)  => if result == "QueryReturnedNoRows" {
+                Ok("No rows found".to_string())
+            } else {
+                Ok(result)
+            },
+            Err(err) => Err(DatastoreError::InternalError(
+                format!("Get value query failed for key {}", key))
+            )
+        }
     }
 }

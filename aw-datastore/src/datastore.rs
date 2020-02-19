@@ -127,8 +127,7 @@ fn _migrate_v3_to_v4(conn: &Connection) {
     conn.execute("CREATE TABLE key_value (
         key TEXT PRIMARY KEY,
         value TEXT
-    ), '{}';", &[] as &[&dyn ToSql])
-        .expect("Failed to upgrade db and add key-value storage table");
+    );", rusqlite::NO_PARAMS).expect("Failed to upgrade db and add key-value storage table");
 
     conn.pragma_update(None, "user_version", &4).expect("Failed to update database version!");
 }
@@ -598,7 +597,7 @@ impl DatastoreInstance {
     }
 
     pub fn create_value(&self, conn: &Connection, key: &str, data: &str)
-        -> Result<&str, DatastoreError> {
+        -> Result<(), DatastoreError> {
 
         let mut stmt = match conn.prepare("
                 INSERT OR REPLACE INTO key_value(key, data)
@@ -609,33 +608,20 @@ impl DatastoreInstance {
             ))
         };
 
-        let res = stmt.execute(&[key as &str, data as &str]);
-        return match res {
-            Ok(_) => Ok(data),
-            Err(err) => {
-                Err(DatastoreError::InternalError(
-                    format!("Failed to insert key-value pair: {:?}, {}", key, err)
-                ))
-            }
-        }
+        stmt.execute(&[key as &str, data as &str]).expect(
+                &format!("Failed to insert key-value pair: {}", key)
+        );
+        Ok(())
     }
 
     pub fn delete_value(&self, conn: &Connection, key: &str) -> Result<(), DatastoreError>{
-        return match conn.execute("DELETE FROM key_value WHERE key = ?1", &[key]) {
-            Ok(_) => {
-                Ok(())
-            },
-            Err(err) => match err {
-                rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _ } =>
-                    Err(DatastoreError::InternalError(err.to_string())),
-
-                err => Err(DatastoreError::InternalError(err.to_string()))
-            }
-        }
+        conn.execute("DELETE FROM key_value WHERE key = ?1", &[key])
+            .expect("Error deleting value from database");
+        Ok(())
     }
 
 
-    pub fn get_value(&self, conn: &Connection, key: &str) -> Result<&str, DatastoreError>{
+    pub fn get_value(&self, conn: &Connection, key: &str) -> Result<String, DatastoreError>{
         let mut stmt = match conn.prepare("
                 SELECT * FROM key_value WHERE KEY = ?1") {
             Ok(stmt) => stmt,
@@ -644,14 +630,10 @@ impl DatastoreInstance {
             ))
         };
 
-        let res = stmt.execute(&[key as &str]);
-        return match res {
-            Ok(_) => Ok(data),
-            Err(err) => {
-                Err(DatastoreError::InternalError(
-                    format!("Failed to get value with key: {:?}, {}", key, err)
-                ))
-            }
-        }
+        let result: String= stmt.query_row(&[key as &str], |row|{
+            row.get(0)
+        }).expect(&"Invalid type value received from db query.");
+
+        Ok(result)
     }
 }

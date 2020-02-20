@@ -5,16 +5,18 @@ use rocket::State;
 use crate::endpoints::ServerState;
 
 use aw_datastore::Datastore;
-use aw_datastore::DatastoreError;
 
 #[post("/<key>", data="<message>")]
 pub fn value_new(state: State<ServerState>, key: String, message: Json<String>)
-    -> Result<(), Status> {
+    -> Result<Status, Status> {
 
     let data = message.into_inner();
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
     let result = datastore.create_value(&key, &data);
-    return Ok(result.expect("Value not created"))
+    return match result {
+        Ok(r) => Ok(Status::Created),
+        Err(err) => Err(Status::InternalServerError)
+    }
 }
 
 #[get("/<key>")]
@@ -27,7 +29,7 @@ pub fn value_get(state: State<ServerState>, key: String) -> Result<String, Statu
             } else {
                 Ok(result)
             },
-        Err(err) => Err(Status::InternalServerError)
+        Err(_) => Err(Status::InternalServerError)
     }
 }
 

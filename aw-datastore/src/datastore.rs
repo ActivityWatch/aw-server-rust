@@ -129,7 +129,8 @@ fn _migrate_v3_to_v4(conn: &Connection) {
     conn.execute("CREATE TABLE key_value (
         key TEXT PRIMARY KEY,
         value TEXT
-    );", rusqlite::NO_PARAMS).expect("Failed to upgrade db and add key-value storage table");
+    );", rusqlite::NO_PARAMS)
+        .expect("Failed to upgrade db and add key-value storage table");
 
     conn.pragma_update(None, "user_version", &4).expect("Failed to update database version!");
 }
@@ -633,14 +634,13 @@ impl DatastoreInstance {
         return match stmt.query_row(&[key as &str], |row|{
             row.get(1)
         }) {
-            Ok(result)  => if result == "QueryReturnedNoRows" {
-                Ok("No rows found".to_string())
-            } else {
-                Ok(result)
-            },
-            Err(err) => Err(DatastoreError::InternalError(
-                format!("Get value query failed for key {}", key))
-            )
+            Ok(result)  => Ok(result),
+            Err(err) => match err {
+                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchValue),
+                _ => Err(DatastoreError::InternalError(
+                              format!("Get value query failed for key {}", key))
+                )
+            }
         }
     }
 }

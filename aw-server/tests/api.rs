@@ -12,13 +12,13 @@ extern crate aw_datastore;
 mod api_tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use rocket::http::Header;
-    use rocket::http::ContentType;
+    use rocket::http::{Header, ContentType, Status };
 
     use aw_server::config;
     use aw_server::endpoints;
 
     use aw_models::{Bucket, BucketsExport};
+    use rocket::local::{Client, LocalResponse};
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
@@ -334,4 +334,86 @@ mod api_tests {
         assert_eq!(res.body_string().unwrap(), r#"{"message":"EmptyQuery","reason":"Internal Server Error (Query Error)","status":500}"#);
     }
 
+    fn create_value_request(client: &Client, key: &str) -> Status {
+        let res = client.post("/api/0/key_value/".to_string() + &key.to_string())
+            .header(ContentType::JSON)
+            .body(r#""test_value""#)
+            .dispatch();
+        res.status()
+    }
+
+    #[test]
+    fn test_creating_value() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        // Test value creation
+        let response_status = create_value_request(&client, "test_key");
+        assert_eq!(response_status, rocket::http::Status::Created);
+
+    }
+
+    #[test]
+    fn test_getting_not_found_value() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        // Test getting not found (getting nonexistent key)
+        let mut res = client.get("/api/0/key_value/non_existent_key")
+        .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.body_string().unwrap(), r#"No such value"#);
+    }
+
+
+
+    #[test]
+    fn test_getting_value() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        let response_status = create_value_request(&client, "test_key");
+        assert_eq!(response_status, rocket::http::Status::Created);
+
+        // Test getting
+        let mut res = client.get("/api/0/key_value/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.body_string().unwrap(), r#"test_value"#);
+    }
+
+    #[test]
+    fn test_updating_value() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        let response_status = create_value_request(&client, "test_key");
+        assert_eq!(response_status, rocket::http::Status::Created);
+
+        let res = client.post("/api/0/key_value/test_key")
+            .header(ContentType::JSON)
+            .body(r#""changed_test_value""#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Created);
+
+        let mut res = client.get("/api/0/key_value/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.body_string().unwrap(), r#"changed_test_value"#);
+    }
+
+    #[test]
+    fn test_deleting_value() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        let response_status = create_value_request(&client, "test_key");
+        assert_eq!(response_status, rocket::http::Status::Created);
+
+        // Test deleting
+        let res = client.delete("/api/0/key_value/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        let mut res = client.get("/api/0/key_value/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.body_string().unwrap(), r#"No such value"#);
+    }
 }

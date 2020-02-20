@@ -23,8 +23,8 @@ pub fn value_new(state: State<ServerState>, key: String, message: Json<String>)
 pub fn value_get(state: State<ServerState>, key: String) -> Result<String, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
     return match datastore.get_value(&key) {
-        Ok(result) => Ok(result + "\n"),
-        Err(DatastoreError::NoSuchValue) => Ok(Status::NoContent.to_string()),
+        Ok(result) => Ok(result),
+        Err(DatastoreError::NoSuchValue) => Ok("No such value".to_string()),
         Err(_) => Err(Status::InternalServerError)
     }
 }

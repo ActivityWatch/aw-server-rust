@@ -63,7 +63,7 @@ pub enum Commands {
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
     DeleteEventsById(String, Vec<i64>),
     ForceCommit(),
-    CreateValue(String, String),
+    InsertValue(String, String),
     GetValue(String),
     DeleteValue(String),
 }
@@ -208,8 +208,8 @@ impl DatastoreWorker {
                         commit = true;
                         Ok(Responses::Empty())
                     },
-                    Commands::CreateValue(key, data) => {
-                        match ds.create_value(&transaction, &key, &data) {
+                    Commands::InsertValue(key, data) => {
+                        match ds.insert_value(&transaction, &key, &data) {
                             Ok(()) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
@@ -382,8 +382,8 @@ impl Datastore {
         }
     }
 
-    pub fn create_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
-        let cmd = Commands::CreateValue(key.to_string(), data.to_string());
+    pub fn insert_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
+        let cmd = Commands::InsertValue(key.to_string(), data.to_string());
         let receiver = self.requester.request(cmd).unwrap();
 
         _unwrap_response(receiver)

@@ -599,7 +599,7 @@ impl DatastoreInstance {
         return Ok(count);
     }
 
-    pub fn create_value(&self, conn: &Connection, key: &str, data: &str)
+    pub fn insert_value(&self, conn: &Connection, key: &str, data: &str)
         -> Result<(), DatastoreError> {
 
         let mut stmt = match conn.prepare("

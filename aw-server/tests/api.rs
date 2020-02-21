@@ -18,7 +18,7 @@ mod api_tests {
     use aw_server::endpoints;
 
     use aw_models::{Bucket, BucketsExport};
-    use rocket::local::{Client, LocalResponse};
+    use rocket::local::Client;
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
@@ -361,11 +361,11 @@ mod api_tests {
         // Test getting not found (getting nonexistent key)
         let mut res = client.get("/api/0/key_value/non_existent_key")
         .dispatch();
-        assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#"No such value"#);
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+        assert_eq!(res.body_string().unwrap(),
+                   r#"{"reason":"Resource was not found.","status":404}"#
+        );
     }
-
-
 
     #[test]
     fn test_getting_value() {
@@ -413,7 +413,8 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         let mut res = client.get("/api/0/key_value/test_key").dispatch();
-        assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#"No such value"#);
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+        assert_eq!(res.body_string().unwrap(),
+                   r#"{"reason":"Resource was not found.","status":404}"#);
     }
 }

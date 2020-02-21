@@ -10,6 +10,8 @@ use aw_datastore::{Datastore, DatastoreError};
 pub fn value_new(state: State<ServerState>, key: String, message: Json<String>)
     -> Result<Status, Status> {
 
+    if key.len() >= 128 { return Err(Status::BadRequest) };;
+
     let data = message.into_inner();
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
     let result = datastore.insert_value(&key, &data);
@@ -25,6 +27,8 @@ pub fn value_new(state: State<ServerState>, key: String, message: Json<String>)
 
 #[get("/<key>")]
 pub fn value_get(state: State<ServerState>, key: String) -> Result<String, Status> {
+    if key.len() >= 128 { return Err(Status::BadRequest) };;
+
     let datastore = endpoints_get_lock!(state.datastore);
     return match datastore.get_value(&key) {
         Ok(result) => Ok(result),
@@ -38,6 +42,8 @@ pub fn value_get(state: State<ServerState>, key: String) -> Result<String, Statu
 
 #[delete("/<key>")]
 pub fn value_delete(state: State<ServerState>, key: String) -> Result<(), Status> {
+    if key.len() > 128 { return Err(Status::BadRequest) };;
+
     let datastore = endpoints_get_lock!(state.datastore);
     let result = datastore.delete_value(&key);
     return match result {

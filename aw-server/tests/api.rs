@@ -343,6 +343,17 @@ mod api_tests {
     }
 
     #[test]
+    fn test_illegally_long_key() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        // Test getting not found (getting nonexistent key)
+        let mut res = client.get("/api/0/key_value/thisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongk")
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+    }
+
+    #[test]
     fn test_creating_value() {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
@@ -359,12 +370,9 @@ mod api_tests {
         let client = rocket::local::Client::new(server).expect("valid instance");
 
         // Test getting not found (getting nonexistent key)
-        let mut res = client.get("/api/0/key_value/non_existent_key")
+        let res = client.get("/api/0/key_value/non_existent_key")
         .dispatch();
         assert_eq!(res.status(), rocket::http::Status::NotFound);
-        assert_eq!(res.body_string().unwrap(),
-                   r#"{"reason":"Resource was not found.","status":404}"#
-        );
     }
 
     #[test]
@@ -414,7 +422,5 @@ mod api_tests {
 
         let mut res = client.get("/api/0/key_value/test_key").dispatch();
         assert_eq!(res.status(), rocket::http::Status::NotFound);
-        assert_eq!(res.body_string().unwrap(),
-                   r#"{"reason":"Resource was not found.","status":404}"#);
     }
 }

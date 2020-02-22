@@ -643,4 +643,34 @@ impl DatastoreInstance {
             }
         }
     }
+
+    pub fn get_values_starting(&self, conn: &Connection, pattern: &str) -> Result<HashMap<String, String>, DatastoreError>{
+        let mut stmt = match conn.prepare("
+                SELECT * FROM key_value WHERE pattern LIKE ?1%") {
+            Ok(stmt) => stmt,
+            Err(err) => return Err(DatastoreError::InternalError(
+                format!("Failed to prepare get_value SQL statement: {}", err)
+            ))
+        };
+
+        let mut output = HashMap::<String, String>::new();
+        let result = stmt.query(&[pattern as &str]);
+
+        match result {
+            Ok(rows) => {
+                // Unwrap to String tuple or panic on SQL row if types are invalid.
+                // should never happen with a properly initialized table
+                rows.map(|row| Ok(output.insert(
+                    row.get::<usize, String>(0).expect("Invalid sql structure"),
+                    row.get::<usize, String>(1).expect("Invalid sql structure"))));
+                Ok(output)
+            },
+            Err(err) => match err {
+                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchValue),
+                _ => Err(DatastoreError::InternalError(
+                    format!("Failed to get key_value rows starting with pattern {}", pattern))
+                )
+            }
+        }
+    }
 }

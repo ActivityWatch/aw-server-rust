@@ -1,23 +1,30 @@
-use std::sync::MutexGuard;
-use rocket_contrib::json::Json;
+use crate::endpoints::ServerState;
 use rocket::http::Status;
 use rocket::State;
-use crate::endpoints::ServerState;
+use rocket_contrib::json::Json;
+use std::collections::HashMap;
+use std::sync::MutexGuard;
 
 use aw_datastore::{Datastore, DatastoreError};
 
 fn parse_key(key: String) -> Result<String, Status> {
-    if key.len() >= 128 { return Err(Status::BadRequest) }
-    else { Ok(key + ".settings")  }
+    let mut namespace: String = "settings.".to_string();
+    if key.len() >= 128 {
+        return Err(Status::BadRequest);
+    } else {
+        Ok(namespace + key.as_str())
+    }
 }
 
-#[post("/<key>", data="<message>")]
-pub fn setting_new(state: State<ServerState>, key: String, message: Json<String>)
-    -> Result<Status, Status> {
-
+#[post("/<key>", data = "<message>")]
+pub fn setting_new(
+    state: State<ServerState>,
+    key: String,
+    message: Json<String>,
+) -> Result<Status, Status> {
     let setting_key = match parse_key(key) {
-            Ok(k) => k,
-            Err(err) => return Err(err)
+        Ok(k) => k,
+        Err(err) => return Err(err),
     };
     let data = message.into_inner();
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
@@ -26,42 +33,57 @@ pub fn setting_new(state: State<ServerState>, key: String, message: Json<String>
         // TODO: Different status for replacement / creation (requires some sql adjustment)
         Ok(_) => Ok(Status::Created),
         Err(err) => {
-            warn!("Unexpected error when creating value: {:?}", err);
+            warn!("Unexpected error when creating setting: {:?}", err);
             Err(Status::InternalServerError)
         }
-    }
+    };
+}
+
+#[get("/")]
+pub fn settings_list_get(
+    state: State<ServerState>,
+) -> Result<Json<HashMap<String, String>>, Status> {
+    let datastore = endpoints_get_lock!(state.datastore);
+    return match datastore.get_values_starting("settings.") {
+        Ok(result) => Ok(Json(result)),
+        Err(DatastoreError::NoSuchValue) => Err(Status::NotFound),
+        Err(err) => {
+            warn!("Unexpected error when getting setting: {:?}", err);
+            Err(Status::InternalServerError)
+        }
+    };
 }
 
 #[get("/<key>")]
 pub fn setting_get(state: State<ServerState>, key: String) -> Result<String, Status> {
     let setting_key = match parse_key(key) {
         Ok(k) => k,
-        Err(err) => return Err(err)
+        Err(err) => return Err(err),
     };
     let datastore = endpoints_get_lock!(state.datastore);
     return match datastore.get_value(&setting_key) {
         Ok(result) => Ok(result),
         Err(DatastoreError::NoSuchValue) => Err(Status::NotFound),
         Err(err) => {
-            warn!("Unexpected error when getting value: {:?}", err);
+            warn!("Unexpected error when getting setting: {:?}", err);
             Err(Status::InternalServerError)
         }
-    }
+    };
 }
 
 #[delete("/<key>")]
 pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), Status> {
     let setting_key = match parse_key(key) {
         Ok(k) => k,
-        Err(err) => return Err(err)
+        Err(err) => return Err(err),
     };
     let datastore = endpoints_get_lock!(state.datastore);
     let result = datastore.delete_value(&setting_key);
     return match result {
         Ok(_) => Ok(()),
         Err(err) => {
-            warn!("Unexpected error when deleting value: {:?}", err);
+            warn!("Unexpected error when deleting setting: {:?}", err);
             Err(Status::InternalServerError)
         }
-    }
+    };
 }

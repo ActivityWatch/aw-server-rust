@@ -374,6 +374,12 @@ mod api_tests {
         .dispatch();
         assert_eq!(res.status(), rocket::http::Status::NotFound);
     }
+    /// TODO: Add a test for the settings list here
+    #[test]
+    fn settings_list_get() {
+
+        assert!(false)
+    }
 
     #[test]
     fn test_getting_setting() {

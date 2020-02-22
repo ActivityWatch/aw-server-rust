@@ -7,7 +7,7 @@ use crate::endpoints::ServerState;
 use aw_datastore::{Datastore, DatastoreError};
 
 #[post("/<key>", data="<message>")]
-pub fn value_new(state: State<ServerState>, key: String, message: Json<String>)
+pub fn setting_new(state: State<ServerState>, key: String, message: Json<String>)
     -> Result<Status, Status> {
 
     if key.len() >= 128 { return Err(Status::BadRequest) };;
@@ -26,7 +26,7 @@ pub fn value_new(state: State<ServerState>, key: String, message: Json<String>)
 }
 
 #[get("/<key>")]
-pub fn value_get(state: State<ServerState>, key: String) -> Result<String, Status> {
+pub fn setting_get(state: State<ServerState>, key: String) -> Result<String, Status> {
     if key.len() >= 128 { return Err(Status::BadRequest) };;
 
     let datastore = endpoints_get_lock!(state.datastore);
@@ -41,7 +41,7 @@ pub fn value_get(state: State<ServerState>, key: String) -> Result<String, Statu
 }
 
 #[delete("/<key>")]
-pub fn value_delete(state: State<ServerState>, key: String) -> Result<(), Status> {
+pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), Status> {
     if key.len() > 128 { return Err(Status::BadRequest) };;
 
     let datastore = endpoints_get_lock!(state.datastore);

@@ -30,7 +30,7 @@ mod query;
 mod import;
 mod cors;
 mod export;
-mod key_value;
+mod settings;
 
 use aw_datastore::Datastore;
 
@@ -152,8 +152,8 @@ pub fn build_rocket(server_state: ServerState, config: &AWConfig) -> rocket::Roc
         .mount("/api/0/export", routes![
                export::buckets_export
         ])
-        .mount("/api/0/key_value", routes![
-            key_value::value_get, key_value::value_new, key_value::value_delete
+        .mount("/api/0/settings", routes![
+            settings::setting_get, settings::setting_new, settings::setting_delete
         ])
         .attach(cors::cors(&config))
         .register(catchers![not_modified, not_found])

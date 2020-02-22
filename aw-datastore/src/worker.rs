@@ -420,7 +420,7 @@ impl Datastore {
     pub fn get_values_starting(&self, key: &str) -> Result<HashMap<String, String>, DatastoreError> {
         let cmd = Commands::GetValuesStarting(key.to_string());
         let receiver = self.requester.request(cmd).unwrap();
-
+        
         match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::KeyValueMap(value) => return Ok(value),

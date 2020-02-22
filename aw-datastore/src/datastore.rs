@@ -610,7 +610,7 @@ impl DatastoreInstance {
                 format!("Failed to prepare insert_value SQL statement: {}", err)
             ))
         };
-        stmt.execute(&[key as &str, data as &str]).expect(
+        stmt.execute(&[key, data]).expect(
             &format!("Failed to insert key-value pair: {}", key)
         );
         return Ok(())
@@ -631,7 +631,7 @@ impl DatastoreInstance {
             ))
         };
 
-        return match stmt.query_row(&[key as &str], |row|{
+        return match stmt.query_row(&[key], |row|{
             row.get(1)
         }) {
             Ok(result)  => Ok(result),
@@ -644,9 +644,10 @@ impl DatastoreInstance {
         }
     }
 
-    pub fn get_values_starting(&self, conn: &Connection, pattern: &str) -> Result<HashMap<String, String>, DatastoreError>{
-        let mut stmt = match conn.prepare("
-                SELECT * FROM key_value WHERE pattern LIKE ?1%") {
+    pub fn get_values_starting(&self, conn: &Connection, pattern: &str) 
+        -> Result<HashMap<String, String>, DatastoreError>
+    {
+        let mut stmt = match conn.prepare("SELECT * FROM key_value WHERE key LIKE '.%' ") {
             Ok(stmt) => stmt,
             Err(err) => return Err(DatastoreError::InternalError(
                 format!("Failed to prepare get_value SQL statement: {}", err)
@@ -654,7 +655,7 @@ impl DatastoreInstance {
         };
 
         let mut output = HashMap::<String, String>::new();
-        let result = stmt.query(&[pattern as &str]);
+        let result = stmt.query(&[pattern]);
 
         match result {
             Ok(rows) => {

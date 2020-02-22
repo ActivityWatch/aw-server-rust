@@ -1,14 +1,14 @@
 use crate::endpoints::ServerState;
 use rocket::http::Status;
 use rocket::State;
-use rocket_contrib::json::Json;
+use rocket_contrib::json::{Json, JsonValue};
 use std::collections::HashMap;
 use std::sync::MutexGuard;
 
 use aw_datastore::{Datastore, DatastoreError};
 
 fn parse_key(key: String) -> Result<String, Status> {
-    let mut namespace: String = "settings.".to_string();
+    let namespace: String = "settings.".to_string();
     if key.len() >= 128 {
         return Err(Status::BadRequest);
     } else {
@@ -42,10 +42,10 @@ pub fn setting_new(
 #[get("/")]
 pub fn settings_list_get(
     state: State<ServerState>,
-) -> Result<Json<HashMap<String, String>>, Status> {
+) -> Result<JsonValue, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
     return match datastore.get_values_starting("settings.") {
-        Ok(result) => Ok(Json(result)),
+        Ok(result) => Ok(json!(result)),
         Err(DatastoreError::NoSuchValue) => Err(Status::NotFound),
         Err(err) => {
             warn!("Unexpected error when getting setting: {:?}", err);

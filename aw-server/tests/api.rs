@@ -377,8 +377,19 @@ mod api_tests {
     /// TODO: Add a test for the settings list here
     #[test]
     fn settings_list_get() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
 
-        assert!(false)
+        let response1_status = create_value_request(&client, "test_key");
+        assert_eq!(response1_status, rocket::http::Status::Created);
+        let response2_status = create_value_request(&client, "test_key");
+        assert_eq!(response2_status, rocket::http::Status::Created);
+
+        let mut res = client.get("/api/0/settings/").dispatch();
+        
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.body_string().unwrap(), r#""#);
+        
     }
 
     #[test]

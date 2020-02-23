@@ -599,7 +599,7 @@ impl DatastoreInstance {
         return Ok(count);
     }
 
-    pub fn insert_value(&self, conn: &Connection, key: &str, data: &str)
+    pub fn insert_key_value(&self, conn: &Connection, key: &str, data: &str)
         -> Result<(), DatastoreError> {
 
         let mut stmt = match conn.prepare("
@@ -616,13 +616,13 @@ impl DatastoreInstance {
         return Ok(())
     }
 
-    pub fn delete_value(&self, conn: &Connection, key: &str) -> Result<(), DatastoreError>{
+    pub fn delete_key_value(&self, conn: &Connection, key: &str) -> Result<(), DatastoreError>{
         conn.execute("DELETE FROM key_value WHERE key = ?1", &[key])
             .expect("Error deleting value from database");
         return Ok(())
     }
 
-    pub fn get_value(&self, conn: &Connection, key: &str) -> Result<String, DatastoreError>{
+    pub fn get_key_value(&self, conn: &Connection, key: &str) -> Result<String, DatastoreError>{
         let mut stmt = match conn.prepare("
                 SELECT * FROM key_value WHERE KEY = ?1") {
             Ok(stmt) => stmt,
@@ -644,7 +644,7 @@ impl DatastoreInstance {
         }
     }
 
-    pub fn get_values_starting(&self, conn: &Connection, pattern: &str)
+    pub fn get_keys_starting(&self, conn: &Connection, pattern: &str)
         -> Result<HashMap<String, String>, DatastoreError>
     {
         let mut stmt = match conn.prepare("SELECT * FROM key_value WHERE key LIKE '.%' ") {

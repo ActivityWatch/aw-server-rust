@@ -64,10 +64,10 @@ pub enum Commands {
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
     DeleteEventsById(String, Vec<i64>),
     ForceCommit(),
-    InsertValue(String, String),
-    GetValue(String),
-    GetValuesStarting(String),
-    DeleteValue(String),
+    InsertKeyValue(String, String),
+    GetKeyValue(String),
+    GetKeysStarting(String),
+    DeleteKeyValue(String),
 }
 
 struct DatastoreWorker {
@@ -210,26 +210,28 @@ impl DatastoreWorker {
                         commit = true;
                         Ok(Responses::Empty())
                     },
-                    Commands::InsertValue(key, data) => {
-                        match ds.insert_value(&transaction, &key, &data) {
+                    Commands::InsertKeyValue(key, data) => {
+                        match ds.insert_key_value(&transaction, &key, &data) {
                             Ok(()) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
                     },
-                    Commands::GetValue(key) => {
-                        match ds.get_value(&transaction, &key) {
+                    Commands::GetKeyValue(key) => {
+                        match ds.get_key_value(&transaction, &key) {
                             Ok(result) => Ok(Responses::String(result)),
                             Err(e) => Err(e)
                         }
                     },
-                    Commands::GetValuesStarting(pattern) => {
-                        match ds.get_values_starting(&transaction, &pattern) {
+                    Commands::GetKeysStarting(pattern) => {
+                        match ds.get_keys_starting(&transaction, &pattern) {
                             Ok(result) => Ok(Responses::KeyValueMap(result)),
                             Err(e) => Err(e)
                         }
+                        
+                        
                     },
-                    Commands::DeleteValue(key) => {
-                        match ds.delete_value(&transaction, &key) {
+                    Commands::DeleteKeyValue(key) => {
+                        match ds.delete_key_value(&transaction, &key) {
                             Ok(()) => Ok(Responses::Empty()),
                             Err(e) => Err(e)
                         }
@@ -390,22 +392,22 @@ impl Datastore {
         }
     }
 
-    pub fn insert_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
-        let cmd = Commands::InsertValue(key.to_string(), data.to_string());
+    pub fn insert_key_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
+        let cmd = Commands::InsertKeyValue(key.to_string(), data.to_string());
         let receiver = self.requester.request(cmd).unwrap();
 
         _unwrap_response(receiver)
     }
 
-    pub fn delete_value(&self, key: &str) -> Result<(), DatastoreError>{
-        let cmd = Commands::DeleteValue(key.to_string());
+    pub fn delete_key_value(&self, key: &str) -> Result<(), DatastoreError>{
+        let cmd = Commands::DeleteKeyValue(key.to_string());
         let receiver = self.requester.request(cmd).unwrap();
 
         _unwrap_response(receiver)
     }
 
-    pub fn get_value(&self, key: &str) -> Result<String, DatastoreError> {
-        let cmd = Commands::GetValue(key.to_string());
+    pub fn get_key_value(&self, key: &str) -> Result<String, DatastoreError> {
+        let cmd = Commands::GetKeyValue(key.to_string());
         let receiver = self.requester.request(cmd).unwrap();
 
         match receiver.collect().unwrap() {
@@ -417,8 +419,8 @@ impl Datastore {
         }
     }
 
-    pub fn get_values_starting(&self, pattern: &str) -> Result<HashMap<String, String>, DatastoreError> {
-        let cmd = Commands::GetValuesStarting(pattern.to_string());
+    pub fn get_keys_starting(&self, pattern: &str) -> Result<HashMap<String, String>, DatastoreError> {
+        let cmd = Commands::GetKeysStarting(pattern.to_string());
         let receiver = self.requester.request(cmd).unwrap();
         
         match receiver.collect().unwrap() {

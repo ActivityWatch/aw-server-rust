@@ -26,7 +26,7 @@ pub fn setting_set(
     let setting_key = parse_key(data.key)?;
 
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
-    let result = datastore.insert_value(&setting_key, &data.value);
+    let result = datastore.insert_key_value(&setting_key, &data.value);
     return match result {
         // TODO: Different status for replacement / creation (requires some sql adjustment)
         Ok(_) => Ok(Status::Created),
@@ -42,7 +42,7 @@ pub fn settings_list_get(
     state: State<ServerState>,
 ) -> Result<JsonValue, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
-    return match datastore.get_values_starting("settings.") {
+    return match datastore.get_keys_starting("settings.") {
         Ok(result) => Ok(json!(result)),
         Err(DatastoreError::NoSuchValue) => Err(Status::NotFound),
         Err(err) => {
@@ -57,7 +57,7 @@ pub fn setting_get(state: State<ServerState>, key: String) -> Result<Json<KeyVal
     let setting_key = parse_key(key)?;
 
     let datastore = endpoints_get_lock!(state.datastore);
-    return match datastore.get_value(&setting_key) {
+    return match datastore.get_key_value(&setting_key) {
         Ok(result) => Ok(Json(KeyValue{ key: setting_key, value: result })),
         Err(DatastoreError::NoSuchValue) => Err(Status::NotFound),
         Err(err) => {
@@ -72,7 +72,7 @@ pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), Stat
     let setting_key = parse_key(key)?;
 
     let datastore = endpoints_get_lock!(state.datastore);
-    let result = datastore.delete_value(&setting_key);
+    let result = datastore.delete_key_value(&setting_key);
     return match result {
         Ok(_) => Ok(()),
         Err(err) => {

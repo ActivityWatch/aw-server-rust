@@ -31,7 +31,7 @@ pub enum DatastoreMethod {
 pub enum DatastoreError {
     NoSuchBucket,
     BucketAlreadyExists,
-    NoSuchValue,
+    NoSuchKey,
     MpscError,
     InternalError(String),
     // Errors specific to when migrate is disabled

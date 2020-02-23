@@ -636,7 +636,7 @@ impl DatastoreInstance {
         }) {
             Ok(result)  => Ok(result),
             Err(err) => match err {
-                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchValue),
+                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchKey),
                 _ => Err(DatastoreError::InternalError(
                               format!("Get value query failed for key {}", key))
                 )
@@ -678,7 +678,7 @@ impl DatastoreInstance {
                 Ok(output)
             }
             Err(err) => match err {
-                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchValue),
+                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchKey),
                 _ => Err(DatastoreError::InternalError(format!(
                     "Failed to get key_value rows starting with pattern {}",
                     pattern

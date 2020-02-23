@@ -1,8 +1,9 @@
 use crate::endpoints::ServerState;
 use rocket::http::Status;
 use rocket::State;
-use rocket_contrib::json::{Json, JsonValue};
+use rocket_contrib::json::Json;
 use std::sync::MutexGuard;
+use std::collections::HashMap;
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::KeyValue;
@@ -40,11 +41,11 @@ pub fn setting_set(
 #[get("/")]
 pub fn settings_list_get(
     state: State<ServerState>,
-) -> Result<JsonValue, Status> {
+) -> Result<Json<HashMap<String, String>>, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
     return match datastore.get_keys_starting("settings.") {
-        Ok(result) => Ok(json!(result)),
-        Err(DatastoreError::NoSuchValue) => Err(Status::NotFound),
+        Ok(result) => Ok(Json(result)),
+        Err(DatastoreError::NoSuchKey) => Err(Status::NotFound),
         Err(err) => {
             warn!("Unexpected error when getting setting: {:?}", err);
             Err(Status::InternalServerError)
@@ -59,7 +60,7 @@ pub fn setting_get(state: State<ServerState>, key: String) -> Result<Json<KeyVal
     let datastore = endpoints_get_lock!(state.datastore);
     return match datastore.get_key_value(&setting_key) {
         Ok(result) => Ok(Json(KeyValue{ key: setting_key, value: result })),
-        Err(DatastoreError::NoSuchValue) => Err(Status::NotFound),
+        Err(DatastoreError::NoSuchKey) => Err(Status::NotFound),
         Err(err) => {
             warn!("Unexpected error when getting setting: {:?}", err);
             Err(Status::InternalServerError)

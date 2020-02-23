@@ -5,6 +5,7 @@ use rocket_contrib::json::{Json, JsonValue};
 use std::sync::MutexGuard;
 
 use aw_datastore::{Datastore, DatastoreError};
+use aw_models::KeyValue;
 
 fn parse_key(key: String) -> Result<String, Status> {
     let namespace: String = "settings.".to_string();
@@ -15,19 +16,17 @@ fn parse_key(key: String) -> Result<String, Status> {
     }
 }
 
-#[post("/<key>", data = "<message>")]
-pub fn setting_new(
+#[post("/", data = "<message>")]
+pub fn setting_set(
     state: State<ServerState>,
-    key: String,
-    message: Json<String>,
+    message: Json<KeyValue>,
 ) -> Result<Status, Status> {
-    let setting_key = match parse_key(key) {
-        Ok(k) => k,
-        Err(err) => return Err(err),
-    };
     let data = message.into_inner();
+    
+    let setting_key = parse_key(data.key)?;
+
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
-    let result = datastore.insert_value(&setting_key, &data);
+    let result = datastore.insert_value(&setting_key, &data.value);
     return match result {
         // TODO: Different status for replacement / creation (requires some sql adjustment)
         Ok(_) => Ok(Status::Created),
@@ -54,14 +53,12 @@ pub fn settings_list_get(
 }
 
 #[get("/<key>")]
-pub fn setting_get(state: State<ServerState>, key: String) -> Result<String, Status> {
-    let setting_key = match parse_key(key) {
-        Ok(k) => k,
-        Err(err) => return Err(err),
-    };
+pub fn setting_get(state: State<ServerState>, key: String) -> Result<Json<KeyValue>, Status> {
+    let setting_key = parse_key(key)?;
+
     let datastore = endpoints_get_lock!(state.datastore);
     return match datastore.get_value(&setting_key) {
-        Ok(result) => Ok(result),
+        Ok(result) => Ok(Json(KeyValue{ key: setting_key, value: result })),
         Err(DatastoreError::NoSuchValue) => Err(Status::NotFound),
         Err(err) => {
             warn!("Unexpected error when getting setting: {:?}", err);
@@ -72,10 +69,8 @@ pub fn setting_get(state: State<ServerState>, key: String) -> Result<String, Sta
 
 #[delete("/<key>")]
 pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), Status> {
-    let setting_key = match parse_key(key) {
-        Ok(k) => k,
-        Err(err) => return Err(err),
-    };
+    let setting_key = parse_key(key)?;
+
     let datastore = endpoints_get_lock!(state.datastore);
     let result = datastore.delete_value(&setting_key);
     return match result {

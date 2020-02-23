@@ -421,7 +421,7 @@ impl Datastore {
         let cmd = Commands::GetValuesStarting(pattern.to_string());
         let receiver = self.requester.request(cmd).unwrap();
         
-        match receiver.collect().expect("This should unwrap") {
+        match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::KeyValueMap(value) => return Ok(value),
                 _ => panic!("Invalid response")
@@ -429,5 +429,4 @@ impl Datastore {
             Err(e) => Err(e)
         }
     }
-
 }

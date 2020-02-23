@@ -334,10 +334,11 @@ mod api_tests {
         assert_eq!(res.body_string().unwrap(), r#"{"message":"EmptyQuery","reason":"Internal Server Error (Query Error)","status":500}"#);
     }
 
-    fn create_value_request(client: &Client, key: &str) -> Status {
-        let res = client.post("/api/0/settings/".to_string() + &key.to_string())
+    fn set_setting_request(client: &Client, key: &str) -> Status {
+        use aw_models::KeyValue;
+        let res = client.post("/api/0/settings/")
             .header(ContentType::JSON)
-            .body(r#""test_value""#)
+            .body(KeyValue { key: key, value: "test_value" } )
             .dispatch();
         res.status()
     }
@@ -354,12 +355,12 @@ mod api_tests {
     }
 
     #[test]
-    fn test_creating_value() {
+    fn test_setting_setting() {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
         // Test value creation
-        let response_status = create_value_request(&client, "test_key");
+        let response_status = set_setting_request(&client, "test_key");
         assert_eq!(response_status, rocket::http::Status::Created);
 
     }
@@ -374,15 +375,15 @@ mod api_tests {
         .dispatch();
         assert_eq!(res.status(), rocket::http::Status::NotFound);
     }
-    /// TODO: Add a test for the settings list here
+
     #[test]
     fn settings_list_get() {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
-        let response1_status = create_value_request(&client, "test_key");
+        let response1_status = set_setting_request(&client, "test_key");
         assert_eq!(response1_status, rocket::http::Status::Created);
-        let response2_status = create_value_request(&client, "test_key");
+        let response2_status = set_setting_request(&client, "test_key");
         assert_eq!(response2_status, rocket::http::Status::Created);
 
         let mut res = client.get("/api/0/settings/").dispatch();
@@ -397,7 +398,7 @@ mod api_tests {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
-        let response_status = create_value_request(&client, "test_key");
+        let response_status = set_setting_request(&client, "test_key");
         assert_eq!(response_status, rocket::http::Status::Created);
 
         // Test getting
@@ -411,7 +412,7 @@ mod api_tests {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
-        let response_status = create_value_request(&client, "test_key");
+        let response_status = set_setting_request(&client, "test_key");
         assert_eq!(response_status, rocket::http::Status::Created);
 
         let res = client.post("/api/0/settings/test_key")
@@ -430,7 +431,7 @@ mod api_tests {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
-        let response_status = create_value_request(&client, "test_key");
+        let response_status = set_setting_request(&client, "test_key");
         assert_eq!(response_status, rocket::http::Status::Created);
 
         // Test deleting

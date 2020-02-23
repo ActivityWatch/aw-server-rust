@@ -153,7 +153,7 @@ pub fn build_rocket(server_state: ServerState, config: &AWConfig) -> rocket::Roc
                export::buckets_export
         ])
         .mount("/api/0/settings", routes![
-            settings::setting_get, settings::settings_list_get, settings::setting_new, settings::setting_delete
+            settings::setting_get, settings::settings_list_get, settings::setting_set, settings::setting_delete
         ])
         .attach(cors::cors(&config))
         .register(catchers![not_modified, not_found])

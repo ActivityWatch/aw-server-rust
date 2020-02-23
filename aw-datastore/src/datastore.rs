@@ -644,23 +644,30 @@ impl DatastoreInstance {
         }
     }
 
-    pub fn get_values_starting(&self, conn: &Connection, pattern: &str) 
+    pub fn get_values_starting(&self, conn: &Connection, pattern: &str)
         -> Result<HashMap<String, String>, DatastoreError>
     {
         let mut stmt = match conn.prepare("SELECT * FROM key_value WHERE key LIKE '.%' ") {
             Ok(stmt) => stmt,
-            Err(err) => return Err(DatastoreError::InternalError(
-                format!("Failed to prepare get_value SQL statement: {}", err)
-            ))
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to prepare get_value SQL statement: {}",
+                    err
+                )))
+            }
         };
 
         let mut output = HashMap::<String, String>::new();
         // Unwrap to String tuple or panic on SQL row if types are invalid.
         // should never happen with a properly initialized table
-        let result = stmt.query_map(&[pattern], |row| Ok(
-            (row.get::<usize, String>(0).expect("Invalid sql column types"), 
-             row.get::<usize, String>(1).expect("Invalid sql column types")))
-        );
+        let result = stmt.query_map(&[pattern], |row| {
+            Ok((
+                row.get::<usize, String>(0)
+                    .expect("Invalid sql column types"),
+                row.get::<usize, String>(1)
+                    .expect("Invalid sql column types"),
+            ))
+        });
 
         match result {
             Ok(kv_pairs) => {
@@ -669,13 +676,14 @@ impl DatastoreInstance {
                     output.insert(k, v);
                 }
                 Ok(output)
-            },
+            }
             Err(err) => match err {
                 rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchValue),
-                _ => Err(DatastoreError::InternalError(
-                    format!("Failed to get key_value rows starting with pattern {}", pattern))
-                )
-            }
+                _ => Err(DatastoreError::InternalError(format!(
+                    "Failed to get key_value rows starting with pattern {}",
+                    pattern
+                ))),
+            },
         }
     }
 }

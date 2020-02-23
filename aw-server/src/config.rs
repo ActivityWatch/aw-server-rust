@@ -79,7 +79,9 @@ pub fn get_config() -> AWConfig {
         for line in default_config_str.lines() {
             default_config_str_commented.push_str(&format!("#{}\n", line));
         }
-        wfile.write(&default_config_str_commented.into_bytes()).expect("Failed to write config to file");
+        wfile
+            .write_all(&default_config_str_commented.into_bytes())
+            .expect("Failed to write config to file");
         wfile.sync_all().expect("Unable to sync config file");
     }
 

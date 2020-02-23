@@ -41,16 +41,23 @@ pub fn setting_set(
 #[get("/")]
 pub fn settings_list_get(
     state: State<ServerState>,
-) -> Result<Json<HashMap<String, String>>, Status> {
+) -> Result<Json<HashMap<&str, String>>, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
-    return match datastore.get_keys_starting("settings.") {
-        Ok(result) => Ok(Json(result)),
+    let queryresults = match datastore.get_keys_starting("settings.") {
+        Ok(result) => Ok(result),
         Err(DatastoreError::NoSuchKey) => Err(Status::NotFound),
         Err(err) => {
             warn!("Unexpected error when getting setting: {:?}", err);
             Err(Status::InternalServerError)
         }
     };
+
+    let mut output = HashMap::<&str, String>::new();
+    for i in queryresults? {
+        output.insert("key", i);
+    }
+    return Ok(Json(output));
+
 }
 
 #[get("/<key>")]

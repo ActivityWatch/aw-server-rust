@@ -49,7 +49,7 @@ pub enum Responses {
     EventList(Vec<Event>),
     Count(i64),
     String(String),
-    KeyValueMap(HashMap<String, String>),
+    StringVec(Vec<String>),
 }
 
 #[derive(Debug,Clone)]
@@ -224,7 +224,7 @@ impl DatastoreWorker {
                     },
                     Commands::GetKeysStarting(pattern) => {
                         match ds.get_keys_starting(&transaction, &pattern) {
-                            Ok(result) => Ok(Responses::KeyValueMap(result)),
+                            Ok(result) => Ok(Responses::StringVec(result)),
                             Err(e) => Err(e)
                         }
                         
@@ -419,13 +419,13 @@ impl Datastore {
         }
     }
 
-    pub fn get_keys_starting(&self, pattern: &str) -> Result<HashMap<String, String>, DatastoreError> {
+    pub fn get_keys_starting(&self, pattern: &str) -> Result<Vec<String>, DatastoreError> {
         let cmd = Commands::GetKeysStarting(pattern.to_string());
         let receiver = self.requester.request(cmd).unwrap();
         
         match receiver.collect().unwrap() {
             Ok(r) => match r {
-                Responses::KeyValueMap(value) => return Ok(value),
+                Responses::StringVec(value) => return Ok(value),
                 _ => panic!("Invalid response")
             },
             Err(e) => Err(e)

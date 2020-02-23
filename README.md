@@ -40,3 +40,10 @@ If you want to quick-compile for debugging, run cargo run from the project root
 *NOTE:* this will start aw-server-rust on the testing port 5666 instead of port 5600
 
 ``` cargo run ```
+
+
+### Contributing
+
+Please run `make install-git-hooks` before you start working. This will ensure you only commit properly formatted files, and only push changes that pass tests.
+
+Please use `cargo fmt` and `cargo clippy`; they are quite helpful when developing. Formatter will make the code style consistent, and Clippy will make sure that most common errors and readibility issues will not slip through.

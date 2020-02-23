@@ -1,4 +1,4 @@
-.PHONY: all aw-server aw-webui build install package test
+.PHONY: all aw-server aw-webui build install package test install-pre-commit pre-commit
 
 all: build
 build: aw-server aw-webui
@@ -11,6 +11,19 @@ aw-server:
 
 aw-webui:
 	make -C ./aw-webui build
+
+install-git-hooks:
+	@printf "make pre-commit\n" > .git/hooks/pre-commit
+	@printf "make pre-push\n" > .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-commit .git/hooks/pre-push
+	@printf "Hooks installed\n"
+
+pre-commit:
+	@cargo fmt -- --check || (printf "Error: Run cargo fmt before committing\n"; exit 1)
+
+pre-push: pre-commit
+	@cargo clippy || (printf "Error: Clippy reported error(s)\n"; exit 1)
+	@cargo test || (printf "Error: Some test(s) failed\n"; exit 1)
 
 test:
 	cargo test

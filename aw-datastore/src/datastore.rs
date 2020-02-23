@@ -655,15 +655,19 @@ impl DatastoreInstance {
         };
 
         let mut output = HashMap::<String, String>::new();
-        let result = stmt.query(&[pattern]);
+        // Unwrap to String tuple or panic on SQL row if types are invalid.
+        // should never happen with a properly initialized table
+        let result = stmt.query_map(&[pattern], |row| Ok(
+            (row.get::<usize, String>(0).expect("Invalid sql column types"), 
+             row.get::<usize, String>(1).expect("Invalid sql column types")))
+        );
 
         match result {
-            Ok(rows) => {
-                // Unwrap to String tuple or panic on SQL row if types are invalid.
-                // should never happen with a properly initialized table
-                rows.map(|row| Ok(output.insert(
-                    row.get::<usize, String>(0).expect("Invalid sql structure"),
-                    row.get::<usize, String>(1).expect("Invalid sql structure"))));
+            Ok(kv_pairs) => {
+                for row in kv_pairs {
+                    let (k, v) = row.unwrap();
+                    output.insert(k, v);
+                }
                 Ok(output)
             },
             Err(err) => match err {

@@ -2,7 +2,6 @@ use crate::endpoints::ServerState;
 use rocket::http::Status;
 use rocket::State;
 use rocket_contrib::json::{Json, JsonValue};
-use std::collections::HashMap;
 use std::sync::MutexGuard;
 
 use aw_datastore::{Datastore, DatastoreError};

@@ -417,11 +417,11 @@ impl Datastore {
         }
     }
 
-    pub fn get_values_starting(&self, key: &str) -> Result<HashMap<String, String>, DatastoreError> {
-        let cmd = Commands::GetValuesStarting(key.to_string());
+    pub fn get_values_starting(&self, pattern: &str) -> Result<HashMap<String, String>, DatastoreError> {
+        let cmd = Commands::GetValuesStarting(pattern.to_string());
         let receiver = self.requester.request(cmd).unwrap();
         
-        match receiver.collect().unwrap() {
+        match receiver.collect().expect("This should unwrap") {
             Ok(r) => match r {
                 Responses::KeyValueMap(value) => return Ok(value),
                 _ => panic!("Invalid response")

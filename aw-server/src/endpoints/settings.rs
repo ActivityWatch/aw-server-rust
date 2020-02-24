@@ -2,8 +2,8 @@ use crate::endpoints::ServerState;
 use rocket::http::Status;
 use rocket::State;
 use rocket_contrib::json::Json;
-use std::sync::MutexGuard;
 use std::collections::HashMap;
+use std::sync::MutexGuard;
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::KeyValue;
@@ -18,12 +18,9 @@ fn parse_key(key: String) -> Result<String, Status> {
 }
 
 #[post("/", data = "<message>")]
-pub fn setting_set(
-    state: State<ServerState>,
-    message: Json<KeyValue>,
-) -> Result<Status, Status> {
+pub fn setting_set(state: State<ServerState>, message: Json<KeyValue>) -> Result<Status, Status> {
     let data = message.into_inner();
-    
+
     let setting_key = parse_key(data.key)?;
 
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
@@ -39,11 +36,9 @@ pub fn setting_set(
 }
 
 #[get("/")]
-pub fn settings_list_get(
-    state: State<ServerState>,
-) -> Result<Json<HashMap<&str, String>>, Status> {
+pub fn settings_list_get(state: State<ServerState>) -> Result<Json<HashMap<&str, String>>, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
-    let queryresults = match datastore.get_keys_starting("settings.") {
+    let queryresults = match datastore.get_keys_starting("settings.%") {
         Ok(result) => Ok(result),
         Err(DatastoreError::NoSuchKey) => Err(Status::NotFound),
         Err(err) => {
@@ -57,7 +52,6 @@ pub fn settings_list_get(
         output.insert("key", i);
     }
     return Ok(Json(output));
-
 }
 
 #[get("/<key>")]
@@ -66,7 +60,10 @@ pub fn setting_get(state: State<ServerState>, key: String) -> Result<Json<KeyVal
 
     let datastore = endpoints_get_lock!(state.datastore);
     return match datastore.get_key_value(&setting_key) {
-        Ok(result) => Ok(Json(KeyValue{ key: setting_key, value: result })),
+        Ok(result) => Ok(Json(KeyValue {
+            key: setting_key,
+            value: result,
+        })),
         Err(DatastoreError::NoSuchKey) => Err(Status::NotFound),
         Err(err) => {
             warn!("Unexpected error when getting setting: {:?}", err);

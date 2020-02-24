@@ -647,7 +647,7 @@ impl DatastoreInstance {
     pub fn get_keys_starting(&self, conn: &Connection, pattern: &str)
         -> Result<Vec<String>, DatastoreError>
     {
-        let mut stmt = match conn.prepare("SELECT key FROM key_value WHERE key LIKE '.%' ") {
+        let mut stmt = match conn.prepare("SELECT key FROM key_value WHERE key LIKE ?") {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -658,13 +658,12 @@ impl DatastoreInstance {
         };
 
         let mut output = Vec::<String>::new();
-        // Unwrap to String tuple or panic on SQL row if types are invalid.
+        // Unwrap to String or panic on SQL row if type is invalid.
         // should never happen with a properly initialized table
         let result = stmt.query_map(&[pattern], |row| row.get::<usize, String>(0));
-
         match result {
-            Ok(kv_pairs) => {
-                for row in kv_pairs {
+            Ok(keys) => {
+                for row in keys {
                     output.push(row.unwrap());
                 }
                 Ok(output)

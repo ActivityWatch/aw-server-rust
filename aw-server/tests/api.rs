@@ -383,14 +383,13 @@ mod api_tests {
 
         let response1_status = set_setting_request(&client, "test_key");
         assert_eq!(response1_status, rocket::http::Status::Created);
-        let response2_status = set_setting_request(&client, "test_key");
+        let response2_status = set_setting_request(&client, "test_key_2");
         assert_eq!(response2_status, rocket::http::Status::Created);
 
         let mut res = client.get("/api/0/settings/").dispatch();
         
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#""#);
-        
+        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","key":"settings.test_key_2"}"#);
     }
 
     #[test]

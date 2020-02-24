@@ -1,4 +1,5 @@
 extern crate aw_models;
+extern crate chrono;
 extern crate gethostname;
 extern crate reqwest;
 extern crate serde_json;
@@ -40,7 +41,7 @@ impl AwClient {
 
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, reqwest::Error> {
         let url = format!("{}/api/0/buckets/", self.baseurl);
-        Ok(self.client.get(&url).send()?.json()?)
+        self.client.get(&url).send()?.json()
     }
 
     pub fn create_bucket(&self, bucketname: &str, buckettype: &str) -> Result<(), reqwest::Error> {
@@ -137,6 +138,6 @@ impl AwClient {
 
     pub fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {
         let url = format!("{}/api/0/info", self.baseurl);
-        Ok(self.client.get(&url).send()?.json()?)
+        self.client.get(&url).send()?.json()
     }
 }

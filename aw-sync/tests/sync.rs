@@ -6,6 +6,7 @@ mod sync_tests {
     use std::collections::{HashMap};
     use chrono::{DateTime, Utc};
 
+    use aw_sync;
     use aw_models::{Bucket, Event};
     use aw_datastore::{Datastore, DatastoreError};
 

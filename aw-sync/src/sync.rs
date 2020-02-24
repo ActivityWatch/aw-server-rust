@@ -6,14 +6,86 @@
 /// It manages a sync-folder by syncing the aw-server datastore with a copy/staging datastore in the folder (one for each host).
 /// The sync folder is then synced with remotes using Syncthing/Dropbox/whatever.
 
+extern crate chrono;
+extern crate serde_json;
+
 use std::fs;
 use std::path::Path;
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc, Duration};
-use serde_json;
+use aw_client_rust::{AwClient};
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Event, Bucket};
+
+// This trait should be implemented by both AwClient and Datastore, unifying them under a single API
+pub trait AccessMethod: std::fmt::Debug {
+    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String>;
+    fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError>;
+    fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError>;
+    fn get_events(&self, bucket_id: &str, start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>, limit: Option<u64>) -> Result<Vec<Event>, String>;
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String>;
+    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
+    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<Event, String>;
+}
+
+impl AccessMethod for Datastore {
+    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
+        Ok(self.get_buckets().unwrap())
+    }
+    fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
+        self.get_bucket(bucket_id)
+    }
+    fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
+        let res = self.create_bucket(bucket)?;
+        self.force_commit().unwrap();
+        Ok(res)
+    }
+    fn get_events(&self, bucket_id: &str, start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>, limit: Option<u64>) -> Result<Vec<Event>, String> {
+        Ok(self.get_events(bucket_id, start, end, limit).unwrap())
+    }
+    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<Event, String> {
+        let res = self.heartbeat(bucket_id, event, duration).unwrap();
+        self.force_commit().unwrap();
+        Ok(res)
+    }
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String> {
+        let res = self.insert_events(bucket_id, &events[..]).unwrap();
+        self.force_commit().unwrap();
+        Ok(res)
+    }
+    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
+        Ok(self.get_event_count(bucket_id, None, None).unwrap())
+    }
+}
+
+impl AccessMethod for AwClient {
+    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
+        Ok(self.get_buckets().unwrap())
+    }
+    fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
+        Ok(self.get_bucket(bucket_id).unwrap())
+    }
+    fn get_events(&self, bucket_id: &str, start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>, limit: Option<u64>) -> Result<Vec<Event>, String> {
+        Ok(self.get_events(bucket_id).unwrap())
+    }
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String> {
+        //Ok(self.insert_events(bucket_id, &events[..]).unwrap())
+        Err("Not implemented".to_string())
+    }
+    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
+        //Ok(self.get_event_count(bucket_id, None, None).unwrap())
+        Err("Not implemented".to_string())
+    }
+    fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
+       Ok(self.create_bucket(bucket.id.as_str(), bucket._type.as_str()).unwrap())
+        //Err(DatastoreError::InternalError("Not implemented".to_string()))
+    }
+    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<Event, String> {
+        Err("Not implemented".to_string())
+    }
+}
 
 /// Performs a single sync pass
 pub fn sync_run() {
@@ -31,20 +103,20 @@ pub fn sync_run() {
 
     // FIXME: These are not the datastores that should actually be synced, I'm just testing
     for ds_from in &ds_remotes {
-        sync_datastores(&ds_from, &ds_local);
+        sync_datastores(ds_from, &ds_local);
     }
 
     log_buckets(&ds_local);
     for ds_from in &ds_remotes {
-        ds_from.force_commit().unwrap();
-        log_buckets(&ds_from);
+        log_buckets(ds_from);
     }
 }
 
 fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
     let mut datastores: Vec<Datastore> = Vec::new();
     for n in 0..2 {
-        let ds = Datastore::new(sync_directory.join(format!("test-remote-{}.db", n)).to_str().unwrap().to_string(), false);
+        let ds_ = Datastore::new(sync_directory.join(format!("test-remote-{}.db", n)).into_os_string().into_string().unwrap(), false);
+        let ds = &ds_ as &dyn AccessMethod;
 
         // Create a bucket
         let bucket_jsonstr = format!(r#"{{
@@ -76,17 +148,16 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
             event
         }).collect::<Vec<Event>>();
 
-        ds.insert_events(bucket.id.as_str(), &events[..]).unwrap();
-        ds.force_commit().unwrap();
+        ds.insert_events(bucket.id.as_str(), events).unwrap();
         //let new_eventcount = ds.get_event_count(bucket.id.as_str(), None, None).unwrap();
         //info!("Eventcount: {:?} ({} new)", new_eventcount, events.len());
-        datastores.push(ds);
+        datastores.push(ds_);
     };
     Ok(datastores)
 }
 
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
-fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &Datastore) -> Bucket {
+fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &dyn AccessMethod) -> Bucket {
     // Ensure the bucket ID ends in "-synced"
     let new_id = format!("{}-synced", bucket_from.id.replace("-synced", ""));
 
@@ -106,7 +177,7 @@ fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &Datastore) -> Bucket 
 }
 
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
-pub fn sync_datastores(ds_from: &Datastore, ds_to: &Datastore) {
+pub fn sync_datastores(ds_from: &dyn AccessMethod, ds_to: &dyn AccessMethod) {
     // FIXME: "-synced" should only be appended when synced to the local database, not to the
     // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
@@ -114,8 +185,7 @@ pub fn sync_datastores(ds_from: &Datastore, ds_to: &Datastore) {
     let buckets_from = ds_from.get_buckets().unwrap();
     for bucket_from in buckets_from.values() {
         let bucket_to = get_or_create_sync_bucket(bucket_from, ds_to);
-        ds_to.force_commit().unwrap();
-        let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str(), None, None).unwrap();
+        let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
         //info!("{:?}", bucket_to);
 
         // Sync events
@@ -143,18 +213,17 @@ pub fn sync_datastores(ds_from: &Datastore, ds_to: &Datastore) {
             ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
         }
 
-        ds_to.force_commit().unwrap();
-        let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str(), None, None).unwrap();
+        let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
         info!("Synced {} new events", eventcount_to_new - eventcount_to_old);
     }
 }
 
-fn log_buckets(ds: &Datastore) {
+fn log_buckets(ds: &dyn AccessMethod) {
     // Logs all buckets and some metadata for a given datastore
     let buckets = ds.get_buckets().unwrap();
     info!("Buckets in {:?}:", ds);
     for bucket in buckets.values() {
         info!(" - {}", bucket.id.as_str());
-        info!("   eventcount: {:?}", ds.get_event_count(bucket.id.as_str(), None, None).unwrap());
+        info!("   eventcount: {:?}", ds.get_event_count(bucket.id.as_str()).unwrap());
     };
 }

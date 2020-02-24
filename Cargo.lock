@@ -157,6 +157,7 @@ dependencies = [
  "aw-datastore",
  "aw-models",
  "aw-server",
+ "aw_client_rust",
  "chrono",
  "log 0.4.8",
  "serde",

@@ -17,16 +17,15 @@ fi
 
 ORIG_PATH="$PATH"
 
-# Ring won't build in the below target for whatever reason
-# 'arm armv7-linux-androideabi' \
 for archtargetstr in \
     'arm64 aarch64-linux-android' \
     'x86_64 x86_64-linux-android' \
     'x86 i686-linux-android' \
+    'arm armv7-linux-androideabi' \
 ; do
     arch=$(echo $archtargetstr | cut -d " " -f 1)
     target=$(echo $archtargetstr | cut -d " " -f 2)
-    NDK_ARCH_DIR="$ANDROID_NDK_HOME/$arch/bin"
+    NDK_ARCH_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
     echo "Building for $arch..."
 
     if [ -d "$NDK_ARCH_DIR" ]; then

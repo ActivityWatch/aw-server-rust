@@ -23,11 +23,6 @@ before_install:
   - if [ "$BUILD_ANDROID" == true ]; then
       ./install-ndk.sh;
       export ANDROID_NDK_HOME=`pwd`/NDK;
-      ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm64 --install-dir "${ANDROID_NDK_HOME}/arm64";
-      ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch arm --install-dir "${ANDROID_NDK_HOME}/arm";
-      ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch x86 --install-dir "${ANDROID_NDK_HOME}/x86";
-      ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --api 26 --arch x86_64 --install-dir "${ANDROID_NDK_HOME}/x86_64";
-      rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android;
     fi
   - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$BUILD_ANDROID" != "true" ]; then
         echo "Installing coverage tools";

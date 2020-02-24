@@ -389,7 +389,7 @@ mod api_tests {
         let mut res = client.get("/api/0/settings/").dispatch();
         
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","key":"settings.test_key_2"}"#);
+        assert_eq!(res.body_string().unwrap(), r#"[{"key":"settings.test_key"},{"key":"settings.test_key_2"}]"#); 
     }
 
     #[test]

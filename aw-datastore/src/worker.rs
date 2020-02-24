@@ -424,8 +424,11 @@ impl Datastore {
         let receiver = self.requester.request(cmd).unwrap();
         
         match receiver.collect().unwrap() {
+
             Ok(r) => match r {
-                Responses::StringVec(value) => return Ok(value),
+                Responses::StringVec(value) => { 
+                    return Ok(value)
+                },
                 _ => panic!("Invalid response")
             },
             Err(e) => Err(e)

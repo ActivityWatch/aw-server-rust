@@ -2,11 +2,10 @@ use crate::endpoints::ServerState;
 use rocket::http::Status;
 use rocket::State;
 use rocket_contrib::json::Json;
-use std::collections::HashMap;
 use std::sync::MutexGuard;
 
 use aw_datastore::{Datastore, DatastoreError};
-use aw_models::KeyValue;
+use aw_models::{Key, KeyValue};
 
 fn parse_key(key: String) -> Result<String, Status> {
     let namespace: String = "settings.".to_string();
@@ -36,7 +35,7 @@ pub fn setting_set(state: State<ServerState>, message: Json<KeyValue>) -> Result
 }
 
 #[get("/")]
-pub fn settings_list_get(state: State<ServerState>) -> Result<Json<HashMap<&str, String>>, Status> {
+pub fn settings_list_get(state: State<ServerState>) -> Result<Json<Vec<Key>>, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
     let queryresults = match datastore.get_keys_starting("settings.%") {
         Ok(result) => Ok(result),
@@ -47,9 +46,9 @@ pub fn settings_list_get(state: State<ServerState>) -> Result<Json<HashMap<&str,
         }
     };
 
-    let mut output = HashMap::<&str, String>::new();
+    let mut output = Vec::<Key>::new();
     for i in queryresults? {
-        output.insert("key", i);
+        output.push(Key { key: i });
     }
     return Ok(Json(output));
 }

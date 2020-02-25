@@ -411,19 +411,28 @@ mod api_tests {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
-        let response_status = set_setting_request(&client, "test_key", "test_value");
-        assert_eq!(response_status, rocket::http::Status::Created);
+        let post_1_status = set_setting_request(&client, "test_key", "test_value");
+        assert_eq!(post_1_status, rocket::http::Status::Created);
         
         let mut res = client.get("/api/0/settings/test_key").dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","value":"test_value","timestamp":}"#);
+        use aw_models::KeyValue;
+        let deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+
+        use chrono::Utc;
+        let timestamp = Utc::now();
+
+        assert_eq!(deserialized, KeyValue::new("settings.test_key", "test_value", timestamp));
     
-        let response_2_status = set_setting_request(&client, "test_key", "changed_test_value"); 
-        assert_eq!(response_2_status, rocket::http::Status::Created);
+        let post_2_status = set_setting_request(&client, "test_key", "changed_test_value"); 
+        assert_eq!(post_2_status, rocket::http::Status::Created);
 
         let mut res = client.get("/api/0/settings/test_key").dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","value":"changed_test_value","timestamp":}"#);
+        
+        let new_deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        let new_timestamp = Utc::now();
+        assert_eq!(new_deserialized, KeyValue::new("settings.test_key","changed_test_value", new_timestamp));
     }
 
     #[test]

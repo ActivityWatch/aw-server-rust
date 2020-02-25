@@ -13,11 +13,13 @@ mod api_tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use rocket::http::{Header, ContentType, Status };
+    use chrono::{DateTime, Utc};
 
     use aw_server::config;
     use aw_server::endpoints;
 
     use aw_models::{Bucket, BucketsExport};
+    use aw_models::KeyValue;
     use rocket::local::Client;
 
     fn setup_testserver() -> rocket::Rocket {
@@ -344,6 +346,18 @@ mod api_tests {
         res.status()
     }
 
+    /// Asserts that 2 KeyValues are otherwise equal and first keyvalues timestamp is within
+    /// or equal with timestamp and second.timestamp
+    fn _equal_and_timestamp_in_range(before: DateTime<Utc>, first: KeyValue, second: KeyValue) { 
+        assert_eq!(first.key, second.key);
+        assert_eq!(first.value, second.value);
+        // Compare with second, not millisecond accuracy
+        assert!(first.timestamp.timestamp() >= before.timestamp(),
+            "{} wasn't after {}", first.timestamp.timestamp(), before.timestamp());
+        assert!(first.timestamp < second.timestamp,
+            "{} wasn't before {}", first.timestamp, second.timestamp);
+    }
+
     #[test]
     fn test_illegally_long_key() {
         let server = setup_testserver();
@@ -396,14 +410,16 @@ mod api_tests {
     fn test_getting_setting() {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
-
+        
+        let timestamp = Utc::now();
         let response_status = set_setting_request(&client, "test_key", "test_value");
         assert_eq!(response_status, rocket::http::Status::Created);
 
         // Test getting
         let mut res = client.get("/api/0/settings/test_key").dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","value":"test_value","timestamp": }"#);
+        let deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        _equal_and_timestamp_in_range(timestamp, deserialized, KeyValue::new("settings.test_key", "test_value", Utc::now()));
     }
 
     #[test]
@@ -411,19 +427,17 @@ mod api_tests {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
+        let timestamp = Utc::now();
         let post_1_status = set_setting_request(&client, "test_key", "test_value");
         assert_eq!(post_1_status, rocket::http::Status::Created);
         
         let mut res = client.get("/api/0/settings/test_key").dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        use aw_models::KeyValue;
         let deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
 
-        use chrono::Utc;
-        let timestamp = Utc::now();
-
-        assert_eq!(deserialized, KeyValue::new("settings.test_key", "test_value", timestamp));
-    
+        _equal_and_timestamp_in_range(timestamp, deserialized, KeyValue::new("settings.test_key", "test_value", Utc::now()));
+        
+        let timestamp_2 = Utc::now();
         let post_2_status = set_setting_request(&client, "test_key", "changed_test_value"); 
         assert_eq!(post_2_status, rocket::http::Status::Created);
 
@@ -431,8 +445,7 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
         
         let new_deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
-        let new_timestamp = Utc::now();
-        assert_eq!(new_deserialized, KeyValue::new("settings.test_key","changed_test_value", new_timestamp));
+        _equal_and_timestamp_in_range(timestamp_2, new_deserialized, KeyValue::new("settings.test_key","changed_test_value", Utc::now()));
     }
 
     #[test]

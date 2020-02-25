@@ -335,8 +335,8 @@ mod api_tests {
     }
 
     fn set_setting_request(client: &Client, key: &str, value: &str) -> Status {
-        use aw_models::KeyValue;
-        let body = serde_json::to_string(&KeyValue {key: key.to_string(), value: value.to_string()}).unwrap();
+        use aw_models::KV;
+        let body = serde_json::to_string(&KV {key: key.to_string(), value: value.to_string()}).unwrap();
         let res = client.post("/api/0/settings/")
             .header(ContentType::JSON)
             .body(body)
@@ -403,7 +403,7 @@ mod api_tests {
         // Test getting
         let mut res = client.get("/api/0/settings/test_key").dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","value":"test_value"}"#);
+        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","value":"test_value","timestamp": }"#);
     }
 
     #[test]
@@ -413,13 +413,17 @@ mod api_tests {
 
         let response_status = set_setting_request(&client, "test_key", "test_value");
         assert_eq!(response_status, rocket::http::Status::Created);
+        
+        let mut res = client.get("/api/0/settings/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","value":"test_value","timestamp":}"#);
     
         let response_2_status = set_setting_request(&client, "test_key", "changed_test_value"); 
         assert_eq!(response_2_status, rocket::http::Status::Created);
 
         let mut res = client.get("/api/0/settings/test_key").dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","value":"changed_test_value"}"#);
+        assert_eq!(res.body_string().unwrap(), r#"{"key":"settings.test_key","value":"changed_test_value","timestamp":}"#);
     }
 
     #[test]

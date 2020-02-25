@@ -12,10 +12,12 @@ use serde_json::value::Value;
 use aw_models::Bucket;
 use aw_models::BucketMetadata;
 use aw_models::Event;
+use aw_models::KeyValue;
 
 use aw_transform;
 
 use rusqlite::types::ToSql;
+use rusqlite::params;
 
 use super::DatastoreError;
 
@@ -128,7 +130,8 @@ fn _migrate_v3_to_v4(conn: &Connection) {
     info!("Upgrading database to v4, adding table for key-value storage");
     conn.execute("CREATE TABLE key_value (
         key TEXT PRIMARY KEY,
-        value TEXT
+        value TEXT,
+        last_modified NUMBER NOT NULL
     );", rusqlite::NO_PARAMS)
         .expect("Failed to upgrade db and add key-value storage table");
 
@@ -603,14 +606,15 @@ impl DatastoreInstance {
         -> Result<(), DatastoreError> {
 
         let mut stmt = match conn.prepare("
-                INSERT OR REPLACE INTO key_value(key, value)
-                VALUES (?1, ?2)") {
+                INSERT OR REPLACE INTO key_value(key, value, last_modified)
+                VALUES (?1, ?2, ?3)") {
             Ok(stmt) => stmt,
             Err(err) => return Err(DatastoreError::InternalError(
                 format!("Failed to prepare insert_value SQL statement: {}", err)
             ))
         };
-        stmt.execute(&[key, data]).expect(
+        let timestamp = Utc::now().timestamp();
+        stmt.execute(params![key, data, &timestamp]).expect(
             &format!("Failed to insert key-value pair: {}", key)
         );
         return Ok(())
@@ -622,7 +626,7 @@ impl DatastoreInstance {
         return Ok(())
     }
 
-    pub fn get_key_value(&self, conn: &Connection, key: &str) -> Result<String, DatastoreError>{
+    pub fn get_key_value(&self, conn: &Connection, key: &str) -> Result<KeyValue, DatastoreError>{
         let mut stmt = match conn.prepare("
                 SELECT * FROM key_value WHERE KEY = ?1") {
             Ok(stmt) => stmt,
@@ -632,8 +636,13 @@ impl DatastoreInstance {
         };
 
         return match stmt.query_row(&[key], |row|{
-            row.get(1)
-        }) {
+            Ok(KeyValue {
+                key: row.get(0).unwrap(), 
+                value: row.get(1).unwrap(), 
+                timestamp: DateTime::from_utc(NaiveDateTime::from_timestamp(row.get(2).unwrap(), 0), Utc)
+            }
+            )}) 
+        {
             Ok(result)  => Ok(result),
             Err(err) => match err {
                 rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchKey),

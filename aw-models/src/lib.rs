@@ -33,4 +33,5 @@ pub use self::event::Event;
 pub use self::timeinterval::TimeInterval;
 pub use self::query::Query;
 pub use self::key_value::KeyValue;
+pub use self::key_value::KV;
 pub use self::key_value::Key;

@@ -11,6 +11,7 @@ use rusqlite::TransactionBehavior;
 
 use aw_models::Bucket;
 use aw_models::Event;
+use aw_models::KeyValue;
 
 use crate::DatastoreError;
 use crate::DatastoreMethod;
@@ -48,7 +49,7 @@ pub enum Responses {
     Event(Event),
     EventList(Vec<Event>),
     Count(i64),
-    String(String),
+    KeyValue(KeyValue),
     StringVec(Vec<String>),
 }
 
@@ -218,7 +219,7 @@ impl DatastoreWorker {
                     },
                     Commands::GetKeyValue(key) => {
                         match ds.get_key_value(&transaction, &key) {
-                            Ok(result) => Ok(Responses::String(result)),
+                            Ok(result) => Ok(Responses::KeyValue(result)),
                             Err(e) => Err(e)
                         }
                     },
@@ -406,13 +407,13 @@ impl Datastore {
         _unwrap_response(receiver)
     }
 
-    pub fn get_key_value(&self, key: &str) -> Result<String, DatastoreError> {
+    pub fn get_key_value(&self, key: &str) -> Result<KeyValue, DatastoreError> {
         let cmd = Commands::GetKeyValue(key.to_string());
         let receiver = self.requester.request(cmd).unwrap();
 
         match receiver.collect().unwrap() {
             Ok(r) => match r {
-                Responses::String(value) => return Ok(value),
+                Responses::KeyValue(value) => return Ok(value),
                 _ => panic!("Invalid response")
             },
             Err(e) => Err(e)

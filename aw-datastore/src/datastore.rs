@@ -637,9 +637,9 @@ impl DatastoreInstance {
 
         return match stmt.query_row(&[key], |row|{
             Ok(KeyValue {
-                key: row.get(0).unwrap(), 
-                value: row.get(1).unwrap(), 
-                timestamp: DateTime::from_utc(NaiveDateTime::from_timestamp(row.get(2).unwrap(), 0), Utc)
+                key: row.get(0)?, 
+                value: row.get(1)?,
+                timestamp: DateTime::from_utc(NaiveDateTime::from_timestamp(row.get(2)?, 0), Utc)
             }
             )}) 
         {
@@ -667,12 +667,13 @@ impl DatastoreInstance {
         };
 
         let mut output = Vec::<String>::new();
-        // Unwrap to String or panic on SQL row if type is invalid.
-        // should never happen with a properly initialized table
+        // Rusqlite's get wants index and item type as parameters.
         let result = stmt.query_map(&[pattern], |row| row.get::<usize, String>(0));
         match result {
             Ok(keys) => {
                 for row in keys {
+                    // Unwrap to String or panic on SQL row if type is invalid. Can't happen with a
+                    // properly initialized table.
                     output.push(row.unwrap());
                 }
                 Ok(output)

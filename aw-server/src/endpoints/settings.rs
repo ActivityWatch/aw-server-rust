@@ -25,7 +25,6 @@ pub fn setting_set(state: State<ServerState>, message: Json<KeyValue>) -> Result
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
     let result = datastore.insert_key_value(&setting_key, &data.value);
     return match result {
-        // TODO: Different status for replacement / creation (requires some sql adjustment)
         Ok(_) => Ok(Status::Created),
         Err(err) => {
             warn!("Unexpected error when creating setting: {:?}", err);

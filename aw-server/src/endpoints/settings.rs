@@ -5,7 +5,7 @@ use rocket_contrib::json::Json;
 use std::sync::MutexGuard;
 
 use aw_datastore::{Datastore, DatastoreError};
-use aw_models::{Key, KV, KeyValue};
+use aw_models::{Key, KeyValue};
 
 fn parse_key(key: String) -> Result<String, Status> {
     let namespace: String = "settings.".to_string();
@@ -17,7 +17,7 @@ fn parse_key(key: String) -> Result<String, Status> {
 }
 
 #[post("/", data = "<message>")]
-pub fn setting_set(state: State<ServerState>, message: Json<KV>) -> Result<Status, Status> {
+pub fn setting_set(state: State<ServerState>, message: Json<KeyValue>) -> Result<Status, Status> {
     let data = message.into_inner();
 
     let setting_key = parse_key(data.key)?;

@@ -639,7 +639,7 @@ impl DatastoreInstance {
             Ok(KeyValue {
                 key: row.get(0)?, 
                 value: row.get(1)?,
-                timestamp: DateTime::from_utc(NaiveDateTime::from_timestamp(row.get(2)?, 0), Utc)
+                timestamp: Some(DateTime::from_utc(NaiveDateTime::from_timestamp(row.get(2)?, 0), Utc))
             }
             )}) 
         {

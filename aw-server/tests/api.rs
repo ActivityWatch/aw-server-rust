@@ -337,8 +337,7 @@ mod api_tests {
     }
 
     fn set_setting_request(client: &Client, key: &str, value: &str) -> Status {
-        use aw_models::KV;
-        let body = serde_json::to_string(&KV {key: key.to_string(), value: value.to_string()}).unwrap();
+        let body = serde_json::to_string(&KeyValue {key: key.to_string(), value: value.to_string(), timestamp: None}).unwrap();
         let res = client.post("/api/0/settings/")
             .header(ContentType::JSON)
             .body(body)
@@ -352,10 +351,10 @@ mod api_tests {
         assert_eq!(first.key, second.key);
         assert_eq!(first.value, second.value);
         // Compare with second, not millisecond accuracy
-        assert!(first.timestamp.timestamp() >= before.timestamp(),
-            "{} wasn't after {}", first.timestamp.timestamp(), before.timestamp());
+        assert!(first.timestamp.unwrap().timestamp() >= before.timestamp(),
+            "{} wasn't after {}", first.timestamp.unwrap().timestamp(), before.timestamp());
         assert!(first.timestamp < second.timestamp,
-            "{} wasn't before {}", first.timestamp, second.timestamp);
+            "{} wasn't before {}", first.timestamp.unwrap(), second.timestamp.unwrap());
     }
 
     #[test]

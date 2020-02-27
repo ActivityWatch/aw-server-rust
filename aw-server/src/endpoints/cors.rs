@@ -6,9 +6,13 @@ use crate::config::AWConfig;
 
 pub fn cors(config: &AWConfig) -> rocket_cors::Cors {
     let root_url = format!("http://127.0.0.1:{}", config.port).to_string();
-    let mut allowed_exact_origins = vec![root_url];
+    let root_url_localhost = format!("http://localhost:{}", config.port).to_string();
+    let mut allowed_exact_origins = vec![root_url, root_url_localhost];
+    allowed_exact_origins.extend(config.cors.clone());
+
     if config.testing {
         allowed_exact_origins.push("http://127.0.0.1:27180".to_string());
+        allowed_exact_origins.push("http://localhost:27180".to_string());
     }
     let mut allowed_regex_origins = vec![
         "chrome-extension://nglaklhklhcoonedhgnpgddginnjdadi".to_string(),

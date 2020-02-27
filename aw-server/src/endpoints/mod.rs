@@ -30,6 +30,7 @@ mod query;
 mod import;
 mod cors;
 mod export;
+mod settings;
 
 use aw_datastore::Datastore;
 
@@ -92,6 +93,7 @@ fn server_info() -> JsonValue {
     {
         testing = true;
     }
+    //TODO: Should this be commented?
     #[cfg(not(debug_assertions))]
     {
         testing = false;
@@ -149,6 +151,9 @@ pub fn build_rocket(server_state: ServerState, config: &AWConfig) -> rocket::Roc
         ])
         .mount("/api/0/export", routes![
                export::buckets_export
+        ])
+        .mount("/api/0/settings", routes![
+            settings::setting_get, settings::settings_list_get, settings::setting_set, settings::setting_delete
         ])
         .attach(cors::cors(&config))
         .register(catchers![not_modified, not_found])

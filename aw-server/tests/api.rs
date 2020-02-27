@@ -12,13 +12,15 @@ extern crate aw_datastore;
 mod api_tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use rocket::http::Header;
-    use rocket::http::ContentType;
+    use rocket::http::{Header, ContentType, Status };
+    use chrono::{DateTime, Utc};
 
     use aw_server::config;
     use aw_server::endpoints;
 
     use aw_models::{Bucket, BucketsExport};
+    use aw_models::KeyValue;
+    use rocket::local::Client;
 
     fn setup_testserver() -> rocket::Rocket {
         let state = endpoints::ServerState {
@@ -334,4 +336,130 @@ mod api_tests {
         assert_eq!(res.body_string().unwrap(), r#"{"message":"EmptyQuery","reason":"Internal Server Error (Query Error)","status":500}"#);
     }
 
+    fn set_setting_request(client: &Client, key: &str, value: &str) -> Status {
+        let body = serde_json::to_string(&KeyValue {key: key.to_string(), value: value.to_string(), timestamp: None}).unwrap();
+        let res = client.post("/api/0/settings/")
+            .header(ContentType::JSON)
+            .body(body)
+            .dispatch();
+        res.status()
+    }
+
+    /// Asserts that 2 KeyValues are otherwise equal and first keyvalues timestamp is within
+    /// or equal with timestamp and second.timestamp
+    fn _equal_and_timestamp_in_range(before: DateTime<Utc>, first: KeyValue, second: KeyValue) { 
+        assert_eq!(first.key, second.key);
+        assert_eq!(first.value, second.value);
+        // Compare with second, not millisecond accuracy
+        assert!(first.timestamp.unwrap().timestamp() >= before.timestamp(),
+            "{} wasn't after {}", first.timestamp.unwrap().timestamp(), before.timestamp());
+        assert!(first.timestamp < second.timestamp,
+            "{} wasn't before {}", first.timestamp.unwrap(), second.timestamp.unwrap());
+    }
+
+    #[test]
+    fn test_illegally_long_key() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        // Test getting not found (getting nonexistent key)
+        let res = set_setting_request(&client, "thisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongk", "");
+        assert_eq!(res, rocket::http::Status::BadRequest);
+    }
+
+    #[test]
+    fn test_setting_setting() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        // Test value creation
+        let response_status = set_setting_request(&client, "test_key", "test_value");
+        assert_eq!(response_status, rocket::http::Status::Created);
+
+    }
+
+    #[test]
+    fn test_getting_not_found_value() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        // Test getting not found (getting nonexistent key)
+        let res = client.get("/api/0/settings/non_existent_key")
+        .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+    }
+
+    #[test]
+    fn settings_list_get() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        let response1_status = set_setting_request(&client, "test_key", "");
+        assert_eq!(response1_status, rocket::http::Status::Created);
+        let response2_status = set_setting_request(&client, "test_key_2", "");
+        assert_eq!(response2_status, rocket::http::Status::Created);
+
+        let mut res = client.get("/api/0/settings/").dispatch();
+        
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.body_string().unwrap(), r#"[{"key":"settings.test_key"},{"key":"settings.test_key_2"}]"#); 
+    }
+
+    #[test]
+    fn test_getting_setting() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+        
+        let timestamp = Utc::now();
+        let response_status = set_setting_request(&client, "test_key", "test_value");
+        assert_eq!(response_status, rocket::http::Status::Created);
+
+        // Test getting
+        let mut res = client.get("/api/0/settings/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        _equal_and_timestamp_in_range(timestamp, deserialized, KeyValue::new("settings.test_key", "test_value", Utc::now()));
+    }
+
+    #[test]
+    fn test_updating_setting() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        let timestamp = Utc::now();
+        let post_1_status = set_setting_request(&client, "test_key", "test_value");
+        assert_eq!(post_1_status, rocket::http::Status::Created);
+        
+        let mut res = client.get("/api/0/settings/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+
+        _equal_and_timestamp_in_range(timestamp, deserialized, KeyValue::new("settings.test_key", "test_value", Utc::now()));
+        
+        let timestamp_2 = Utc::now();
+        let post_2_status = set_setting_request(&client, "test_key", "changed_test_value"); 
+        assert_eq!(post_2_status, rocket::http::Status::Created);
+
+        let mut res = client.get("/api/0/settings/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        
+        let new_deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        _equal_and_timestamp_in_range(timestamp_2, new_deserialized, KeyValue::new("settings.test_key","changed_test_value", Utc::now()));
+    }
+
+    #[test]
+    fn test_deleting_setting() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        let response_status = set_setting_request(&client, "test_key", "");
+        assert_eq!(response_status, rocket::http::Status::Created);
+
+        // Test deleting
+        let res = client.delete("/api/0/settings/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        let res = client.get("/api/0/settings/test_key").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+    }
 }

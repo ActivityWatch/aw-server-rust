@@ -12,10 +12,12 @@ use serde_json::value::Value;
 use aw_models::Bucket;
 use aw_models::BucketMetadata;
 use aw_models::Event;
+use aw_models::KeyValue;
 
 use aw_transform;
 
 use rusqlite::types::ToSql;
+use rusqlite::params;
 
 use super::DatastoreError;
 
@@ -30,8 +32,10 @@ fn _get_db_version(conn: &Connection) -> i32 {
  * 0: Uninitialized database
  * 1: Initialized database
  * 2: Added 'data' field to 'buckets' table
+ * 3: see: https://github.com/ActivityWatch/aw-server-rust/pull/52
+ * 4: Added 'key_value' table for storing key - value pairs
  */
-static NEWEST_DB_VERSION : i32 = 3;
+static NEWEST_DB_VERSION : i32 = 4;
 
 fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;
@@ -47,6 +51,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 3 {
         _migrate_v2_to_v3(conn);
+    }
+
+    if version < 4 {
+        _migrate_v3_to_v4(conn);
     }
 
     first_init
@@ -116,6 +124,18 @@ fn _migrate_v2_to_v3(conn: &Connection) {
         .expect("Failed to upgrade database when adding new data field to buckets");
 
     conn.pragma_update(None, "user_version", &3).expect("Failed to update database version!");
+}
+
+fn _migrate_v3_to_v4(conn: &Connection) {
+    info!("Upgrading database to v4, adding table for key-value storage");
+    conn.execute("CREATE TABLE key_value (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        last_modified NUMBER NOT NULL
+    );", rusqlite::NO_PARAMS)
+        .expect("Failed to upgrade db and add key-value storage table");
+
+    conn.pragma_update(None, "user_version", &4).expect("Failed to update database version!");
 }
 
 pub struct DatastoreInstance {
@@ -580,5 +600,91 @@ impl DatastoreInstance {
         };
 
         return Ok(count);
+    }
+
+    pub fn insert_key_value(&self, conn: &Connection, key: &str, data: &str)
+        -> Result<(), DatastoreError> {
+
+        let mut stmt = match conn.prepare("
+                INSERT OR REPLACE INTO key_value(key, value, last_modified)
+                VALUES (?1, ?2, ?3)") {
+            Ok(stmt) => stmt,
+            Err(err) => return Err(DatastoreError::InternalError(
+                format!("Failed to prepare insert_value SQL statement: {}", err)
+            ))
+        };
+        let timestamp = Utc::now().timestamp();
+        stmt.execute(params![key, data, &timestamp]).expect(
+            &format!("Failed to insert key-value pair: {}", key)
+        );
+        return Ok(())
+    }
+
+    pub fn delete_key_value(&self, conn: &Connection, key: &str) -> Result<(), DatastoreError>{
+        conn.execute("DELETE FROM key_value WHERE key = ?1", &[key])
+            .expect("Error deleting value from database");
+        return Ok(())
+    }
+
+    pub fn get_key_value(&self, conn: &Connection, key: &str) -> Result<KeyValue, DatastoreError>{
+        let mut stmt = match conn.prepare("
+                SELECT * FROM key_value WHERE KEY = ?1") {
+            Ok(stmt) => stmt,
+            Err(err) => return Err(DatastoreError::InternalError(
+                format!("Failed to prepare get_value SQL statement: {}", err)
+            ))
+        };
+
+        return match stmt.query_row(&[key], |row|{
+            Ok(KeyValue {
+                key: row.get(0)?, 
+                value: row.get(1)?,
+                timestamp: Some(DateTime::from_utc(NaiveDateTime::from_timestamp(row.get(2)?, 0), Utc))
+            }
+            )}) 
+        {
+            Ok(result)  => Ok(result),
+            Err(err) => match err {
+                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchKey),
+                _ => Err(DatastoreError::InternalError(
+                              format!("Get value query failed for key {}", key))
+                )
+            }
+        }
+    }
+
+    pub fn get_keys_starting(&self, conn: &Connection, pattern: &str)
+        -> Result<Vec<String>, DatastoreError>
+    {
+        let mut stmt = match conn.prepare("SELECT key FROM key_value WHERE key LIKE ?") {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to prepare get_value SQL statement: {}",
+                    err
+                )))
+            }
+        };
+
+        let mut output = Vec::<String>::new();
+        // Rusqlite's get wants index and item type as parameters.
+        let result = stmt.query_map(&[pattern], |row| row.get::<usize, String>(0));
+        match result {
+            Ok(keys) => {
+                for row in keys {
+                    // Unwrap to String or panic on SQL row if type is invalid. Can't happen with a
+                    // properly initialized table.
+                    output.push(row.unwrap());
+                }
+                Ok(output)
+            }
+            Err(err) => match err {
+                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchKey),
+                _ => Err(DatastoreError::InternalError(format!(
+                    "Failed to get key_value rows starting with pattern {}",
+                    pattern
+                ))),
+            },
+        }
     }
 }

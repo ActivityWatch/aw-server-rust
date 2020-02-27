@@ -11,12 +11,14 @@ use rusqlite::TransactionBehavior;
 
 use aw_models::Bucket;
 use aw_models::Event;
+use aw_models::KeyValue;
 
 use crate::DatastoreError;
 use crate::DatastoreMethod;
 use crate::DatastoreInstance;
 
 use mpsc_requests;
+use mpsc_requests::ResponseReceiver;
 
 type RequestSender = mpsc_requests::RequestSender<Commands, Result<Responses, DatastoreError>>;
 type RequestReceiver = mpsc_requests::RequestReceiver<Commands, Result<Responses, DatastoreError>>;
@@ -46,7 +48,9 @@ pub enum Responses {
     BucketMap(HashMap<String, Bucket>),
     Event(Event),
     EventList(Vec<Event>),
-    Count(i64)
+    Count(i64),
+    KeyValue(KeyValue),
+    StringVec(Vec<String>),
 }
 
 #[derive(Debug,Clone)]
@@ -61,12 +65,27 @@ pub enum Commands {
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
     DeleteEventsById(String, Vec<i64>),
     ForceCommit(),
+    InsertKeyValue(String, String),
+    GetKeyValue(String),
+    GetKeysStarting(String),
+    DeleteKeyValue(String),
 }
 
 struct DatastoreWorker {
     responder: RequestReceiver,
     legacy_import: bool,
     quit: bool
+}
+
+fn _unwrap_response(receiver: ResponseReceiver<Result<Responses, DatastoreError>>)
+                    -> Result<(), DatastoreError> {
+    match receiver.collect().unwrap() {
+        Ok(r) => match r {
+            Responses::Empty() => Ok(()),
+            _ => panic!("Invalid response")
+        },
+        Err(e) => Err(e)
+    }
 }
 
 impl DatastoreWorker {
@@ -191,6 +210,32 @@ impl DatastoreWorker {
                     Commands::ForceCommit() => {
                         commit = true;
                         Ok(Responses::Empty())
+                    },
+                    Commands::InsertKeyValue(key, data) => {
+                        match ds.insert_key_value(&transaction, &key, &data) {
+                            Ok(()) => Ok(Responses::Empty()),
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::GetKeyValue(key) => {
+                        match ds.get_key_value(&transaction, &key) {
+                            Ok(result) => Ok(Responses::KeyValue(result)),
+                            Err(e) => Err(e)
+                        }
+                    },
+                    Commands::GetKeysStarting(pattern) => {
+                        match ds.get_keys_starting(&transaction, &pattern) {
+                            Ok(result) => Ok(Responses::StringVec(result)),
+                            Err(e) => Err(e)
+                        }
+                        
+                        
+                    },
+                    Commands::DeleteKeyValue(key) => {
+                        match ds.delete_key_value(&transaction, &key) {
+                            Ok(()) => Ok(Responses::Empty()),
+                            Err(e) => Err(e)
+                        }
                     },
                 };
                 response_sender.respond(response);
@@ -342,6 +387,49 @@ impl Datastore {
         match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Responses::Empty() => Ok(()),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn insert_key_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
+        let cmd = Commands::InsertKeyValue(key.to_string(), data.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+
+        _unwrap_response(receiver)
+    }
+
+    pub fn delete_key_value(&self, key: &str) -> Result<(), DatastoreError>{
+        let cmd = Commands::DeleteKeyValue(key.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+
+        _unwrap_response(receiver)
+    }
+
+    pub fn get_key_value(&self, key: &str) -> Result<KeyValue, DatastoreError> {
+        let cmd = Commands::GetKeyValue(key.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Responses::KeyValue(value) => return Ok(value),
+                _ => panic!("Invalid response")
+            },
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn get_keys_starting(&self, pattern: &str) -> Result<Vec<String>, DatastoreError> {
+        let cmd = Commands::GetKeysStarting(pattern.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+        
+        match receiver.collect().unwrap() {
+
+            Ok(r) => match r {
+                Responses::StringVec(value) => { 
+                    return Ok(value)
+                },
                 _ => panic!("Invalid response")
             },
             Err(e) => Err(e)

@@ -1,7 +1,6 @@
 /// Transforms for classifying (tagging and categorizing) events.
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
-
 use aw_models::Event;
 use regex::{Regex, RegexBuilder};
 use serde_json;
@@ -33,9 +32,7 @@ impl RegexRule {
         let mut regex_builder = RegexBuilder::new(regex_str);
         regex_builder.case_insensitive(ignore_case);
         let regex = regex_builder.build()?;
-        Ok(RegexRule {
-            regex,
-        })
+        Ok(RegexRule { regex })
     }
 }
 
@@ -58,9 +55,7 @@ impl RuleTrait for RegexRule {
 
 impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
-        Rule::Regex(RegexRule {
-            regex: re,
-        })
+        Rule::Regex(RegexRule { regex: re })
     }
 }
 
@@ -127,11 +122,13 @@ fn _pick_highest_ranking_category(acc: Vec<String>, item: &Vec<String>) -> Vec<S
 #[test]
 fn test_rule() {
     let mut e_match = Event::default();
-    e_match.data
+    e_match
+        .data
         .insert("test".into(), serde_json::json!("just a test"));
 
     let mut e_no_match = Event::default();
-    e_no_match.data
+    e_no_match
+        .data
         .insert("nonono".into(), serde_json::json!("no match!"));
 
     let rule_from_regex = Rule::from(Regex::new("test").unwrap());

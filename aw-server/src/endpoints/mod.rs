@@ -2,15 +2,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use gethostname::gethostname;
 use rocket;
-use rocket::response::{NamedFile};
+use rocket::response::NamedFile;
 use rocket::State;
 use rocket_contrib::json::JsonValue;
-use gethostname::gethostname;
 use uuid::Uuid;
 
-use crate::dirs;
 use crate::config::AWConfig;
+use crate::dirs;
 
 #[macro_export]
 macro_rules! endpoints_get_lock {
@@ -22,14 +22,14 @@ macro_rules! endpoints_get_lock {
                 return Err(Status::ServiceUnavailable);
             }
         }
-    }
+    };
 }
 
 mod bucket;
-mod query;
-mod import;
 mod cors;
 mod export;
+mod import;
+mod query;
 mod settings;
 
 use aw_datastore::Datastore;
@@ -88,7 +88,7 @@ fn get_device_id() -> String {
 
 #[get("/")]
 fn server_info() -> JsonValue {
-    let testing : bool;
+    let testing: bool;
     #[cfg(debug_assertions)]
     {
         testing = true;
@@ -129,32 +129,53 @@ fn not_found() -> JsonValue {
 }
 
 pub fn build_rocket(server_state: ServerState, config: &AWConfig) -> rocket::Rocket {
-    info!("Starting aw-server-rust at {}:{}", config.address, config.port);
+    info!(
+        "Starting aw-server-rust at {}:{}",
+        config.address, config.port
+    );
     rocket::custom(config.to_rocket_config())
-        .mount("/", routes![
-               root_index, root_favicon,
-               root_fonts, root_css, root_js, root_static,
-        ])
+        .mount(
+            "/",
+            routes![
+                root_index,
+                root_favicon,
+                root_fonts,
+                root_css,
+                root_js,
+                root_static,
+            ],
+        )
         .mount("/api/0/info", routes![server_info])
-        .mount("/api/0/buckets", routes![
-               bucket::bucket_new, bucket::bucket_delete, bucket::buckets_get, bucket::bucket_get,
-               bucket::bucket_events_get, bucket::bucket_events_create, bucket::bucket_events_heartbeat, bucket::bucket_event_count,
-               bucket::bucket_events_delete_by_id,
-               bucket::bucket_export
-        ])
-        .mount("/api/0/query", routes![
-               query::query
-        ])
-        .mount("/api/0/import", routes![
-               import::bucket_import_json,
-               import::bucket_import_form
-        ])
-        .mount("/api/0/export", routes![
-               export::buckets_export
-        ])
-        .mount("/api/0/settings", routes![
-            settings::setting_get, settings::settings_list_get, settings::setting_set, settings::setting_delete
-        ])
+        .mount(
+            "/api/0/buckets",
+            routes![
+                bucket::bucket_new,
+                bucket::bucket_delete,
+                bucket::buckets_get,
+                bucket::bucket_get,
+                bucket::bucket_events_get,
+                bucket::bucket_events_create,
+                bucket::bucket_events_heartbeat,
+                bucket::bucket_event_count,
+                bucket::bucket_events_delete_by_id,
+                bucket::bucket_export
+            ],
+        )
+        .mount("/api/0/query", routes![query::query])
+        .mount(
+            "/api/0/import",
+            routes![import::bucket_import_json, import::bucket_import_form],
+        )
+        .mount("/api/0/export", routes![export::buckets_export])
+        .mount(
+            "/api/0/settings",
+            routes![
+                settings::setting_get,
+                settings::settings_list_get,
+                settings::setting_set,
+                settings::setting_delete
+            ],
+        )
         .attach(cors::cors(&config))
         .register(catchers![not_modified, not_found])
         .manage(server_state)

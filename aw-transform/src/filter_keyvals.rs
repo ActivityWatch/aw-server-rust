@@ -14,7 +14,7 @@ pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &Vec<Value>) -> Vec<E
                     }
                 }
             }
-            None => break
+            None => break,
         }
     }
     return filtered_events;
@@ -33,17 +33,17 @@ mod tests {
     use super::filter_keyvals;
 
     #[test]
-    fn test_filter_keyvals () {
+    fn test_filter_keyvals() {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json_map!{"test": json!(1)}
+            data: json_map! {"test": json!(1)},
         };
         let mut e2 = e1.clone();
-        e2.data = json_map!{"test": json!(1), "test2": json!(1)};
+        e2.data = json_map! {"test": json!(1), "test2": json!(1)};
         let mut e3 = e1.clone();
-        e3.data = json_map!{"test2": json!(2)};
+        e3.data = json_map! {"test2": json!(2)};
         let res = filter_keyvals(vec![e1.clone(), e2.clone(), e3], "test", &vec![json!(1)]);
         assert_eq!(vec![e1, e2], res);
     }

@@ -1,4 +1,5 @@
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 extern crate chrono;
 extern crate serde;
 extern crate serde_json;

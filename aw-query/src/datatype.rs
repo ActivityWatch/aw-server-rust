@@ -1,20 +1,19 @@
 use std::collections::HashMap;
+use std::convert::{TryFrom, TryInto};
 use std::fmt;
-use std::convert::{TryFrom,TryInto};
 
-use aw_models::Event;
-use aw_transform::classify::{Rule, RegexRule};
-use super::QueryError;
 use super::functions;
+use super::QueryError;
+use aw_models::Event;
+use aw_transform::classify::{RegexRule, Rule};
 
 use serde::Serializer;
 use serde_json::value::Value;
 use serde_json::Number;
 
-
 // TODO: greater/less comparisons
 
-#[derive(Clone,Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(untagged)]
 pub enum DataType {
     None(),
@@ -28,13 +27,17 @@ pub enum DataType {
     Function(String, functions::QueryFn),
 }
 
-fn serialize_function<S>(_element: &String, _fun: &functions::QueryFn, _serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer
+fn serialize_function<S>(
+    _element: &String,
+    _fun: &functions::QueryFn,
+    _serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
 {
     panic!("Query function was unevaluated and was attempted to be serialized, panic!");
     //element.id.serialize(serializer)
 }
-
 
 // Needed because of a limitation in rust where you cannot derive(Debug) on a
 // enum which has a fn with reference parameters which our QueryFn has
@@ -68,7 +71,10 @@ impl DataType {
             (DataType::List(l1), DataType::List(l2)) => Ok(l1 == l2),
             (DataType::Dict(d1), DataType::Dict(d2)) => Ok(d1 == d2),
             // We do not care about comparing functions
-            _ => Err(QueryError::InvalidType(format!("Cannot compare values of different types {:?} and {:?}", self, other))),
+            _ => Err(QueryError::InvalidType(format!(
+                "Cannot compare values of different types {:?} and {:?}",
+                self, other
+            ))),
         }
     }
 }
@@ -86,7 +92,7 @@ impl PartialEq for DataType {
             (DataType::List(l1), DataType::List(l2)) => l1 == l2,
             (DataType::Dict(d1), DataType::Dict(d2)) => d1 == d2,
             // We do not care about comparing functions
-            _ => false
+            _ => false,
         }
     }
 }
@@ -96,9 +102,10 @@ impl TryFrom<&DataType> for Vec<DataType> {
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
         match value {
             DataType::List(ref s) => Ok(s.clone()),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type List, got {:?}", invalid_type)
-            ))
+            ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
+                "Expected function parameter of type List, got {:?}",
+                invalid_type
+            ))),
         }
     }
 }
@@ -108,9 +115,10 @@ impl TryFrom<&DataType> for String {
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
         match value {
             DataType::String(s) => Ok(s.clone()),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type String, list contains {:?}", invalid_type)
-            ))
+            ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
+                "Expected function parameter of type String, list contains {:?}",
+                invalid_type
+            ))),
         }
     }
 }
@@ -136,9 +144,12 @@ impl TryFrom<&DataType> for Vec<Event> {
         for event in tagged_events.drain(..) {
             match event {
                 DataType::Event(e) => events.push(e.clone()),
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type List of Events, list contains {:?}", invalid_type)
-                ))
+                ref invalid_type => {
+                    return Err(QueryError::InvalidFunctionParameters(format!(
+                        "Expected function parameter of type List of Events, list contains {:?}",
+                        invalid_type
+                    )))
+                }
             }
         }
         return Ok(events);
@@ -164,10 +175,13 @@ impl TryFrom<&DataType> for Vec<(String, Rule)> {
                             format!("Expected function parameter of type list of (tag, rule) tuples, list contains {:?}", l)))
                     };
                     lists.push((tag, rule));
-                },
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type list of (tag, rule) tuples, got {:?}", invalid_type)
-                ))
+                }
+                ref invalid_type => {
+                    return Err(QueryError::InvalidFunctionParameters(format!(
+                        "Expected function parameter of type list of (tag, rule) tuples, got {:?}",
+                        invalid_type
+                    )))
+                }
             }
         }
         return Ok(lists);
@@ -193,10 +207,13 @@ impl TryFrom<&DataType> for Vec<(Vec<String>, Rule)> {
                             format!("Expected function parameter of type list of (category, rule) tuples, list contains {:?}", l)))
                     };
                     lists.push((category, rule));
-                },
-                ref invalid_type => return Err(QueryError::InvalidFunctionParameters(
-                    format!("Expected function parameter of type list of (category, rule) tuples, got {:?}", invalid_type)
-                ))
+                }
+                ref invalid_type => {
+                    return Err(QueryError::InvalidFunctionParameters(format!(
+                    "Expected function parameter of type list of (category, rule) tuples, got {:?}",
+                    invalid_type
+                )))
+                }
             }
         }
         return Ok(lists);
@@ -208,9 +225,10 @@ impl TryFrom<&DataType> for f64 {
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
         match value {
             DataType::Number(f) => Ok(*f),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                format!("Expected function parameter of type Number, got {:?}", invalid_type)
-            ))
+            ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
+                "Expected function parameter of type Number, got {:?}",
+                invalid_type
+            ))),
         }
     }
 }
@@ -238,10 +256,11 @@ impl TryFrom<&DataType> for Value {
                     values.push((&value).try_into()?);
                 }
                 return Ok(Value::Array(values));
-            },
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(
-                    format!("Query2 support for parsing values is limited, does not support parsing {:?}", invalid_type)
-                    ))
+            }
+            ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
+                "Query2 support for parsing values is limited, does not support parsing {:?}",
+                invalid_type
+            ))),
         }
     }
 }
@@ -264,51 +283,75 @@ impl TryFrom<&DataType> for Rule {
     fn try_from(data: &DataType) -> Result<Self, Self::Error> {
         let obj = match data {
             DataType::Dict(dict) => dict,
-            _ => return Err(QueryError::InvalidFunctionParameters(
-                format!("Expected rule dict, got {:?}", data))),
+            _ => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                    "Expected rule dict, got {:?}",
+                    data
+                )))
+            }
         };
         let rtype_val = match obj.get("type") {
             Some(rtype) => rtype,
-            None => return Err(QueryError::InvalidFunctionParameters(
-                "rule does not have a type".to_string())),
+            None => {
+                return Err(QueryError::InvalidFunctionParameters(
+                    "rule does not have a type".to_string(),
+                ))
+            }
         };
         let rtype = match rtype_val {
             DataType::String(s) => s,
-            _ => return Err(QueryError::InvalidFunctionParameters(
-                "rule type is not a string".to_string())),
+            _ => {
+                return Err(QueryError::InvalidFunctionParameters(
+                    "rule type is not a string".to_string(),
+                ))
+            }
         };
         if rtype == "none" {
             return Ok(Self::None);
-        }
-        else if rtype == "regex" {
-            let regex_val = match obj.get("regex"){
+        } else if rtype == "regex" {
+            let regex_val = match obj.get("regex") {
                 Some(regex_val) => regex_val,
-                None => return Err(QueryError::InvalidFunctionParameters(
-                    "regex rule is missing the 'regex' field".to_string())),
+                None => {
+                    return Err(QueryError::InvalidFunctionParameters(
+                        "regex rule is missing the 'regex' field".to_string(),
+                    ))
+                }
             };
             let regex_str = match regex_val {
                 DataType::String(s) => s,
-                _ => return Err(QueryError::InvalidFunctionParameters(
-                    "the regex field of the regex rule is not a string".to_string())),
+                _ => {
+                    return Err(QueryError::InvalidFunctionParameters(
+                        "the regex field of the regex rule is not a string".to_string(),
+                    ))
+                }
             };
-            let ignore_case_val = match obj.get("ignore_case"){
+            let ignore_case_val = match obj.get("ignore_case") {
                 Some(case_val) => case_val,
                 None => &DataType::Bool(false),
             };
             let ignore_case = match ignore_case_val {
                 DataType::Bool(b) => b,
-                _ => return Err(QueryError::InvalidFunctionParameters(
-                    "the ignore_case field of the regex rule is not a bool".to_string())),
+                _ => {
+                    return Err(QueryError::InvalidFunctionParameters(
+                        "the ignore_case field of the regex rule is not a bool".to_string(),
+                    ))
+                }
             };
             let regex_rule = match RegexRule::new(regex_str, *ignore_case) {
                 Ok(regex_rule) => regex_rule,
-                Err(err) => return Err(QueryError::RegexCompileError(
-                    format!("Failed to compile regex string '{}': '{:?}", regex_str, err))),
+                Err(err) => {
+                    return Err(QueryError::RegexCompileError(format!(
+                        "Failed to compile regex string '{}': '{:?}",
+                        regex_str, err
+                    )))
+                }
             };
-            return Ok(Self::Regex( regex_rule ));
+            return Ok(Self::Regex(regex_rule));
         } else {
-            return Err(QueryError::InvalidFunctionParameters(
-                format!("Unknown rule type '{}'", rtype)));
+            return Err(QueryError::InvalidFunctionParameters(format!(
+                "Unknown rule type '{}'",
+                rtype
+            )));
         }
     }
 }

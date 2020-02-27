@@ -1,27 +1,27 @@
 use std::fmt;
 
-use serde::de::{self, Visitor, Deserialize, Deserializer};
+use serde::de::{self, Deserialize, Deserializer, Visitor};
 
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct TimeInterval {
     start: DateTime<Utc>,
-    end: DateTime<Utc>
+    end: DateTime<Utc>,
 }
 
 #[derive(Debug)]
 pub enum TimeIntervalError {
-    ParseError()
+    ParseError(),
 }
 
 impl TimeInterval {
     pub fn new(start: DateTime<Utc>, end: DateTime<Utc>) -> TimeInterval {
         TimeInterval {
             start: start,
-            end: end
+            end: end,
         }
     }
 
@@ -32,11 +32,11 @@ impl TimeInterval {
         }
         let start = match DateTime::parse_from_rfc3339(splits[0]) {
             Ok(dt) => dt.with_timezone(&Utc),
-            Err(_e) => return Err(TimeIntervalError::ParseError())
+            Err(_e) => return Err(TimeIntervalError::ParseError()),
         };
         let end = match DateTime::parse_from_rfc3339(splits[1]) {
             Ok(dt) => dt.with_timezone(&Utc),
-            Err(_e) => return Err(TimeIntervalError::ParseError())
+            Err(_e) => return Err(TimeIntervalError::ParseError()),
         };
 
         Ok(TimeInterval::new(start, end))

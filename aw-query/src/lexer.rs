@@ -93,7 +93,11 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(s: &'a str) -> Lexer<'a> {
-        Lexer { original: s, remaining: s , line: 1}
+        Lexer {
+            original: s,
+            remaining: s,
+            line: 1,
+        }
     }
 }
 
@@ -121,7 +125,7 @@ impl<'a> Iterator for Lexer<'a> {
                 self.remaining = new_remaining;
                 tok
             } else {
-                return None
+                return None;
             };
             match tok {
                 (Token::Whitespace, _) | (Token::Comment, _) => {
@@ -138,4 +142,3 @@ impl<'a> Iterator for Lexer<'a> {
         }
     }
 }
-

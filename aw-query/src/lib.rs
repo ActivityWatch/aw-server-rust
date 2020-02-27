@@ -1,7 +1,9 @@
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 extern crate serde;
 extern crate serde_json;
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate serde_derive;
 
 use std::fmt;
 
@@ -11,11 +13,11 @@ use aw_datastore::Datastore;
 
 pub mod datatype;
 
-mod lexer;
 mod ast;
-mod parser;
 mod functions;
 mod interpret;
+mod lexer;
+mod parser;
 
 pub use crate::datatype::DataType;
 
@@ -43,7 +45,6 @@ impl fmt::Display for QueryError {
         write!(f, "{:?}", self)
     }
 }
-
 
 pub fn query<'a>(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
     let lexer = lexer::Lexer::new(code);

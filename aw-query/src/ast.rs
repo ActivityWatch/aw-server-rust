@@ -4,16 +4,16 @@ use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Program {
-    pub stmts: Vec<Expr>
+    pub stmts: Vec<Expr>,
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct Expr {
     pub span: Span,
     pub node: Expr_,
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum Expr_ {
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),

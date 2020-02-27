@@ -11,4 +11,3 @@ macro_rules! json_map {
         map
     }};
 }
-

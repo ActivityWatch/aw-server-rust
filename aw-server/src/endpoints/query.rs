@@ -1,19 +1,19 @@
-use rocket::State;
 use rocket::http::Status;
 use rocket::response::status;
+use rocket::State;
 use rocket_contrib::json::{Json, JsonValue};
 
 use aw_models::Query;
 
+use crate::endpoints::ServerState;
 use aw_query;
 use aw_query::QueryError;
-use crate::endpoints::ServerState;
 
 #[derive(Serialize)]
 struct QueryErrorJson {
     status: u16,
     reason: String,
-    message: String
+    message: String,
 }
 
 /* TODO: Slightly ugly code with ok() and error() */
@@ -26,7 +26,7 @@ fn error(err: QueryError) -> status::Custom<JsonValue> {
     let body = QueryErrorJson {
         status: 500,
         reason: "Internal Server Error (Query Error)".to_string(),
-        message: format!("{}", err)
+        message: format!("{}", err),
     };
     status::Custom(Status::InternalServerError, json!(body))
 }
@@ -46,7 +46,7 @@ pub fn query(query_req: Json<Query>, state: State<ServerState>) -> status::Custo
                 let body = QueryErrorJson {
                     status: 504,
                     reason: "Service Unavailable".to_string(),
-                    message: "Taking datastore lock failed, see aw-server logs".to_string()
+                    message: "Taking datastore lock failed, see aw-server logs".to_string(),
                 };
                 return status::Custom(Status::ServiceUnavailable, json!(body));
             }

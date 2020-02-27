@@ -1,4 +1,5 @@
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 
 #[macro_export]
 macro_rules! json_map {
@@ -15,8 +16,8 @@ macro_rules! json_map {
 }
 
 mod datastore;
-mod worker;
 mod legacy_import;
+mod worker;
 
 pub use self::datastore::DatastoreInstance;
 pub use self::worker::Datastore;
@@ -27,7 +28,7 @@ pub enum DatastoreMethod {
 }
 
 /* TODO: Implement this as a proper error */
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum DatastoreError {
     NoSuchBucket,
     BucketAlreadyExists,

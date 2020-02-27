@@ -8,8 +8,8 @@ extern crate aw_server;
 mod macros_tests {
     #[test]
     fn test_json_map() {
-        json_map!{};
-        json_map!{"a": json!(1)};
-        json_map!{"a": json!(1), "b": json!(2)};
+        json_map! {};
+        json_map! {"a": json!(1)};
+        json_map! {"a": json!(1), "b": json!(2)};
     }
 }

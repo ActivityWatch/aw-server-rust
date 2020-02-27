@@ -1,4 +1,5 @@
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 
 use aw_server::*;
 
@@ -48,7 +49,7 @@ fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
                 }
                 return Ok(data_dir);
             }
-        },
+        }
         None => {}
     };
     // If no dirs exists in XDG_DATA_DIRS, fallback to /usr/local/share
@@ -64,7 +65,7 @@ fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
     }
 }
 
-fn get_asset_path () -> PathBuf {
+fn get_asset_path() -> PathBuf {
     use std::env::current_exe;
 
     // TODO: Add cmdline arg which can override asset path?
@@ -91,7 +92,7 @@ fn get_asset_path () -> PathBuf {
             if current_exe_path.as_path().exists() {
                 return current_exe_path;
             }
-        },
+        }
         Err(_) => (),
     };
 

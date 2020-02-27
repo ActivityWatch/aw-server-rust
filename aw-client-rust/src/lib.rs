@@ -1,12 +1,12 @@
-extern crate reqwest;
 extern crate gethostname;
+extern crate reqwest;
 #[macro_use]
 extern crate serde_derive;
-extern crate serde_json;
 extern crate aw_models;
+extern crate serde_json;
 
-use std::vec::Vec;
 use std::collections::HashMap;
+use std::vec::Vec;
 
 use serde_json::Map;
 
@@ -14,8 +14,8 @@ pub use aw_models::{Bucket, BucketMetadata, Event};
 
 #[derive(Deserialize)]
 pub struct Info {
-  pub hostname: String,
-  pub testing: bool,
+    pub hostname: String,
+    pub testing: bool,
 }
 
 #[derive(Debug)]
@@ -23,7 +23,7 @@ pub struct AwClient {
     client: reqwest::Client,
     pub baseurl: String,
     pub name: String,
-    pub hostname: String
+    pub hostname: String,
 }
 
 impl AwClient {
@@ -35,13 +35,13 @@ impl AwClient {
             client: client,
             baseurl: baseurl,
             name: name.to_string(),
-            hostname: hostname
+            hostname: hostname,
         };
     }
 
     pub fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        let bucket : Bucket = self.client.get(&url).send()?.json()?;
+        let bucket: Bucket = self.client.get(&url).send()?.json()?;
         Ok(bucket)
     }
 
@@ -87,14 +87,25 @@ impl AwClient {
         Ok(())
     }
 
-    pub fn heartbeat(&self, bucketname: &str, event: &Event, pulsetime: f64) -> Result<(), reqwest::Error> {
-        let url = format!("{}/api/0/buckets/{}/heartbeat?pulsetime={}", self.baseurl, bucketname, pulsetime);
+    pub fn heartbeat(
+        &self,
+        bucketname: &str,
+        event: &Event,
+        pulsetime: f64,
+    ) -> Result<(), reqwest::Error> {
+        let url = format!(
+            "{}/api/0/buckets/{}/heartbeat?pulsetime={}",
+            self.baseurl, bucketname, pulsetime
+        );
         self.client.post(&url).json(&event).send()?;
         Ok(())
     }
 
     pub fn delete_event(&self, bucketname: &str, event_id: i64) -> Result<(), reqwest::Error> {
-        let url = format!("{}/api/0/buckets/{}/events/{}", self.baseurl, bucketname, event_id);
+        let url = format!(
+            "{}/api/0/buckets/{}/events/{}",
+            self.baseurl, bucketname, event_id
+        );
         self.client.delete(&url).send()?;
         Ok(())
     }
@@ -102,7 +113,7 @@ impl AwClient {
     pub fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events/count", self.baseurl, bucketname);
         let res = self.client.get(&url).send()?.text()?;
-        let count : i64 = match res.parse() {
+        let count: i64 = match res.parse() {
             Ok(count) => count,
             Err(err) => panic!("could not parse get_event_count response: {:?}", err),
         };

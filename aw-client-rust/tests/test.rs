@@ -1,15 +1,15 @@
 extern crate aw_client_rust;
-extern crate serde_json;
-extern crate chrono;
-extern crate aw_server;
 extern crate aw_datastore;
+extern crate aw_server;
+extern crate chrono;
+extern crate serde_json;
 
 #[cfg(test)]
 mod test {
     use aw_client_rust::AwClient;
     use aw_client_rust::Event;
+    use chrono::{DateTime, Duration, Utc};
     use serde_json::Map;
-    use chrono::{DateTime, Utc, Duration};
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::thread;
@@ -24,10 +24,12 @@ mod test {
                 Ok(_) => break,
                 Err(err) => {
                     if i == timeout_s {
-                        panic!("Timed out starting aw-server after {}s: {:?}",
-                               timeout_s, err);
+                        panic!(
+                            "Timed out starting aw-server after {}s: {:?}",
+                            timeout_s, err
+                        );
                     }
-                },
+                }
             }
             use std::time;
             let duration = time::Duration::from_secs(1);
@@ -57,9 +59,9 @@ mod test {
     #[test]
     fn test_full() {
         let ip = "127.0.0.1";
-        let port : String = PORT.to_string();
+        let port: String = PORT.to_string();
         let clientname = "aw-client-rust-test";
-        let client : AwClient = AwClient::new(ip, &port, clientname);
+        let client: AwClient = AwClient::new(ip, &port, clientname);
 
         setup_testserver();
 
@@ -80,21 +82,33 @@ mod test {
         println!("Buckets: {:?}", buckets);
         let mut event = Event {
             id: None,
-            timestamp: DateTime::from_utc(DateTime::parse_from_rfc3339("2017-12-30T01:00:00+00:00").unwrap().naive_utc(), Utc),
+            timestamp: DateTime::from_utc(
+                DateTime::parse_from_rfc3339("2017-12-30T01:00:00+00:00")
+                    .unwrap()
+                    .naive_utc(),
+                Utc,
+            ),
             duration: Duration::seconds(0),
-            data: Map::new()
+            data: Map::new(),
         };
         println!("{:?}", event);
         client.insert_event(&bucketname, &event).unwrap();
         // Ugly way to create a UTC from timestamp, see https://github.com/chronotope/chrono/issues/263
-        event.timestamp = DateTime::from_utc(DateTime::parse_from_rfc3339("2017-12-30T01:00:01+00:00").unwrap().naive_utc(), Utc);
+        event.timestamp = DateTime::from_utc(
+            DateTime::parse_from_rfc3339("2017-12-30T01:00:01+00:00")
+                .unwrap()
+                .naive_utc(),
+            Utc,
+        );
         client.heartbeat(&bucketname, &event, 10.0).unwrap();
 
         let events = client.get_events(&bucketname).unwrap();
         println!("Events: {:?}", events);
         assert!(events[0].duration == Duration::seconds(1));
 
-        client.delete_event(&bucketname, events[0].id.unwrap()).unwrap();
+        client
+            .delete_event(&bucketname, events[0].id.unwrap())
+            .unwrap();
 
         let count = client.get_event_count(&bucketname).unwrap();
         assert_eq!(count, 0);

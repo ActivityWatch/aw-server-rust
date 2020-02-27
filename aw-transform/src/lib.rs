@@ -1,4 +1,5 @@
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 
 // TODO: Move this to some more suitable place
 #[macro_export]
@@ -14,7 +15,6 @@ macro_rules! json_map {
         map
     }};
 }
-
 
 pub mod classify;
 
@@ -34,7 +34,7 @@ mod chunk;
 pub use chunk::chunk_events_by_key;
 
 mod sort;
-pub use sort::{sort_by_timestamp, sort_by_duration};
+pub use sort::{sort_by_duration, sort_by_timestamp};
 
 mod filter_keyvals;
 pub use filter_keyvals::filter_keyvals;

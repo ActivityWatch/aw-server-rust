@@ -264,6 +264,8 @@ parser! {
     }
 }
 
-pub fn parse<I: Iterator<Item=(Token, Span)>>(i: I) -> Result<Program, (Option<(Token, Span)>, &'static str)> {
+pub fn parse<I: Iterator<Item = (Token, Span)>>(
+    i: I,
+) -> Result<Program, (Option<(Token, Span)>, &'static str)> {
     parse_(i)
 }

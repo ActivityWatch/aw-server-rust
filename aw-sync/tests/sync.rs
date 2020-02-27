@@ -1,14 +1,15 @@
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 extern crate aw_sync;
 
 #[cfg(test)]
 mod sync_tests {
-    use std::collections::{HashMap};
     use chrono::{DateTime, Utc};
+    use std::collections::HashMap;
 
-    use aw_sync;
-    use aw_models::{Bucket, Event};
     use aw_datastore::{Datastore, DatastoreError};
+    use aw_models::{Bucket, Event};
+    use aw_sync;
 
     struct TestState {
         ds_src: Datastore,
@@ -19,18 +20,21 @@ mod sync_tests {
         return TestState {
             ds_src: Datastore::new_in_memory(false),
             ds_dest: Datastore::new_in_memory(false),
-        }
+        };
     }
 
     fn create_bucket(ds: &Datastore, n: i32) -> String {
         // Create a bucket
         let bucket_id = format!("bucket-{}", n);
-        let bucket_jsonstr = format!(r#"{{
+        let bucket_jsonstr = format!(
+            r#"{{
             "id": "{}",
             "type": "test",
             "hostname": "device-{}",
             "client": "test"
-        }}"#, bucket_id, n);
+        }}"#,
+            bucket_id, n
+        );
         let bucket: Bucket = serde_json::from_str(&bucket_jsonstr).unwrap();
         match ds.create_bucket(&bucket) {
             Ok(()) => (),
@@ -39,7 +43,7 @@ mod sync_tests {
                     debug!("bucket already exists, skipping");
                 }
                 e => panic!("woops! {:?}", e),
-            }
+            },
         };
         bucket_id
     }
@@ -50,18 +54,22 @@ mod sync_tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
 
         let timestamp: DateTime<Utc> = Utc::now();
-        let event_jsonstr = format!(r#"{{
+        let event_jsonstr = format!(
+            r#"{{
             "timestamp": "{}",
             "duration": 0,
             "data": {{"test": {} }}
-        }}"#, timestamp.to_rfc3339(), data_str);
+        }}"#,
+            timestamp.to_rfc3339(),
+            data_str
+        );
         serde_json::from_str(&event_jsonstr).unwrap()
     }
 
     fn create_events(ds: &Datastore, bucket_id: &str, n: i64) {
-        let events: Vec<Event> = (0..n).map(|i| {
-            create_event(format!("{}", i).as_str())
-        }).collect::<Vec<Event>>();
+        let events: Vec<Event> = (0..n)
+            .map(|i| create_event(format!("{}", i).as_str()))
+            .collect::<Vec<Event>>();
 
         ds.insert_events(bucket_id, &events[..]).unwrap();
         ds.force_commit().unwrap();
@@ -80,9 +88,12 @@ mod sync_tests {
 
     fn get_all_buckets_map(datastores: Vec<&Datastore>) -> HashMap<String, (&Datastore, Bucket)> {
         let all_buckets = get_all_buckets(datastores);
-        all_buckets.iter().cloned().map(|(ds, b)| (b.id.clone(), (ds, b))).collect()
+        all_buckets
+            .iter()
+            .cloned()
+            .map(|(ds, b)| (b.id.clone(), (ds, b)))
+            .collect()
     }
-
 
     #[test]
     fn test_buckets_created() {
@@ -103,7 +114,9 @@ mod sync_tests {
                 let bucket_src_id = bucket.id.replace("-synced", "");
                 let (ds_src, bucket_src) = all_buckets_map.get(&bucket_src_id).unwrap();
                 let events_synced = ds.get_events(bucket.id.as_str(), None, None, None).unwrap();
-                let events_src = ds_src.get_events(bucket_src.id.as_str(), None, None, None).unwrap();
+                let events_src = ds_src
+                    .get_events(bucket_src.id.as_str(), None, None, None)
+                    .unwrap();
                 println!("{:?}", events_synced);
                 println!("{:?}", events_src);
                 assert!(events_synced == events_src);
@@ -118,18 +131,25 @@ mod sync_tests {
         let state = init_teststate();
 
         let bucket_id = create_bucket(&state.ds_src, 0);
-        state.ds_src.heartbeat(bucket_id.as_str(), create_event("1"), 1.0).unwrap();
+        state
+            .ds_src
+            .heartbeat(bucket_id.as_str(), create_event("1"), 1.0)
+            .unwrap();
 
         aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
 
-        let all_datastores: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].iter().cloned().collect();
+        let all_datastores: Vec<&Datastore> =
+            [&state.ds_src, &state.ds_dest].iter().cloned().collect();
         let all_buckets_map = get_all_buckets_map(all_datastores);
 
         // Check that all synced buckets are identical to source bucket
         check_synced_buckets_equal_to_src(&all_buckets_map);
 
         // Add some more events
-        state.ds_src.heartbeat(bucket_id.as_str(), create_event("1"), 1.0).unwrap();
+        state
+            .ds_src
+            .heartbeat(bucket_id.as_str(), create_event("1"), 1.0)
+            .unwrap();
         aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
 
         // Check again that new events were indeed synced
@@ -145,7 +165,8 @@ mod sync_tests {
 
         aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
 
-        let all_datastores: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].iter().cloned().collect();
+        let all_datastores: Vec<&Datastore> =
+            [&state.ds_src, &state.ds_dest].iter().cloned().collect();
         let all_buckets_map = get_all_buckets_map(all_datastores);
 
         // Check that all synced buckets are identical to source bucket
@@ -159,4 +180,3 @@ mod sync_tests {
         check_synced_buckets_equal_to_src(&all_buckets_map);
     }
 }
-

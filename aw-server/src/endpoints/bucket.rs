@@ -10,11 +10,11 @@ use aw_models::Bucket;
 use aw_models::BucketsExport;
 use aw_models::Event;
 
-use rocket::State;
-use rocket::response::status;
-use rocket::response::Response;
 use rocket::http::Header;
 use rocket::http::Status;
+use rocket::response::status;
+use rocket::response::Response;
+use rocket::State;
 
 use crate::endpoints::ServerState;
 
@@ -30,7 +30,7 @@ pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Buc
                 warn!("Unexpected error: {:?}", e);
                 Err(Status::InternalServerError)
             }
-        }
+        },
     }
 }
 
@@ -45,7 +45,7 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
                 warn!("Unexpected error: {:?}", e);
                 Err(Status::InternalServerError)
             }
-        }
+        },
     }
 }
 
@@ -53,7 +53,11 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
 // Status::NotModified rocket will for some unknown reason consider that to be a
 // "Invalid status used as responder" and converts it to a 500 which we do not want.
 #[post("/<bucket_id>", data = "<message>")]
-pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerState>) -> status::Custom<()> {
+pub fn bucket_new(
+    bucket_id: String,
+    message: Json<Bucket>,
+    state: State<ServerState>,
+) -> status::Custom<()> {
     let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
         bucket.id = bucket_id;
@@ -76,35 +80,43 @@ pub fn bucket_new(bucket_id: String, message: Json<Bucket>, state: State<ServerS
                 warn!("Unexpected error: {:?}", e);
                 status::Custom(Status::InternalServerError, ())
             }
-        }
+        },
     }
 }
 
 #[get("/<bucket_id>/events?<start>&<end>&<limit>")]
-pub fn bucket_events_get(bucket_id: String, start: Option<String>, end: Option<String>, limit: Option<u64>, state: State<ServerState>) -> Result<Json<Vec<Event>>, Status> {
-    let starttime : Option<DateTime<Utc>> = match start {
-        Some(dt_str) => {
-            match DateTime::parse_from_rfc3339(&dt_str) {
-                Ok(dt) => Some(dt.with_timezone(&Utc)),
-                Err(e) => {
-                    warn!("Failed to parse starttime, datetime needs to be in rfc3339 format: {}", e);
-                    return Err(Status::BadRequest);
-                }
+pub fn bucket_events_get(
+    bucket_id: String,
+    start: Option<String>,
+    end: Option<String>,
+    limit: Option<u64>,
+    state: State<ServerState>,
+) -> Result<Json<Vec<Event>>, Status> {
+    let starttime: Option<DateTime<Utc>> = match start {
+        Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
+            Ok(dt) => Some(dt.with_timezone(&Utc)),
+            Err(e) => {
+                warn!(
+                    "Failed to parse starttime, datetime needs to be in rfc3339 format: {}",
+                    e
+                );
+                return Err(Status::BadRequest);
             }
         },
-        None => None
+        None => None,
     };
-    let endtime : Option<DateTime<Utc>> = match end {
-        Some(dt_str) => {
-            match DateTime::parse_from_rfc3339(&dt_str) {
-                Ok(dt) => Some(dt.with_timezone(&Utc)),
-                Err(e) => {
-                    warn!("Failed to parse endtime, datetime needs to be in rfc3339 format: {}", e);
-                    return Err(Status::BadRequest);
-                }
+    let endtime: Option<DateTime<Utc>> = match end {
+        Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
+            Ok(dt) => Some(dt.with_timezone(&Utc)),
+            Err(e) => {
+                warn!(
+                    "Failed to parse endtime, datetime needs to be in rfc3339 format: {}",
+                    e
+                );
+                return Err(Status::BadRequest);
             }
         },
-        None => None
+        None => None,
     };
     let datastore = endpoints_get_lock!(state.datastore);
     let res = datastore.get_events(&bucket_id, starttime, endtime, limit);
@@ -116,12 +128,16 @@ pub fn bucket_events_get(bucket_id: String, start: Option<String>, end: Option<S
                 warn!("Failed to fetch events: {:?}", e);
                 Err(Status::InternalServerError)
             }
-        }
+        },
     }
 }
 
 #[post("/<bucket_id>/events", data = "<events>")]
-pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: State<ServerState>) -> Result<Json<Vec<Event>>, Status> {
+pub fn bucket_events_create(
+    bucket_id: String,
+    events: Json<Vec<Event>>,
+    state: State<ServerState>,
+) -> Result<Json<Vec<Event>>, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
     let res = datastore.insert_events(&bucket_id, &events);
     match res {
@@ -132,12 +148,17 @@ pub fn bucket_events_create(bucket_id: String, events: Json<Vec<Event>>, state: 
                 warn!("Failed to create event(s): {:?}", e);
                 Err(Status::InternalServerError)
             }
-        }
+        },
     }
 }
 
 #[post("/<bucket_id>/heartbeat?<pulsetime>", data = "<heartbeat_json>")]
-pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, pulsetime: f64, state: State<ServerState>) -> Result<Json<Event>, Status> {
+pub fn bucket_events_heartbeat(
+    bucket_id: String,
+    heartbeat_json: Json<Event>,
+    pulsetime: f64,
+    state: State<ServerState>,
+) -> Result<Json<Event>, Status> {
     let heartbeat = heartbeat_json.into_inner();
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.heartbeat(&bucket_id, heartbeat, pulsetime) {
@@ -148,12 +169,15 @@ pub fn bucket_events_heartbeat(bucket_id: String, heartbeat_json: Json<Event>, p
                 warn!("Heartbeat failed: {:?}", err);
                 Err(Status::InternalServerError)
             }
-        }
+        },
     }
 }
 
 #[get("/<bucket_id>/events/count")]
-pub fn bucket_event_count(bucket_id: String, state: State<ServerState>) -> Result<Json<u64>, Status> {
+pub fn bucket_event_count(
+    bucket_id: String,
+    state: State<ServerState>,
+) -> Result<Json<u64>, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
     let res = datastore.get_event_count(&bucket_id, None, None);
     match res {
@@ -164,12 +188,16 @@ pub fn bucket_event_count(bucket_id: String, state: State<ServerState>) -> Resul
                 warn!("Failed to count events: {:?}", e);
                 Err(Status::InternalServerError)
             }
-        }
+        },
     }
 }
 
 #[delete("/<bucket_id>/events/<event_id>")]
-pub fn bucket_events_delete_by_id(bucket_id: String, event_id: i64, state: State<ServerState>) -> Result<(), Status> {
+pub fn bucket_events_delete_by_id(
+    bucket_id: String,
+    event_id: i64,
+    state: State<ServerState>,
+) -> Result<(), Status> {
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.delete_events_by_id(&bucket_id, vec![event_id]) {
         Ok(_) => Ok(()),
@@ -179,7 +207,7 @@ pub fn bucket_events_delete_by_id(bucket_id: String, event_id: i64, state: State
                 warn!("Delete events by id failed: {:?}", err);
                 Err(Status::InternalServerError)
             }
-        }
+        },
     }
 }
 
@@ -187,7 +215,7 @@ pub fn bucket_events_delete_by_id(bucket_id: String, event_id: i64, state: State
 pub fn bucket_export(bucket_id: String, state: State<ServerState>) -> Result<Response, Status> {
     let datastore = endpoints_get_lock!(state.datastore);
     let mut export = BucketsExport {
-        buckets: HashMap::new()
+        buckets: HashMap::new(),
     };
     let mut bucket = match datastore.get_bucket(&bucket_id) {
         Ok(bucket) => bucket,
@@ -197,9 +225,13 @@ pub fn bucket_export(bucket_id: String, state: State<ServerState>) -> Result<Res
                 warn!("Failed to fetch events: {:?}", e);
                 return Err(Status::InternalServerError);
             }
-        }
+        },
     };
-    bucket.events = Some(datastore.get_events(&bucket_id, None, None, None).expect("Failed to get events for bucket"));
+    bucket.events = Some(
+        datastore
+            .get_events(&bucket_id, None, None, None)
+            .expect("Failed to get events for bucket"),
+    );
     export.buckets.insert(bucket_id.clone(), bucket);
     let filename = format!("aw-bucket-export_{}.json", bucket_id);
 
@@ -207,7 +239,9 @@ pub fn bucket_export(bucket_id: String, state: State<ServerState>) -> Result<Res
     let response = Response::build()
         .status(Status::Ok)
         .header(Header::new("Content-Disposition", header_content))
-        .sized_body(Cursor::new(serde_json::to_string(&export).expect("Failed to serialize")))
+        .sized_body(Cursor::new(
+            serde_json::to_string(&export).expect("Failed to serialize"),
+        ))
         .finalize();
     return Ok(response);
 }
@@ -223,6 +257,6 @@ pub fn bucket_delete(bucket_id: String, state: State<ServerState>) -> Result<(),
                 warn!("Failed to delete bucket: {:?}", e);
                 Err(Status::InternalServerError)
             }
-        }
+        },
     }
 }

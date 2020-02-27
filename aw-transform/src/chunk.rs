@@ -1,7 +1,7 @@
 use aw_models::Event;
 
 pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
-    let mut chunked_events : Vec<Event> = Vec::new();
+    let mut chunked_events: Vec<Event> = Vec::new();
     for event in events {
         if chunked_events.len() == 0 && event.data.get(key).is_some() {
             // TODO: Add sub-chunks
@@ -9,7 +9,7 @@ pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
         } else {
             let val = match event.data.get(key) {
                 None => continue,
-                Some(v) => v
+                Some(v) => v,
             };
             let mut last_event = chunked_events.pop().unwrap();
             let last_val = last_event.data.get(key).unwrap().clone();
@@ -45,13 +45,13 @@ mod tests {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
             duration: Duration::seconds(1),
-            data: json_map!{"test": json!(1)}
+            data: json_map! {"test": json!(1)},
         };
         let mut e2 = e1.clone();
-        e2.data = json_map!{"test2": json!(1)};
+        e2.data = json_map! {"test2": json!(1)};
         let e3 = e1.clone();
         let mut e4 = e1.clone();
-        e4.data = json_map!{"test": json!(2)};
+        e4.data = json_map! {"test": json!(2)};
 
         let res = chunk_events_by_key(vec![e1, e2, e3, e4], "test");
         assert_eq!(res.len(), 2);

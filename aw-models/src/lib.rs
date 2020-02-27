@@ -1,8 +1,11 @@
 extern crate serde;
-#[macro_use] extern crate serde_json;
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 extern crate chrono;
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 
 // TODO: Move me to an appropriate place
 #[macro_export]
@@ -19,18 +22,18 @@ macro_rules! json_map {
     }};
 }
 
-mod duration;
 mod bucket;
+mod duration;
 mod event;
-mod timeinterval;
-mod query;
 mod key_value;
+mod query;
+mod timeinterval;
 
 pub use self::bucket::Bucket;
 pub use self::bucket::BucketMetadata;
 pub use self::bucket::BucketsExport;
 pub use self::event::Event;
-pub use self::timeinterval::TimeInterval;
-pub use self::query::Query;
-pub use self::key_value::KeyValue;
 pub use self::key_value::Key;
+pub use self::key_value::KeyValue;
+pub use self::query::Query;
+pub use self::timeinterval::TimeInterval;

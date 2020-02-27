@@ -12,7 +12,8 @@ pub struct AWConfig {
     pub port: u16,
     #[serde(skip, default = "is_testing")]
     pub testing: bool, // This is not written to the config file (serde(skip))
-                       // TODO: add CORS origins
+    #[serde(default = "default_cors")]
+    pub cors: Vec<String>,
 }
 
 impl Default for AWConfig {
@@ -21,6 +22,7 @@ impl Default for AWConfig {
             address: default_address(),
             port: default_port(),
             testing: is_testing(),
+            cors: default_cors(),
         }
     }
 }
@@ -48,6 +50,14 @@ fn default_port() -> u16 {
     match Environment::active().expect("Failed to get current environment") {
         Environment::Production => 5600,
         Environment::Development => 5666,
+        Environment::Staging => panic!("Staging environment not supported"),
+    }
+}
+
+fn default_cors() -> Vec<String> {
+    match Environment::active().expect("Failed to get current environment") {
+        Environment::Production => Vec::<String>::new(),
+        Environment::Development => Vec::<String>::new(),
         Environment::Staging => panic!("Staging environment not supported"),
     }
 }

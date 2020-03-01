@@ -80,6 +80,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8aac770f1885fd7e387acedd76065302551364496e46b3dd00860b2f8359b9d"
 
 [[package]]
+name = "aw-client-rust"
+version = "0.1.0"
+dependencies = [
+ "aw-datastore",
+ "aw-models",
+ "aw-server",
+ "chrono",
+ "gethostname",
+ "reqwest",
+ "serde",
+ "serde_derive",
+ "serde_json",
+]
+
+[[package]]
 name = "aw-datastore"
 version = "0.1.0"
 dependencies = [
@@ -154,10 +169,10 @@ dependencies = [
 name = "aw-sync"
 version = "0.1.0"
 dependencies = [
+ "aw-client-rust",
  "aw-datastore",
  "aw-models",
  "aw-server",
- "aw_client_rust",
  "chrono",
  "log 0.4.8",
  "serde",
@@ -174,21 +189,6 @@ dependencies = [
  "regex",
  "rocket",
  "serde",
- "serde_json",
-]
-
-[[package]]
-name = "aw_client_rust"
-version = "0.1.0"
-dependencies = [
- "aw-datastore",
- "aw-models",
- "aw-server",
- "chrono",
- "gethostname",
- "reqwest",
- "serde",
- "serde_derive",
  "serde_json",
 ]
 

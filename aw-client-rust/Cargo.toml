@@ -1,5 +1,5 @@
 [package]
-name = "aw_client_rust"
+name = "aw-client-rust"
 version = "0.1.0"
 edition = "2018"
 authors = ["Johan Bjäreholt <johan@bjareho.lt>"]

@@ -20,7 +20,7 @@ pub struct Info {
 
 #[derive(Debug)]
 pub struct AwClient {
-    client: reqwest::Client,
+    client: reqwest::blocking::Client,
     pub baseurl: String,
     pub name: String,
     pub hostname: String,
@@ -29,7 +29,7 @@ pub struct AwClient {
 impl AwClient {
     pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
         let baseurl = String::from(format!("http://{}:{}", ip, port));
-        let client = reqwest::Client::new();
+        let client = reqwest::blocking::Client::new();
         let hostname = gethostname::gethostname().into_string().unwrap();
         return AwClient {
             client: client,

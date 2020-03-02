@@ -23,7 +23,7 @@ mod test {
             match client.get_info() {
                 Ok(_) => break,
                 Err(err) => {
-                    if i == timeout_s {
+                    if i == timeout_s-1 {
                         panic!(
                             "Timed out starting aw-server after {}s: {:?}",
                             timeout_s, err
@@ -65,7 +65,7 @@ mod test {
 
         setup_testserver();
 
-        wait_for_server(10, &client);
+        wait_for_server(20, &client);
 
         let info = client.get_info().unwrap();
         assert!(info.testing == true);

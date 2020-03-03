@@ -20,13 +20,13 @@ pub enum TimeIntervalError {
 impl TimeInterval {
     pub fn new(start: DateTime<Utc>, end: DateTime<Utc>) -> TimeInterval {
         TimeInterval {
-            start: start,
-            end: end,
+            start,
+            end,
         }
     }
 
     pub fn new_from_string(period: &str) -> Result<TimeInterval, TimeIntervalError> {
-        let splits = period.split("/").collect::<Vec<&str>>();
+        let splits = period.split('/').collect::<Vec<&str>>();
         if splits.len() != 2 {
             return Err(TimeIntervalError::ParseError());
         }

@@ -249,7 +249,7 @@ impl TryFrom<&DataType> for Value {
             DataType::Bool(b) => Ok(Value::Bool(*b)),
             DataType::Number(n) => Ok(Value::Number(Number::from_f64(*n).unwrap())),
             DataType::String(s) => Ok(Value::String(s.to_string())),
-            DataType::List(l) => {
+            DataType::List(_l) => {
                 let mut tagged_values: Vec<DataType> = value.try_into()?;
                 let mut values: Vec<Value> = Vec::new();
                 for value in tagged_values.drain(..) {

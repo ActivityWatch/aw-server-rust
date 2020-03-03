@@ -42,8 +42,6 @@ mod test {
         // TODO: Properly shutdown
         use aw_server::endpoints::ServerState;
         let state = ServerState {
-            // TODO: This currently has legacy_import enabled so it can become very slow on
-            // machines with a legacy database on them if it's large
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
             asset_path: PathBuf::from("."), // webui won't be used, so it's invalidly set
         };

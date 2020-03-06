@@ -1,4 +1,5 @@
 extern crate serde;
+#[cfg_attr(test, macro_use)] // Only macro use for tests
 extern crate serde_json;
 #[macro_use]
 extern crate serde_derive;
@@ -7,7 +8,8 @@ extern crate chrono;
 extern crate log;
 
 // TODO: Move me to an appropriate place
-#[macro_export]
+#[cfg(test)] // Only macro use for tests
+#[macro_use]
 macro_rules! json_map {
     { $( $key:literal : $value:expr),* } => {{
         use serde_json::Value;

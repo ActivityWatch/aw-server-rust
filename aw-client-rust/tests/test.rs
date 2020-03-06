@@ -38,7 +38,6 @@ mod test {
     }
 
     fn setup_testserver() -> () {
-        // Start testserver and wait 10s for it to start up
         // TODO: Properly shutdown
         use aw_server::endpoints::ServerState;
         let state = ServerState {
@@ -48,7 +47,6 @@ mod test {
         let mut aw_config = aw_server::config::AWConfig::default();
         aw_config.port = PORT;
         let server = aw_server::endpoints::build_rocket(state, &aw_config);
-
         thread::spawn(move || {
             server.launch();
         });
@@ -62,7 +60,7 @@ mod test {
         let client: AwClient = AwClient::new(ip, &port, clientname);
 
         setup_testserver();
-
+        // Wait for client to connect to server for 20 seconds or timeout
         wait_for_server(20, &client);
 
         let info = client.get_info().unwrap();
@@ -75,6 +73,8 @@ mod test {
         let bucket = client.get_bucket(&bucketname).unwrap();
         assert!(bucket.id == bucketname);
         println!("{}", bucket.id);
+        
+        // Can / could the server close the connection here for some reason?
 
         let buckets = client.get_buckets().unwrap();
         println!("Buckets: {:?}", buckets);

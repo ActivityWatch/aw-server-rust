@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::vec::Vec;
 
 use serde_json::Map;
+use reqwest::blocking;
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
 
@@ -20,7 +21,6 @@ pub struct Info {
 
 #[derive(Debug)]
 pub struct AwClient {
-    client: reqwest::blocking::Client,
     pub baseurl: String,
     pub name: String,
     pub hostname: String,
@@ -29,10 +29,8 @@ pub struct AwClient {
 impl AwClient {
     pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
         let baseurl = String::from(format!("http://{}:{}", ip, port));
-        let client = reqwest::blocking::Client::new();
         let hostname = gethostname::gethostname().into_string().unwrap();
         return AwClient {
-            client: client,
             baseurl: baseurl,
             name: name.to_string(),
             hostname: hostname,
@@ -41,13 +39,15 @@ impl AwClient {
 
     pub fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        let bucket: Bucket = self.client.get(&url).send()?.json()?;
+        let client = blocking::Client::new();
+        let bucket: Bucket = client.get(&url).send()?.json()?;
         Ok(bucket)
     }
 
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, reqwest::Error> {
         let url = format!("{}/api/0/buckets/", self.baseurl);
-        Ok(self.client.get(&url).send()?.json()?)
+        let client = blocking::Client::new();
+        Ok(client.get(&url).send()?.json()?)
     }
 
     pub fn create_bucket(&self, bucketname: &str, buckettype: &str) -> Result<(), reqwest::Error> {
@@ -64,26 +64,29 @@ impl AwClient {
             created: None,
             last_updated: None,
         };
-        self.client.post(&url).json(&data).send()?;
+        let client = blocking::Client::new();
+        client.post(&url).json(&data).send()?;
         Ok(())
     }
 
     pub fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        self.client.delete(&url).send()?;
+        let client = blocking::Client::new();
+        client.delete(&url).send()?;
         Ok(())
     }
 
     pub fn get_events(&self, bucketname: &str) -> Result<Vec<Event>, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
-        Ok(self.client.get(&url).send()?.json()?)
+        Ok(blocking::get(&url)?.json()?)
     }
 
     pub fn insert_event(&self, bucketname: &str, event: &Event) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
         let mut eventlist = Vec::new();
         eventlist.push(event.clone());
-        self.client.post(&url).json(&eventlist).send()?;
+        let client = blocking::Client::new();
+        client.post(&url).json(&eventlist).send()?;
         Ok(())
     }
 
@@ -97,7 +100,8 @@ impl AwClient {
             "{}/api/0/buckets/{}/heartbeat?pulsetime={}",
             self.baseurl, bucketname, pulsetime
         );
-        self.client.post(&url).json(&event).send()?;
+        let client = blocking::Client::new();
+        client.post(&url).json(&event).send()?;
         Ok(())
     }
 
@@ -106,13 +110,15 @@ impl AwClient {
             "{}/api/0/buckets/{}/events/{}",
             self.baseurl, bucketname, event_id
         );
-        self.client.delete(&url).send()?;
+        let client = blocking::Client::new();
+        client.delete(&url).send()?;
         Ok(())
     }
 
     pub fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events/count", self.baseurl, bucketname);
-        let res = self.client.get(&url).send()?.text()?;
+        let client = blocking::Client::new();
+        let res = client.get(&url).send()?.text()?;
         let count: i64 = match res.parse() {
             Ok(count) => count,
             Err(err) => panic!("could not parse get_event_count response: {:?}", err),
@@ -122,6 +128,7 @@ impl AwClient {
 
     pub fn get_info(&self) -> Result<Info, reqwest::Error> {
         let url = format!("{}/api/0/info", self.baseurl);
-        Ok(self.client.get(&url).send()?.json()?)
+        let client = blocking::Client::new();
+        Ok(client.get(&url).send()?.json()?)
     }
 }

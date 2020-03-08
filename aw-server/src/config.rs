@@ -36,6 +36,7 @@ impl AWConfig {
         Config::build(env)
             .address(self.address.clone())
             .port(self.port)
+            .keep_alive(0)
             .limits(limits)
             .finalize()
             .unwrap()

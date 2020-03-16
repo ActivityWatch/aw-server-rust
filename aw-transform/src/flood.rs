@@ -15,18 +15,15 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
             drop_next = false;
             continue;
         }
-        match gap_prev {
-            Some(gap) => {
-                e1.timestamp = e1.timestamp - (gap / 2);
-                e1.duration = e1.duration + (gap / 2);
-                gap_prev = None;
-            }
-            None => (),
+        if let Some(gap) = gap_prev {
+            e1.timestamp = e1.timestamp - (gap / 2);
+            e1.duration = e1.duration + (gap / 2);
+            gap_prev = None;
         }
         let e2 = match e1_iter.peek() {
             Some(e) => e,
             None => {
-                new_events.push(e1.clone());
+                new_events.push(e1);
                 break;
             }
         };
@@ -59,7 +56,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
         }
         new_events.push(e1.clone());
     }
-    return new_events;
+    new_events
 }
 
 #[cfg(test)]

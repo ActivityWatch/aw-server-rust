@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use aw_models::Event;
 
+#[allow(clippy::map_entry)]
 pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event> {
-    if keys.len() == 0 {
+    if keys.is_empty() {
         return vec![];
     }
     let mut merged_events_map: HashMap<String, Event> = HashMap::new();
@@ -26,8 +27,8 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
             }
             let merged_event = Event {
                 id: None,
-                timestamp: event.timestamp.clone(),
-                duration: event.duration.clone(),
+                timestamp: event.timestamp,
+                duration: event.duration,
                 data: event.data.clone(),
             };
             merged_events_map.insert(summed_key, merged_event);
@@ -37,7 +38,7 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
     for (_key, event) in merged_events_map.drain() {
         merged_events_list.push(event);
     }
-    return merged_events_list;
+    merged_events_list
 }
 
 #[cfg(test)]

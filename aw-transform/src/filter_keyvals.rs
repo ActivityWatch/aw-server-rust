@@ -2,7 +2,7 @@ use serde_json::value::Value;
 
 use aw_models::Event;
 
-pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &Vec<Value>) -> Vec<Event> {
+pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<Event> {
     let mut filtered_events = Vec::new();
     for event in events {
         match event.data.get(key) {
@@ -17,7 +17,7 @@ pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &Vec<Value>) -> Vec<E
             None => break,
         }
     }
-    return filtered_events;
+    filtered_events
 }
 
 #[cfg(test)]

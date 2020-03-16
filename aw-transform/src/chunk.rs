@@ -3,7 +3,7 @@ use aw_models::Event;
 pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
     let mut chunked_events: Vec<Event> = Vec::new();
     for event in events {
-        if chunked_events.len() == 0 && event.data.get(key).is_some() {
+        if chunked_events.is_empty() && event.data.get(key).is_some() {
             // TODO: Add sub-chunks
             chunked_events.push(event.clone());
         } else {
@@ -24,7 +24,7 @@ pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
             }
         }
     }
-    return chunked_events;
+    chunked_events
 }
 
 #[cfg(test)]

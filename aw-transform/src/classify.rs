@@ -3,7 +3,6 @@
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
 use aw_models::Event;
 use regex::{Regex, RegexBuilder};
-use serde_json;
 
 pub enum Rule {
     None,
@@ -48,7 +47,7 @@ impl RuleTrait for RegexRule {
             .values()
             .filter(|val| val.is_string())
             .any(|val| {
-                return self.regex.is_match(val.as_str().unwrap());
+                self.regex.is_match(val.as_str().unwrap())
             })
     }
 }
@@ -64,15 +63,15 @@ impl From<Regex> for Rule {
 /// An event can only have one category, although the category may have a hierarchy,
 /// for instance: "Work -> ActivityWatch -> aw-server-rust"
 /// If multiple categories match, the deepest one will be chosen.
-pub fn categorize(mut events: Vec<Event>, rules: &Vec<(Vec<String>, Rule)>) -> Vec<Event> {
+pub fn categorize(mut events: Vec<Event>, rules: &[(Vec<String>, Rule)]) -> Vec<Event> {
     let mut classified_events = Vec::new();
     for event in events.drain(..) {
         classified_events.push(categorize_one(event, rules));
     }
-    return classified_events;
+    classified_events
 }
 
-fn categorize_one(mut event: Event, rules: &Vec<(Vec<String>, Rule)>) -> Event {
+fn categorize_one(mut event: Event, rules: &[(Vec<String>, Rule)]) -> Event {
     let mut category: Vec<String> = vec!["Uncategorized".into()];
     for (cat, rule) in rules {
         if rule.matches(&event) {
@@ -82,22 +81,22 @@ fn categorize_one(mut event: Event, rules: &Vec<(Vec<String>, Rule)>) -> Event {
     event
         .data
         .insert("$category".into(), serde_json::json!(category));
-    return event;
+    event
 }
 
 /// Tags a list of events
 ///
 /// An event can have many tags (as opposed to only one category) which will be put into the `$tags` key of
 /// the event data object.
-pub fn tag(mut events: Vec<Event>, rules: &Vec<(String, Rule)>) -> Vec<Event> {
+pub fn tag(mut events: Vec<Event>, rules: &[(String, Rule)]) -> Vec<Event> {
     let mut events_tagged = Vec::new();
     for event in events.drain(..) {
         events_tagged.push(tag_one(event, &rules));
     }
-    return events_tagged;
+    events_tagged
 }
 
-fn tag_one(mut event: Event, rules: &Vec<(String, Rule)>) -> Event {
+fn tag_one(mut event: Event, rules: &[(String, Rule)]) -> Event {
     let mut tags: Vec<String> = Vec::new();
     for (cls, rule) in rules {
         if rule.matches(&event) {
@@ -110,10 +109,10 @@ fn tag_one(mut event: Event, rules: &Vec<(String, Rule)>) -> Event {
     event
 }
 
-fn _pick_highest_ranking_category(acc: Vec<String>, item: &Vec<String>) -> Vec<String> {
+fn _pick_highest_ranking_category(acc: Vec<String>, item: &[String]) -> Vec<String> {
     if item.len() >= acc.len() {
         // If tag is category with greater or equal depth than current, then choose the new one instead.
-        item.clone()
+        item.to_vec()
     } else {
         acc
     }

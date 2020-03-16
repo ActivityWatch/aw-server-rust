@@ -10,7 +10,7 @@ pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Optio
     let heartbeat_endtime = heartbeat.calculate_endtime();
 
     // Verify that timestamps intersect (including pulsetime)
-    let pulsetime_ns: i64 = (pulsetime * 1000000000.0).round() as i64;
+    let pulsetime_ns: i64 = (pulsetime * 1_000_000_000.0).round() as i64;
     let last_endtime_allowed = last_event_endtime + chrono::Duration::nanoseconds(pulsetime_ns);
     if last_event.timestamp > heartbeat.timestamp {
         return None;
@@ -19,15 +19,17 @@ pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Optio
         return None;
     }
 
-    let mut starttime = &last_event.timestamp;
-    if heartbeat.timestamp < last_event.timestamp {
-        starttime = &heartbeat.timestamp;
-    }
+    let starttime = if heartbeat.timestamp < last_event.timestamp {
+        &heartbeat.timestamp
+    } else {
+        &last_event.timestamp
+    };
 
-    let mut endtime = &heartbeat_endtime;
-    if last_event_endtime > heartbeat_endtime {
-        endtime = &last_event_endtime;
-    }
+    let endtime = if last_event_endtime > heartbeat_endtime {
+        &last_event_endtime
+    } else {
+        &heartbeat_endtime
+    };
 
     let duration = endtime.signed_duration_since(*starttime);
     if duration.num_nanoseconds().unwrap() < 0 {
@@ -36,12 +38,12 @@ pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Optio
     }
 
     // Success, return successful heartbeat last_event
-    return Some(Event {
+    Some(Event {
         id: None,
-        timestamp: starttime.clone(),
-        duration: duration,
+        timestamp: *starttime,
+        duration,
         data: last_event.data.clone(),
-    });
+    })
 }
 
 #[cfg(test)]

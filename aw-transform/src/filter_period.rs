@@ -1,6 +1,6 @@
 use aw_models::Event;
 
-pub fn filter_period_intersect(events: &Vec<Event>, filter_events: &Vec<Event>) -> Vec<Event> {
+pub fn filter_period_intersect(events: &[Event], filter_events: &[Event]) -> Vec<Event> {
     let mut filtered_events = Vec::new();
     for filter in filter_events {
         let filter_endtime = filter.calculate_endtime();
@@ -19,7 +19,7 @@ pub fn filter_period_intersect(events: &Vec<Event>, filter_events: &Vec<Event>) 
             filtered_events.push(e);
         }
     }
-    return filtered_events;
+    filtered_events
 }
 
 #[cfg(test)]

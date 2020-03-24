@@ -23,7 +23,7 @@ mod test {
             match client.get_info() {
                 Ok(_) => break,
                 Err(err) => {
-                    if i == timeout_s-1 {
+                    if i == timeout_s - 1 {
                         panic!(
                             "Timed out starting aw-server after {}s: {:?}",
                             timeout_s, err

@@ -429,8 +429,8 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events : Vec<Event> = (&args[0]).try_into()?;
-        let filter_events : Vec<Event> = (&args[1]).try_into()?;
+        let events: Vec<Event> = (&args[0]).try_into()?;
+        let filter_events: Vec<Event> = (&args[1]).try_into()?;
 
         let mut filtered_events = aw_transform::filter_period_intersect(&events, &filter_events);
         let mut filtered_tagged_events = Vec::new();

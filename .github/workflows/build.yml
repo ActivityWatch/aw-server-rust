@@ -1,0 +1,93 @@
+name: Rust
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-18.04, windows-latest, macOS-latest]
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Rust nightly
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        override: true
+    - name: Cache cargo build
+      uses: actions/cache@v1
+      env:
+        cache-name: cargo-build-target
+      with:
+        path: target
+        key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ env.cache-name }}-
+    - name: Build
+      run: cargo build --workspace --verbose
+    - name: Run tests
+      run: cargo test --workspace --verbose
+    - name: Run tests with coverage
+      if: startsWith(matrix.os, 'ubuntu')
+      run: |
+        sudo apt-get install libcurl4-openssl-dev libelf-dev libdw-dev binutils-dev
+        cargo install --force cargo-kcov;
+        cargo kcov --print-install-kcov-sh | sh;
+        cargo kcov --all --verbose;
+        bash <(curl -s https://codecov.io/bash);
+
+
+  build-android:
+    name: Build for Android
+    runs-on: ubuntu-18.04
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Rust nightly
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        override: true
+    - name: Cache cargo build
+      uses: actions/cache@v1
+      env:
+        cache-name: cargo-build-target-android
+      with:
+        path: target
+        key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ env.cache-name }}-
+    - name: Install NDK
+      run: |
+        ./install-ndk.sh
+    - name: Build
+      run: |
+        export ANDROID_NDK_HOME=`pwd`/NDK
+        ./compile-android.sh
+
+  lint:
+    runs-on: ubuntu-18.04
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Rust nightly
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        components: clippy, rustfmt
+        override: true
+    - name: Check formatting
+      if: always()
+      run: cargo fmt -- --check
+    - name: Run clippy  # Doesn't fail build
+      if: always()
+      run: cargo clippy

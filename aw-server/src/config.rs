@@ -48,22 +48,22 @@ fn default_address() -> String {
 }
 
 fn default_port() -> u16 {
-    match Environment::active().expect("Failed to get current environment") {
-        Environment::Production => 5600,
-        Environment::Development => 5666,
-        Environment::Staging => panic!("Staging environment not supported"),
+    if is_production() {
+        5600
+    } else {
+        5666
     }
 }
 
 fn default_cors() -> Vec<String> {
-    match Environment::active().expect("Failed to get current environment") {
-        Environment::Production => Vec::<String>::new(),
-        Environment::Development => Vec::<String>::new(),
-        Environment::Staging => panic!("Staging environment not supported"),
-    }
+    Vec::<String>::new()
 }
 
-fn is_testing() -> bool {
+pub fn is_production() -> bool {
+    !is_testing()
+}
+
+pub fn is_testing() -> bool {
     match Environment::active().expect("Failed to get current environment") {
         Environment::Production => false,
         Environment::Development => true,
@@ -73,9 +73,10 @@ fn is_testing() -> bool {
 
 pub fn get_config() -> AWConfig {
     let mut config_path = dirs::get_config_dir().unwrap();
-    match is_testing() {
-        false => config_path.push("config.toml"),
-        true => config_path.push("config-testing.toml"),
+    if is_production() {
+        config_path.push("config.toml")
+    } else {
+        config_path.push("config-testing.toml")
     }
 
     /* If there is no config file, create a new config file with default values but every value is
@@ -98,8 +99,7 @@ pub fn get_config() -> AWConfig {
     }
 
     debug!("Reading config at {:?}", config_path);
-    let mut rfile =
-        File::open(config_path.clone()).expect("Failed to open config file for reading");
+    let mut rfile = File::open(config_path).expect("Failed to open config file for reading");
     let mut content = String::new();
     rfile
         .read_to_string(&mut content)

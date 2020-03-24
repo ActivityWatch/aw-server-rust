@@ -34,36 +34,37 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
         .error(Color::Red);
 
     fern::Dispatch::new()
+        // Set some Rocket messages to debug level
+        // TODO: Log more if run in development/testing mode
+        .level_for("rocket::rocket", log::LevelFilter::Warn)
+        .level_for("_", log::LevelFilter::Warn)
+        .format(move |out, message, record| {
+            out.finish(format_args!(
+                "[{}][{}][{}]: {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                colors.color(record.level()),
+                record.target(),
+                message,
+            ))
+        })
         // Color and higher log levels to stdout
         .chain(
             fern::Dispatch::new()
-                .format(move |out, message, record| {
-                    out.finish(format_args!(
-                        "{}[{}][{}] {}",
-                        chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
-                        record.target(),
-                        colors.color(record.level()),
-                        message
-                    ))
-                })
-                .chain(std::io::stdout())
-                .level(log::LevelFilter::Info), //.level_for("aw_server", log::LevelFilter::Debug)
+                //.level_for("aw_server", log::LevelFilter::Debug)
+                .chain(std::io::stdout()),
         )
         // No color and lower log levels to logfile
         .chain(
             fern::Dispatch::new()
-                .format(|out, message, record| {
+                .level_for("aw_server", log::LevelFilter::Info)
+                .format(|out, message, _record| {
                     out.finish(format_args!(
-                        "{}[{}][{}] {}",
-                        chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
-                        record.target(),
-                        record.level(),
-                        message
+                        // TODO: Strip color info
+                        "{}",
+                        message,
                     ))
                 })
-                .chain(fern::log_file(logfile_path)?)
-                .level(log::LevelFilter::Warn)
-                .level_for("aw_server", log::LevelFilter::Info),
+                .chain(fern::log_file(logfile_path)?),
         )
         .apply()?;
 

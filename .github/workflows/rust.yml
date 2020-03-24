@@ -1,0 +1,30 @@
+name: Rust
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Rust nightly
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        components: clippy, rustfmt
+        override: true
+    - name: Build
+      run: cargo build --verbose
+    - name: Check formatting  # Doesn't fail build
+      run: cargo fmt -- --check  # --error-on-unformatted
+    - name: Run tests  # Doesn't fail build
+      run: cargo clippy
+    - name: Run tests
+      run: cargo test --verbose

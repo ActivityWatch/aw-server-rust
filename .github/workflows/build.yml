@@ -22,10 +22,19 @@ jobs:
         profile: minimal
         toolchain: nightly
         override: true
+    - name: Cache cargo build
+      uses: actions/cache@v1
+      env:
+        cache-name: cargo-build-target
+      with:
+        path: aw-server-rust/target
+        key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ env.cache-name }}-
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --workspace --verbose
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --workspace --verbose
 
   build-android:
     name: Build for Android
@@ -38,12 +47,22 @@ jobs:
         profile: minimal
         toolchain: nightly
         override: true
+    - name: Cache cargo build
+      uses: actions/cache@v1
+      env:
+        cache-name: cargo-build-target-android
+      with:
+        path: aw-server-rust/target
+        key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ env.cache-name }}-
     - name: Install NDK
       run: |
-        ./install-ndk.sh;
-        export ANDROID_NDK_HOME=`pwd`/NDK;
+        ./install-ndk.sh
     - name: Build
-      run: ./compile-android.sh
+      run: |
+        export ANDROID_NDK_HOME=`pwd`/NDK
+        ./compile-android.sh
 
   lint:
     runs-on: ubuntu-18.04

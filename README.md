@@ -2,41 +2,43 @@ aw-server-rust
 ==============
 
 [![Dependency Status](https://deps.rs/repo/github/activitywatch/aw-server-rust/status.svg)](https://deps.rs/repo/github/activitywatch/aw-server-rust)
-[![Build Status](https://travis-ci.org/ActivityWatch/aw-server-rust.svg?branch=master)](https://travis-ci.org/ActivityWatch/aw-server-rust)
+![Build Status](https://github.com/ActivityWatch/aw-server-rust/workflows/Rust/badge.svg)
+
 [![Coverage Status](https://codecov.io/gh/ActivityWatch/aw-server-rust/branch/master/graph/badge.svg)](https://codecov.io/gh/ActivityWatch/aw-server-rust)
 
-A reimplementation of aw-server in Rust
-
-Primary features missing:
-- None?
+A reimplementation of aw-server in Rust.
 
 Caveats:
-- Lots of TODO and FIXME comments
 
-Bugs:
-- Memory leak during Bucket import? (wtf rust?)
+ - Lots of TODO and FIXME comments
 
-Features missing compared to aw-server python:
-- Swagger support
+Features missing compared to the Python implementation of aw-server:
+
+ - API explorer (Swagger/OpenAPI)
 
 ### How to compile
 
-Install rust nightly with rustup
+Install rust nightly with `rustup`:
 
-``` rustup default nightly ```
+```
+rustup default nightly
+```
 
-Run cargo build to build
+Build with `cargo`:
 
-``` cargo build --release ```
+```
+cargo build --release 
+```
+
+Your built executable will be located in `./target/release/aw-server-rust`
+
 
 ### How to run
 
-After compilation you will have an executable at target/release/aw-server-rust
+If you want to quick-compile for debugging, run cargo run from the project root:
 
-``` ./target/release/aw-server-rust ```
+```
+cargo run --bin aw-server
+```
 
-If you want to quick-compile for debugging, run cargo run from the project root
-
-*NOTE:* this will start aw-server-rust on the testing port 5666 instead of port 5600
-
-``` cargo run ```
+*NOTE:* This will start aw-server-rust in testing mode (on port 5666 instead of port 5600).

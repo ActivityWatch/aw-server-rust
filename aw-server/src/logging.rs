@@ -3,28 +3,22 @@ use std::path::PathBuf;
 
 use fern::colors::{Color, ColoredLevelConfig};
 
+use crate::config::is_production;
 use crate::dirs;
 
 pub fn setup_logger() -> Result<(), fern::InitError> {
     let mut logfile_path: PathBuf =
         dirs::get_log_dir().expect("Unable to get log dir to store logs in");
     fs::create_dir_all(logfile_path.clone()).expect("Unable to create folder for logs");
-    #[cfg(debug_assertions)]
-    {
-        logfile_path.push(
-            chrono::Local::now()
-                .format("aw-server-testing_%Y-%m-%dT%H-%M-%S%z.log")
-                .to_string(),
-        );
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        logfile_path.push(
-            chrono::Local::now()
-                .format("aw-server_%Y-%m-%dT%H-%M-%S%z.log")
-                .to_string(),
-        );
-    }
+    logfile_path.push(
+        chrono::Local::now()
+            .format(if is_production() {
+                "aw-server_%Y-%m-%dT%H-%M-%S%z.log"
+            } else {
+                "aw-server-testing_%Y-%m-%dT%H-%M-%S%z.log"
+            })
+            .to_string(),
+    );
 
     let colors = ColoredLevelConfig::new()
         .debug(Color::White)

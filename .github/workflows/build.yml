@@ -27,6 +27,24 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
+  build-android:
+    name: Build for Android
+    runs-on: ubuntu-18.04
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Rust nightly
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        override: true
+    - name: Install NDK
+      run: |
+        ./install-ndk.sh;
+        export ANDROID_NDK_HOME=`pwd`/NDK;
+    - name: Build
+      run: ./compile-android.sh
+
   lint:
     runs-on: ubuntu-18.04
 

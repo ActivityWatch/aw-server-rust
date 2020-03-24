@@ -27,7 +27,7 @@ jobs:
       env:
         cache-name: cargo-build-target
       with:
-        path: aw-server-rust/target
+        path: target
         key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-${{ env.cache-name }}-
@@ -52,7 +52,7 @@ jobs:
       env:
         cache-name: cargo-build-target-android
       with:
-        path: aw-server-rust/target
+        path: target
         key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-${{ env.cache-name }}-

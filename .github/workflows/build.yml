@@ -8,8 +8,27 @@ on:
 
 jobs:
   build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-18.04, windows-latest, macOS-latest]
 
-    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Rust nightly
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        override: true
+    - name: Build
+      run: cargo build --verbose
+    - name: Run tests
+      run: cargo test --verbose
+
+  lint:
+    runs-on: ubuntu-18.04
 
     steps:
     - uses: actions/checkout@v2
@@ -20,11 +39,7 @@ jobs:
         toolchain: nightly
         components: clippy, rustfmt
         override: true
-    - name: Build
-      run: cargo build --verbose
     - name: Check formatting  # Doesn't fail build
       run: cargo fmt -- --check || true
     - name: Run clippy  # Doesn't fail build
       run: cargo clippy
-    - name: Run tests
-      run: cargo test --verbose

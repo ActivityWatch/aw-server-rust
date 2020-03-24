@@ -23,8 +23,8 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: Check formatting  # Doesn't fail build
-      run: cargo fmt -- --check  # --error-on-unformatted
-    - name: Run tests  # Doesn't fail build
+      run: cargo fmt -- --check || true
+    - name: Run clippy  # Doesn't fail build
       run: cargo clippy
     - name: Run tests
       run: cargo test --verbose

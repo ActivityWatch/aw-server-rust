@@ -9,6 +9,7 @@ use rocket::State;
 use rocket_contrib::json::JsonValue;
 use uuid::Uuid;
 
+use crate::config::is_testing;
 use crate::config::AWConfig;
 use crate::dirs;
 
@@ -88,24 +89,13 @@ fn get_device_id() -> String {
 
 #[get("/")]
 fn server_info() -> JsonValue {
-    let testing: bool;
-    #[cfg(debug_assertions)]
-    {
-        testing = true;
-    }
-    //TODO: Should this be commented?
-    #[cfg(not(debug_assertions))]
-    {
-        testing = false;
-    }
-
     let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
     const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
     json!({
         "hostname": hostname,
-        "version": format!("aw-server-rust v{}", VERSION.unwrap_or("(unknown)")),
-        "testing": testing,
+        "version": format!("v{} (rust)", VERSION.unwrap_or("(unknown)")),
+        "testing": is_testing(),
         "device_id": get_device_id(),
     })
 }

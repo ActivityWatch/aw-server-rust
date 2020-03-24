@@ -46,9 +46,7 @@ impl RuleTrait for RegexRule {
             .data
             .values()
             .filter(|val| val.is_string())
-            .any(|val| {
-                self.regex.is_match(val.as_str().unwrap())
-            })
+            .any(|val| self.regex.is_match(val.as_str().unwrap()))
     }
 }
 

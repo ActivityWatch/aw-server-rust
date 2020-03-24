@@ -24,9 +24,9 @@ impl Event {
 
 impl PartialEq for Event {
     fn eq(&self, other: &Event) -> bool {
-        !(self.timestamp != other.timestamp ||
-            self.duration != other.duration ||
-            self.data != other.data)
+        !(self.timestamp != other.timestamp
+            || self.duration != other.duration
+            || self.data != other.data)
     }
 }
 

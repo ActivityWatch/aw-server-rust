@@ -76,7 +76,9 @@ jobs:
         toolchain: nightly
         components: clippy, rustfmt
         override: true
-    - name: Check formatting  # Doesn't fail build
-      run: cargo fmt -- --check || true
+    - name: Check formatting
+      if: always()
+      run: cargo fmt -- --check
     - name: Run clippy  # Doesn't fail build
+      if: always()
       run: cargo clippy

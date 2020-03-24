@@ -7,8 +7,7 @@ use crate::dirs;
 
 pub fn setup_logger() -> Result<(), fern::InitError> {
     let mut logfile_path: PathBuf =
-        dirs::get_cache_dir().expect("Unable to get cache dir to store logs in");
-    logfile_path.push("logs");
+        dirs::get_log_dir().expect("Unable to get log dir to store logs in");
     fs::create_dir_all(logfile_path.clone()).expect("Unable to create folder for logs");
     #[cfg(debug_assertions)]
     {
@@ -36,6 +35,7 @@ pub fn setup_logger() -> Result<(), fern::InitError> {
     fern::Dispatch::new()
         // Set some Rocket messages to debug level
         // TODO: Log more if run in development/testing mode
+        .level(log::LevelFilter::Info)
         .level_for("rocket::rocket", log::LevelFilter::Warn)
         .level_for("_", log::LevelFilter::Warn)
         .format(move |out, message, record| {

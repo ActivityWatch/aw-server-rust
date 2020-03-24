@@ -22,7 +22,7 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
         let mut dir = appdirs::user_config_dir(Some("activitywatch"), None, false)?;
         dir.push("aw-server-rust");
         fs::create_dir_all(dir.clone()).expect("Unable to create config dir");
-        return Ok(dir);
+        Ok(dir)
     }
 
     #[cfg(target_os = "android")]
@@ -37,7 +37,7 @@ pub fn get_data_dir() -> Result<PathBuf, ()> {
         let mut dir = appdirs::user_data_dir(Some("activitywatch"), None, false)?;
         dir.push("aw-server-rust");
         fs::create_dir_all(dir.clone()).expect("Unable to create data dir");
-        return Ok(dir);
+        Ok(dir)
     }
 
     #[cfg(target_os = "android")]
@@ -52,7 +52,23 @@ pub fn get_cache_dir() -> Result<PathBuf, ()> {
         let mut dir = appdirs::user_cache_dir(Some("activitywatch"), None)?;
         dir.push("aw-server-rust");
         fs::create_dir_all(dir.clone()).expect("Unable to create cache dir");
-        return Ok(dir);
+        Ok(dir)
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        panic!("not implemented on Android");
+    }
+}
+
+pub fn get_log_dir() -> Result<PathBuf, ()> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut dir = appdirs::user_cache_dir(Some("activitywatch"), None)?;
+        dir.push("log");
+        dir.push("aw-server-rust");
+        fs::create_dir_all(dir.clone()).expect("Unable to create cache dir");
+        Ok(dir)
     }
 
     #[cfg(target_os = "android")]
@@ -67,7 +83,7 @@ pub fn db_path() -> PathBuf {
     db_path.push("sqlite-testing.db");
     #[cfg(not(debug_assertions))]
     db_path.push("sqlite.db");
-    return db_path;
+    db_path
 }
 
 #[cfg(target_os = "android")]

@@ -13,7 +13,7 @@ fn init_env<'a>(ti: &TimeInterval) -> HashMap<&'a str, DataType> {
     let mut env = HashMap::new();
     env.insert("TIMEINTERVAL", DataType::String(ti.to_string()));
     functions::fill_env(&mut env);
-    return env;
+    env
 }
 
 pub fn interpret_prog<'a>(
@@ -52,11 +52,10 @@ fn interpret_expr<'a>(
                         ))
                     }
                 },
-                DataType::List(l1) => match b_res {
-                    DataType::List(l2) => {
-                        let mut new_list = l1.clone();
-                        new_list.append(&mut l2.clone());
-                        DataType::List(new_list)
+                DataType::List(mut l1) => match b_res {
+                    DataType::List(mut l2) => {
+                        l1.append(&mut l2);
+                        DataType::List(l1)
                     }
                     _ => {
                         return Err(QueryError::InvalidType(
@@ -66,7 +65,7 @@ fn interpret_expr<'a>(
                 },
                 DataType::String(s1) => match b_res {
                     DataType::String(s2) => {
-                        let mut new_string = s1.clone();
+                        let mut new_string = s1;
                         new_string.push_str(&s2);
                         DataType::String(new_string)
                     }

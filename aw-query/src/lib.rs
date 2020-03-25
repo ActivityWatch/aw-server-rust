@@ -17,6 +17,7 @@ mod ast;
 mod functions;
 mod interpret;
 mod lexer;
+#[allow(clippy::match_single_binding, clippy::redundant_closure_call)]
 mod parser;
 
 pub use crate::datatype::DataType;
@@ -46,7 +47,7 @@ impl fmt::Display for QueryError {
     }
 }
 
-pub fn query<'a>(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
+pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
     let lexer = lexer::Lexer::new(code);
     let program = match parser::parse(lexer) {
         Ok(p) => p,

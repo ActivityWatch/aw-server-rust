@@ -108,7 +108,6 @@ mod qfunctions {
     use super::validate;
     use crate::DataType;
     use crate::QueryError;
-    use aw_transform;
 
     pub fn print(
         args: Vec<DataType>,
@@ -118,7 +117,7 @@ mod qfunctions {
         for arg in args {
             info!("{:?}", arg);
         }
-        return Ok(DataType::None());
+        Ok(DataType::None())
     }
 
     pub fn query_bucket(
@@ -133,8 +132,8 @@ mod qfunctions {
 
         let events = match ds.get_events(
             bucket_id.as_str(),
-            Some(interval.start().clone()),
-            Some(interval.end().clone()),
+            Some(*interval.start()),
+            Some(*interval.end()),
             None,
         ) {
             Ok(events) => events,
@@ -149,7 +148,7 @@ mod qfunctions {
         for event in events {
             ret.push(DataType::Event(event));
         }
-        return Ok(DataType::List(ret));
+        Ok(DataType::List(ret))
     }
 
     pub fn query_bucket_names(
@@ -171,7 +170,7 @@ mod qfunctions {
         for bucketname in buckets.keys() {
             bucketnames.push(DataType::String(bucketname.to_string()));
         }
-        return Ok(DataType::List(bucketnames));
+        Ok(DataType::List(bucketnames))
     }
 
     pub fn find_bucket(
@@ -199,7 +198,7 @@ mod qfunctions {
                 )))
             }
         };
-        return Ok(DataType::String(bucketname));
+        Ok(DataType::String(bucketname))
     }
 
     pub fn contains(
@@ -210,9 +209,7 @@ mod qfunctions {
         // typecheck
         validate::args_length(&args, 2)?;
         match args[0] {
-            DataType::List(ref list) => {
-                return Ok(DataType::Bool(list.contains(&args[1])));
-            }
+            DataType::List(ref list) => Ok(DataType::Bool(list.contains(&args[1]))),
             DataType::Dict(ref dict) => {
                 let s = match &args[1] {
                     DataType::String(s) => s.to_string(),
@@ -223,14 +220,12 @@ mod qfunctions {
                         )))
                     }
                 };
-                return Ok(DataType::Bool(dict.contains_key(&s)));
+                Ok(DataType::Bool(dict.contains_key(&s)))
             }
-            _ => {
-                return Err(QueryError::InvalidFunctionParameters(format!(
-                    "function contains got first argument {:?}, expected type List or Dict",
-                    args[0]
-                )))
-            }
+            _ => Err(QueryError::InvalidFunctionParameters(format!(
+                "function contains got first argument {:?}, expected type List or Dict",
+                args[0]
+            ))),
         }
     }
 
@@ -249,7 +244,7 @@ mod qfunctions {
         for event in flooded_events.drain(..) {
             tagged_flooded_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(tagged_flooded_events));
+        Ok(DataType::List(tagged_flooded_events))
     }
 
     pub fn categorize(
@@ -268,7 +263,7 @@ mod qfunctions {
         for event in flooded_events.drain(..) {
             tagged_flooded_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(tagged_flooded_events));
+        Ok(DataType::List(tagged_flooded_events))
     }
 
     pub fn tag(
@@ -287,7 +282,7 @@ mod qfunctions {
         for event in flooded_events.drain(..) {
             tagged_flooded_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(tagged_flooded_events));
+        Ok(DataType::List(tagged_flooded_events))
     }
 
     pub fn sort_by_duration(
@@ -306,7 +301,7 @@ mod qfunctions {
         for event in sorted_events.drain(..) {
             tagged_sorted_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(tagged_sorted_events));
+        Ok(DataType::List(tagged_sorted_events))
     }
 
     pub fn limit_events(
@@ -326,7 +321,7 @@ mod qfunctions {
         for event in events.drain(0..limit) {
             limited_tagged_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(limited_tagged_events));
+        Ok(DataType::List(limited_tagged_events))
     }
 
     pub fn sort_by_timestamp(
@@ -345,7 +340,7 @@ mod qfunctions {
         for event in sorted_events.drain(..) {
             tagged_sorted_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(tagged_sorted_events));
+        Ok(DataType::List(tagged_sorted_events))
     }
 
     pub fn sum_durations(
@@ -362,9 +357,9 @@ mod qfunctions {
         for event in events.drain(..) {
             sum_durations = sum_durations + event.duration;
         }
-        return Ok(DataType::Number(
+        Ok(DataType::Number(
             (sum_durations.num_milliseconds() as f64) / 1000.0,
-        ));
+        ))
     }
 
     pub fn merge_events_by_keys(
@@ -382,7 +377,7 @@ mod qfunctions {
         for event in merged_events.drain(..) {
             merged_tagged_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(merged_tagged_events));
+        Ok(DataType::List(merged_tagged_events))
     }
 
     pub fn chunk_events_by_key(
@@ -400,7 +395,7 @@ mod qfunctions {
         for event in merged_events.drain(..) {
             merged_tagged_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(merged_tagged_events));
+        Ok(DataType::List(merged_tagged_events))
     }
 
     pub fn filter_keyvals(
@@ -419,7 +414,7 @@ mod qfunctions {
         for event in filtered_events.drain(..) {
             filtered_tagged_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(filtered_tagged_events));
+        Ok(DataType::List(filtered_tagged_events))
     }
 
     pub fn filter_period_intersect(
@@ -437,7 +432,7 @@ mod qfunctions {
         for event in filtered_events.drain(..) {
             filtered_tagged_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(filtered_tagged_events));
+        Ok(DataType::List(filtered_tagged_events))
     }
 
     pub fn split_url_events(
@@ -454,7 +449,7 @@ mod qfunctions {
             aw_transform::split_url_event(&mut event);
             tagged_split_url_events.push(DataType::Event(event));
         }
-        return Ok(DataType::List(tagged_split_url_events));
+        Ok(DataType::List(tagged_split_url_events))
     }
 
     pub fn concat(
@@ -469,7 +464,7 @@ mod qfunctions {
                 event_list.push(DataType::Event(event));
             }
         }
-        return Ok(DataType::List(event_list));
+        Ok(DataType::List(event_list))
     }
 }
 
@@ -478,7 +473,7 @@ mod validate {
     use aw_models::TimeInterval;
     use std::collections::HashMap;
 
-    pub fn args_length(args: &Vec<DataType>, len: usize) -> Result<(), QueryError> {
+    pub fn args_length(args: &[DataType], len: usize) -> Result<(), QueryError> {
         if args.len() != len {
             return Err(QueryError::InvalidFunctionParameters(format!(
                 "Expected {} parameters in function, got {}",
@@ -486,7 +481,7 @@ mod validate {
                 args.len()
             )));
         }
-        return Ok(());
+        Ok(())
     }
 
     pub fn get_timeinterval(env: &HashMap<&str, DataType>) -> Result<TimeInterval, QueryError> {

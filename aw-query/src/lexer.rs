@@ -54,7 +54,7 @@ lexer! {
     r#"False"# => (Token::Bool(false), text),
 
     r#"\"([^\"]|(\\\"))*\""# => (
-        Token::String(text.to_owned()[1..text.len()-1].replace("\\\"", "\"").to_string()),
+        Token::String(text.to_owned()[1..text.len()-1].replace("\\\"", "\"")),
         text
     ),
     r#"[0-9]+[\.]?[0-9]*"# => {
@@ -111,7 +111,7 @@ pub struct Span {
 fn span_in(s: &str, t: &str, l: usize) -> Span {
     let lo = s.as_ptr() as usize - t.as_ptr() as usize;
     Span {
-        lo: lo,
+        lo,
         hi: lo + s.len(),
         line: l,
     }

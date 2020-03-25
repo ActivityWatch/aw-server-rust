@@ -7,11 +7,11 @@ use std::collections::HashMap;
 
 fn merge_if_vecs(lhs: Expr_, rhs: Expr_) -> Expr_ {
     let mut ifs = match lhs {
-        Expr_::If(_ifs) => _ifs.clone(),
+        Expr_::If(_ifs) => _ifs,
         _ => unreachable!(),
     };
     match rhs {
-        Expr_::If(_ifs) => ifs.append(&mut _ifs.clone()),
+        Expr_::If(mut _ifs) => ifs.append(&mut _ifs),
         _ => unreachable!(),
     };
     Expr_::If(ifs)
@@ -87,7 +87,7 @@ parser! {
             span: span!(),
             node: {
                 let mut l_new = match l_ifs.node {
-                    Expr_::If(l_ifs) => l_ifs.clone(),
+                    Expr_::If(l_ifs) => l_ifs,
                     _ => unreachable!(),
                 };
                 let true_expr = Expr { span: span!(), node: Expr_::Bool(true) };
@@ -100,7 +100,7 @@ parser! {
             span: span!(),
             node: {
                 let mut l_new = match l_ifs.node {
-                    Expr_::If(l_ifs) => l_ifs.clone(),
+                    Expr_::If(l_ifs) => l_ifs,
                     _ => unreachable!(),
                 };
                 let true_expr = Expr { span: span!(), node: Expr_::Bool(true) };
@@ -209,8 +209,7 @@ parser! {
                 match l.node {
                     Expr_::List(mut l) => {
                         l.push(o);
-                        // FIXME: this can be incredibly slow
-                        Expr_::List(l.clone())
+                        Expr_::List(l)
                     },
                     _ => unreachable!(),
                 }
@@ -233,8 +232,7 @@ parser! {
                 match d.node {
                     Expr_::Dict(mut d) => {
                         d.insert(k, v);
-                        // FIXME: this can be incredibly slow
-                        Expr_::Dict(d.clone())
+                        Expr_::Dict(d)
                     },
                     _ => unreachable!(),
                 }
@@ -264,8 +262,8 @@ parser! {
     }
 }
 
-pub fn parse<I: Iterator<Item = (Token, Span)>>(
-    i: I,
-) -> Result<Program, (Option<(Token, Span)>, &'static str)> {
+pub type ParseError = (Option<(Token, Span)>, &'static str);
+
+pub fn parse<I: Iterator<Item = (Token, Span)>>(i: I) -> Result<Program, ParseError> {
     parse_(i)
 }

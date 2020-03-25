@@ -27,8 +27,9 @@ pub enum DataType {
     Function(String, functions::QueryFn),
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn serialize_function<S>(
-    _element: &String,
+    _element: &str,
     _fun: &functions::QueryFn,
     _serializer: S,
 ) -> Result<S::Ok, S::Error>
@@ -132,7 +133,7 @@ impl TryFrom<&DataType> for Vec<String> {
             let s: String = (&string).try_into()?;
             strings.push(s);
         }
-        return Ok(strings);
+        Ok(strings)
     }
 }
 
@@ -152,7 +153,7 @@ impl TryFrom<&DataType> for Vec<Event> {
                 }
             }
         }
-        return Ok(events);
+        Ok(events)
     }
 }
 
@@ -184,7 +185,7 @@ impl TryFrom<&DataType> for Vec<(String, Rule)> {
                 }
             }
         }
-        return Ok(lists);
+        Ok(lists)
     }
 }
 
@@ -216,7 +217,7 @@ impl TryFrom<&DataType> for Vec<(Vec<String>, Rule)> {
                 }
             }
         }
-        return Ok(lists);
+        Ok(lists)
     }
 }
 
@@ -255,7 +256,7 @@ impl TryFrom<&DataType> for Value {
                 for value in tagged_values.drain(..) {
                     values.push((&value).try_into()?);
                 }
-                return Ok(Value::Array(values));
+                Ok(Value::Array(values))
             }
             ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
                 "Query2 support for parsing values is limited, does not support parsing {:?}",
@@ -273,7 +274,7 @@ impl TryFrom<&DataType> for Vec<Value> {
         for value in tagged_values.drain(..) {
             values.push((&value).try_into()?);
         }
-        return Ok(values);
+        Ok(values)
     }
 }
 
@@ -307,7 +308,7 @@ impl TryFrom<&DataType> for Rule {
             }
         };
         if rtype == "none" {
-            return Ok(Self::None);
+            Ok(Self::None)
         } else if rtype == "regex" {
             let regex_val = match obj.get("regex") {
                 Some(regex_val) => regex_val,
@@ -346,12 +347,12 @@ impl TryFrom<&DataType> for Rule {
                     )))
                 }
             };
-            return Ok(Self::Regex(regex_rule));
+            Ok(Self::Regex(regex_rule))
         } else {
-            return Err(QueryError::InvalidFunctionParameters(format!(
+            Err(QueryError::InvalidFunctionParameters(format!(
                 "Unknown rule type '{}'",
                 rtype
-            )));
+            )))
         }
     }
 }

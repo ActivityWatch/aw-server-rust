@@ -4,13 +4,24 @@ use std::io::{Read, Write};
 
 use crate::dirs;
 
+/* Far from an optimal way to solve it, but works and is simple */
+static mut TESTING: bool = true;
+pub fn set_testing(testing: bool) {
+    unsafe {
+        TESTING = testing;
+    }
+}
+pub fn is_testing() -> bool {
+    unsafe { TESTING }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct AWConfig {
     #[serde(default = "default_address")]
     pub address: String,
     #[serde(default = "default_port")]
     pub port: u16,
-    #[serde(skip, default = "is_testing")]
+    #[serde(skip, default = "default_testing")]
     pub testing: bool, // This is not written to the config file (serde(skip))
     #[serde(default = "default_cors")]
     pub cors: Vec<String>,
@@ -21,7 +32,7 @@ impl Default for AWConfig {
         AWConfig {
             address: default_address(),
             port: default_port(),
-            testing: is_testing(),
+            testing: default_testing(),
             cors: default_cors(),
         }
     }
@@ -29,7 +40,10 @@ impl Default for AWConfig {
 
 impl AWConfig {
     pub fn to_rocket_config(&self) -> rocket::Config {
-        let env = Environment::active().expect("Failed to get current environment");
+        let env = match self.testing {
+            true => Environment::Production,
+            false => Environment::Development,
+        };
         // Needed for bucket imports
         let limits = Limits::new().limit("json", 1 * 1000 * 1000 * 1000);
 
@@ -47,33 +61,25 @@ fn default_address() -> String {
     "127.0.0.1".to_string()
 }
 
-fn default_port() -> u16 {
-    if is_production() {
-        5600
-    } else {
-        5666
-    }
-}
-
 fn default_cors() -> Vec<String> {
     Vec::<String>::new()
 }
 
-pub fn is_production() -> bool {
-    !is_testing()
+fn default_testing() -> bool {
+    is_testing()
 }
 
-pub fn is_testing() -> bool {
-    match Environment::active().expect("Failed to get current environment") {
-        Environment::Production => false,
-        Environment::Development => true,
-        Environment::Staging => panic!("Staging environment not supported"),
+fn default_port() -> u16 {
+    match is_testing() {
+        false => 5600,
+        true => 5666,
     }
 }
 
-pub fn get_config() -> AWConfig {
+pub fn create_config(testing: bool) -> AWConfig {
+    set_testing(testing);
     let mut config_path = dirs::get_config_dir().unwrap();
-    if is_production() {
+    if !testing {
         config_path.push("config.toml")
     } else {
         config_path.push("config-testing.toml")

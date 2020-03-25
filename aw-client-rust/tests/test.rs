@@ -47,7 +47,7 @@ mod test {
         };
         let mut aw_config = aw_server::config::AWConfig::default();
         aw_config.port = PORT;
-        let server = aw_server::endpoints::build_rocket(state, &aw_config);
+        let server = aw_server::endpoints::build_rocket(state, aw_config);
 
         thread::spawn(move || {
             server.launch();

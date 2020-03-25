@@ -3,16 +3,15 @@ use std::path::PathBuf;
 
 use fern::colors::{Color, ColoredLevelConfig};
 
-use crate::config::is_production;
 use crate::dirs;
 
-pub fn setup_logger() -> Result<(), fern::InitError> {
+pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
     let mut logfile_path: PathBuf =
         dirs::get_log_dir().expect("Unable to get log dir to store logs in");
     fs::create_dir_all(logfile_path.clone()).expect("Unable to create folder for logs");
     logfile_path.push(
         chrono::Local::now()
-            .format(if is_production() {
+            .format(if !testing {
                 "aw-server_%Y-%m-%dT%H-%M-%S%z.log"
             } else {
                 "aw-server-testing_%Y-%m-%dT%H-%M-%S%z.log"

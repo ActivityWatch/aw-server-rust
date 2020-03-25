@@ -9,7 +9,6 @@ use rocket::State;
 use rocket_contrib::json::JsonValue;
 use uuid::Uuid;
 
-use crate::config::is_testing;
 use crate::config::AWConfig;
 use crate::dirs;
 
@@ -88,14 +87,14 @@ fn get_device_id() -> String {
 }
 
 #[get("/")]
-fn server_info() -> JsonValue {
+fn server_info(config: State<AWConfig>) -> JsonValue {
     let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
     const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
     json!({
         "hostname": hostname,
         "version": format!("v{} (rust)", VERSION.unwrap_or("(unknown)")),
-        "testing": is_testing(),
+        "testing": config.testing,
         "device_id": get_device_id(),
     })
 }
@@ -118,7 +117,7 @@ fn not_found() -> JsonValue {
     })
 }
 
-pub fn build_rocket(server_state: ServerState, config: &AWConfig) -> rocket::Rocket {
+pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rocket {
     info!(
         "Starting aw-server-rust at {}:{}",
         config.address, config.port
@@ -169,4 +168,5 @@ pub fn build_rocket(server_state: ServerState, config: &AWConfig) -> rocket::Roc
         .attach(cors::cors(&config))
         .register(catchers![not_modified, not_found])
         .manage(server_state)
+        .manage(config)
 }

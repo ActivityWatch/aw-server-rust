@@ -13,7 +13,7 @@ fn main() {
     //  - Import buckets and sync events from remotes
 
     println!("Started aw-sync-rust...");
-    aw_server::logging::setup_logger().expect("Failed to setup logging");
+    aw_server::logging::setup_logger(true).expect("Failed to setup logging");
 
     sync::sync_run();
     info!("Finished successfully, exiting...");

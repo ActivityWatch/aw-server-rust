@@ -1,14 +1,23 @@
 #[macro_use]
 extern crate log;
 
+use rocket::config::Environment;
+
 use aw_server::*;
 
 fn main() {
     use std::sync::Mutex;
 
-    logging::setup_logger().expect("Failed to setup logging");
+    let env = Environment::active().expect("Failed to get current environment");
+    let testing = match env {
+        Environment::Production => false,
+        Environment::Development => true,
+        Environment::Staging => panic!("Staging environment not supported"),
+    };
 
-    let config = config::get_config();
+    logging::setup_logger(testing).expect("Failed to setup logging");
+
+    let config = config::create_config(testing);
 
     let db_path = dirs::db_path().to_str().unwrap().to_string();
     info!("Using DB at path {:?}", db_path);
@@ -23,7 +32,7 @@ fn main() {
         asset_path: asset_path,
     };
 
-    endpoints::build_rocket(server_state, &config).launch();
+    endpoints::build_rocket(server_state, config).launch();
 }
 
 use std::path::PathBuf;

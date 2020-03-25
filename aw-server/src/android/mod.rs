@@ -112,7 +112,7 @@ pub mod android {
         let mut config = AWConfig::default();
         config.port = 5600;
         info!("Starting server...");
-        endpoints::build_rocket(server_state, &config).launch();
+        endpoints::build_rocket(server_state, config).launch();
         info!("Server exited");
     }
 

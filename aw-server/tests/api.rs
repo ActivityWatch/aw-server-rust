@@ -28,7 +28,7 @@ mod api_tests {
             asset_path: PathBuf::from("aw-webui/dist"),
         };
         let aw_config = config::AWConfig::default();
-        endpoints::build_rocket(state, &aw_config)
+        endpoints::build_rocket(state, aw_config)
     }
 
     #[test]

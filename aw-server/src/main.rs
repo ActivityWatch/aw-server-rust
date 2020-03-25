@@ -1,19 +1,46 @@
 #[macro_use]
 extern crate log;
+extern crate getopts;
 
+use getopts::Options;
 use rocket::config::Environment;
+use std::env;
 
 use aw_server::*;
+
+fn print_usage(program: &str, opts: Options) {
+    let brief = format!("Usage: {} FILE [options]", program);
+    print!("{}", opts.usage(&brief));
+}
 
 fn main() {
     use std::sync::Mutex;
 
+    let args: Vec<String> = env::args().collect();
+    let program = args[0].clone();
+
+    let mut opts = Options::new();
+    opts.optflag("", "testing", "run in testing mode");
+    opts.optflag("h", "help", "print this help menu");
+    let matches = match opts.parse(&args[1..]) {
+        Ok(m) => m,
+        Err(f) => panic!(f.to_string()),
+    };
+    if matches.opt_present("h") {
+        print_usage(&program, opts);
+        return;
+    }
+
     let env = Environment::active().expect("Failed to get current environment");
-    let testing = match env {
+    let mut testing = match env {
         Environment::Production => false,
         Environment::Development => true,
         Environment::Staging => panic!("Staging environment not supported"),
     };
+    // Always override environment if --testing is specified
+    if matches.opt_present("testing") {
+        testing = true;
+    }
 
     logging::setup_logger(testing).expect("Failed to setup logging");
 
@@ -45,7 +72,6 @@ use std::path::PathBuf;
 // TODO: Should we talk to upstream about this? This changes the behavior quite a lot so maybe they
 // don't want this change?
 fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
-    use std::env;
     // Iterate over all XDG_DATA_DIRS and return first match that exists
     match env::var_os("XDG_DATA_DIRS") {
         Some(joined) => {

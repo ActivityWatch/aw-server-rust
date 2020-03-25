@@ -29,6 +29,7 @@ fern = { version = "0.5", features = ["colored"] }
 toml = "0.5"
 gethostname = "0.2"
 uuid = { version = "0.8", features = ["serde", "v4"] }
+getopts = "0.2"
 
 aw-datastore = { path = "../aw-datastore" }
 aw-models = { path = "../aw-models" }

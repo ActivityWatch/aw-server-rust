@@ -85,7 +85,7 @@ mod import {
 
     fn get_legacy_events(
         conn: &Connection,
-        bucket_id: &i64,
+        bucket_id: i64,
     ) -> Result<Vec<Event>, LegacyDatastoreImportError> {
         let mut stmt = match conn.prepare(
             "
@@ -121,12 +121,12 @@ mod import {
                     ),
                 };
 
-            return Ok(Event {
+            Ok(Event {
                 id: None,
-                timestamp: timestamp,
+                timestamp,
                 duration: Duration::nanoseconds(duration_ns),
-                data: data,
-            });
+                data,
+            })
         }) {
             Ok(rows) => rows,
             Err(err) => {
@@ -165,7 +165,7 @@ mod import {
                 Ok(_) => (),
                 Err(err) => panic!("Failed to create bucket '{}': {:?}", bucket.id, err),
             };
-            let events = get_legacy_events(&legacy_conn, &bucket.bid.unwrap())?;
+            let events = get_legacy_events(&legacy_conn, bucket.bid.unwrap())?;
             let num_events = events.len(); // Save len before lending events to insert_events
             println!("Importing {} events for {}", num_events, bucket.id);
             match new_ds.insert_events(new_conn, &bucket.id, events) {

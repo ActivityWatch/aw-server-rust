@@ -412,6 +412,7 @@ mod datastore_tests {
                 buckets[&populated_bucket.id].metadata.end,
                 Some(e1.timestamp)
             );
+            ds.force_commit().unwrap();
         }
         {
             // Load database again

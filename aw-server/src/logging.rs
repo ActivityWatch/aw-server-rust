@@ -42,10 +42,7 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
             ))
         })
         // Color and higher log levels to stdout
-        .chain(
-            fern::Dispatch::new()
-                .chain(std::io::stdout()),
-        )
+        .chain(fern::Dispatch::new().chain(std::io::stdout()))
         // No color and lower log levels to logfile
         .chain(
             fern::Dispatch::new()

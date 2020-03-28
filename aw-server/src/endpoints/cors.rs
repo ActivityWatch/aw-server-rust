@@ -1,12 +1,11 @@
 use rocket::http::Method;
-use rocket_cors;
 use rocket_cors::{AllowedHeaders, AllowedOrigins};
 
 use crate::config::AWConfig;
 
 pub fn cors(config: &AWConfig) -> rocket_cors::Cors {
-    let root_url = format!("http://127.0.0.1:{}", config.port).to_string();
-    let root_url_localhost = format!("http://localhost:{}", config.port).to_string();
+    let root_url = format!("http://127.0.0.1:{}", config.port);
+    let root_url_localhost = format!("http://localhost:{}", config.port);
     let mut allowed_exact_origins = vec![root_url, root_url_localhost];
     allowed_exact_origins.extend(config.cors.clone());
 

@@ -10,7 +10,7 @@ use aw_models::{Key, KeyValue};
 fn parse_key(key: String) -> Result<String, Status> {
     let namespace: String = "settings.".to_string();
     if key.len() >= 128 {
-        return Err(Status::BadRequest);
+        Err(Status::BadRequest)
     } else {
         Ok(namespace + key.as_str())
     }
@@ -24,13 +24,14 @@ pub fn setting_set(state: State<ServerState>, message: Json<KeyValue>) -> Result
 
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
     let result = datastore.insert_key_value(&setting_key, &data.value);
-    return match result {
+
+    match result {
         Ok(_) => Ok(Status::Created),
         Err(err) => {
             warn!("Unexpected error when creating setting: {:?}", err);
             Err(Status::InternalServerError)
         }
-    };
+    }
 }
 
 #[get("/")]
@@ -49,7 +50,8 @@ pub fn settings_list_get(state: State<ServerState>) -> Result<Json<Vec<Key>>, St
     for i in queryresults? {
         output.push(Key { key: i });
     }
-    return Ok(Json(output));
+
+    Ok(Json(output))
 }
 
 #[get("/<key>")]
@@ -57,14 +59,15 @@ pub fn setting_get(state: State<ServerState>, key: String) -> Result<Json<KeyVal
     let setting_key = parse_key(key)?;
 
     let datastore = endpoints_get_lock!(state.datastore);
-    return match datastore.get_key_value(&setting_key) {
+
+    match datastore.get_key_value(&setting_key) {
         Ok(result) => Ok(Json(result)),
         Err(DatastoreError::NoSuchKey) => Err(Status::NotFound),
         Err(err) => {
             warn!("Unexpected error when getting setting: {:?}", err);
             Err(Status::InternalServerError)
         }
-    };
+    }
 }
 
 #[delete("/<key>")]
@@ -73,11 +76,12 @@ pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), Stat
 
     let datastore = endpoints_get_lock!(state.datastore);
     let result = datastore.delete_key_value(&setting_key);
-    return match result {
+
+    match result {
         Ok(_) => Ok(()),
         Err(err) => {
             warn!("Unexpected error when deleting setting: {:?}", err);
             Err(Status::InternalServerError)
         }
-    };
+    }
 }

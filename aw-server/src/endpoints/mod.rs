@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use gethostname::gethostname;
-use rocket;
 use rocket::response::NamedFile;
 use rocket::State;
 use rocket_contrib::json::JsonValue;
@@ -88,6 +87,7 @@ fn get_device_id() -> String {
 
 #[get("/")]
 fn server_info(config: State<AWConfig>) -> JsonValue {
+    #[allow(clippy::or_fun_call)]
     let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
     const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 

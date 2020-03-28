@@ -26,7 +26,7 @@ pub fn buckets_export(state: State<ServerState>) -> Result<Response, Status> {
         export.buckets.insert(bid, bucket);
     }
 
-    let response = Response::build()
+    Ok(Response::build()
         .status(Status::Ok)
         .header(Header::new(
             "Content-Disposition",
@@ -35,6 +35,5 @@ pub fn buckets_export(state: State<ServerState>) -> Result<Response, Status> {
         .sized_body(Cursor::new(
             serde_json::to_string(&export).expect("Failed to serialize"),
         ))
-        .finalize();
-    return Ok(response);
+        .finalize())
 }

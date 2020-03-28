@@ -3,9 +3,6 @@ use std::path::PathBuf;
 #[cfg(not(target_os = "android"))]
 use std::fs;
 
-#[cfg(not(target_os = "android"))]
-use appdirs;
-
 #[cfg(target_os = "android")]
 use std::sync::Mutex;
 

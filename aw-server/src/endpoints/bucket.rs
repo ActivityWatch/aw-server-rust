@@ -25,12 +25,10 @@ pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Buc
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.get_buckets() {
         Ok(bucketlist) => Ok(Json(bucketlist)),
-        Err(e) => match e {
-            _ => {
-                warn!("Unexpected error: {:?}", e);
-                Err(Status::InternalServerError)
-            }
-        },
+        Err(e) => {
+            warn!("Unexpected error: {:?}", e);
+            Err(Status::InternalServerError)
+        }
     }
 }
 
@@ -236,14 +234,13 @@ pub fn bucket_export(bucket_id: String, state: State<ServerState>) -> Result<Res
     let filename = format!("aw-bucket-export_{}.json", bucket_id);
 
     let header_content = format!("attachment; filename={}", filename);
-    let response = Response::build()
+    Ok(Response::build()
         .status(Status::Ok)
         .header(Header::new("Content-Disposition", header_content))
         .sized_body(Cursor::new(
             serde_json::to_string(&export).expect("Failed to serialize"),
         ))
-        .finalize();
-    return Ok(response);
+        .finalize())
 }
 
 #[delete("/<bucket_id>")]

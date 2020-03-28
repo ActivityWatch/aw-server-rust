@@ -28,15 +28,15 @@ pub struct AwClient {
 
 impl AwClient {
     pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
-        let baseurl = String::from(format!("http://{}:{}", ip, port));
+        let baseurl = format!("http://{}:{}", ip, port);
         let client = reqwest::blocking::Client::new();
         let hostname = gethostname::gethostname().into_string().unwrap();
-        return AwClient {
-            client: client,
-            baseurl: baseurl,
+        AwClient {
+            client,
+            baseurl,
             name: name.to_string(),
-            hostname: hostname,
-        };
+            hostname,
+        }
     }
 
     pub fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {

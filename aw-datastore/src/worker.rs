@@ -4,6 +4,7 @@ use std::thread;
 
 use chrono::DateTime;
 use chrono::Utc;
+use chrono::Duration;
 
 use rusqlite::Connection;
 use rusqlite::DropBehavior;
@@ -150,6 +151,7 @@ impl DatastoreWorker {
                 };
             let mut commit = false;
             let mut uncommited_events = 0;
+            let last_commit_time: DateTime<Utc> = Utc::now();
             transaction.set_drop_behavior(DropBehavior::Commit);
             loop {
                 let (request, response_sender) = match self.responder.poll() {
@@ -262,7 +264,9 @@ impl DatastoreWorker {
                     }
                 };
                 response_sender.respond(response);
-                if commit || uncommited_events > 100 {
+                let now: DateTime<Utc> = Utc::now();
+                let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
+                if commit || commit_interval_passed || uncommited_events > 100 {
                     break;
                 };
             }

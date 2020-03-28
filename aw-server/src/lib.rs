@@ -15,6 +15,7 @@ extern crate serde_derive;
 
 extern crate chrono;
 
+#[cfg(not(target_os = "android"))]
 extern crate appdirs;
 
 #[cfg(target_os = "android")]

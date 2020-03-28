@@ -6,7 +6,6 @@ use rocket_contrib::json::{Json, JsonValue};
 use aw_models::Query;
 
 use crate::endpoints::ServerState;
-use aw_query;
 use aw_query::QueryError;
 
 #[derive(Serialize)]

@@ -31,15 +31,15 @@ fn main() {
         return;
     }
 
-    let env = Environment::active().expect("Failed to get current environment");
-    let mut testing = match env {
-        Environment::Production => false,
-        Environment::Development => true,
-        Environment::Staging => panic!("Staging environment not supported"),
-    };
+    let mut testing = matches.opt_present("testing");
     // Always override environment if --testing is specified
-    if matches.opt_present("testing") {
-        testing = true;
+    if !testing {
+        let env = Environment::active().expect("Failed to get current environment");
+        testing = match env {
+            Environment::Production => false,
+            Environment::Development => true,
+            Environment::Staging => panic!("Staging environment not supported"),
+        };
     }
 
     logging::setup_logger(testing).expect("Failed to setup logging");
@@ -56,7 +56,7 @@ fn main() {
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
         datastore: Mutex::new(aw_datastore::Datastore::new(db_path, true)),
-        asset_path: asset_path,
+        asset_path,
     };
 
     endpoints::build_rocket(server_state, config).launch();
@@ -73,30 +73,29 @@ use std::path::PathBuf;
 // don't want this change?
 fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
     // Iterate over all XDG_DATA_DIRS and return first match that exists
-    match env::var_os("XDG_DATA_DIRS") {
-        Some(joined) => {
-            for mut data_dir in env::split_paths(&joined) {
-                if app.is_some() {
-                    data_dir.push(app.unwrap());
-                }
-                if !data_dir.is_dir() {
-                    continue;
-                }
-                return Ok(data_dir);
+    if let Some(joined) = env::var_os("XDG_DATA_DIRS") {
+        for mut data_dir in env::split_paths(&joined) {
+            if let Some(app) = app {
+                data_dir.push(app);
             }
+            if !data_dir.is_dir() {
+                continue;
+            }
+            return Ok(data_dir);
         }
-        None => {}
-    };
+    }
     // If no dirs exists in XDG_DATA_DIRS, fallback to /usr/local/share
     let default = "/usr/local/share";
     let mut data_dir = PathBuf::new();
     data_dir.push(default);
-    if app.is_some() {
-        data_dir.push(app.unwrap());
+    if let Some(app) = app {
+        data_dir.push(app);
     }
-    match data_dir.is_dir() {
-        true => Ok(data_dir),
-        false => Err(()),
+
+    if data_dir.is_dir() {
+        Ok(data_dir)
+    } else {
+        Err(())
     }
 }
 
@@ -120,29 +119,23 @@ fn get_asset_path() -> PathBuf {
 
     // current_exe_path
     // (for self-contained deployed binaries)
-    match current_exe() {
-        Ok(mut current_exe_path) => {
-            current_exe_path.pop(); // remove name of executable
-            current_exe_path.push("./static/");
-            if current_exe_path.as_path().exists() {
-                return current_exe_path;
-            }
+    if let Ok(mut current_exe_path) = current_exe() {
+        current_exe_path.pop(); // remove name of executable
+        current_exe_path.push("./static/");
+        if current_exe_path.as_path().exists() {
+            return current_exe_path;
         }
-        Err(_) => (),
-    };
+    }
 
     // usr_path
     // (for linux usr installs)
-    match site_data_dir(Some("aw-server"), None) {
-        Ok(mut usr_path) => {
-            usr_path.push("static");
-            if usr_path.as_path().exists() {
-                return usr_path;
-            }
+    if let Ok(mut usr_path) = site_data_dir(Some("aw-server"), None) {
+        usr_path.push("static");
+        if usr_path.as_path().exists() {
+            return usr_path;
         }
-        Err(_) => {}
     }
 
     warn!("Unable to find an aw-webui asset path which exists, falling back to ./aw-webui/dist");
-    return cargo_dev_path;
+    cargo_dev_path
 }

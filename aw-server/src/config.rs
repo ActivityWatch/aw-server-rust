@@ -40,12 +40,13 @@ impl Default for AWConfig {
 
 impl AWConfig {
     pub fn to_rocket_config(&self) -> rocket::Config {
-        let env = match self.testing {
-            true => Environment::Production,
-            false => Environment::Development,
+        let env = if self.testing {
+            Environment::Production
+        } else {
+            Environment::Development
         };
         // Needed for bucket imports
-        let limits = Limits::new().limit("json", 1 * 1000 * 1000 * 1000);
+        let limits = Limits::new().limit("json", 1_000_000_000);
 
         Config::build(env)
             .address(self.address.clone())
@@ -70,9 +71,10 @@ fn default_testing() -> bool {
 }
 
 fn default_port() -> u16 {
-    match is_testing() {
-        false => 5600,
-        true => 5666,
+    if is_testing() {
+        5666
+    } else {
+        5600
     }
 }
 

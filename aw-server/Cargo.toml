@@ -25,7 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 appdirs = "0.2.0"
 lazy_static = "1.2"
 log = "0.4"
-fern = { version = "0.5", features = ["colored"] }
+fern = { version = "0.6", features = ["colored"] }
 toml = "0.5"
 gethostname = "0.2"
 uuid = { version = "0.8", features = ["serde", "v4"] }

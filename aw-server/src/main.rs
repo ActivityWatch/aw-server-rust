@@ -46,7 +46,7 @@ fn main() {
 
     let config = config::create_config(testing);
 
-    let db_path = dirs::db_path().to_str().unwrap().to_string();
+    let db_path = dirs::db_path(testing).to_str().unwrap().to_string();
     info!("Using DB at path {:?}", db_path);
 
     let asset_path = get_asset_path();

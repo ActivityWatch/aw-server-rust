@@ -74,12 +74,13 @@ pub fn get_log_dir() -> Result<PathBuf, ()> {
     }
 }
 
-pub fn db_path() -> PathBuf {
+pub fn db_path(testing: bool) -> PathBuf {
     let mut db_path = get_data_dir().unwrap();
-    #[cfg(debug_assertions)]
-    db_path.push("sqlite-testing.db");
-    #[cfg(not(debug_assertions))]
-    db_path.push("sqlite.db");
+    if testing {
+        db_path.push("sqlite-testing.db");
+    } else {
+        db_path.push("sqlite.db");
+    }
     db_path
 }
 

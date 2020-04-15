@@ -16,7 +16,7 @@ fn parse_key(key: String) -> Result<String, Status> {
     }
 }
 
-#[post("/", data = "<message>")]
+#[post("/", data = "<message>", format = "application/json")]
 pub fn setting_set(state: State<ServerState>, message: Json<KeyValue>) -> Result<Status, Status> {
     let data = message.into_inner();
 

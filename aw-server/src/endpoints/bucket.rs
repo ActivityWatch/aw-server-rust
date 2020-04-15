@@ -50,7 +50,7 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
 // FIXME: The status::Custom return is used because if we simply used Status and return a
 // Status::NotModified rocket will for some unknown reason consider that to be a
 // "Invalid status used as responder" and converts it to a 500 which we do not want.
-#[post("/<bucket_id>", data = "<message>")]
+#[post("/<bucket_id>", data = "<message>", format = "application/json")]
 pub fn bucket_new(
     bucket_id: String,
     message: Json<Bucket>,
@@ -130,7 +130,7 @@ pub fn bucket_events_get(
     }
 }
 
-#[post("/<bucket_id>/events", data = "<events>")]
+#[post("/<bucket_id>/events", data = "<events>", format = "application/json")]
 pub fn bucket_events_create(
     bucket_id: String,
     events: Json<Vec<Event>>,
@@ -150,7 +150,7 @@ pub fn bucket_events_create(
     }
 }
 
-#[post("/<bucket_id>/heartbeat?<pulsetime>", data = "<heartbeat_json>")]
+#[post("/<bucket_id>/heartbeat?<pulsetime>", data = "<heartbeat_json>", format = "application/json")]
 pub fn bucket_events_heartbeat(
     bucket_id: String,
     heartbeat_json: Json<Event>,

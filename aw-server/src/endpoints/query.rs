@@ -30,7 +30,7 @@ fn error(err: QueryError) -> status::Custom<JsonValue> {
     status::Custom(Status::InternalServerError, json!(body))
 }
 
-#[post("/", data = "<query_req>")]
+#[post("/", data = "<query_req>", format = "application/json")]
 pub fn query(query_req: Json<Query>, state: State<ServerState>) -> status::Custom<JsonValue> {
     let query_code = query_req.0.query.join("\n");
     let intervals = &query_req.0.timeperiods;

@@ -150,7 +150,11 @@ pub fn bucket_events_create(
     }
 }
 
-#[post("/<bucket_id>/heartbeat?<pulsetime>", data = "<heartbeat_json>", format = "application/json")]
+#[post(
+    "/<bucket_id>/heartbeat?<pulsetime>",
+    data = "<heartbeat_json>",
+    format = "application/json"
+)]
 pub fn bucket_events_heartbeat(
     bucket_id: String,
     heartbeat_json: Json<Event>,

@@ -99,24 +99,6 @@ fn server_info(config: State<AWConfig>) -> JsonValue {
     })
 }
 
-// This catcher is sadly invalid as catchers in rocket are only forwarded if they
-// have code 400-599 for some reason
-#[catch(304)]
-fn not_modified() -> JsonValue {
-    json!({
-        "status": 304,
-        "reason": "Not modified."
-    })
-}
-
-#[catch(404)]
-fn not_found() -> JsonValue {
-    json!({
-        "status": 404,
-        "reason": "Resource was not found."
-    })
-}
-
 pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rocket {
     info!(
         "Starting aw-server-rust at {}:{}",
@@ -166,7 +148,6 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             ],
         )
         .attach(cors::cors(&config))
-        .register(catchers![not_modified, not_found])
         .manage(server_state)
         .manage(config)
 }

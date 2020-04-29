@@ -38,6 +38,7 @@ jobs:
     - name: Run tests with coverage
       if: startsWith(matrix.os, 'ubuntu')
       run: |
+        sudo apt-get update
         sudo apt-get install libcurl4-openssl-dev libelf-dev libdw-dev binutils-dev
         cargo install --force cargo-kcov;
         cargo kcov --print-install-kcov-sh | sh;

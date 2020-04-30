@@ -126,7 +126,7 @@ pub mod android {
         if !INITIALIZED {
             android_logger::init_once(
                 Config::default()
-                    .with_min_level(Level::Trace) // limit log level
+                    .with_min_level(Level::Info) // limit log level
                     .with_tag("aw-server-rust"), // logs will show under mytag tag
                                                  //.with_filter( // configure messages for specific crate
                                                  //    FilterBuilder::new()

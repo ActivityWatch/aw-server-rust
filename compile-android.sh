@@ -8,7 +8,7 @@ if [ -z "$ANDROID_NDK_HOME" ]; then
     exit 1
 fi
 
-if [ $RELEASE == "true" ]; then
+if [ "$RELEASE" = "true" ]; then
     echo "Building in release mode... (slow)";
 else
     echo "Building in debug mode... (fast)"

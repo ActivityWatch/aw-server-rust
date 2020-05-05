@@ -37,7 +37,7 @@ rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-andro
 
 # Creates cargo config
 echo "Creating cargo config..."
-mkdir -p .cargo
+mkdir -p $project_path/.cargo
 echo "
 [target.aarch64-linux-android]
 ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-ar'

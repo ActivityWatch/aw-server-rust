@@ -17,7 +17,11 @@ mod ast;
 mod functions;
 mod interpret;
 mod lexer;
-#[allow(clippy::match_single_binding, clippy::redundant_closure_call)]
+#[allow(
+    clippy::match_single_binding,
+    clippy::redundant_closure_call,
+    unused_braces
+)]
 mod parser;
 
 pub use crate::datatype::DataType;

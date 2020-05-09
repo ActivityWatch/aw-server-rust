@@ -208,14 +208,14 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        match args[0] {
+        match args.get(0).unwrap() {
             DataType::List(ref list) => Ok(DataType::Bool(list.contains(&args[1]))),
             DataType::Dict(ref dict) => {
                 let s = match &args[1] {
                     DataType::String(s) => s.to_string(),
                     _ => {
                         return Err(QueryError::InvalidFunctionParameters(format!(
-                            "function contains got first argument {:?}, expected type List or Dict",
+                            "function contains got second argument {:?}, expected type String",
                             args[0]
                         )))
                     }

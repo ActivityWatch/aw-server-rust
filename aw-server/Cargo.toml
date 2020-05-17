@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 rocket = "0.4"
 rocket_contrib = { version = "*", default-features = false, features = ["json"] }
-rocket_cors = "0.5.0"
+rocket_cors = "0.5"
 multipart = { version = "0.16", default-features = false, features = ["server"] }
 serde = "1.0"
 serde_json = "1.0"

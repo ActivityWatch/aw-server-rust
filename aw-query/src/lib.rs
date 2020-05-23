@@ -61,5 +61,5 @@ pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, 
             return Err(QueryError::ParsingError(format!("{:?}", e)));
         }
     };
-    interpret::interpret_prog(&program, ti, ds)
+    interpret::interpret_prog(program, ti, ds)
 }

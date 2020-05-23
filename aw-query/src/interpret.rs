@@ -9,20 +9,20 @@ use crate::ast::*;
 use crate::DataType;
 use crate::QueryError;
 
-fn init_env<'a>(ti: &TimeInterval) -> HashMap<&'a str, DataType> {
+fn init_env(ti: &TimeInterval) -> HashMap<String, DataType> {
     let mut env = HashMap::new();
-    env.insert("TIMEINTERVAL", DataType::String(ti.to_string()));
+    env.insert("TIMEINTERVAL".to_string(), DataType::String(ti.to_string()));
     functions::fill_env(&mut env);
     env
 }
 
-pub fn interpret_prog<'a>(
-    p: &'a Program,
+pub fn interpret_prog(
+    p: Program,
     ti: &TimeInterval,
     ds: &Datastore,
 ) -> Result<DataType, QueryError> {
     let mut env = init_env(ti);
-    for expr in &p.stmts {
+    for expr in p.stmts {
         interpret_expr(&mut env, ds, expr)?;
     }
     match env.remove("RETURN") {
@@ -31,16 +31,16 @@ pub fn interpret_prog<'a>(
     }
 }
 
-fn interpret_expr<'a>(
-    env: &mut HashMap<&'a str, DataType>,
+fn interpret_expr(
+    env: &mut HashMap<String, DataType>,
     ds: &Datastore,
-    expr: &'a Expr,
+    expr: Expr,
 ) -> Result<DataType, QueryError> {
     use crate::ast::Expr_::*;
     match expr.node {
-        Add(ref a, ref b) => {
-            let a_res = interpret_expr(env, ds, a)?;
-            let b_res = interpret_expr(env, ds, b)?;
+        Add(a, b) => {
+            let a_res = interpret_expr(env, ds, *a)?;
+            let b_res = interpret_expr(env, ds, *b)?;
             let res = match a_res {
                 DataType::Number(n1) => match b_res {
                     DataType::Number(n2) => DataType::Number(n1 + n2),
@@ -83,9 +83,9 @@ fn interpret_expr<'a>(
             };
             Ok(res)
         }
-        Sub(ref a, ref b) => {
-            let a_res = interpret_expr(env, ds, a)?;
-            let b_res = interpret_expr(env, ds, b)?;
+        Sub(a, b) => {
+            let a_res = interpret_expr(env, ds, *a)?;
+            let b_res = interpret_expr(env, ds, *b)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -104,9 +104,9 @@ fn interpret_expr<'a>(
             };
             Ok(DataType::Number(a_num - b_num))
         }
-        Mul(ref a, ref b) => {
-            let a_res = interpret_expr(env, ds, a)?;
-            let b_res = interpret_expr(env, ds, b)?;
+        Mul(a, b) => {
+            let a_res = interpret_expr(env, ds, *a)?;
+            let b_res = interpret_expr(env, ds, *b)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -125,9 +125,9 @@ fn interpret_expr<'a>(
             };
             Ok(DataType::Number(a_num * b_num))
         }
-        Div(ref a, ref b) => {
-            let a_res = interpret_expr(env, ds, a)?;
-            let b_res = interpret_expr(env, ds, b)?;
+        Div(a, b) => {
+            let a_res = interpret_expr(env, ds, *a)?;
+            let b_res = interpret_expr(env, ds, *b)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -151,9 +151,9 @@ fn interpret_expr<'a>(
             }
             Ok(DataType::Number(a_num / b_num))
         }
-        Mod(ref a, ref b) => {
-            let a_res = interpret_expr(env, ds, a)?;
-            let b_res = interpret_expr(env, ds, b)?;
+        Mod(a, b) => {
+            let a_res = interpret_expr(env, ds, *a)?;
+            let b_res = interpret_expr(env, ds, *b)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -172,33 +172,33 @@ fn interpret_expr<'a>(
             };
             Ok(DataType::Number(a_num % b_num))
         }
-        Equal(ref lhs, ref rhs) => {
-            let lhs_res = interpret_expr(env, ds, lhs)?;
-            let rhs_res = interpret_expr(env, ds, rhs)?;
+        Equal(lhs, rhs) => {
+            let lhs_res = interpret_expr(env, ds, *lhs)?;
+            let rhs_res = interpret_expr(env, ds, *rhs)?;
             Ok(DataType::Bool(lhs_res.query_eq(&rhs_res)?))
         }
-        Assign(ref var, ref b) => {
-            let val = interpret_expr(env, ds, b)?;
+        Assign(var, b) => {
+            let val = interpret_expr(env, ds, *b)?;
             env.insert(var, val);
             Ok(DataType::None())
         }
         // FIXME: avoid clone, it's slow
-        Var(ref var) => match env.get(&var[..]) {
+        Var(var) => match env.get(&var) {
             Some(v) => Ok(v.clone()),
             None => Err(QueryError::VariableNotDefined(var.to_string())),
         },
         Bool(lit) => Ok(DataType::Bool(lit)),
         Number(lit) => Ok(DataType::Number(lit)),
-        String(ref litstr) => Ok(DataType::String(litstr.to_string())),
-        Return(ref e) => {
-            let val = interpret_expr(env, ds, e)?;
+        String(litstr) => Ok(DataType::String(litstr.to_string())),
+        Return(e) => {
+            let val = interpret_expr(env, ds, *e)?;
             // TODO: Once RETURN is deprecated we can fix this
-            env.insert("RETURN", val);
+            env.insert("RETURN".to_string(), val);
             return Ok(DataType::None());
         }
-        If(ref ifs) => {
-            for (ref cond, ref block) in ifs {
-                let c = interpret_expr(env, ds, cond)?;
+        If(ifs) => {
+            for (cond, block) in ifs {
+                let c = interpret_expr(env, ds, *cond)?;
                 if c.query_eq(&DataType::Bool(true))? {
                     for expr in block {
                         interpret_expr(env, ds, expr)?;
@@ -208,8 +208,8 @@ fn interpret_expr<'a>(
             }
             Ok(DataType::None())
         }
-        Function(ref fname, ref e) => {
-            let args = match interpret_expr(env, ds, e)? {
+        Function(fname, e) => {
+            let args = match interpret_expr(env, ds, *e)? {
                 DataType::List(l) => l,
                 _ => unreachable!(),
             };
@@ -223,7 +223,7 @@ fn interpret_expr<'a>(
             };
             fun(args, env, ds)
         }
-        List(ref list) => {
+        List(list) => {
             let mut l = Vec::new();
             for entry in list {
                 let res = interpret_expr(env, ds, entry)?;
@@ -231,7 +231,7 @@ fn interpret_expr<'a>(
             }
             Ok(DataType::List(l))
         }
-        Dict(ref d) => {
+        Dict(d) => {
             let mut dict = HashMap::new();
             for (key, val_uninterpreted) in d {
                 let val = interpret_expr(env, ds, val_uninterpreted)?;

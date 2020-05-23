@@ -5,95 +5,98 @@ use std::collections::HashMap;
 
 pub type QueryFn = fn(
     args: Vec<DataType>,
-    env: &HashMap<&str, DataType>,
+    env: &HashMap<String, DataType>,
     ds: &Datastore,
 ) -> Result<DataType, QueryError>;
 
-pub fn fill_env<'a>(env: &mut HashMap<&'a str, DataType>) {
+pub fn fill_env(env: &mut HashMap<String, DataType>) {
     env.insert(
-        "print",
+        "print".to_string(),
         DataType::Function("print".to_string(), qfunctions::print),
     );
     env.insert(
-        "query_bucket",
+        "query_bucket".to_string(),
         DataType::Function("query_bucket".to_string(), qfunctions::query_bucket),
     );
     env.insert(
-        "query_bucket_names",
+        "query_bucket_names".to_string(),
         DataType::Function(
             "query_bucket_names".to_string(),
             qfunctions::query_bucket_names,
         ),
     );
     env.insert(
-        "sort_by_duration",
+        "sort_by_duration".to_string(),
         DataType::Function("sort_by_duration".to_string(), qfunctions::sort_by_duration),
     );
     env.insert(
-        "sort_by_timestamp",
+        "sort_by_timestamp".to_string(),
         DataType::Function(
             "sort_by_timestamp".to_string(),
             qfunctions::sort_by_timestamp,
         ),
     );
     env.insert(
-        "sum_durations",
+        "sum_durations".to_string(),
         DataType::Function("sum_durations".to_string(), qfunctions::sum_durations),
     );
     env.insert(
-        "limit_events",
+        "limit_events".to_string(),
         DataType::Function("limit_events".to_string(), qfunctions::limit_events),
     );
     env.insert(
-        "contains",
+        "contains".to_string(),
         DataType::Function("contains".to_string(), qfunctions::contains),
     );
     env.insert(
-        "flood",
+        "flood".to_string(),
         DataType::Function("flood".to_string(), qfunctions::flood),
     );
     env.insert(
-        "find_bucket",
+        "find_bucket".to_string(),
         DataType::Function("find_bucket".to_string(), qfunctions::find_bucket),
     );
     env.insert(
-        "merge_events_by_keys",
+        "merge_events_by_keys".to_string(),
         DataType::Function(
             "merge_events_by_keys".to_string(),
             qfunctions::merge_events_by_keys,
         ),
     );
     env.insert(
-        "chunk_events_by_key",
+        "chunk_events_by_key".to_string(),
         DataType::Function(
             "chunk_events_by_key".to_string(),
             qfunctions::chunk_events_by_key,
         ),
     );
     env.insert(
-        "filter_keyvals",
+        "filter_keyvals".to_string(),
         DataType::Function("filter_keyvals".to_string(), qfunctions::filter_keyvals),
     );
     env.insert(
-        "filter_period_intersect",
+        "filter_period_intersect".to_string(),
         DataType::Function(
             "filter_period_intersect".to_string(),
             qfunctions::filter_period_intersect,
         ),
     );
     env.insert(
-        "split_url_events",
+        "split_url_events".to_string(),
         DataType::Function("split_url_events".to_string(), qfunctions::split_url_events),
     );
     env.insert(
-        "concat",
+        "concat".to_string(),
         DataType::Function("concat".to_string(), qfunctions::concat),
     );
     env.insert(
-        "categorize",
+        "categorize".to_string(),
         DataType::Function("categorize".into(), qfunctions::categorize),
     );
-    env.insert("tag", DataType::Function("tag".into(), qfunctions::tag));
+    env.insert(
+        "tag".to_string(),
+        DataType::Function("tag".into(), qfunctions::tag),
+    );
 }
 
 mod qfunctions {
@@ -111,7 +114,7 @@ mod qfunctions {
 
     pub fn print(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         for arg in args {
@@ -122,7 +125,7 @@ mod qfunctions {
 
     pub fn query_bucket(
         args: Vec<DataType>,
-        env: &HashMap<&str, DataType>,
+        env: &HashMap<String, DataType>,
         ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // Typecheck
@@ -153,7 +156,7 @@ mod qfunctions {
 
     pub fn query_bucket_names(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         validate::args_length(&args, 0)?;
@@ -175,7 +178,7 @@ mod qfunctions {
 
     pub fn find_bucket(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         validate::args_length(&args, 1)?;
@@ -203,7 +206,7 @@ mod qfunctions {
 
     pub fn contains(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -231,7 +234,7 @@ mod qfunctions {
 
     pub fn flood(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -249,7 +252,7 @@ mod qfunctions {
 
     pub fn categorize(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -268,7 +271,7 @@ mod qfunctions {
 
     pub fn tag(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -287,7 +290,7 @@ mod qfunctions {
 
     pub fn sort_by_duration(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -306,7 +309,7 @@ mod qfunctions {
 
     pub fn limit_events(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -326,7 +329,7 @@ mod qfunctions {
 
     pub fn sort_by_timestamp(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -345,7 +348,7 @@ mod qfunctions {
 
     pub fn sum_durations(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -364,7 +367,7 @@ mod qfunctions {
 
     pub fn merge_events_by_keys(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -382,7 +385,7 @@ mod qfunctions {
 
     pub fn chunk_events_by_key(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -400,7 +403,7 @@ mod qfunctions {
 
     pub fn filter_keyvals(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -419,7 +422,7 @@ mod qfunctions {
 
     pub fn filter_period_intersect(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -437,7 +440,7 @@ mod qfunctions {
 
     pub fn split_url_events(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
@@ -454,7 +457,7 @@ mod qfunctions {
 
     pub fn concat(
         args: Vec<DataType>,
-        _env: &HashMap<&str, DataType>,
+        _env: &HashMap<String, DataType>,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         let mut event_list = Vec::new();
@@ -484,7 +487,7 @@ mod validate {
         Ok(())
     }
 
-    pub fn get_timeinterval(env: &HashMap<&str, DataType>) -> Result<TimeInterval, QueryError> {
+    pub fn get_timeinterval(env: &HashMap<String, DataType>) -> Result<TimeInterval, QueryError> {
         let interval_str = match env.get("TIMEINTERVAL") {
             Some(data_ti) => match data_ti {
                 DataType::String(ti_str) => ti_str,

@@ -22,11 +22,10 @@ pub fn interpret_prog<'a>(
     ds: &Datastore,
 ) -> Result<DataType, QueryError> {
     let mut env = init_env(ti);
-    let mut ret = None;
     for expr in &p.stmts {
-        ret = Some(interpret_expr(&mut env, ds, expr)?)
+        interpret_expr(&mut env, ds, expr)?;
     }
-    match ret {
+    match env.remove("RETURN") {
         Some(ret) => Ok(ret),
         None => Err(QueryError::EmptyQuery()),
     }
@@ -180,9 +179,8 @@ fn interpret_expr<'a>(
         }
         Assign(ref var, ref b) => {
             let val = interpret_expr(env, ds, b)?;
-            // FIXME: avoid clone, it's slow
-            env.insert(var, val.clone());
-            Ok(val)
+            env.insert(var, val);
+            Ok(DataType::None())
         }
         // FIXME: avoid clone, it's slow
         Var(ref var) => match env.get(&var[..]) {
@@ -194,7 +192,9 @@ fn interpret_expr<'a>(
         String(ref litstr) => Ok(DataType::String(litstr.to_string())),
         Return(ref e) => {
             let val = interpret_expr(env, ds, e)?;
-            Ok(val)
+            // TODO: Once RETURN is deprecated we can fix this
+            env.insert("RETURN", val);
+            return Ok(DataType::None());
         }
         If(ref ifs) => {
             for (ref cond, ref block) in ifs {

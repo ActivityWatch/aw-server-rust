@@ -102,7 +102,7 @@ mod query_tests {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("True;False;a=True;True;");
+        let code = String::from("True;False;a=True;return True;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Bool(b) => assert_eq!(b, true),
             ref data => panic!("Wrong datatype, {:?}", data),
@@ -114,7 +114,7 @@ mod query_tests {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("1;1.;1.1;");
+        let code = String::from("1;1.;return 1.1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Number(n) => assert_eq!(n, 1.1),
             ref data => panic!("Wrong datatype, {:?}", data),
@@ -127,49 +127,49 @@ mod query_tests {
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         // number comparison true
-        let code = String::from("1==1;");
+        let code = String::from("return 1==1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Bool(b) => assert_eq!(b, true),
             ref data => panic!("Wrong datatype, {:?}", data),
         };
 
         // number comparison false
-        let code = String::from("2==1;");
+        let code = String::from("return  2==1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Bool(b) => assert_eq!(b, false),
             ref data => panic!("Wrong datatype, {:?}", data),
         };
 
         // string comparison true
-        let code = String::from(r#""a"=="a";"#);
+        let code = String::from(r#"return  "a"=="a";"#);
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Bool(b) => assert_eq!(b, true),
             ref data => panic!("Wrong datatype, {:?}", data),
         };
 
         // string comparison false
-        let code = String::from(r#""a"=="b";"#);
+        let code = String::from(r#"return  "a"=="b";"#);
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Bool(b) => assert_eq!(b, false),
             ref data => panic!("Wrong datatype, {:?}", data),
         };
 
         // bool comparison true
-        let code = String::from("True==True;");
+        let code = String::from("return  True==True;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Bool(b) => assert_eq!(b, true),
             ref data => panic!("Wrong datatype, {:?}", data),
         };
 
         // bool comparison false
-        let code = String::from("False==True;");
+        let code = String::from("return  False==True;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Bool(b) => assert_eq!(b, false),
             ref data => panic!("Wrong datatype, {:?}", data),
         };
 
         // different types comparison (should raise an error)
-        let code = String::from("True==1;");
+        let code = String::from("return  True==1;");
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidType(_));
     }
@@ -180,6 +180,13 @@ mod query_tests {
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
         let code = String::from("return 1;");
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            aw_query::DataType::Number(n) => assert_eq!(n, 1.0),
+            ref data => panic!("Wrong datatype, {:?}", data),
+        };
+
+        // Test with old RETURN method
+        let code = String::from("RETURN=1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Number(n) => assert_eq!(n, 1.0),
             ref data => panic!("Wrong datatype, {:?}", data),
@@ -303,13 +310,13 @@ mod query_tests {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("print(1);");
+        let code = String::from("return print(1);");
         aw_query::query(&code, &interval, &ds).unwrap();
 
-        let code = String::from("print(1, 2);");
+        let code = String::from("return print(1, 2);");
         aw_query::query(&code, &interval, &ds).unwrap();
 
-        let code = String::from("no_such_function(1);");
+        let code = String::from("return no_such_function(1);");
         match aw_query::query(&code, &interval, &ds) {
             Ok(ok) => panic!(format!("Expected QueryError, got {:?}", ok)),
             Err(e) => match e {
@@ -321,7 +328,7 @@ mod query_tests {
             },
         }
 
-        let code = String::from("invalid_type=1; invalid_type(1);");
+        let code = String::from("invalid_type=1; return invalid_type(1);");
         match aw_query::query(&code, &interval, &ds) {
             Ok(ok) => panic!(format!("Expected QueryError, got {:?}", ok)),
             Err(e) => match e {
@@ -339,7 +346,7 @@ mod query_tests {
         let ds = setup_datastore_populated();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("query_bucket(\"testid\");");
+        let code = String::from("return query_bucket(\"testid\");");
         aw_query::query(&code, &interval, &ds).unwrap();
 
         let code = format!(
@@ -360,7 +367,7 @@ mod query_tests {
             filtered_events = filter_keyvals(events, "$category", [["Uncategorized"]]);
             chunked_events = chunk_events_by_key(events, "key");
             merged_events = merge_events_by_keys(events, ["key"]);
-            RETURN = merged_events;"#,
+            return  merged_events;"#,
             "testid", "testid"
         );
         match aw_query::query(&code, &interval, &ds).unwrap() {
@@ -379,7 +386,7 @@ mod query_tests {
             r#"
             events = query_bucket("{}");
             events = categorize(events, [[["Test", "Subtest"], {{ "type": "regex", "regex": "^value$" }}]]);
-            RETURN = events;"#,
+            return  events;"#,
             "testid"
         );
         let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
@@ -399,7 +406,7 @@ mod query_tests {
             r#"
             events = query_bucket("{}");
             events = tag(events, [["testtag", {{ "type": "regex", "regex": "value$" }}], ["another testtag", {{ "type": "regex", "regex": "value$" }}]]);
-            RETURN = events;"#,
+            return  events;"#,
             "testid"
         );
         let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
@@ -419,7 +426,7 @@ mod query_tests {
         let code = r#"
             events = [];
             events = tag(events, ["test", false]);
-            RETURN = events;"#;
+            return  events;"#;
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
@@ -427,7 +434,7 @@ mod query_tests {
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { }]]);
-            RETURN = events;"#;
+            return  events;"#;
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
@@ -435,7 +442,7 @@ mod query_tests {
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { "type": false }]]);
-            RETURN = events;"#;
+            return  events;"#;
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
@@ -443,7 +450,7 @@ mod query_tests {
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { "type": "rgex" }]]);
-            RETURN = events;"#;
+            return  events;"#;
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
@@ -451,14 +458,14 @@ mod query_tests {
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { "type": "none" }]]);
-            RETURN = events;"#;
+            return  events;"#;
         aw_query::query(&code, &interval, &ds).unwrap();
 
         // Test regex rule where regex field has wrong type
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { "type": "regex", "regex": true }]]);
-            RETURN = events;"#;
+            return  events;"#;
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
@@ -466,7 +473,7 @@ mod query_tests {
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { "type": "regex" }]]);
-            RETURN = events;"#;
+            return  events;"#;
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
@@ -474,14 +481,14 @@ mod query_tests {
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { "type": "regex", "regex": "test", "ignore_case": false }]]);
-            RETURN = events;"#;
+            return  events;"#;
         aw_query::query(&code, &interval, &ds).unwrap();
 
         // Test regex rule where ignore_case field is of invalid type
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { "type": "regex", "regex": "test", "ignore_case": "" }]]);
-            RETURN = events;"#;
+            return  events;"#;
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
 
@@ -489,7 +496,7 @@ mod query_tests {
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { "type": "regex", "regex": "!#¤%&/(=" }]]);
-            RETURN = events;"#;
+            return  events;"#;
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::RegexCompileError(_));
     }
@@ -499,7 +506,7 @@ mod query_tests {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("a=\"test \\\" with escaped quote\";");
+        let code = String::from("return \"test \\\" with escaped quote\";");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::String(s) => assert_eq!(s, "test \" with escaped quote"),
             _ => panic!("Wrong datatype"),
@@ -511,22 +518,22 @@ mod query_tests {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("[];");
+        let code = String::from("return [];");
         aw_query::query(&code, &interval, &ds).unwrap();
 
-        let code = String::from("[1];");
+        let code = String::from("return [1];");
         aw_query::query(&code, &interval, &ds).unwrap();
 
-        let code = String::from("[1+1];");
+        let code = String::from("return [1+1];");
         aw_query::query(&code, &interval, &ds).unwrap();
 
-        let code = String::from("[1,1];");
+        let code = String::from("return [1,1];");
         aw_query::query(&code, &interval, &ds).unwrap();
 
-        let code = String::from("[1,1+2];");
+        let code = String::from("return [1,1+2];");
         aw_query::query(&code, &interval, &ds).unwrap();
 
-        let code = String::from("[1,1+1,1+2+3,4/3,[1+2]];");
+        let code = String::from("return [1,1+1,1+2+3,4/3,[1+2]];");
         aw_query::query(&code, &interval, &ds).unwrap();
     }
 
@@ -535,7 +542,7 @@ mod query_tests {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("1;# testing 123");
+        let code = String::from("return 1;# testing 123");
         aw_query::query(&code, &interval, &ds).unwrap();
     }
 
@@ -607,41 +614,41 @@ mod query_tests {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
 
-        let code = String::from("1+1;");
+        let code = String::from("return 1+1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             DataType::Number(n) => assert_eq!(n, 2.0),
             num => panic!("Expected number, got {:?}", num),
         };
 
-        let code = String::from("1-1;");
+        let code = String::from("return 1-1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             DataType::Number(n) => assert_eq!(n, 0.0),
             num => panic!("Expected number, got {:?}", num),
         };
 
-        let code = String::from("3*5;");
+        let code = String::from("return 3*5;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             DataType::Number(n) => assert_eq!(n, 15.0),
             num => panic!("Expected number, got {:?}", num),
         };
 
-        let code = String::from("4/2;");
+        let code = String::from("return 4/2;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             DataType::Number(n) => assert_eq!(n, 2.0),
             num => panic!("Expected number, got {:?}", num),
         };
 
-        let code = String::from("1/0;");
+        let code = String::from("return 1/0;");
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::MathError(_));
 
-        let code = String::from("2.5%1;");
+        let code = String::from("return 2.5%1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             DataType::Number(n) => assert_eq!(n, 0.5),
             num => panic!("Expected number, got {:?}", num),
         };
 
-        let code = String::from("1+1+0+1;");
+        let code = String::from("return 1+1+0+1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             DataType::Number(n) => assert_eq!(n, 3.0),
             num => panic!("Expected number, got {:?}", num),

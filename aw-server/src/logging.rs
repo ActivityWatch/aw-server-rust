@@ -59,3 +59,8 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
 
     Ok(())
 }
+
+#[test]
+fn test_setup_logger() {
+    setup_logger(true).unwrap();
+}

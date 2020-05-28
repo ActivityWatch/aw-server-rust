@@ -43,7 +43,11 @@ pub mod android {
         match DATASTORE {
             Some(ref ds) => ds.clone(),
             None => {
-                let db_dir = dirs::db_path(false).to_str().unwrap().to_string();
+                let db_dir = dirs::db_path(false)
+                    .expect("Failed to get db path")
+                    .to_str()
+                    .unwrap()
+                    .to_string();
                 DATASTORE = Some(Datastore::new(db_dir, false));
                 openDatastore()
             }

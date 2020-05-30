@@ -365,6 +365,7 @@ mod query_tests {
             url_events = split_url_events (events);
             filtered_events = filter_period_intersect(events, events);
             filtered_events = filter_keyvals(events, "$category", [["Uncategorized"]]);
+            filtered_events = filter_keyvals_regex(events, "key", "regex");
             chunked_events = chunk_events_by_key(events, "key");
             merged_events = merge_events_by_keys(events, ["key"]);
             return  merged_events;"#,

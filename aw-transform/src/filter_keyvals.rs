@@ -3,9 +3,9 @@ use serde_json::value::Value;
 
 use aw_models::Event;
 
-pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<Event> {
+pub fn filter_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<Event> {
     let mut filtered_events = Vec::new();
-    for event in events {
+    for event in events.drain(..) {
         match event.data.get(key) {
             Some(v) => {
                 for val in vals {
@@ -15,16 +15,16 @@ pub fn filter_keyvals(events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<Even
                     }
                 }
             }
-            None => break,
+            None => (),
         }
     }
     filtered_events
 }
 
-pub fn filter_keyvals_regex(events: Vec<Event>, key: &str, regex: &Regex) -> Vec<Event> {
+pub fn filter_keyvals_regex(mut events: Vec<Event>, key: &str, regex: &Regex) -> Vec<Event> {
     let mut filtered_events = Vec::new();
 
-    for event in events {
+    for event in events.drain(..) {
         match event.data.get(key) {
             Some(v) => {
                 if regex.is_match(v.as_str().unwrap()) {

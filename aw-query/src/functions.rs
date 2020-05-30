@@ -75,6 +75,13 @@ pub fn fill_env(env: &mut HashMap<String, DataType>) {
         DataType::Function("filter_keyvals".to_string(), qfunctions::filter_keyvals),
     );
     env.insert(
+        "filter_keyvals_regex".to_string(),
+        DataType::Function(
+            "filter_keyvals_regex".to_string(),
+            qfunctions::filter_keyvals_regex,
+        ),
+    );
+    env.insert(
         "filter_period_intersect".to_string(),
         DataType::Function(
             "filter_period_intersect".to_string(),
@@ -413,6 +420,36 @@ mod qfunctions {
         let vals: Vec<_> = (&args[2]).try_into()?;
 
         let mut filtered_events = aw_transform::filter_keyvals(events, &key, &vals);
+        let mut filtered_tagged_events = Vec::new();
+        for event in filtered_events.drain(..) {
+            filtered_tagged_events.push(DataType::Event(event));
+        }
+        Ok(DataType::List(filtered_tagged_events))
+    }
+
+    use regex::RegexBuilder;
+
+    pub fn filter_keyvals_regex(
+        args: Vec<DataType>,
+        _env: &HashMap<String, DataType>,
+        _ds: &Datastore,
+    ) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 3)?;
+        let events = (&args[0]).try_into()?;
+        let key: String = (&args[1]).try_into()?;
+        let regex_str: String = (&args[2]).try_into()?;
+        let regex = match RegexBuilder::new(&regex_str).build() {
+            Ok(regex) => regex,
+            Err(e) => {
+                return Err(QueryError::RegexCompileError(format!(
+                    "Failed to compile regex string '{}': {}",
+                    regex_str, e
+                )))
+            }
+        };
+
+        let mut filtered_events = aw_transform::filter_keyvals_regex(events, &key, &regex);
         let mut filtered_tagged_events = Vec::new();
         for event in filtered_events.drain(..) {
             filtered_tagged_events.push(DataType::Event(event));

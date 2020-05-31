@@ -232,7 +232,7 @@ mod query_tests {
         let code = String::from(
             "
             a=True; n=1;
-            if a { n=2; }
+            if &a { n=2; }
             return n;",
         );
         match aw_query::query(&code, &interval, &ds).unwrap() {
@@ -269,8 +269,8 @@ mod query_tests {
         let code = String::from(
             "
             a=False; b=True; n=1;
-            if a { n=2; }
-            elif b { n=3; }
+            if &a { n=2; }
+            elif &b { n=3; }
             return n;",
         );
         match aw_query::query(&code, &interval, &ds).unwrap() {
@@ -282,8 +282,8 @@ mod query_tests {
         let code = String::from(
             "
             a=False; b=True; n=1;
-            if a { n=2; }
-            elif a { n=3; }
+            if &a { n=2; }
+            elif &a { n=3; }
             else { n=4; }
             return n;",
         );
@@ -296,7 +296,7 @@ mod query_tests {
         let code = String::from(
             "
             a=True; n=1;
-            if a { if a { n = 2; } }
+            if &a { if &a { n = 2; } }
             return n;",
         );
         match aw_query::query(&code, &interval, &ds).unwrap() {
@@ -359,16 +359,16 @@ mod query_tests {
             events = concat(events, query_bucket("{}"));
             events = categorize(events, [[["test"], {{ "type": "regex", "regex": "value$" }}], [["test", "testing"], {{ "type": "regex", "regex": "value$" }}]]);
             events = tag(events, [["testtag", {{ "type": "regex", "regex": "test$" }}], ["another testtag", {{ "type": "regex", "regex": "test-pat$" }}]]);
-            total_duration = sum_durations(events);
+            total_duration = sum_durations(&events);
             bucketnames = query_bucket_names();
             print("test", "test2");
-            url_events = split_url_events (events);
-            filtered_events = filter_period_intersect(events, events);
-            filtered_events = filter_keyvals(events, "$category", [["Uncategorized"]]);
-            filtered_events = filter_keyvals_regex(events, "key", "regex");
-            chunked_events = chunk_events_by_key(events, "key");
-            merged_events = merge_events_by_keys(events, ["key"]);
-            return  merged_events;"#,
+            events = split_url_events (events);
+            events = filter_period_intersect(&events, &events);
+            events = filter_keyvals(events, "$category", [["Uncategorized"]]);
+            events = filter_keyvals_regex(events, "key", "regex");
+            events = chunk_events_by_key(events, "key");
+            events = merge_events_by_keys(events, ["key"]);
+            return events;"#,
             "testid", "testid"
         );
         match aw_query::query(&code, &interval, &ds).unwrap() {

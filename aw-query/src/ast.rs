@@ -24,6 +24,7 @@ pub enum Expr_ {
     Equal(Box<Expr>, Box<Expr>),
 
     Var(String),
+    VarRef(String),
     Assign(String, Box<Expr>),
     Function(String, Box<Expr>),
     If(Vec<(Box<Expr>, Vec<Expr>)>),

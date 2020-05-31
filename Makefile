@@ -47,3 +47,10 @@ install:
 	# Install systemd user service
 	mkdir -p $(DESTDIR)$(PREFIX)/lib/systemd/user
 	install -m 644 aw-server.service $(DESTDIR)$(PREFIX)/lib/systemd/user/aw-server.service
+
+coverage:
+	export CARGO_INCREMENTAL=0
+	export RUSTFLAGS="-Zprofile -Ccodegen-units=1 -Copt-level=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests -Cpanic=abort"
+	export RUSTDOCFLAGS="-Cpanic=abort"
+	cargo build --verbose $(cargoflag)
+	cargo test --verbose $(cargoflag)

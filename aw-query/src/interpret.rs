@@ -182,11 +182,17 @@ fn interpret_expr(
             env.insert(var, val);
             Ok(DataType::None())
         }
-        // FIXME: avoid clone, it's slow
-        Var(var) => match env.get(&var) {
-            Some(v) => Ok(v.clone()),
+        Var(var) => match env.remove(&var) {
+            Some(v) => Ok(v),
             None => Err(QueryError::VariableNotDefined(var.to_string())),
         },
+        VarRef(var) => {
+            // TODO: Remove clone
+            match env.get(&var) {
+                Some(v) => Ok(v.clone()),
+                None => Err(QueryError::VariableNotDefined(var.to_string())),
+            }
+        }
         Bool(lit) => Ok(DataType::Bool(lit)),
         Number(lit) => Ok(DataType::Number(lit)),
         String(litstr) => Ok(DataType::String(litstr.to_string())),

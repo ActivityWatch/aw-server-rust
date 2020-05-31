@@ -246,6 +246,10 @@ parser! {
             span: span!(),
             node: Expr_::Var(v),
         },
+        Ampersand Ident(v) => Expr {
+            span: span!(),
+            node: Expr_::VarRef(v),
+        },
         Bool(b) => Expr {
             span: span!(),
             node: Expr_::Bool(b),

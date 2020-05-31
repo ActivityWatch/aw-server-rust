@@ -13,6 +13,7 @@ pub enum Token {
     Number(f64),
     String(String),
     Plus,
+    Ampersand,
     Minus,
     Star,
     Slash,
@@ -69,6 +70,7 @@ lexer! {
 
     r#"=="# => (Token::Equals, text),
     r#"="# => (Token::Assign, text),
+    r#"\&"# => (Token::Ampersand, text),
     r#"\+"# => (Token::Plus, text),
     r#"-"# => (Token::Minus, text),
     r#"\*"# => (Token::Star, text),

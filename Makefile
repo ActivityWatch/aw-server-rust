@@ -1,4 +1,4 @@
-.PHONY: all aw-server aw-webui build install package test
+.PHONY: all aw-server aw-webui build install package test test-coverage coverage coverage-html coverage-lcov
 
 all: build
 build: aw-server aw-webui
@@ -25,6 +25,29 @@ endif
 
 test:
 	cargo test
+
+
+COV_CARGO_INCREMENTAL=0
+COV_RUSTFLAGS="-Zprofile -Ccodegen-units=1 -Copt-level=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests -Cpanic=abort"
+COV_RUSTDOCFLAGS="-Cpanic=abort"
+
+test-coverage:
+	# We need to remove build files in case a non-coverage test has been run
+	# before without RUST/CARGO flags needed for coverage
+	rm -rf target/debug
+	# Build and test
+	CARGO_INCREMENTAL=${COV_CARGO_INCREMENTAL} \
+	RUSTFLAGS=${COV_RUSTFLAGS} \
+	RUSTDOCFLAGS=${COV_RUSTDOCFLAGS} \
+		cargo test
+
+coverage-html: test-coverage
+	grcov ./target/debug/ -s . -t html --llvm --branch --ignore-not-existing -o ./target/debug/$@/
+
+coverage-lcov: test-coverage
+	grcov ./target/debug/ -s . -t lcov --llvm --branch --ignore-not-existing -o ./target/debug/$@.txt
+
+coverage: coverage-html
 
 package:
 	# Clean and prepare target/package folder

@@ -38,11 +38,10 @@ jobs:
     - name: Run tests with coverage
       if: startsWith(matrix.os, 'ubuntu')
       run: |
-        sudo apt-get update
-        sudo apt-get install libcurl4-openssl-dev libelf-dev libdw-dev binutils-dev
-        cargo install --force cargo-kcov;
-        cargo kcov --print-install-kcov-sh | sh;
-        cargo kcov --all --verbose;
+        # Download grcov, unpack the executable to cwd and add cwd to PATH
+        curl -L https://github.com/mozilla/grcov/releases/latest/download/grcov-linux-x86_64.tar.bz2 | tar jxf -
+        export PATH=$PATH:.
+        make coverage-lcov
         bash <(curl -s https://codecov.io/bash);
 
 

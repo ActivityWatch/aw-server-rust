@@ -32,9 +32,11 @@ COV_RUSTFLAGS="-Zprofile -Ccodegen-units=1 -Copt-level=0 -Clink-dead-code -Cover
 COV_RUSTDOCFLAGS="-Cpanic=abort"
 
 test-coverage:
+ifndef COVERAGE_CACHE
 	# We need to remove build files in case a non-coverage test has been run
 	# before without RUST/CARGO flags needed for coverage
 	rm -rf target/debug
+endif
 	# Build and test
 	CARGO_INCREMENTAL=${COV_CARGO_INCREMENTAL} \
 	RUSTFLAGS=${COV_RUSTFLAGS} \

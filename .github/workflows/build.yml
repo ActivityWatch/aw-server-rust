@@ -25,7 +25,7 @@ jobs:
     - name: Cache cargo build
       uses: actions/cache@v1
       env:
-        cache-name: cargo-build-target
+        cache-name: cargo-build-target-2
       with:
         path: target
         key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}

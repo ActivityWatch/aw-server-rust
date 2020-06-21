@@ -65,7 +65,8 @@ jobs:
         # Add cwd to path to find grcov
         export PATH=$PATH:.
         make coverage-lcov COVERAGE_CACHE=1
-        bash <(curl -s https://codecov.io/bash);
+    - name: Upload coverage files
+      run: bash <(curl -s https://codecov.io/bash);
 
   build-android:
     name: Build for Android

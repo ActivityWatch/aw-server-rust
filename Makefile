@@ -41,7 +41,7 @@ endif
 	CARGO_INCREMENTAL=${COV_CARGO_INCREMENTAL} \
 	RUSTFLAGS=${COV_RUSTFLAGS} \
 	RUSTDOCFLAGS=${COV_RUSTDOCFLAGS} \
-		cargo test
+		cargo test --verbose
 
 coverage-html: test-coverage
 	grcov ./target/debug/ -s . -t html --llvm --branch --ignore-not-existing -o ./target/debug/$@/

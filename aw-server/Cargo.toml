@@ -40,3 +40,4 @@ aw-query = { path = "../aw-query" }
 jni = { version = "0.16", default-features = false }
 libc = "0.2"
 android_logger = "0.8"
+openssl-sys = { version = "0.9.56", features = ["vendored"]}

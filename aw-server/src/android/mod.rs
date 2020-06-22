@@ -31,7 +31,7 @@ pub mod android {
     extern crate jni;
 
     use self::jni::objects::{JClass, JString};
-    use self::jni::sys::{jdouble, jstring};
+    use self::jni::sys::{jdouble, jint, jstring};
     use self::jni::JNIEnv;
     use super::*;
     use aw_datastore::Datastore;
@@ -220,9 +220,11 @@ pub mod android {
         env: JNIEnv,
         _: JClass,
         java_bucket_id: JString,
+        java_limit: jint,
     ) -> jstring {
         let bucket_id = jstring_to_string(&env, java_bucket_id);
-        match openDatastore().get_events(&bucket_id, None, None, None) {
+        let limit = java_limit as u64;
+        match openDatastore().get_events(&bucket_id, None, None, Some(limit)) {
             Ok(events) => string_to_jstring(&env, json!(events).to_string()),
             Err(e) => create_error_object(
                 &env,

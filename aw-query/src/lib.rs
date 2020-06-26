@@ -25,6 +25,7 @@ mod lexer;
 mod parser;
 
 pub use crate::datatype::DataType;
+pub use crate::interpret::VarEnv;
 
 // TODO: add line numbers to errors
 // (works during lexing, but not during parsing I believe)

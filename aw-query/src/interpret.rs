@@ -9,7 +9,9 @@ use crate::ast::*;
 use crate::DataType;
 use crate::QueryError;
 
-fn init_env(ti: &TimeInterval) -> HashMap<String, DataType> {
+pub type VarEnv = HashMap<String, DataType>;
+
+fn init_env(ti: &TimeInterval) -> VarEnv {
     let mut env = HashMap::new();
     env.insert("TIMEINTERVAL".to_string(), DataType::String(ti.to_string()));
     functions::fill_env(&mut env);
@@ -189,12 +191,12 @@ fn interpret_expr(
         },
         Bool(lit) => Ok(DataType::Bool(lit)),
         Number(lit) => Ok(DataType::Number(lit)),
-        String(litstr) => Ok(DataType::String(litstr.to_string())),
+        String(litstr) => Ok(DataType::String(litstr)),
         Return(e) => {
             let val = interpret_expr(env, ds, *e)?;
             // TODO: Once RETURN is deprecated we can fix this
             env.insert("RETURN".to_string(), val);
-            return Ok(DataType::None());
+            Ok(DataType::None())
         }
         If(ifs) => {
             for (cond, block) in ifs {

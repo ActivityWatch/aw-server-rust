@@ -6,16 +6,13 @@ use aw_models::Event;
 pub fn filter_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<Event> {
     let mut filtered_events = Vec::new();
     for event in events.drain(..) {
-        match event.data.get(key) {
-            Some(v) => {
-                for val in vals {
-                    if val == v {
-                        filtered_events.push(event.clone());
-                        break;
-                    }
+        if let Some(v) = event.data.get(key) {
+            for val in vals {
+                if val == v {
+                    filtered_events.push(event.clone());
+                    break;
                 }
             }
-            None => (),
         }
     }
     filtered_events
@@ -25,13 +22,10 @@ pub fn filter_keyvals_regex(mut events: Vec<Event>, key: &str, regex: &Regex) ->
     let mut filtered_events = Vec::new();
 
     for event in events.drain(..) {
-        match event.data.get(key) {
-            Some(v) => {
-                if regex.is_match(v.as_str().unwrap()) {
-                    filtered_events.push(event.clone());
-                }
+        if let Some(v) = event.data.get(key) {
+            if regex.is_match(v.as_str().unwrap()) {
+                filtered_events.push(event.clone());
             }
-            None => (),
         }
     }
     filtered_events

@@ -115,4 +115,29 @@ mod tests {
         let res_merge = heartbeat(&event, &heartbeat_different_data, 1.0);
         assert!(res_merge.is_none());
     }
+
+    #[test]
+    fn test_heartbeat_same_timestamp() {
+        let now = Utc::now();
+        let event = Event {
+            id: None,
+            timestamp: now.clone(),
+            duration: Duration::seconds(0),
+            data: json_map! {"test": json!(1)},
+        };
+        let heartbeat_same_data = Event {
+            id: None,
+            timestamp: now.clone(),
+            duration: Duration::seconds(1),
+            data: json_map! {"test": json!(1)},
+        };
+
+        // Should merge
+        let res_merge = heartbeat(&event, &heartbeat_same_data, 1.0).unwrap();
+        assert_eq!(Duration::seconds(1), res_merge.duration);
+
+        // Order shouldn't matter, should merge anyway
+        let res_merge = heartbeat(&heartbeat_same_data, &event, 1.0).unwrap();
+        assert_eq!(Duration::seconds(1), res_merge.duration);
+    }
 }

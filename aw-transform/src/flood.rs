@@ -36,8 +36,15 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
                     warn!("Gap was of negative duration ({}s), but could be safely merged. This error will only show once per batch.", gap);
                     warned_negative_gap_safe = true;
                 }
-                // Extend e1 to the middle between e1 and e2
-                e1.duration = e2.calculate_endtime() - e1.timestamp;
+                // Choose the longest event and set the endtime to it
+                // TODO: Also possibly extend to an e3 if that exists?
+                let e1_endtime = e1.calculate_endtime();
+                let e2_endtime = e2.calculate_endtime();
+                if e2_endtime > e1_endtime {
+                    e1.duration = e2_endtime - e1.timestamp;
+                } else {
+                    e1.duration = e1_endtime - e1.timestamp;
+                }
                 // Drop next event since they are merged and flooded into e1
                 drop_next = true;
             } else {
@@ -46,7 +53,6 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
                         warn!("Gap was of negative duration ({}s) and could NOT be safely merged. This error will only show once per batch.", gap);
                         warned_negative_gap_unsafe = true;
                     }
-                    continue;
                 }
                 // Extend e1 to the middle between e1 and e2
                 e1.duration = e1.duration + (gap / 2);
@@ -125,5 +131,41 @@ mod tests {
         assert_eq!(2, res.len());
         assert_eq!(&res[0], &e1_expected);
         assert_eq!(&res[1], &e2_expected);
+    }
+
+    #[test]
+    fn test_flood_same_timestamp() {
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"status": "afk"},
+        };
+        let e2 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(5),
+            data: json_map! {"status": "not-afk"},
+        };
+        let e3 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"status": "not-afk"},
+        };
+        let e4 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:06Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"status": "afk"},
+        };
+        let res = flood(
+            vec![e1.clone(), e2.clone(), e3.clone(), e4.clone()],
+            Duration::seconds(5),
+        );
+        assert_eq!(3, res.len());
+        assert_eq!(&res[0], &e1);
+        assert_eq!(&res[1], &e2);
+        assert_eq!(&res[2], &e4);
     }
 }

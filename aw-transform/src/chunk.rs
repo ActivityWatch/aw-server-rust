@@ -5,7 +5,7 @@ pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
     for event in events {
         if chunked_events.is_empty() && event.data.get(key).is_some() {
             // TODO: Add sub-chunks
-            chunked_events.push(event.clone());
+            chunked_events.push(event);
         } else {
             let val = match event.data.get(key) {
                 None => continue,
@@ -20,7 +20,7 @@ pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
             chunked_events.push(last_event);
             if &last_val != val {
                 // TODO: Add sub-chunks
-                chunked_events.push(event.clone());
+                chunked_events.push(event);
             }
         }
     }

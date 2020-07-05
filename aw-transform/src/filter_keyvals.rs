@@ -9,7 +9,7 @@ pub fn filter_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<
         if let Some(v) = event.data.get(key) {
             for val in vals {
                 if val == v {
-                    filtered_events.push(event.clone());
+                    filtered_events.push(event);
                     break;
                 }
             }
@@ -24,7 +24,7 @@ pub fn filter_keyvals_regex(mut events: Vec<Event>, key: &str, regex: &Regex) ->
     for event in events.drain(..) {
         if let Some(v) = event.data.get(key) {
             if regex.is_match(v.as_str().unwrap()) {
-                filtered_events.push(event.clone());
+                filtered_events.push(event);
             }
         }
     }

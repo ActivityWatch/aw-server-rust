@@ -60,7 +60,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
                 gap_prev = Some(gap);
             }
         }
-        new_events.push(e1.clone());
+        new_events.push(e1);
     }
     new_events
 }

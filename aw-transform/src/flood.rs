@@ -8,13 +8,15 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
     let mut events_sorted = sort_by_timestamp(events);
     let mut e1_iter = events_sorted.drain(..).peekable();
     let mut new_events = Vec::new();
-    let mut drop_next = false;
     let mut gap_prev: Option<chrono::Duration> = None;
-    while let Some(mut e1) = e1_iter.next() {
-        if drop_next {
-            drop_next = false;
-            continue;
+    let mut retry_e: Option<Event> = None;
+    while let Some(mut e1) = match retry_e {
+        Some(e) => {
+            retry_e = None;
+            Some(e)
         }
+        None => e1_iter.next(),
+    } {
         if let Some(gap) = gap_prev {
             e1.timestamp = e1.timestamp - (gap / 2);
             e1.duration = e1.duration + (gap / 2);
@@ -37,7 +39,6 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
                     warned_negative_gap_safe = true;
                 }
                 // Choose the longest event and set the endtime to it
-                // TODO: Also possibly extend to an e3 if that exists?
                 let e1_endtime = e1.calculate_endtime();
                 let e2_endtime = e2.calculate_endtime();
                 if e2_endtime > e1_endtime {
@@ -46,7 +47,13 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
                     e1.duration = e1_endtime - e1.timestamp;
                 }
                 // Drop next event since they are merged and flooded into e1
-                drop_next = true;
+                e1_iter.next();
+                // Retry this event again to give it a change to merge e1
+                // with 'e3'
+                retry_e = Some(e1);
+                // Since we are retrying on this event we don't want to push it
+                // to the new_events vec
+                continue;
             } else {
                 if chrono::Duration::seconds(0) > gap {
                     if !warned_negative_gap_unsafe {
@@ -135,6 +142,10 @@ mod tests {
 
     #[test]
     fn test_flood_same_timestamp() {
+        // e1, stay same
+        // e2, base merge (longest duration, this should be the duration selected)
+        // e3, merge with e2
+        // e4, stay same
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
@@ -167,5 +178,49 @@ mod tests {
         assert_eq!(&res[0], &e1);
         assert_eq!(&res[1], &e2);
         assert_eq!(&res[2], &e4);
+
+        // e1, stay same
+        // e2, base merge
+        // e3, merge with e2
+        // e4, merge with e2 (longest duration, this should be the duration selected)
+        // e5, stay same
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"status": "afk"},
+        };
+        let e2 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(5),
+            data: json_map! {"status": "not-afk"},
+        };
+        let e3 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"status": "not-afk"},
+        };
+        let e4 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(10),
+            data: json_map! {"status": "not-afk"},
+        };
+        let e5 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:11Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"status": "afk"},
+        };
+        let res = flood(
+            vec![e1.clone(), e2.clone(), e3.clone(), e4.clone(), e5.clone()],
+            Duration::seconds(5),
+        );
+        assert_eq!(3, res.len());
+        assert_eq!(&res[0], &e1);
+        assert_eq!(&res[1], &e4);
+        assert_eq!(&res[2], &e5);
     }
 }

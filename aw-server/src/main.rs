@@ -8,6 +8,12 @@ use std::env;
 
 use aw_server::*;
 
+#[cfg(target_os = "linux")]
+extern crate jemallocator;
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 fn print_usage(program: &str, opts: Options) {
     let brief = format!("Usage: {} FILE [options]", program);
     print!("{}", opts.usage(&brief));

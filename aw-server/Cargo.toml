@@ -36,6 +36,9 @@ aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
 
+[target.'cfg(target_os="linux")'.dependencies]
+jemallocator = "0.3.2"
+
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.16", default-features = false }
 libc = "0.2"

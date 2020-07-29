@@ -2,6 +2,16 @@ use aw_models::Event;
 
 use crate::sort_by_timestamp;
 
+/// Floods event to the nearest neighbouring event if within the specified pulsetime
+///
+/// Also merges events if they have the same data and are within the pulsetime
+///
+/// # Example
+/// ```ignore
+/// pulsetime: 1 second (one space)
+/// input:  [a] [a]  [b][b]    [b][c]
+/// output: [a     ][b    ]    [b][c]
+/// ```
 pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
     let mut warned_negative_gap_safe = false;
     let mut warned_negative_gap_unsafe = false;

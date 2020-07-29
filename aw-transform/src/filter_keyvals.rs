@@ -3,6 +3,15 @@ use serde_json::value::Value;
 
 use aw_models::Event;
 
+/// Drops events not matching the specified key and value(s)
+///
+/// # Example
+/// ```ignore
+///  key: a
+///  vals: [1,2]
+///  input:  [a:1][a:2][a:3][b:4]
+///  output: [a:1][a:2]
+/// ```
 pub fn filter_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<Event> {
     let mut filtered_events = Vec::new();
     for event in events.drain(..) {
@@ -18,6 +27,16 @@ pub fn filter_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<
     filtered_events
 }
 
+/// Drops events not matching the regex on the value for a specified key
+/// Will only match if the value is a string
+///
+/// # Example
+/// ```ignore
+/// key: a
+/// regex: "[A-Z]+"
+/// input:  [a:"HELLO"][a:"hello"][a:3][b:"HELLO"]
+/// output: [a:"HELLO"]
+/// ```
 pub fn filter_keyvals_regex(mut events: Vec<Event>, key: &str, regex: &Regex) -> Vec<Event> {
     let mut filtered_events = Vec::new();
 

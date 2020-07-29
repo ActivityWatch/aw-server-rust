@@ -2,6 +2,43 @@ use std::collections::HashMap;
 
 use aw_models::Event;
 
+/// Merge events with the same values at the specified keys
+///
+/// Doesn't care about if events are neighbouring or not, this transform merges
+/// all events with the same key.
+/// The timestamp will be the timestamp of the first event with a specific key value
+///
+/// # Example 1
+/// A simple example only using one key
+///
+/// ```ignore
+/// keys: ["a"]
+/// input:
+///   { duration: 1.0, data: { "a": 1 } }
+///   { duration: 1.0, data: { "a": 1 } }
+///   { duration: 1.0, data: { "a": 2 } }
+///   { duration: 1.0, data: { "b": 1 } }
+///   { duration: 1.0, data: { "a": 1 } }
+/// output:
+///   { duration: 3.0, data: { "a": 1 } }
+///   { duration: 1.0, data: { "a": 2 } }
+///   { duration: 1.0, data: { "b": 1 } }
+/// ```
+///
+/// # Example 2
+/// A more complex example only using two keys
+/// ```ignore
+/// keys: ["a", "b"]
+/// input:
+///   { duration: 1.0, data: { "a": 1, "b": 1 } }
+///   { duration: 1.0, data: { "a": 2, "b": 2 } }
+///   { duration: 1.0, data: { "a": 1, "b": 1 } }
+///   { duration: 1.0, data: { "a": 1, "b": 2 } }
+/// output:
+///   { duration: 2.0, data: { "a": 1, "b": 1 } }
+///   { duration: 1.0, data: { "a": 2, "b": 2 } }
+///   { duration: 1.0, data: { "a": 1, "b": 2 } }
+/// ```
 #[allow(clippy::map_entry)]
 pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event> {
     if keys.is_empty() {

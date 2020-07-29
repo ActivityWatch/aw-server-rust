@@ -1,5 +1,14 @@
 use aw_models::Event;
 
+/// Returns a merged event if two events have the same data and are within the pulsetime
+///
+/// # Example
+///
+/// ```ignore
+/// pulsetime: 1 second (one space)
+/// input:  [a] [a]  [a][b]
+/// output: [a    ]  [a][b]
+/// ```
 pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Option<Event> {
     // Verify that data is the same
     if heartbeat.data != last_event.data {

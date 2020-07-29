@@ -1,5 +1,24 @@
 use aw_models::Event;
 
+/// Chunks together events with the same key
+///
+/// NOTE: In most cases you should use merge_events_by_keys instead, this
+/// transform is mostly just for backwards compatibility with older versions
+/// of aw-webui
+/// NOTE: Does not support sub-chunking which aw-server-python supports
+/// Without sub-chunking it is pretty much the same as merge_events_by_key
+///
+/// # Example
+/// ```ignore
+/// key: a
+/// input:
+///   { duration: 1.0, data: { "a": 1, "b": 1 } }
+///   { duration: 1.0, data: { "a": 1, "b": 2 } }
+///   { duration: 1.0, data: { "a": 2, "b": 1 } }
+/// output:
+///   { duration: 2.0, data: { "a": 1 } }
+///   { duration: 1.0, data: { "a": 2 } }
+/// ```
 pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
     let mut chunked_events: Vec<Event> = Vec::new();
     for event in events {

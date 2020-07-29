@@ -1,5 +1,19 @@
 use aw_models::Event;
 
+/// Removes events not intersecting with the provided filter_events
+///
+/// Usually used to filter buckets unaware if the user is making any activity with an bucket which
+/// is aware if the user is at the computer or not.
+/// For example the events from aw-watcher-window should be called with filter_period_intersect
+/// with the "not-afk" events from aw-watcher-afk to give events with durations of only when the
+/// user is at the computer.
+///
+/// # Example
+/// ```ignore
+/// events:        [a      ][b    ]
+/// filter_events: [     ]   [   ]
+/// output:        [a    ]   [b  ]
+/// ```
 pub fn filter_period_intersect(events: &[Event], filter_events: &[Event]) -> Vec<Event> {
     let mut filtered_events = Vec::new();
     for filter in filter_events {

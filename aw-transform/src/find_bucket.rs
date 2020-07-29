@@ -1,3 +1,4 @@
+/// Finds the first bucket which starts with the specified string
 pub fn find_bucket<'a>(
     bucket_filter: &str,
     bucketnames: impl IntoIterator<Item = &'a String>,

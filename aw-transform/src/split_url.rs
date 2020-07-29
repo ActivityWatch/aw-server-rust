@@ -1,6 +1,26 @@
 use aw_models::Event;
 use serde_json::value::Value;
 
+/// Adds $protocol, $domain, $path and $params keys for events with an "url" key
+///
+/// But it only adds the generated field if it exists, for example if a url does not have a path
+/// the path value will not be set at all.
+///
+/// # Example
+/// ```ignore
+/// input:  {
+///           "data": {
+///             "url": "http://google.com/test"
+///           }
+///         }
+/// output: {
+///           "data": {
+///             "$domain": "google.com",
+///             "$path": "/test",
+///             "$protocol": "http"
+///           }
+///         }
+/// ```
 pub fn split_url_event(event: &mut Event) {
     use rocket::http::uri::Absolute;
     let uri_str = match event.data.get("url") {

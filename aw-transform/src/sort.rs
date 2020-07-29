@@ -1,11 +1,12 @@
 use aw_models::Event;
 
+/// Sort a list of events by timestamp
 pub fn sort_by_timestamp(mut events: Vec<Event>) -> Vec<Event> {
     events.sort_by(|e1, e2| e1.timestamp.cmp(&e2.timestamp));
     events
 }
 
-/* Highest first */
+/// Sort a list of events by duration with the highest duration first
 pub fn sort_by_duration(mut events: Vec<Event>) -> Vec<Event> {
     events.sort_by(|e1, e2| e2.duration.cmp(&e1.duration));
     events

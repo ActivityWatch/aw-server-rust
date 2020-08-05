@@ -26,6 +26,7 @@ mod api_tests {
         let state = endpoints::ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
             asset_path: PathBuf::from("aw-webui/dist"),
+            device_id: "test_id".to_string(),
         };
         let aw_config = config::AWConfig::default();
         endpoints::build_rocket(state, aw_config)

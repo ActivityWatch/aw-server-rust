@@ -4,7 +4,10 @@ extern crate getopts;
 
 use getopts::Options;
 use rocket::config::Environment;
+use uuid::Uuid;
+
 use std::env;
+use std::fs;
 
 use aw_server::*;
 
@@ -17,6 +20,20 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 fn print_usage(program: &str, opts: Options) {
     let brief = format!("Usage: {} FILE [options]", program);
     print!("{}", opts.usage(&brief));
+}
+
+/// Retrieves the device ID, if none exists it generates one (using UUID v4)
+fn get_device_id() -> String {
+    // I chose get_data_dir over get_config_dir since the latter isn't yet supported on Android.
+    let mut path = dirs::get_data_dir().unwrap();
+    path.push("device_id");
+    if path.exists() {
+        fs::read_to_string(path).unwrap()
+    } else {
+        let uuid = Uuid::new_v4().to_hyphenated().to_string();
+        fs::write(path, &uuid).unwrap();
+        uuid
+    }
 }
 
 fn main() {
@@ -67,6 +84,7 @@ fn main() {
         // it will not happen there
         datastore: Mutex::new(aw_datastore::Datastore::new(db_path, true)),
         asset_path,
+        device_id: get_device_id(),
     };
 
     endpoints::build_rocket(server_state, config).launch();

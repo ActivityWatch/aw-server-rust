@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
+use crate::device_id;
 use crate::dirs;
 
 use android_logger::Config;
@@ -111,6 +112,7 @@ pub mod android {
         let server_state = endpoints::ServerState {
             datastore: Mutex::new(openDatastore()),
             asset_path: PathBuf::from(asset_path),
+            device_id: device_id::get_device_id(),
         };
 
         let mut config = AWConfig::default();

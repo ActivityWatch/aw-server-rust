@@ -87,6 +87,10 @@ mod api_tests {
             .dispatch();
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::NotModified);
+        assert_eq!(
+            res.body_string().unwrap(),
+            "{\"message\":\"Bucket already exists\"}"
+        );
 
         // Get list of buckets (1 bucket)
         res = client
@@ -288,6 +292,33 @@ mod api_tests {
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
+        // TODO: test more error cases
+        // Import already existing bucket
+        let mut res = client
+            .post("/api/0/import")
+            .header(ContentType::JSON)
+            .body(
+                r#"{"buckets":
+            {"id1": {
+                "id": "id1",
+                "type": "type",
+                "client": "client",
+                "hostname": "hostname",
+                "events": [{
+                    "timestamp":"2000-01-01T00:00:00Z",
+                    "duration":1.0,
+                    "data": {}
+                }]
+            }}}"#,
+            )
+            .dispatch();
+        debug!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::InternalServerError);
+        assert_eq!(
+            res.body_string().unwrap(),
+            "{\"message\":\"Failed to import bucket: BucketAlreadyExists\"}"
+        );
+
         // Export single created bucket
         let mut res = client
             .get("/api/0/buckets/id1/export")
@@ -425,10 +456,7 @@ mod api_tests {
             )
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::InternalServerError);
-        assert_eq!(
-            res.body_string().unwrap(),
-            r#"{"message":"EmptyQuery","reason":"Internal Server Error","status":500}"#
-        );
+        assert_eq!(res.body_string().unwrap(), r#"{"message":"EmptyQuery"}"#);
     }
 
     fn set_setting_request(client: &Client, key: &str, value: &str) -> Status {

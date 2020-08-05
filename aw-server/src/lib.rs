@@ -31,6 +31,7 @@ extern crate toml;
 #[macro_use]
 pub mod macros;
 pub mod config;
+pub mod device_id;
 pub mod dirs;
 pub mod endpoints;
 pub mod logging;

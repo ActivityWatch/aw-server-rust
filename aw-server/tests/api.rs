@@ -6,14 +6,14 @@ extern crate rocket;
 extern crate aw_datastore;
 extern crate aw_server;
 
-// TODO: Validate return data on more places
-
 #[cfg(test)]
 mod api_tests {
-    use chrono::{DateTime, Utc};
-    use rocket::http::{ContentType, Header, Status};
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    use chrono::{DateTime, Utc};
+    use rocket::http::{ContentType, Header, Status};
 
     use aw_server::config;
     use aw_server::endpoints;
@@ -44,6 +44,9 @@ mod api_tests {
             .dispatch();
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::Ok);
+        let buckets: HashMap<String, Bucket> =
+            serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        assert_eq!(buckets.len(), 0);
 
         // Try to fetch non-existing bucket
         res = client
@@ -91,8 +94,18 @@ mod api_tests {
             .header(ContentType::JSON)
             .dispatch();
         debug!("{:?}", res.body_string());
-        // TODO: assert data
         assert_eq!(res.status(), rocket::http::Status::Ok);
+        let buckets: HashMap<String, Bucket> =
+            serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        assert_eq!(buckets.len(), 1);
+        let bucket = buckets.get("id").unwrap();
+        assert_eq!(bucket.id, "id");
+        assert_eq!(bucket._type, "type");
+        assert_eq!(bucket.client, "client");
+        assert_eq!(bucket.hostname, "hostname");
+        assert_eq!(bucket.events, None);
+        assert_eq!(bucket.metadata.start, None);
+        assert_eq!(bucket.metadata.end, None);
 
         // Get newly created bucket
         res = client
@@ -134,6 +147,17 @@ mod api_tests {
             .dispatch();
         debug!("{:?}", res.body_string());
         assert_eq!(res.status(), rocket::http::Status::NotFound);
+
+        // Get empty list of buckets
+        let mut res = client
+            .get("/api/0/buckets/")
+            .header(ContentType::JSON)
+            .dispatch();
+        debug!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let buckets: HashMap<String, Bucket> =
+            serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        assert_eq!(buckets.len(), 0);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use rocket::response::status;
 use rocket::response::Response;
 use rocket::State;
 
-use crate::endpoints::ServerState;
+use crate::endpoints::{http_err, http_ok, HttpResponse, ServerState};
 
 use aw_datastore::DatastoreError;
 
@@ -47,15 +47,12 @@ pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<B
     }
 }
 
-// FIXME: The status::Custom return is used because if we simply used Status and return a
-// Status::NotModified rocket will for some unknown reason consider that to be a
-// "Invalid status used as responder" and converts it to a 500 which we do not want.
 #[post("/<bucket_id>", data = "<message>", format = "application/json")]
 pub fn bucket_new(
     bucket_id: String,
     message: Json<Bucket>,
     state: State<ServerState>,
-) -> status::Custom<()> {
+) -> HttpResponse {
     let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
         bucket.id = bucket_id;
@@ -66,17 +63,22 @@ pub fn bucket_new(
         Ok(ds) => ds,
         Err(e) => {
             warn!("Taking datastore lock failed, returning 504: {}", e);
-            return status::Custom(Status::ServiceUnavailable, ());
+            return http_err(
+                Status::ServiceUnavailable,
+                "Takind datastore lock failed".to_string(),
+            );
         }
     };
     let ret = datastore.create_bucket(&bucket);
     match ret {
-        Ok(_) => status::Custom(Status::Ok, ()),
-        Err(e) => match e {
-            DatastoreError::BucketAlreadyExists => status::Custom(Status::NotModified, ()),
+        Ok(_) => http_ok(json!(null)),
+        Err(err) => match err {
+            DatastoreError::BucketAlreadyExists => {
+                http_err(Status::NotModified, "Bucket already exists".to_string())
+            }
             _ => {
-                warn!("Unexpected error: {:?}", e);
-                status::Custom(Status::InternalServerError, ())
+                warn!("Unexpected error: {:?}", err);
+                http_err(Status::InternalServerError, format!("{:?}", err))
             }
         },
     }

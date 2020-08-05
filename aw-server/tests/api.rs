@@ -427,7 +427,7 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::InternalServerError);
         assert_eq!(
             res.body_string().unwrap(),
-            r#"{"message":"EmptyQuery","reason":"Internal Server Error (Query Error)","status":500}"#
+            r#"{"message":"EmptyQuery","reason":"Internal Server Error","status":500}"#
         );
     }
 

@@ -44,6 +44,7 @@ mod test {
         let state = ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
             asset_path: PathBuf::from("."), // webui won't be used, so it's invalidly set
+            device_id: "test_id".to_string(),
         };
         let mut aw_config = aw_server::config::AWConfig::default();
         aw_config.port = PORT;

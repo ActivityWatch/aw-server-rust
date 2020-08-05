@@ -12,36 +12,45 @@ use aw_models::Event;
 
 use rocket::http::Header;
 use rocket::http::Status;
-use rocket::response::status;
 use rocket::response::Response;
 use rocket::State;
 
-use crate::endpoints::{http_err, http_ok, HttpResponse, ServerState};
+use crate::endpoints::{HttpErrorJson, ServerState};
 
 use aw_datastore::DatastoreError;
 
 #[get("/")]
-pub fn buckets_get(state: State<ServerState>) -> Result<Json<HashMap<String, Bucket>>, Status> {
+pub fn buckets_get(
+    state: State<ServerState>,
+) -> Result<Json<HashMap<String, Bucket>>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.get_buckets() {
         Ok(bucketlist) => Ok(Json(bucketlist)),
         Err(e) => {
-            warn!("Unexpected error: {:?}", e);
-            Err(Status::InternalServerError)
+            let err_msg = format!("Unexpected error: {:?}", e);
+            warn!("{}", err_msg);
+            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
         }
     }
 }
 
 #[get("/<bucket_id>")]
-pub fn bucket_get(bucket_id: String, state: State<ServerState>) -> Result<Json<Bucket>, Status> {
+pub fn bucket_get(
+    bucket_id: String,
+    state: State<ServerState>,
+) -> Result<Json<Bucket>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.get_bucket(&bucket_id) {
         Ok(bucket) => Ok(Json(bucket)),
         Err(e) => match e {
-            DatastoreError::NoSuchBucket => Err(Status::NotFound),
+            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
+                Status::NotFound,
+                "The requested bucket does not exist".to_string(),
+            )),
             _ => {
-                warn!("Unexpected error: {:?}", e);
-                Err(Status::InternalServerError)
+                let err_msg = format!("Unexpected error: {:?}", e);
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
             }
         },
     }
@@ -52,7 +61,7 @@ pub fn bucket_new(
     bucket_id: String,
     message: Json<Bucket>,
     state: State<ServerState>,
-) -> HttpResponse {
+) -> Result<(), HttpErrorJson> {
     let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
         bucket.id = bucket_id;
@@ -63,22 +72,26 @@ pub fn bucket_new(
         Ok(ds) => ds,
         Err(e) => {
             warn!("Taking datastore lock failed, returning 504: {}", e);
-            return http_err(
+            return Err(HttpErrorJson::new(
                 Status::ServiceUnavailable,
                 "Takind datastore lock failed".to_string(),
-            );
+            ));
         }
     };
     let ret = datastore.create_bucket(&bucket);
     match ret {
-        Ok(_) => http_ok(json!(null)),
+        Ok(_) => Ok(()),
         Err(err) => match err {
-            DatastoreError::BucketAlreadyExists => {
-                http_err(Status::NotModified, "Bucket already exists".to_string())
-            }
+            DatastoreError::BucketAlreadyExists => Err(HttpErrorJson::new(
+                Status::NotModified,
+                "Bucket already exists".to_string(),
+            )),
             _ => {
                 warn!("Unexpected error: {:?}", err);
-                http_err(Status::InternalServerError, format!("{:?}", err))
+                Err(HttpErrorJson::new(
+                    Status::InternalServerError,
+                    format!("{:?}", err),
+                ))
             }
         },
     }
@@ -91,16 +104,17 @@ pub fn bucket_events_get(
     end: Option<String>,
     limit: Option<u64>,
     state: State<ServerState>,
-) -> Result<Json<Vec<Event>>, Status> {
+) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     let starttime: Option<DateTime<Utc>> = match start {
         Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
             Ok(dt) => Some(dt.with_timezone(&Utc)),
             Err(e) => {
-                warn!(
+                let err_msg = format!(
                     "Failed to parse starttime, datetime needs to be in rfc3339 format: {}",
                     e
                 );
-                return Err(Status::BadRequest);
+                warn!("{}", err_msg);
+                return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
             }
         },
         None => None,
@@ -109,11 +123,12 @@ pub fn bucket_events_get(
         Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
             Ok(dt) => Some(dt.with_timezone(&Utc)),
             Err(e) => {
-                warn!(
+                let err_msg = format!(
                     "Failed to parse endtime, datetime needs to be in rfc3339 format: {}",
                     e
                 );
-                return Err(Status::BadRequest);
+                warn!("{}", err_msg);
+                return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
             }
         },
         None => None,
@@ -123,10 +138,14 @@ pub fn bucket_events_get(
     match res {
         Ok(events) => Ok(Json(events)),
         Err(err) => match err {
-            DatastoreError::NoSuchBucket => Err(Status::NotFound),
+            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
+                Status::NotFound,
+                "The requested bucket does not exist".to_string(),
+            )),
             e => {
-                warn!("Failed to fetch events: {:?}", e);
-                Err(Status::InternalServerError)
+                let err_msg = format!("Failed to fetch events: {:?}", e);
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
             }
         },
     }
@@ -137,16 +156,20 @@ pub fn bucket_events_create(
     bucket_id: String,
     events: Json<Vec<Event>>,
     state: State<ServerState>,
-) -> Result<Json<Vec<Event>>, Status> {
+) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let res = datastore.insert_events(&bucket_id, &events);
     match res {
         Ok(events) => Ok(Json(events)),
         Err(e) => match e {
-            DatastoreError::NoSuchBucket => Err(Status::NotFound),
+            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
+                Status::NotFound,
+                "The requested bucket does not exist".to_string(),
+            )),
             e => {
-                warn!("Failed to create event(s): {:?}", e);
-                Err(Status::InternalServerError)
+                let err_msg = format!("Failed to create event(s): {:?}", e);
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
             }
         },
     }
@@ -162,16 +185,20 @@ pub fn bucket_events_heartbeat(
     heartbeat_json: Json<Event>,
     pulsetime: f64,
     state: State<ServerState>,
-) -> Result<Json<Event>, Status> {
+) -> Result<Json<Event>, HttpErrorJson> {
     let heartbeat = heartbeat_json.into_inner();
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.heartbeat(&bucket_id, heartbeat, pulsetime) {
         Ok(e) => Ok(Json(e)),
         Err(err) => match err {
-            DatastoreError::NoSuchBucket => Err(Status::NotFound),
+            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
+                Status::NotFound,
+                "The requested bucket does not exist".to_string(),
+            )),
             err => {
-                warn!("Heartbeat failed: {:?}", err);
-                Err(Status::InternalServerError)
+                let err_msg = format!("Heartbeat failed: {:?}", err);
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
             }
         },
     }
@@ -181,16 +208,20 @@ pub fn bucket_events_heartbeat(
 pub fn bucket_event_count(
     bucket_id: String,
     state: State<ServerState>,
-) -> Result<Json<u64>, Status> {
+) -> Result<Json<u64>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let res = datastore.get_event_count(&bucket_id, None, None);
     match res {
         Ok(eventcount) => Ok(Json(eventcount as u64)),
         Err(e) => match e {
-            DatastoreError::NoSuchBucket => Err(Status::NotFound),
+            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
+                Status::NotFound,
+                "The requested bucket does not exist".to_string(),
+            )),
             e => {
-                warn!("Failed to count events: {:?}", e);
-                Err(Status::InternalServerError)
+                let err_msg = format!("Failed to count events: {:?}", e);
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
             }
         },
     }
@@ -201,22 +232,29 @@ pub fn bucket_events_delete_by_id(
     bucket_id: String,
     event_id: i64,
     state: State<ServerState>,
-) -> Result<(), Status> {
+) -> Result<(), HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.delete_events_by_id(&bucket_id, vec![event_id]) {
         Ok(_) => Ok(()),
         Err(err) => match err {
-            DatastoreError::NoSuchBucket => Err(Status::NotFound),
+            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
+                Status::NotFound,
+                "The requested bucket does not exist".to_string(),
+            )),
             err => {
-                warn!("Delete events by id failed: {:?}", err);
-                Err(Status::InternalServerError)
+                let err_msg = format!("Delete events by id failed: {:?}", err);
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
             }
         },
     }
 }
 
 #[get("/<bucket_id>/export")]
-pub fn bucket_export(bucket_id: String, state: State<ServerState>) -> Result<Response, Status> {
+pub fn bucket_export(
+    bucket_id: String,
+    state: State<ServerState>,
+) -> Result<Response, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let mut export = BucketsExport {
         buckets: HashMap::new(),
@@ -224,10 +262,16 @@ pub fn bucket_export(bucket_id: String, state: State<ServerState>) -> Result<Res
     let mut bucket = match datastore.get_bucket(&bucket_id) {
         Ok(bucket) => bucket,
         Err(err) => match err {
-            DatastoreError::NoSuchBucket => return Err(Status::NotFound),
+            DatastoreError::NoSuchBucket => {
+                return Err(HttpErrorJson::new(
+                    Status::NotFound,
+                    "The requested bucket does not exist".to_string(),
+                ))
+            }
             e => {
-                warn!("Failed to fetch events: {:?}", e);
-                return Err(Status::InternalServerError);
+                let err_msg = format!("Failed to fetch events: {:?}", e);
+                warn!("{}", err_msg);
+                return Err(HttpErrorJson::new(Status::InternalServerError, err_msg));
             }
         },
     };
@@ -250,15 +294,19 @@ pub fn bucket_export(bucket_id: String, state: State<ServerState>) -> Result<Res
 }
 
 #[delete("/<bucket_id>")]
-pub fn bucket_delete(bucket_id: String, state: State<ServerState>) -> Result<(), Status> {
+pub fn bucket_delete(bucket_id: String, state: State<ServerState>) -> Result<(), HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.delete_bucket(&bucket_id) {
         Ok(_) => Ok(()),
         Err(e) => match e {
-            DatastoreError::NoSuchBucket => Err(Status::NotFound),
+            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
+                Status::NotFound,
+                "The requested bucket does not exist".to_string(),
+            )),
             e => {
-                warn!("Failed to delete bucket: {:?}", e);
-                Err(Status::InternalServerError)
+                let err_msg = format!("Failed to delete bucket: {:?}", e);
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
             }
         },
     }

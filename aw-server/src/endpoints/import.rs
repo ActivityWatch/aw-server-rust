@@ -13,16 +13,17 @@ use aw_models::BucketsExport;
 
 use aw_datastore::Datastore;
 
-use crate::endpoints::ServerState;
+use crate::endpoints::{HttpErrorJson, ServerState};
 
-fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), Status> {
+fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), HttpErrorJson> {
     let datastore = endpoints_get_lock!(datastore_mutex);
     for (_bucketname, bucket) in import.buckets {
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(e) => {
-                warn!("Failed to import bucket: {:?}", e);
-                return Err(Status::InternalServerError);
+                let err_msg = format!("Failed to import bucket: {:?}", e);
+                warn!("{}", err_msg);
+                return Err(HttpErrorJson::new(Status::InternalServerError, err_msg));
             }
         }
     }
@@ -33,7 +34,7 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
 pub fn bucket_import_json(
     state: State<ServerState>,
     json_data: Json<BucketsExport>,
-) -> Result<(), Status> {
+) -> Result<(), HttpErrorJson> {
     import(&state.datastore, json_data.into_inner())
 }
 
@@ -44,13 +45,15 @@ pub fn bucket_import_form(
     state: State<ServerState>,
     cont_type: &ContentType,
     data: Data,
-) -> Result<(), Status> {
+) -> Result<(), HttpErrorJson> {
     let (_, boundary) = cont_type
         .params()
         .find(|&(k, _)| k == "boundary")
         .ok_or_else(|| {
-            warn!("`Content-Type: multipart/form-data` boundary param not provided");
-            Status::BadRequest
+            return HttpErrorJson::new(
+                Status::BadRequest,
+                "`Content-Type: multipart/form-data` boundary param not provided".to_string(),
+            );
         })?;
 
     let string = process_multipart_packets(boundary, data);

@@ -3,12 +3,50 @@ use std::sync::Mutex;
 
 use gethostname::gethostname;
 use rocket::http::Status;
-use rocket::response::status;
 use rocket::response::NamedFile;
 use rocket::State;
 use rocket_contrib::json::JsonValue;
 
 use crate::config::AWConfig;
+
+use aw_datastore::Datastore;
+
+pub struct ServerState {
+    pub datastore: Mutex<Datastore>,
+    pub asset_path: PathBuf,
+    pub device_id: String,
+}
+
+use rocket::http::ContentType;
+use rocket::request::Request;
+use rocket::response::{self, Responder, Response};
+use std::io::Cursor;
+
+#[derive(Serialize, Debug)]
+pub struct HttpErrorJson {
+    #[serde(skip_serializing)]
+    status: Status,
+    message: String,
+}
+
+impl HttpErrorJson {
+    pub fn new(status: Status, err: String) -> HttpErrorJson {
+        HttpErrorJson {
+            status: status,
+            message: format!("{}", err),
+        }
+    }
+}
+
+impl<'r> Responder<'r> for HttpErrorJson {
+    fn respond_to(self, _: &Request) -> response::Result<'r> {
+        Response::build()
+            .status(self.status)
+            .sized_body(Cursor::new(format!("{{\"message\":\"{}\"}}", self.message)))
+            .header(ContentType::new("application", "json"))
+            .ok()
+    }
+}
 
 #[macro_export]
 macro_rules! endpoints_get_lock {
@@ -16,8 +54,9 @@ macro_rules! endpoints_get_lock {
         match $lock.lock() {
             Ok(r) => r,
             Err(e) => {
-                warn!("Taking datastore lock failed, returning 504: {}", e);
-                return Err(Status::ServiceUnavailable);
+                let err_msg = format!("Taking datastore lock failed, returning 504: {}", e);
+                warn!("{}", err_msg);
+                return Err(HttpErrorJson::new(Status::ServiceUnavailable, err_msg));
             }
         }
     };
@@ -29,36 +68,6 @@ mod export;
 mod import;
 mod query;
 mod settings;
-
-use aw_datastore::Datastore;
-
-pub struct ServerState {
-    pub datastore: Mutex<Datastore>,
-    pub asset_path: PathBuf,
-    pub device_id: String,
-}
-
-#[derive(Serialize)]
-struct HttpErrorJson {
-    status: u16,
-    reason: String,
-    message: String,
-}
-
-pub type HttpResponse = status::Custom<JsonValue>;
-
-pub fn http_ok(data: JsonValue) -> HttpResponse {
-    status::Custom(Status::Ok, json!(data))
-}
-
-pub fn http_err(status: Status, err: String) -> HttpResponse {
-    let body = HttpErrorJson {
-        status: status.code,
-        reason: status.reason.to_string(),
-        message: format!("{}", err),
-    };
-    status::Custom(status, json!(body))
-}
 
 #[get("/")]
 fn root_index(state: State<ServerState>) -> Option<NamedFile> {

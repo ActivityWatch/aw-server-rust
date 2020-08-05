@@ -7,17 +7,25 @@ use std::sync::MutexGuard;
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Key, KeyValue};
 
-fn parse_key(key: String) -> Result<String, Status> {
+use crate::endpoints::HttpErrorJson;
+
+fn parse_key(key: String) -> Result<String, HttpErrorJson> {
     let namespace: String = "settings.".to_string();
     if key.len() >= 128 {
-        Err(Status::BadRequest)
+        Err(HttpErrorJson::new(
+            Status::BadRequest,
+            "Too long key".to_string(),
+        ))
     } else {
         Ok(namespace + key.as_str())
     }
 }
 
 #[post("/", data = "<message>", format = "application/json")]
-pub fn setting_set(state: State<ServerState>, message: Json<KeyValue>) -> Result<Status, Status> {
+pub fn setting_set(
+    state: State<ServerState>,
+    message: Json<KeyValue>,
+) -> Result<Status, HttpErrorJson> {
     let data = message.into_inner();
 
     let setting_key = parse_key(data.key)?;
@@ -28,21 +36,26 @@ pub fn setting_set(state: State<ServerState>, message: Json<KeyValue>) -> Result
     match result {
         Ok(_) => Ok(Status::Created),
         Err(err) => {
-            warn!("Unexpected error when creating setting: {:?}", err);
-            Err(Status::InternalServerError)
+            let err_msg = format!("Unexpected error when creating setting: {:?}", err);
+            warn!("{}", err_msg);
+            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
         }
     }
 }
 
 #[get("/")]
-pub fn settings_list_get(state: State<ServerState>) -> Result<Json<Vec<Key>>, Status> {
+pub fn settings_list_get(state: State<ServerState>) -> Result<Json<Vec<Key>>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let queryresults = match datastore.get_keys_starting("settings.%") {
         Ok(result) => Ok(result),
-        Err(DatastoreError::NoSuchKey) => Err(Status::NotFound),
+        Err(DatastoreError::NoSuchKey) => Err(HttpErrorJson::new(
+            Status::NotFound,
+            "Key not found".to_string(),
+        )),
         Err(err) => {
-            warn!("Unexpected error when getting setting: {:?}", err);
-            Err(Status::InternalServerError)
+            let err_msg = format!("Unexpected error when getting setting: {:?}", err);
+            warn!("{}", err_msg);
+            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
         }
     };
 
@@ -55,23 +68,30 @@ pub fn settings_list_get(state: State<ServerState>) -> Result<Json<Vec<Key>>, St
 }
 
 #[get("/<key>")]
-pub fn setting_get(state: State<ServerState>, key: String) -> Result<Json<KeyValue>, Status> {
+pub fn setting_get(
+    state: State<ServerState>,
+    key: String,
+) -> Result<Json<KeyValue>, HttpErrorJson> {
     let setting_key = parse_key(key)?;
 
     let datastore = endpoints_get_lock!(state.datastore);
 
     match datastore.get_key_value(&setting_key) {
         Ok(result) => Ok(Json(result)),
-        Err(DatastoreError::NoSuchKey) => Err(Status::NotFound),
+        Err(DatastoreError::NoSuchKey) => Err(HttpErrorJson::new(
+            Status::NotFound,
+            "Could not find requested key".to_string(),
+        )),
         Err(err) => {
-            warn!("Unexpected error when getting setting: {:?}", err);
-            Err(Status::InternalServerError)
+            let err_msg = format!("Unexpected error when getting setting: {:?}", err);
+            warn!("{}", err_msg);
+            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
         }
     }
 }
 
 #[delete("/<key>")]
-pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), Status> {
+pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), HttpErrorJson> {
     let setting_key = parse_key(key)?;
 
     let datastore = endpoints_get_lock!(state.datastore);
@@ -80,8 +100,9 @@ pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), Stat
     match result {
         Ok(_) => Ok(()),
         Err(err) => {
-            warn!("Unexpected error when deleting setting: {:?}", err);
-            Err(Status::InternalServerError)
+            let err_msg = format!("Unexpected error when deleting setting: {:?}", err);
+            warn!("{}", err_msg);
+            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
         }
     }
 }

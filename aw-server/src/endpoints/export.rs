@@ -8,10 +8,10 @@ use rocket::State;
 
 use aw_models::BucketsExport;
 
-use crate::endpoints::ServerState;
+use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[get("/")]
-pub fn buckets_export(state: State<ServerState>) -> Result<Response, Status> {
+pub fn buckets_export(state: State<ServerState>) -> Result<Response, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let mut export = BucketsExport {
         buckets: HashMap::new(),
@@ -19,6 +19,7 @@ pub fn buckets_export(state: State<ServerState>) -> Result<Response, Status> {
     let mut buckets = datastore.get_buckets().unwrap();
     for (bid, mut bucket) in buckets.drain() {
         bucket.events = Some(
+            // TODO: Remove expect
             datastore
                 .get_events(&bid, None, None, None)
                 .expect("Failed to get events for bucket"),

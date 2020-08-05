@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use gethostname::gethostname;
+use rocket::http::Status;
+use rocket::response::status;
 use rocket::response::NamedFile;
 use rocket::State;
 use rocket_contrib::json::JsonValue;
@@ -34,6 +36,28 @@ pub struct ServerState {
     pub datastore: Mutex<Datastore>,
     pub asset_path: PathBuf,
     pub device_id: String,
+}
+
+#[derive(Serialize)]
+struct HttpErrorJson {
+    status: u16,
+    reason: String,
+    message: String,
+}
+
+pub type HttpResponse = status::Custom<JsonValue>;
+
+pub fn http_ok(data: JsonValue) -> HttpResponse {
+    status::Custom(Status::Ok, json!(data))
+}
+
+pub fn http_err(status: Status, err: String) -> HttpResponse {
+    let body = HttpErrorJson {
+        status: status.code,
+        reason: status.reason.to_string(),
+        message: format!("{}", err),
+    };
+    status::Custom(status, json!(body))
 }
 
 #[get("/")]

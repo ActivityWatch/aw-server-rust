@@ -30,9 +30,9 @@ pub enum DatastoreMethod {
 /* TODO: Implement this as a proper error */
 #[derive(Debug, Clone)]
 pub enum DatastoreError {
-    NoSuchBucket,
-    BucketAlreadyExists,
-    NoSuchKey,
+    NoSuchBucket(String),
+    BucketAlreadyExists(String),
+    NoSuchKey(String),
     MpscError,
     InternalError(String),
     // Errors specific to when migrate is disabled

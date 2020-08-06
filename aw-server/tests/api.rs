@@ -89,7 +89,7 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::NotModified);
         assert_eq!(
             res.body_string().unwrap(),
-            "{\"message\":\"Bucket already exists\"}"
+            r#"{"message":"Bucket 'id' already exists"}"#
         );
 
         // Get list of buckets (1 bucket)
@@ -316,7 +316,7 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::InternalServerError);
         assert_eq!(
             res.body_string().unwrap(),
-            "{\"message\":\"Failed to import bucket: BucketAlreadyExists\"}"
+            r#"{"message":"Failed to import bucket: BucketAlreadyExists(\"id1\")"}"#
         );
 
         // Export single created bucket

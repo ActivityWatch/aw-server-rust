@@ -23,9 +23,11 @@ impl HttpErrorJson {
 
 impl<'r> Responder<'r> for HttpErrorJson {
     fn respond_to(self, _: &Request) -> response::Result<'r> {
+        // TODO: Fix unwrap
+        let body = serde_json::to_string(&self).unwrap();
         Response::build()
             .status(self.status)
-            .sized_body(Cursor::new(format!("{{\"message\":\"{}\"}}", self.message)))
+            .sized_body(Cursor::new(body))
             .header(ContentType::new("application", "json"))
             .ok()
     }
@@ -36,16 +38,17 @@ use aw_datastore::DatastoreError;
 impl Into<HttpErrorJson> for DatastoreError {
     fn into(self) -> HttpErrorJson {
         match self {
-            DatastoreError::NoSuchBucket => HttpErrorJson::new(
+            DatastoreError::NoSuchBucket(bucket_id) => HttpErrorJson::new(
                 Status::NotFound,
-                "The requested bucket does not exist".to_string(),
+                format!("The requested bucket '{}' does not exist", bucket_id),
             ),
-            DatastoreError::BucketAlreadyExists => {
-                HttpErrorJson::new(Status::NotModified, "Bucket already exists".to_string())
-            }
-            DatastoreError::NoSuchKey => HttpErrorJson::new(
+            DatastoreError::BucketAlreadyExists(bucket_id) => HttpErrorJson::new(
+                Status::NotModified,
+                format!("Bucket '{}' already exists", bucket_id),
+            ),
+            DatastoreError::NoSuchKey(key) => HttpErrorJson::new(
                 Status::NotFound,
-                "The requested key does not exist".to_string(),
+                format!("The requested key(s) '{}' do not exist", key),
             ),
             DatastoreError::MpscError => HttpErrorJson::new(
                 Status::InternalServerError,

@@ -39,7 +39,7 @@ mod sync_tests {
         match ds.create_bucket(&bucket) {
             Ok(()) => (),
             Err(e) => match e {
-                DatastoreError::BucketAlreadyExists => {
+                DatastoreError::BucketAlreadyExists(_) => {
                     debug!("bucket already exists, skipping");
                 }
                 e => panic!("woops! {:?}", e),

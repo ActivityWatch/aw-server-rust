@@ -382,7 +382,7 @@ impl DatastoreInstance {
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _ } => match sqlerr.code {
                     rusqlite::ErrorCode::ConstraintViolation => {
-                        Err(DatastoreError::BucketAlreadyExists)
+                        Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string()))
                     }
                     _ => Err(DatastoreError::InternalError(format!(
                         "Failed to execute create_bucket SQL statement: {}",
@@ -417,7 +417,7 @@ impl DatastoreInstance {
             Err(err) => match err {
                 rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _ } => match sqlerr.code {
                     rusqlite::ErrorCode::ConstraintViolation => {
-                        Err(DatastoreError::BucketAlreadyExists)
+                        Err(DatastoreError::BucketAlreadyExists(bucket_id.to_string()))
                     }
                     _ => Err(DatastoreError::InternalError(err.to_string())),
                 },
@@ -430,7 +430,7 @@ impl DatastoreInstance {
         let cached_bucket = self.buckets_cache.get(bucket_id);
         match cached_bucket {
             Some(bucket) => Ok(bucket.clone()),
-            None => Err(DatastoreError::NoSuchBucket),
+            None => Err(DatastoreError::NoSuchBucket(bucket_id.to_string())),
         }
     }
 
@@ -881,7 +881,9 @@ impl DatastoreInstance {
         }) {
             Ok(result) => Ok(result),
             Err(err) => match err {
-                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchKey),
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Err(DatastoreError::NoSuchKey(key.to_string()))
+                }
                 _ => Err(DatastoreError::InternalError(format!(
                     "Get value query failed for key {}",
                     key
@@ -918,7 +920,9 @@ impl DatastoreInstance {
                 Ok(output)
             }
             Err(err) => match err {
-                rusqlite::Error::QueryReturnedNoRows => Err(DatastoreError::NoSuchKey),
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Err(DatastoreError::NoSuchKey(pattern.to_string()))
+                }
                 _ => Err(DatastoreError::InternalError(format!(
                     "Failed to get key_value rows starting with pattern {}",
                     pattern

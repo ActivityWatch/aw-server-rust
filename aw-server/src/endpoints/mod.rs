@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use gethostname::gethostname;
-use rocket::http::Status;
 use rocket::response::NamedFile;
 use rocket::State;
 use rocket_contrib::json::JsonValue;
@@ -17,57 +16,16 @@ pub struct ServerState {
     pub device_id: String,
 }
 
-use rocket::http::ContentType;
-use rocket::request::Request;
-use rocket::response::{self, Responder, Response};
-use std::io::Cursor;
-
-#[derive(Serialize, Debug)]
-pub struct HttpErrorJson {
-    #[serde(skip_serializing)]
-    status: Status,
-    message: String,
-}
-
-impl HttpErrorJson {
-    pub fn new(status: Status, err: String) -> HttpErrorJson {
-        HttpErrorJson {
-            status: status,
-            message: format!("{}", err),
-        }
-    }
-}
-
-impl<'r> Responder<'r> for HttpErrorJson {
-    fn respond_to(self, _: &Request) -> response::Result<'r> {
-        Response::build()
-            .status(self.status)
-            .sized_body(Cursor::new(format!("{{\"message\":\"{}\"}}", self.message)))
-            .header(ContentType::new("application", "json"))
-            .ok()
-    }
-}
-
-#[macro_export]
-macro_rules! endpoints_get_lock {
-    ( $lock:expr ) => {
-        match $lock.lock() {
-            Ok(r) => r,
-            Err(e) => {
-                let err_msg = format!("Taking datastore lock failed, returning 504: {}", e);
-                warn!("{}", err_msg);
-                return Err(HttpErrorJson::new(Status::ServiceUnavailable, err_msg));
-            }
-        }
-    };
-}
-
+#[macro_use]
+mod util;
 mod bucket;
 mod cors;
 mod export;
 mod import;
 mod query;
 mod settings;
+
+pub use util::HttpErrorJson;
 
 #[get("/")]
 fn root_index(state: State<ServerState>) -> Option<NamedFile> {

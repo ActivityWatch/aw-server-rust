@@ -39,6 +39,7 @@ impl fmt::Debug for Datastore {
  * TODO:
  * - Allow read requests to go straight through a read-only db connection instead of requesting the
  * worker thread for better performance?
+ * TODO: Add an seperate "Import" request which does an import with an transaction
  */
 
 #[allow(clippy::large_enum_variant)]

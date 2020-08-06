@@ -17,8 +17,6 @@ use rocket::State;
 
 use crate::endpoints::{HttpErrorJson, ServerState};
 
-use aw_datastore::DatastoreError;
-
 #[get("/")]
 pub fn buckets_get(
     state: State<ServerState>,
@@ -26,11 +24,7 @@ pub fn buckets_get(
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.get_buckets() {
         Ok(bucketlist) => Ok(Json(bucketlist)),
-        Err(e) => {
-            let err_msg = format!("Unexpected error: {:?}", e);
-            warn!("{}", err_msg);
-            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -42,17 +36,7 @@ pub fn bucket_get(
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.get_bucket(&bucket_id) {
         Ok(bucket) => Ok(Json(bucket)),
-        Err(e) => match e {
-            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
-                Status::NotFound,
-                "The requested bucket does not exist".to_string(),
-            )),
-            _ => {
-                let err_msg = format!("Unexpected error: {:?}", e);
-                warn!("{}", err_msg);
-                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-            }
-        },
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -66,34 +50,11 @@ pub fn bucket_new(
     if bucket.id != bucket_id {
         bucket.id = bucket_id;
     }
-    // Cannot re-use endpoints_get_lock!() here because it returns Err(Status) on failure and this
-    // function returns a Response
-    let datastore = match state.datastore.lock() {
-        Ok(ds) => ds,
-        Err(e) => {
-            warn!("Taking datastore lock failed, returning 504: {}", e);
-            return Err(HttpErrorJson::new(
-                Status::ServiceUnavailable,
-                "Takind datastore lock failed".to_string(),
-            ));
-        }
-    };
+    let datastore = endpoints_get_lock!(state.datastore);
     let ret = datastore.create_bucket(&bucket);
     match ret {
         Ok(_) => Ok(()),
-        Err(err) => match err {
-            DatastoreError::BucketAlreadyExists => Err(HttpErrorJson::new(
-                Status::NotModified,
-                "Bucket already exists".to_string(),
-            )),
-            _ => {
-                warn!("Unexpected error: {:?}", err);
-                Err(HttpErrorJson::new(
-                    Status::InternalServerError,
-                    format!("{:?}", err),
-                ))
-            }
-        },
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -137,17 +98,7 @@ pub fn bucket_events_get(
     let res = datastore.get_events(&bucket_id, starttime, endtime, limit);
     match res {
         Ok(events) => Ok(Json(events)),
-        Err(err) => match err {
-            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
-                Status::NotFound,
-                "The requested bucket does not exist".to_string(),
-            )),
-            e => {
-                let err_msg = format!("Failed to fetch events: {:?}", e);
-                warn!("{}", err_msg);
-                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-            }
-        },
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -161,17 +112,7 @@ pub fn bucket_events_create(
     let res = datastore.insert_events(&bucket_id, &events);
     match res {
         Ok(events) => Ok(Json(events)),
-        Err(e) => match e {
-            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
-                Status::NotFound,
-                "The requested bucket does not exist".to_string(),
-            )),
-            e => {
-                let err_msg = format!("Failed to create event(s): {:?}", e);
-                warn!("{}", err_msg);
-                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-            }
-        },
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -190,17 +131,7 @@ pub fn bucket_events_heartbeat(
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.heartbeat(&bucket_id, heartbeat, pulsetime) {
         Ok(e) => Ok(Json(e)),
-        Err(err) => match err {
-            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
-                Status::NotFound,
-                "The requested bucket does not exist".to_string(),
-            )),
-            err => {
-                let err_msg = format!("Heartbeat failed: {:?}", err);
-                warn!("{}", err_msg);
-                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-            }
-        },
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -213,17 +144,7 @@ pub fn bucket_event_count(
     let res = datastore.get_event_count(&bucket_id, None, None);
     match res {
         Ok(eventcount) => Ok(Json(eventcount as u64)),
-        Err(e) => match e {
-            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
-                Status::NotFound,
-                "The requested bucket does not exist".to_string(),
-            )),
-            e => {
-                let err_msg = format!("Failed to count events: {:?}", e);
-                warn!("{}", err_msg);
-                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-            }
-        },
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -236,17 +157,7 @@ pub fn bucket_events_delete_by_id(
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.delete_events_by_id(&bucket_id, vec![event_id]) {
         Ok(_) => Ok(()),
-        Err(err) => match err {
-            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
-                Status::NotFound,
-                "The requested bucket does not exist".to_string(),
-            )),
-            err => {
-                let err_msg = format!("Delete events by id failed: {:?}", err);
-                warn!("{}", err_msg);
-                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-            }
-        },
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -261,19 +172,7 @@ pub fn bucket_export(
     };
     let mut bucket = match datastore.get_bucket(&bucket_id) {
         Ok(bucket) => bucket,
-        Err(err) => match err {
-            DatastoreError::NoSuchBucket => {
-                return Err(HttpErrorJson::new(
-                    Status::NotFound,
-                    "The requested bucket does not exist".to_string(),
-                ))
-            }
-            e => {
-                let err_msg = format!("Failed to fetch events: {:?}", e);
-                warn!("{}", err_msg);
-                return Err(HttpErrorJson::new(Status::InternalServerError, err_msg));
-            }
-        },
+        Err(err) => return Err(err.into()),
     };
     bucket.events = Some(
         datastore
@@ -298,16 +197,6 @@ pub fn bucket_delete(bucket_id: String, state: State<ServerState>) -> Result<(),
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.delete_bucket(&bucket_id) {
         Ok(_) => Ok(()),
-        Err(e) => match e {
-            DatastoreError::NoSuchBucket => Err(HttpErrorJson::new(
-                Status::NotFound,
-                "The requested bucket does not exist".to_string(),
-            )),
-            e => {
-                let err_msg = format!("Failed to delete bucket: {:?}", e);
-                warn!("{}", err_msg);
-                Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-            }
-        },
+        Err(err) => Err(err.into()),
     }
 }

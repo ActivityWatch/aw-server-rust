@@ -16,14 +16,15 @@ pub fn buckets_export(state: State<ServerState>) -> Result<Response, HttpErrorJs
     let mut export = BucketsExport {
         buckets: HashMap::new(),
     };
-    let mut buckets = datastore.get_buckets().unwrap();
+    let mut buckets = match datastore.get_buckets() {
+        Ok(buckets) => buckets,
+        Err(err) => return Err(err.into()),
+    };
     for (bid, mut bucket) in buckets.drain() {
-        bucket.events = Some(
-            // TODO: Remove expect
-            datastore
-                .get_events(&bid, None, None, None)
-                .expect("Failed to get events for bucket"),
-        );
+        bucket.events = Some(match datastore.get_events(&bid, None, None, None) {
+            Ok(events) => events,
+            Err(err) => return Err(err.into()),
+        });
         export.buckets.insert(bid, bucket);
     }
 

@@ -4,7 +4,7 @@ use rocket::State;
 use rocket_contrib::json::Json;
 use std::sync::MutexGuard;
 
-use aw_datastore::{Datastore, DatastoreError};
+use aw_datastore::Datastore;
 use aw_models::{Key, KeyValue};
 
 use crate::endpoints::HttpErrorJson;
@@ -35,11 +35,7 @@ pub fn setting_set(
 
     match result {
         Ok(_) => Ok(Status::Created),
-        Err(err) => {
-            let err_msg = format!("Unexpected error when creating setting: {:?}", err);
-            warn!("{}", err_msg);
-            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -48,15 +44,7 @@ pub fn settings_list_get(state: State<ServerState>) -> Result<Json<Vec<Key>>, Ht
     let datastore = endpoints_get_lock!(state.datastore);
     let queryresults = match datastore.get_keys_starting("settings.%") {
         Ok(result) => Ok(result),
-        Err(DatastoreError::NoSuchKey) => Err(HttpErrorJson::new(
-            Status::NotFound,
-            "Key not found".to_string(),
-        )),
-        Err(err) => {
-            let err_msg = format!("Unexpected error when getting setting: {:?}", err);
-            warn!("{}", err_msg);
-            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-        }
+        Err(err) => Err(err.into()),
     };
 
     let mut output = Vec::<Key>::new();
@@ -78,15 +66,7 @@ pub fn setting_get(
 
     match datastore.get_key_value(&setting_key) {
         Ok(result) => Ok(Json(result)),
-        Err(DatastoreError::NoSuchKey) => Err(HttpErrorJson::new(
-            Status::NotFound,
-            "Could not find requested key".to_string(),
-        )),
-        Err(err) => {
-            let err_msg = format!("Unexpected error when getting setting: {:?}", err);
-            warn!("{}", err_msg);
-            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -99,10 +79,6 @@ pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), Http
 
     match result {
         Ok(_) => Ok(()),
-        Err(err) => {
-            let err_msg = format!("Unexpected error when deleting setting: {:?}", err);
-            warn!("{}", err_msg);
-            Err(HttpErrorJson::new(Status::InternalServerError, err_msg))
-        }
+        Err(err) => Err(err.into()),
     }
 }

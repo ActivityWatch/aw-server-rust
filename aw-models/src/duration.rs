@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 // Max duration of a i64 nanosecond is 2562047.7880152157 hours
 // ((2**64)/2)/1000000000/60/60
 

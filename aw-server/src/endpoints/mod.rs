@@ -4,11 +4,12 @@ use std::sync::Mutex;
 use gethostname::gethostname;
 use rocket::response::NamedFile;
 use rocket::State;
-use rocket_contrib::json::JsonValue;
+use rocket_contrib::json::Json;
 
 use crate::config::AWConfig;
 
 use aw_datastore::Datastore;
+use aw_models::Info;
 
 pub struct ServerState {
     pub datastore: Mutex<Datastore>,
@@ -58,16 +59,16 @@ fn root_favicon(state: State<ServerState>) -> Option<NamedFile> {
 }
 
 #[get("/")]
-fn server_info(config: State<AWConfig>, state: State<ServerState>) -> JsonValue {
+fn server_info(config: State<AWConfig>, state: State<ServerState>) -> Json<Info> {
     #[allow(clippy::or_fun_call)]
     let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
     const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
-    json!({
-        "hostname": hostname,
-        "version": format!("v{} (rust)", VERSION.unwrap_or("(unknown)")),
-        "testing": config.testing,
-        "device_id": state.device_id,
+    Json(Info {
+        hostname,
+        version: format!("v{} (rust)", VERSION.unwrap_or("(unknown)")),
+        testing: config.testing,
+        device_id: state.device_id.clone(),
     })
 }
 

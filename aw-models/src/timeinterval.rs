@@ -6,6 +6,8 @@ use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 
+// TODO: Implement serialize
+
 #[derive(Clone, Debug)]
 pub struct TimeInterval {
     start: DateTime<Utc>,

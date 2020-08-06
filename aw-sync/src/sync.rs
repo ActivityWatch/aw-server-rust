@@ -165,7 +165,7 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         match ds.create_bucket(&bucket) {
             Ok(()) => (),
             Err(e) => match e {
-                DatastoreError::BucketAlreadyExists => {
+                DatastoreError::BucketAlreadyExists(_) => {
                     debug!("bucket already exists, skipping");
                 }
                 e => panic!("woops! {:?}", e),
@@ -205,7 +205,7 @@ fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &dyn AccessMethod) -> 
 
     match ds_to.get_bucket(new_id.as_str()) {
         Ok(bucket) => bucket,
-        Err(DatastoreError::NoSuchBucket) => {
+        Err(DatastoreError::NoSuchBucket(_)) => {
             let mut bucket_new = bucket_from.clone();
             bucket_new.id = new_id.clone();
             // TODO: Replace sync origin with hostname/GUID and discuss how we will treat the data

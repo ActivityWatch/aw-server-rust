@@ -7,7 +7,7 @@ use super::QueryError;
 use aw_models::Event;
 use aw_transform::classify::{RegexRule, Rule};
 
-use serde::Serializer;
+use serde::{Serialize, Serializer};
 use serde_json::value::Value;
 use serde_json::Number;
 

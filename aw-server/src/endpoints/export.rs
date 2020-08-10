@@ -1,17 +1,17 @@
 use std::collections::HashMap;
-use std::io::Cursor;
 
-use rocket::http::Header;
 use rocket::http::Status;
-use rocket::response::Response;
 use rocket::State;
+use rocket_contrib::json::Json;
+use rocket_okapi::openapi;
 
 use aw_models::BucketsExport;
 
 use crate::endpoints::{HttpErrorJson, ServerState};
 
+#[openapi]
 #[get("/")]
-pub fn buckets_export(state: State<ServerState>) -> Result<Response, HttpErrorJson> {
+pub fn buckets_export(state: State<ServerState>) -> Result<Json<BucketsExport>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let mut export = BucketsExport {
         buckets: HashMap::new(),
@@ -28,6 +28,7 @@ pub fn buckets_export(state: State<ServerState>) -> Result<Response, HttpErrorJs
         export.buckets.insert(bid, bucket);
     }
 
+    /*
     Ok(Response::build()
         .status(Status::Ok)
         .header(Header::new(
@@ -38,4 +39,6 @@ pub fn buckets_export(state: State<ServerState>) -> Result<Response, HttpErrorJs
             serde_json::to_string(&export).expect("Failed to serialize"),
         ))
         .finalize())
+    */
+    Ok(Json(export))
 }

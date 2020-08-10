@@ -1,7 +1,6 @@
+extern crate aw_models;
 extern crate gethostname;
 extern crate reqwest;
-#[macro_use]
-extern crate aw_models;
 extern crate serde_json;
 
 use std::collections::HashMap;

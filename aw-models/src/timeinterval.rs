@@ -1,6 +1,8 @@
 use std::fmt;
 
-use serde::de::{self, Deserialize, Deserializer, Visitor};
+use serde::de::Error as DeserializeError;
+use serde::de::Visitor;
+use serde::{Deserialize, Deserializer};
 
 use chrono::DateTime;
 use chrono::Duration;
@@ -72,13 +74,16 @@ impl<'de> Visitor<'de> for TimeIntervalVisitor {
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
     where
-        E: de::Error,
+        E: DeserializeError,
     {
         match TimeInterval::new_from_string(&value) {
             Ok(ti) => Ok(ti),
             Err(e) => {
                 warn!("{:?}", e);
-                Err(de::Error::invalid_value(Unexpected::Str(value), &self))
+                Err(DeserializeError::invalid_value(
+                    Unexpected::Str(value),
+                    &self,
+                ))
             }
         }
     }

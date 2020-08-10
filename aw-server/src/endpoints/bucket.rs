@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Cursor;
 
 use rocket_contrib::json::Json;
 
@@ -10,13 +9,13 @@ use aw_models::Bucket;
 use aw_models::BucketsExport;
 use aw_models::Event;
 
-use rocket::http::Header;
 use rocket::http::Status;
-use rocket::response::Response;
 use rocket::State;
+use rocket_okapi::openapi;
 
 use crate::endpoints::{HttpErrorJson, ServerState};
 
+#[openapi]
 #[get("/")]
 pub fn buckets_get(
     state: State<ServerState>,
@@ -28,6 +27,7 @@ pub fn buckets_get(
     }
 }
 
+#[openapi]
 #[get("/<bucket_id>")]
 pub fn bucket_get(
     bucket_id: String,
@@ -40,6 +40,7 @@ pub fn bucket_get(
     }
 }
 
+#[openapi]
 #[post("/<bucket_id>", data = "<message>", format = "application/json")]
 pub fn bucket_new(
     bucket_id: String,
@@ -58,6 +59,7 @@ pub fn bucket_new(
     }
 }
 
+#[openapi]
 #[get("/<bucket_id>/events?<start>&<end>&<limit>")]
 pub fn bucket_events_get(
     bucket_id: String,
@@ -102,6 +104,7 @@ pub fn bucket_events_get(
     }
 }
 
+#[openapi]
 #[post("/<bucket_id>/events", data = "<events>", format = "application/json")]
 pub fn bucket_events_create(
     bucket_id: String,
@@ -116,6 +119,7 @@ pub fn bucket_events_create(
     }
 }
 
+#[openapi]
 #[post(
     "/<bucket_id>/heartbeat?<pulsetime>",
     data = "<heartbeat_json>",
@@ -135,6 +139,7 @@ pub fn bucket_events_heartbeat(
     }
 }
 
+#[openapi]
 #[get("/<bucket_id>/events/count")]
 pub fn bucket_event_count(
     bucket_id: String,
@@ -148,6 +153,7 @@ pub fn bucket_event_count(
     }
 }
 
+#[openapi]
 #[delete("/<bucket_id>/events/<event_id>")]
 pub fn bucket_events_delete_by_id(
     bucket_id: String,
@@ -161,11 +167,12 @@ pub fn bucket_events_delete_by_id(
     }
 }
 
+#[openapi]
 #[get("/<bucket_id>/export")]
 pub fn bucket_export(
     bucket_id: String,
     state: State<ServerState>,
-) -> Result<Response, HttpErrorJson> {
+) -> Result<Json<BucketsExport>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let mut export = BucketsExport {
         buckets: HashMap::new(),
@@ -180,8 +187,10 @@ pub fn bucket_export(
             .expect("Failed to get events for bucket"),
     );
     export.buckets.insert(bucket_id.clone(), bucket);
-    let filename = format!("aw-bucket-export_{}.json", bucket_id);
 
+    // TODO: Add back Content-Disposition
+    /*
+    let filename = format!("aw-bucket-export_{}.json", bucket_id);
     let header_content = format!("attachment; filename={}", filename);
     Ok(Response::build()
         .status(Status::Ok)
@@ -190,8 +199,11 @@ pub fn bucket_export(
             serde_json::to_string(&export).expect("Failed to serialize"),
         ))
         .finalize())
+    */
+    Ok(Json(export))
 }
 
+#[openapi]
 #[delete("/<bucket_id>")]
 pub fn bucket_delete(bucket_id: String, state: State<ServerState>) -> Result<(), HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);

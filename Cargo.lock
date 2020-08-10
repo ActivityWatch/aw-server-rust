@@ -127,7 +127,6 @@ dependencies = [
  "gethostname",
  "reqwest",
  "serde",
- "serde_derive",
  "serde_json",
 ]
 
@@ -143,7 +142,6 @@ dependencies = [
  "mpsc_requests",
  "rusqlite",
  "serde",
- "serde_derive",
  "serde_json",
 ]
 
@@ -170,7 +168,6 @@ dependencies = [
  "plex",
  "regex",
  "serde",
- "serde_derive",
  "serde_json",
 ]
 
@@ -199,7 +196,6 @@ dependencies = [
  "rocket_contrib",
  "rocket_cors",
  "serde",
- "serde_derive",
  "serde_json",
  "toml 0.5.6",
  "uuid",

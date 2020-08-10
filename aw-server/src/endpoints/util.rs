@@ -4,6 +4,7 @@ use rocket::http::ContentType;
 use rocket::http::Status;
 use rocket::request::Request;
 use rocket::response::{self, Responder, Response};
+use serde::Serialize;
 
 #[derive(Serialize, Debug)]
 pub struct HttpErrorJson {

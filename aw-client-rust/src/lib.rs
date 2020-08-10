@@ -1,7 +1,6 @@
 extern crate gethostname;
 extern crate reqwest;
 #[macro_use]
-extern crate serde_derive;
 extern crate aw_models;
 extern crate serde_json;
 
@@ -11,12 +10,6 @@ use std::vec::Vec;
 use serde_json::Map;
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
-
-#[derive(Deserialize)]
-pub struct Info {
-    pub hostname: String,
-    pub testing: bool,
-}
 
 #[derive(Debug)]
 pub struct AwClient {
@@ -120,7 +113,7 @@ impl AwClient {
         Ok(count)
     }
 
-    pub fn get_info(&self) -> Result<Info, reqwest::Error> {
+    pub fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {
         let url = format!("{}/api/0/info", self.baseurl);
         Ok(self.client.get(&url).send()?.json()?)
     }

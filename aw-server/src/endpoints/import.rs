@@ -1,10 +1,9 @@
+use multipart::server::Multipart;
 use rocket::http::ContentType;
 use rocket::http::Status;
 use rocket::Data;
 use rocket::State;
 use rocket_contrib::json::Json;
-
-use multipart::server::Multipart;
 
 use std::io::Read;
 use std::sync::Mutex;

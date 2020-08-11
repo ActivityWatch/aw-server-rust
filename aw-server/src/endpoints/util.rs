@@ -4,11 +4,13 @@ use rocket::http::ContentType;
 use rocket::http::Status;
 use rocket::request::Request;
 use rocket::response::{self, Responder, Response};
+use rocket_okapi::JsonSchema;
 use serde::Serialize;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, JsonSchema, Debug)]
 pub struct HttpErrorJson {
-    #[serde(skip_serializing)]
+    #[serde(skip)]
+    #[schemars(skip)]
     status: Status,
     message: String,
 }
@@ -31,6 +33,20 @@ impl<'r> Responder<'r> for HttpErrorJson {
             .sized_body(Cursor::new(body))
             .header(ContentType::new("application", "json"))
             .ok()
+    }
+}
+
+use std::collections::BTreeMap;
+
+impl<'r> rocket_okapi::response::OpenApiResponder<'r> for HttpErrorJson {
+    fn responses(
+        _gen: &mut rocket_okapi::gen::OpenApiGenerator,
+    ) -> Result<okapi::openapi3::Responses, rocket_okapi::OpenApiError> {
+        Ok(okapi::openapi3::Responses {
+            default: None,
+            responses: BTreeMap::new(),
+            extensions: BTreeMap::new(),
+        })
     }
 }
 

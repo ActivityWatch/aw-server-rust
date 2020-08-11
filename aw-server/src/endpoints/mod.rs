@@ -2,9 +2,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use gethostname::gethostname;
+use rocket::get;
 use rocket::response::NamedFile;
 use rocket::State;
 use rocket_contrib::json::Json;
+use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
+use rocket_okapi::{openapi, routes_with_openapi};
 
 use crate::config::AWConfig;
 
@@ -58,6 +61,7 @@ fn root_favicon(state: State<ServerState>) -> Option<NamedFile> {
     NamedFile::open(state.asset_path.join("favicon.ico")).ok()
 }
 
+#[openapi]
 #[get("/")]
 fn server_info(config: State<AWConfig>, state: State<ServerState>) -> Json<Info> {
     #[allow(clippy::or_fun_call)]
@@ -70,6 +74,20 @@ fn server_info(config: State<AWConfig>, state: State<ServerState>) -> Json<Info>
         testing: config.testing,
         device_id: state.device_id.clone(),
     })
+}
+
+fn get_docs() -> SwaggerUIConfig {
+    use rocket_okapi::swagger_ui::UrlObject;
+
+    SwaggerUIConfig {
+        url: "/info/openapi.json".to_string(),
+        urls: vec![
+            UrlObject::new("Info", "/api/0/info/openapi.json"),
+            UrlObject::new("Bucket", "/api/0/buckets/openapi.json"),
+            UrlObject::new("Export", "/api/0/export/openapi.json"),
+        ],
+        ..Default::default()
+    }
 }
 
 pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rocket {
@@ -89,10 +107,10 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 root_static,
             ],
         )
-        .mount("/api/0/info", routes![server_info])
+        .mount("/api/0/info", routes_with_openapi![server_info])
         .mount(
             "/api/0/buckets",
-            routes![
+            routes_with_openapi![
                 bucket::bucket_new,
                 bucket::bucket_delete,
                 bucket::buckets_get,
@@ -110,7 +128,10 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             "/api/0/import",
             routes![import::bucket_import_json, import::bucket_import_form],
         )
-        .mount("/api/0/export", routes![export::buckets_export])
+        .mount(
+            "/api/0/export",
+            routes_with_openapi![export::buckets_export],
+        )
         .mount(
             "/api/0/settings",
             routes![
@@ -120,6 +141,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 settings::setting_delete
             ],
         )
+        .mount("/api", make_swagger_ui(&get_docs()))
         .attach(cors::cors(&config))
         .manage(server_state)
         .manage(config)

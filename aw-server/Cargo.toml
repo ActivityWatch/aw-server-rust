@@ -29,6 +29,9 @@ toml = "0.5"
 gethostname = "0.2"
 uuid = { version = "0.8", features = ["serde", "v4"] }
 getopts = "0.2"
+rocket_okapi = "0.5"
+schemars = "0.7"
+okapi = { version = "0.4", features = ["derive_json_schema"] }
 
 aw-datastore = { path = "../aw-datastore" }
 aw-models = { path = "../aw-models" }

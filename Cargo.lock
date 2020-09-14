@@ -1192,9 +1192,9 @@ dependencies = [
 
 [[package]]
 name = "mpsc_requests"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5710456a1fb0a99dcbd37d33af3874f32011675a9be47d0e8813306349afa84d"
+checksum = "5d778b8a8b7b31d8d23c8bbde4e571b483f3962dc9f14f447c14188e8a7fe85c"
 dependencies = [
  "crossbeam-channel",
 ]

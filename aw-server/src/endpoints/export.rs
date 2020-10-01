@@ -7,6 +7,7 @@ use rocket::response::Response;
 use rocket::State;
 
 use aw_models::BucketsExport;
+use aw_models::TryVec;
 
 use crate::endpoints::{HttpErrorJson, ServerState};
 
@@ -21,10 +22,11 @@ pub fn buckets_export(state: State<ServerState>) -> Result<Response, HttpErrorJs
         Err(err) => return Err(err.into()),
     };
     for (bid, mut bucket) in buckets.drain() {
-        bucket.events = Some(match datastore.get_events(&bid, None, None, None) {
+        let events = match datastore.get_events(&bid, None, None, None) {
             Ok(events) => events,
             Err(err) => return Err(err.into()),
-        });
+        };
+        bucket.events = Some(TryVec::new(events));
         export.buckets.insert(bid, bucket);
     }
 

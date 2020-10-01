@@ -9,6 +9,7 @@ use chrono::Utc;
 use aw_models::Bucket;
 use aw_models::BucketsExport;
 use aw_models::Event;
+use aw_models::TryVec;
 
 use rocket::http::Header;
 use rocket::http::Status;
@@ -174,11 +175,11 @@ pub fn bucket_export(
         Ok(bucket) => bucket,
         Err(err) => return Err(err.into()),
     };
-    bucket.events = Some(
-        datastore
-            .get_events(&bucket_id, None, None, None)
-            .expect("Failed to get events for bucket"),
-    );
+    /* TODO: Replace expect with http error */
+    let events = datastore
+        .get_events(&bucket_id, None, None, None)
+        .expect("Failed to get events for bucket");
+    bucket.events = Some(TryVec::new(events));
     export.buckets.insert(bucket_id.clone(), bucket);
     let filename = format!("aw-bucket-export_{}.json", bucket_id);
 

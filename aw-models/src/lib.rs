@@ -24,6 +24,7 @@ mod info;
 mod key_value;
 mod query;
 mod timeinterval;
+mod tryvec;
 
 pub use self::bucket::Bucket;
 pub use self::bucket::BucketMetadata;
@@ -34,3 +35,4 @@ pub use self::key_value::Key;
 pub use self::key_value::KeyValue;
 pub use self::query::Query;
 pub use self::timeinterval::TimeInterval;
+pub use self::tryvec::TryVec;

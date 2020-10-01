@@ -7,6 +7,7 @@ use serde_json::value::Value;
 use std::collections::HashMap;
 
 use crate::Event;
+use crate::TryVec;
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct Bucket {
@@ -22,7 +23,10 @@ pub struct Bucket {
     pub data: Map<String, Value>,
     #[serde(default, skip_deserializing)]
     pub metadata: BucketMetadata,
-    pub events: Option<Vec<Event>>, /* Should only be set during import/export */
+    // Events should only be "Some" during import/export
+    // It's using a TryVec to discard only the events which were failed to be serialized so only a
+    // few events are being dropped during import instead of failing the whole import
+    pub events: Option<TryVec<Event>>,
     pub last_updated: Option<DateTime<Utc>>, // TODO: Should probably be moved into metadata field
 }
 

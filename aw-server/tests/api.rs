@@ -107,7 +107,7 @@ mod api_tests {
         assert_eq!(bucket._type, "type");
         assert_eq!(bucket.client, "client");
         assert_eq!(bucket.hostname, "hostname");
-        assert_eq!(bucket.events, None);
+        assert!(bucket.events.is_none());
         assert_eq!(bucket.metadata.start, None);
         assert_eq!(bucket.metadata.end, None);
 
@@ -124,7 +124,7 @@ mod api_tests {
         assert_eq!(bucket._type, "type");
         assert_eq!(bucket.client, "client");
         assert_eq!(bucket.hostname, "hostname");
-        assert_eq!(bucket.events, None);
+        assert!(bucket.events.is_none());
         assert_eq!(bucket.metadata.start, None);
         assert_eq!(bucket.metadata.end, None);
 
@@ -374,7 +374,7 @@ mod api_tests {
         let mut buckets = export.buckets;
         assert_eq!(buckets.len(), 1);
         let b = buckets.remove("id1").unwrap();
-        assert_eq!(b.events.unwrap().len(), 1);
+        assert_eq!(b.events.unwrap().take_inner().len(), 1);
 
         assert_eq!(buckets.len(), 0);
     }

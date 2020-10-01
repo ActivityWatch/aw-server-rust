@@ -103,30 +103,7 @@ mod import {
             let timestamp_str: String = row.get(0)?;
             let duration_float: f64 = row.get(1)?;
             let data_str: String = row.get(2)?;
-
-            let timestamp_str = timestamp_str.replace(" ", "T");
-            let timestamp = match DateTime::parse_from_rfc3339(&timestamp_str) {
-                Ok(timestamp) => timestamp.with_timezone(&Utc),
-                Err(err) => panic!("Timestamp string {}: {:?}", timestamp_str, err),
-            };
-
-            let duration_ns = (duration_float * 1_000_000_000.0) as i64;
-
-            let data: serde_json::map::Map<String, serde_json::Value> =
-                match serde_json::from_str(&data_str) {
-                    Ok(data) => data,
-                    Err(err) => panic!(
-                        "Unable to parse JSON data in event from bucket {}\n{}\n{}",
-                        bucket_id, err, data_str
-                    ),
-                };
-
-            Ok(Event {
-                id: None,
-                timestamp,
-                duration: Duration::nanoseconds(duration_ns),
-                data,
-            })
+            Ok((timestamp_str, duration_float, data_str))
         }) {
             Ok(rows) => rows,
             Err(err) => {
@@ -139,7 +116,35 @@ mod import {
         let mut list = Vec::new();
         for row in rows {
             match row {
-                Ok(event) => list.push(event),
+                Ok((timestamp_str, duration_float, data_str)) => {
+                    let timestamp_str = timestamp_str.replace(" ", "T");
+                    let timestamp = match DateTime::parse_from_rfc3339(&timestamp_str) {
+                        Ok(timestamp) => timestamp.with_timezone(&Utc),
+                        Err(err) => panic!("Timestamp string {}: {:?}", timestamp_str, err),
+                    };
+
+                    let duration_ns = (duration_float * 1_000_000_000.0) as i64;
+
+                    let data: serde_json::map::Map<String, serde_json::Value> =
+                        match serde_json::from_str(&data_str) {
+                            Ok(data) => data,
+                            Err(err) => {
+                                warn!(
+                                    "Unable to parse JSON data in event from bucket {}\n{}\n{}",
+                                    bucket_id, err, data_str
+                                );
+                                continue;
+                            }
+                        };
+
+                    let event = Event {
+                        id: None,
+                        timestamp,
+                        duration: Duration::nanoseconds(duration_ns),
+                        data,
+                    };
+                    list.push(event)
+                }
                 Err(err) => panic!("Corrupt event in bucket {}: {}", bucket_id, err),
             };
         }

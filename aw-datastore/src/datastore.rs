@@ -373,7 +373,7 @@ impl DatastoreInstance {
                 self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
                 // Insert events
                 if let Some(events) = events {
-                    self.insert_events(conn, &bucket.id, events)?;
+                    self.insert_events(conn, &bucket.id, events.take_inner())?;
                     bucket.events = None;
                 }
                 Ok(())

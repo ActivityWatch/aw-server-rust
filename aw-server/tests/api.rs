@@ -14,6 +14,7 @@ mod api_tests {
 
     use chrono::{DateTime, Utc};
     use rocket::http::{ContentType, Header, Status};
+    use serde_json::{json, Value};
 
     use aw_server::config;
     use aw_server::endpoints;
@@ -459,10 +460,10 @@ mod api_tests {
         assert_eq!(res.body_string().unwrap(), r#"{"message":"EmptyQuery"}"#);
     }
 
-    fn set_setting_request(client: &Client, key: &str, value: &str) -> Status {
+    fn set_setting_request(client: &Client, key: &str, value: Value) -> Status {
         let body = serde_json::to_string(&KeyValue {
             key: key.to_string(),
-            value: value.to_string(),
+            value: value,
             timestamp: None,
         })
         .unwrap();
@@ -500,7 +501,7 @@ mod api_tests {
         let client = rocket::local::Client::new(server).expect("valid instance");
 
         // Test getting not found (getting nonexistent key)
-        let res = set_setting_request(&client, "thisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongk", "");
+        let res = set_setting_request(&client, "thisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongk", json!(""));
         assert_eq!(res, rocket::http::Status::BadRequest);
     }
 
@@ -510,7 +511,7 @@ mod api_tests {
         let client = rocket::local::Client::new(server).expect("valid instance");
 
         // Test value creation
-        let response_status = set_setting_request(&client, "test_key", "test_value");
+        let response_status = set_setting_request(&client, "test_key", json!("test_value"));
         assert_eq!(response_status, rocket::http::Status::Created);
     }
 
@@ -529,9 +530,9 @@ mod api_tests {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
-        let response1_status = set_setting_request(&client, "test_key", "");
+        let response1_status = set_setting_request(&client, "test_key", json!(""));
         assert_eq!(response1_status, rocket::http::Status::Created);
-        let response2_status = set_setting_request(&client, "test_key_2", "");
+        let response2_status = set_setting_request(&client, "test_key_2", json!(""));
         assert_eq!(response2_status, rocket::http::Status::Created);
 
         let mut res = client.get("/api/0/settings/").dispatch();
@@ -549,7 +550,7 @@ mod api_tests {
         let client = rocket::local::Client::new(server).expect("valid instance");
 
         let timestamp = Utc::now();
-        let response_status = set_setting_request(&client, "test_key", "test_value");
+        let response_status = set_setting_request(&client, "test_key", json!("test_value"));
         assert_eq!(response_status, rocket::http::Status::Created);
 
         // Test getting
@@ -569,7 +570,7 @@ mod api_tests {
         let client = rocket::local::Client::new(server).expect("valid instance");
 
         let timestamp = Utc::now();
-        let post_1_status = set_setting_request(&client, "test_key", "test_value");
+        let post_1_status = set_setting_request(&client, "test_key", json!("test_value"));
         assert_eq!(post_1_status, rocket::http::Status::Created);
 
         let mut res = client.get("/api/0/settings/test_key").dispatch();
@@ -583,7 +584,7 @@ mod api_tests {
         );
 
         let timestamp_2 = Utc::now();
-        let post_2_status = set_setting_request(&client, "test_key", "changed_test_value");
+        let post_2_status = set_setting_request(&client, "test_key", json!("changed_test_value"));
         assert_eq!(post_2_status, rocket::http::Status::Created);
 
         let mut res = client.get("/api/0/settings/test_key").dispatch();
@@ -602,7 +603,7 @@ mod api_tests {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");
 
-        let response_status = set_setting_request(&client, "test_key", "");
+        let response_status = set_setting_request(&client, "test_key", json!(""));
         assert_eq!(response_status, rocket::http::Status::Created);
 
         // Test deleting

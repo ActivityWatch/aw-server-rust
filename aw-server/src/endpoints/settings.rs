@@ -31,7 +31,7 @@ pub fn setting_set(
     let setting_key = parse_key(data.key)?;
 
     let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
-    let result = datastore.insert_key_value(&setting_key, &data.value);
+    let result = datastore.insert_key_value(&setting_key, &data.value.to_string());
 
     match result {
         Ok(_) => Ok(Status::Created),

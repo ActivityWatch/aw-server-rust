@@ -61,6 +61,10 @@ pub fn fill_env(env: &mut VarEnv) {
         ),
     );
     env.insert(
+        "union_events_split".to_string(),
+        DataType::Function("union_events_split".to_string(), qfunctions::union_events_split),
+    );
+    env.insert(
         "chunk_events_by_key".to_string(),
         DataType::Function(
             "chunk_events_by_key".to_string(),
@@ -380,6 +384,24 @@ mod qfunctions {
         let keys: Vec<String> = (&args[1]).try_into()?;
 
         let mut merged_events = aw_transform::merge_events_by_keys(events, keys);
+        let mut merged_tagged_events = Vec::new();
+        for event in merged_events.drain(..) {
+            merged_tagged_events.push(DataType::Event(event));
+        }
+        Ok(DataType::List(merged_tagged_events))
+    }
+
+    pub fn union_events_split(
+        args: Vec<DataType>,
+        _env: &VarEnv,
+        _ds: &Datastore,
+    ) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 2)?;
+        let events1: Vec<Event> = (&args[0]).try_into()?;
+        let events2: Vec<Event> = (&args[1]).try_into()?;
+
+        let mut merged_events = aw_transform::union_events_split(events1, &events2);
         let mut merged_tagged_events = Vec::new();
         for event in merged_events.drain(..) {
             merged_tagged_events.push(DataType::Event(event));

@@ -1,4 +1,4 @@
-use schemars::JsonSchema;
+use schemars::{gen::SchemaGenerator, schema::Schema, JsonSchema};
 use serde::de::{DeserializeOwned, SeqAccess, Visitor};
 use serde::export::PhantomData;
 use serde::ser::SerializeSeq;
@@ -7,17 +7,24 @@ use serde_json::Value;
 use std::fmt;
 use std::fmt::Debug;
 
-#[derive(Debug, Clone, JsonSchema)]
-#[serde(untagged)]
-// TODO: JsonSchema is invalid, we should only allow "Parsed" value as the
-// others will be dropped
-pub enum TryParse<T> {
+#[derive(Debug, Clone)]
+pub enum TryParse<T: JsonSchema> {
     Parsed(T),
     Unparsed(Value),
     NotPresent,
 }
 
-impl<'de, T: DeserializeOwned> Deserialize<'de> for TryParse<T> {
+impl<T: JsonSchema> JsonSchema for TryParse<T> {
+    fn schema_name() -> String {
+        format!("Try<{}>", std::any::type_name::<T>())
+    }
+
+    fn json_schema(gen: &mut SchemaGenerator) -> Schema {
+        gen.subschema_for::<T>()
+    }
+}
+
+impl<'de, T: DeserializeOwned + JsonSchema> Deserialize<'de> for TryParse<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match Option::<Value>::deserialize(deserializer)? {
             None => Ok(TryParse::NotPresent),
@@ -31,11 +38,11 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for TryParse<T> {
 
 #[derive(Debug, Clone, JsonSchema)]
 #[serde(transparent)]
-pub struct TryVec<T> {
+pub struct TryVec<T: JsonSchema> {
     inner: Vec<TryParse<T>>,
 }
 
-impl<T> TryVec<T> {
+impl<T: JsonSchema> TryVec<T> {
     pub fn new(mut vec: Vec<T>) -> Self {
         let mut vec_marked: Vec<TryParse<T>> = Vec::new();
         for item in vec.drain(..) {
@@ -60,7 +67,7 @@ impl<T> TryVec<T> {
     }
 }
 
-impl<T> Serialize for TryVec<T>
+impl<T: JsonSchema> Serialize for TryVec<T>
 where
     T: Serialize,
 {
@@ -79,11 +86,11 @@ where
     }
 }
 
-struct TryVecVisitor<T> {
+struct TryVecVisitor<T: JsonSchema> {
     marker: PhantomData<fn() -> TryVec<T>>,
 }
 
-impl<T> TryVecVisitor<T> {
+impl<T: JsonSchema> TryVecVisitor<T> {
     fn new() -> Self {
         TryVecVisitor {
             marker: PhantomData,
@@ -93,7 +100,7 @@ impl<T> TryVecVisitor<T> {
 
 impl<'de, T> Visitor<'de> for TryVecVisitor<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + JsonSchema,
 {
     type Value = TryVec<T>;
 
@@ -129,7 +136,7 @@ where
     }
 }
 
-impl<'de, T> Deserialize<'de> for TryVec<T>
+impl<'de, T: JsonSchema> Deserialize<'de> for TryVec<T>
 where
     T: DeserializeOwned,
 {
@@ -143,11 +150,12 @@ where
 
 #[cfg(test)]
 mod test {
+    use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
     use super::TryVec;
 
-    #[derive(Deserialize, Serialize, Debug)]
+    #[derive(Deserialize, Serialize, JsonSchema, Debug)]
     struct TestEvent {
         data: String,
     }

@@ -565,6 +565,48 @@ mod api_tests {
     }
 
     #[test]
+    fn test_getting_setting_multiple_types() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        let timestamp = Utc::now();
+
+        // Test array
+        let response_status = set_setting_request(&client, "test_key_array", json!("[1,2,3]"));
+        assert_eq!(response_status, rocket::http::Status::Created);
+
+        let mut res = client.get("/api/0/settings/test_key_array").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        _equal_and_timestamp_in_range(
+            timestamp,
+            deserialized,
+            KeyValue::new("settings.test_key_array", "[1,2,3]", Utc::now()),
+        );
+
+        // Test dict
+        let response_status = set_setting_request(
+            &client,
+            "test_key_dict",
+            json!("{key: 'value', another_key: 'another value'}"),
+        );
+        assert_eq!(response_status, rocket::http::Status::Created);
+
+        let mut res = client.get("/api/0/settings/test_key_dict").dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let deserialized: KeyValue = serde_json::from_str(&res.body_string().unwrap()).unwrap();
+        _equal_and_timestamp_in_range(
+            timestamp,
+            deserialized,
+            KeyValue::new(
+                "settings.test_key_dict",
+                "{key: 'value', another_key: 'another value'}",
+                Utc::now(),
+            ),
+        );
+    }
+
+    #[test]
     fn test_updating_setting() {
         let server = setup_testserver();
         let client = rocket::local::Client::new(server).expect("valid instance");

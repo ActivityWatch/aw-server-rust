@@ -1,43 +1,27 @@
 use std::collections::HashMap;
 
-use crate::functions;
-
 use aw_datastore::Datastore;
-use aw_models::TimeInterval;
 
 use crate::ast::*;
 use crate::DataType;
 use crate::QueryError;
-
-pub type VarEnv = HashMap<String, DataType>;
-
-fn init_env(ti: &TimeInterval) -> VarEnv {
-    let mut env = HashMap::new();
-    env.insert("TIMEINTERVAL".to_string(), DataType::String(ti.to_string()));
-    functions::fill_env(&mut env);
-    env
-}
+use crate::VarEnv;
 
 pub fn interpret_prog(
     p: Program,
-    ti: &TimeInterval,
+    env: &mut VarEnv,
     ds: &Datastore,
 ) -> Result<DataType, QueryError> {
-    let mut env = init_env(ti);
     for expr in p.stmts {
-        interpret_expr(&mut env, ds, expr)?;
+        interpret_expr(env, ds, expr)?;
     }
-    match env.remove("RETURN") {
+    match env.take("RETURN") {
         Some(ret) => Ok(ret),
         None => Err(QueryError::EmptyQuery()),
     }
 }
 
-fn interpret_expr(
-    env: &mut HashMap<String, DataType>,
-    ds: &Datastore,
-    expr: Expr,
-) -> Result<DataType, QueryError> {
+fn interpret_expr(env: &mut VarEnv, ds: &Datastore, expr: Expr) -> Result<DataType, QueryError> {
     use crate::ast::Expr_::*;
     match expr.node {
         Add(a, b) => {
@@ -184,9 +168,8 @@ fn interpret_expr(
             env.insert(var, val);
             Ok(DataType::None())
         }
-        // FIXME: avoid clone, it's slow
-        Var(var) => match env.get(&var) {
-            Some(v) => Ok(v.clone()),
+        Var(var) => match env.take(&var) {
+            Some(v) => Ok(v),
             None => Err(QueryError::VariableNotDefined(var.to_string())),
         },
         Bool(lit) => Ok(DataType::Bool(lit)),
@@ -195,6 +178,7 @@ fn interpret_expr(
         Return(e) => {
             let val = interpret_expr(env, ds, *e)?;
             // TODO: Once RETURN is deprecated we can fix this
+            env.declare("RETURN".to_string());
             env.insert("RETURN".to_string(), val);
             Ok(DataType::None())
         }
@@ -215,7 +199,7 @@ fn interpret_expr(
                 DataType::List(l) => l,
                 _ => unreachable!(),
             };
-            let var = match env.get(&fname[..]) {
+            let var = match env.take(&fname[..]) {
                 Some(v) => v,
                 None => return Err(QueryError::VariableNotDefined(fname.clone())),
             };

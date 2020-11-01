@@ -197,6 +197,19 @@ mod query_tests {
             aw_query::DataType::Number(n) => assert_eq!(n, 2.0),
             ref data => panic!("Wrong datatype, {:?}", data),
         };
+
+        // test missing return
+        let code = String::from("");
+        match aw_query::query(&code, &interval, &ds) {
+            Ok(ok) => panic!(format!("Expected QueryError, got {:?}", ok)),
+            Err(e) => match e {
+                QueryError::EmptyQuery() => (),
+                qe => panic!(format!(
+                    "Expected QueryError::EmptyQuery, got {:?}",
+                    qe
+                )),
+            },
+        };
     }
 
     #[test]

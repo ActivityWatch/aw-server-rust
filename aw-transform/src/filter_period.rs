@@ -1,4 +1,5 @@
 use aw_models::Event;
+use chrono::{DateTime, Utc};
 
 /// Removes events not intersecting with the provided filter_events
 ///
@@ -10,25 +11,32 @@ use aw_models::Event;
 ///
 /// # Example
 /// ```ignore
-/// events:        [a      ][b    ]
-/// filter_events: [     ]   [   ]
-/// output:        [a    ]   [b  ]
+/// events:        [a          ][b   ]
+/// filter_events: [     ]  [      ]
+/// output:        [a    ]  [a ][b ]
 /// ```
 pub fn filter_period_intersect(events: &[Event], filter_events: &[Event]) -> Vec<Event> {
     let mut filtered_events = Vec::new();
+
+    // Start with pre-calculating endtimes of events
+    let mut events_with_endtimes: Vec<(&Event, DateTime<Utc>)> = Vec::new();
+    for event in events {
+        events_with_endtimes.push((event, event.calculate_endtime()));
+    }
+
+    // Do actual filtering
     for filter in filter_events {
         let filter_endtime = filter.calculate_endtime();
-        for event in events {
+        for (event, event_endtime) in &events_with_endtimes {
             if event.timestamp > filter_endtime {
                 continue;
             }
-            let event_endtime = event.calculate_endtime();
-            if event_endtime < filter.timestamp {
+            if *event_endtime < filter.timestamp {
                 continue;
             }
-            let mut e = event.clone();
+            let mut e = (*event).clone();
             e.timestamp = std::cmp::max(e.timestamp, filter.timestamp);
-            let endtime = std::cmp::min(event_endtime, filter_endtime);
+            let endtime = std::cmp::min(*event_endtime, filter_endtime);
             e.duration = endtime - e.timestamp;
             filtered_events.push(e);
         }

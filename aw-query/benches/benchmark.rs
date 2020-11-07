@@ -35,19 +35,17 @@ mod query_benchmarks {
     use aw_models::Event;
     use aw_models::TimeInterval;
 
+    static BUCKETNAME: &str = "testbucket";
     static TIME_INTERVAL: &str = "1980-01-01T00:00:00Z/2080-01-02T00:00:00Z";
-    static BUCKET_ID: &str = "testid";
 
-    fn setup_datastore_empty() -> Datastore {
+    fn setup_datastore() -> Datastore {
         return Datastore::new_in_memory(false);
     }
 
-    fn setup_datastore_with_bucket() -> Datastore {
-        let ds = setup_datastore_empty();
-        // Create bucket
+    fn create_bucket(ds: &Datastore, bucketname: String) {
         let bucket = Bucket {
             bid: None,
-            id: BUCKET_ID.to_string(),
+            id: bucketname,
             _type: "testtype".to_string(),
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
@@ -58,35 +56,29 @@ mod query_benchmarks {
             last_updated: None,
         };
         ds.create_bucket(&bucket).unwrap();
-        return ds;
     }
 
-    fn setup_datastore_populated() -> Datastore {
-        let ds = setup_datastore_with_bucket();
-
+    fn insert_events(ds: &Datastore, bucketname: &str, num_events: i64) {
         let mut possible_data = Vec::<Map<String, Value>>::new();
         for i in 0..20 {
             possible_data.push(json_map! {"number": i});
         }
-        //
         let mut event_list = Vec::new();
-        for i in 0..3000 {
+        for i in 0..num_events {
             let e = Event {
                 id: None,
                 timestamp: chrono::Utc::now() + Duration::seconds(i),
-                duration: Duration::seconds(1),
+                duration: Duration::seconds(10),
                 data: possible_data[i as usize % 20].clone(),
             };
             event_list.push(e);
         }
-        ds.insert_events(&BUCKET_ID, &event_list).unwrap();
-
-        return ds;
+        ds.insert_events(bucketname, &event_list).unwrap();
     }
 
     #[bench]
     fn bench_assign(b: &mut Bencher) {
-        let ds = setup_datastore_empty();
+        let ds = setup_datastore();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
         b.iter(|| {
             let code = String::from("return a=1;");
@@ -99,14 +91,17 @@ mod query_benchmarks {
 
     #[bench]
     fn bench_many_events(b: &mut Bencher) {
-        let ds = setup_datastore_populated();
+        let ds = setup_datastore();
+        create_bucket(&ds, BUCKETNAME.to_string());
+        insert_events(&ds, &BUCKETNAME, 5000);
+
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
         b.iter(|| {
             let code = String::from(
                 "
-                events = query_bucket(\"testid\");
+                events = query_bucket(\"testbucket\");
                 return events;
-            ",
+                ",
             );
             aw_query::query(&code, &interval, &ds).unwrap();
         });

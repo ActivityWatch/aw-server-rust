@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
-use crate::functions;
+use tracing::debug_span;
 
 use aw_datastore::Datastore;
 use aw_models::TimeInterval;
 
+use crate::functions;
 use crate::ast::*;
 use crate::DataType;
 use crate::QueryError;
@@ -24,6 +25,7 @@ pub fn interpret_prog(
     ds: &Datastore,
 ) -> Result<DataType, QueryError> {
     let mut env = init_env(ti);
+    let _span = debug_span!("interpret");
     for expr in p.stmts {
         interpret_expr(&mut env, ds, expr)?;
     }

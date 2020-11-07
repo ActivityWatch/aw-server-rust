@@ -107,6 +107,8 @@ mod qfunctions {
     use std::convert::TryFrom;
     use std::convert::TryInto;
 
+    use tracing::trace_span;
+
     use aw_datastore::Datastore;
     use aw_models::Event;
     use aw_transform::classify::Rule;
@@ -132,6 +134,7 @@ mod qfunctions {
         env: &VarEnv,
         ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::query_bucket");
         // Typecheck
         validate::args_length(&args, 1)?;
         let bucket_id: String = (&args[0]).try_into()?;
@@ -163,6 +166,7 @@ mod qfunctions {
         _env: &VarEnv,
         ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::query_bucket_names");
         validate::args_length(&args, 0)?;
         let mut bucketnames: Vec<DataType> = Vec::new();
         let buckets = match ds.get_buckets() {
@@ -185,6 +189,7 @@ mod qfunctions {
         _env: &VarEnv,
         ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::find_bucket");
         validate::args_length(&args, 1)?;
         let bucket_filter: String = (&args[0]).try_into()?;
         let buckets = match ds.get_buckets() {
@@ -213,6 +218,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::contains");
         // typecheck
         validate::args_length(&args, 2)?;
         match args.get(0).unwrap() {
@@ -241,6 +247,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::flood");
         // typecheck
         validate::args_length(&args, 1)?;
         let events: Vec<Event> = (&args[0]).try_into()?;
@@ -259,6 +266,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::categorize");
         // typecheck
         validate::args_length(&args, 2)?;
         let events: Vec<Event> = Vec::try_from(&args[0])?;
@@ -278,6 +286,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::tag");
         // typecheck
         validate::args_length(&args, 2)?;
         let events: Vec<Event> = Vec::try_from(&args[0])?;
@@ -297,6 +306,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::sort_by_duration");
         // typecheck
         validate::args_length(&args, 1)?;
         let events: Vec<Event> = (&args[0]).try_into()?;
@@ -316,6 +326,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::limit_events");
         // typecheck
         validate::args_length(&args, 2)?;
         let mut events: Vec<Event> = (&args[0]).try_into()?;
@@ -336,6 +347,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::sort_by_timestamp");
         // typecheck
         validate::args_length(&args, 1)?;
         let events: Vec<Event> = (&args[0]).try_into()?;
@@ -355,6 +367,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::sum_durations");
         // typecheck
         validate::args_length(&args, 1)?;
         let mut events: Vec<Event> = (&args[0]).try_into()?;
@@ -374,6 +387,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::merge_events_by_keys");
         // typecheck
         validate::args_length(&args, 2)?;
         let events: Vec<Event> = (&args[0]).try_into()?;
@@ -392,6 +406,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::chunk_events_by_key");
         // typecheck
         validate::args_length(&args, 2)?;
         let events: Vec<Event> = (&args[0]).try_into()?;
@@ -410,6 +425,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::filter_keyvals");
         // typecheck
         validate::args_length(&args, 3)?;
         let events = (&args[0]).try_into()?;
@@ -431,6 +447,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::filter_keyvals_regex");
         // typecheck
         validate::args_length(&args, 3)?;
         let events = (&args[0]).try_into()?;
@@ -459,6 +476,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::filter_period_intersect");
         // typecheck
         validate::args_length(&args, 2)?;
         let events: Vec<Event> = (&args[0]).try_into()?;
@@ -477,6 +495,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::split_url_events");
         // typecheck
         validate::args_length(&args, 1)?;
         let mut events: Vec<Event> = (&args[0]).try_into()?;
@@ -494,6 +513,7 @@ mod qfunctions {
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        let _span = trace_span!("query::function_call::concat");
         let mut event_list = Vec::new();
         for arg in args {
             let mut events: Vec<Event> = (&arg).try_into()?;

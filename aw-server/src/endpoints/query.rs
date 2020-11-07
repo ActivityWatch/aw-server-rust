@@ -1,6 +1,7 @@
 use rocket::http::Status;
 use rocket::State;
 use rocket_contrib::json::{Json, JsonValue};
+use tracing::info_span;
 
 use aw_models::Query;
 
@@ -11,6 +12,7 @@ pub fn query(
     query_req: Json<Query>,
     state: State<ServerState>,
 ) -> Result<JsonValue, HttpErrorJson> {
+    let _span = info_span!("query");
     let query_code = query_req.0.query.join("\n");
     let intervals = &query_req.0.timeperiods;
     let mut results = Vec::new();

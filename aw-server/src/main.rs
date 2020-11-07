@@ -1,6 +1,9 @@
 #[macro_use]
 extern crate log;
 extern crate getopts;
+extern crate tracing;
+extern crate tracing_appender;
+extern crate tracing_subscriber;
 
 use getopts::Options;
 use rocket::config::Environment;
@@ -49,6 +52,19 @@ fn main() {
         };
     }
 
+    use tracing_subscriber::{fmt, Registry};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::fmt::format::FmtSpan;
+
+    let file_appender = tracing_appender::rolling::hourly("./logs", "log");
+    let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let subscriber = Registry::default()
+        .with(fmt::Layer::default().with_span_events(FmtSpan::CLOSE).with_writer(file_writer))
+        .with(fmt::Layer::default().with_span_events(FmtSpan::CLOSE).with_writer(std::io::stdout));
+
+    tracing::subscriber::set_global_default(subscriber).expect("unable to set global subscriber");
+
     logging::setup_logger(testing).expect("Failed to setup logging");
 
     let config = config::create_config(testing);
@@ -71,6 +87,7 @@ fn main() {
         device_id: device_id::get_device_id(),
     };
 
+    tracing::info!("starting");
     endpoints::build_rocket(server_state, config).launch();
 }
 

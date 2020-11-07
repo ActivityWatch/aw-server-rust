@@ -70,7 +70,7 @@ mod query_benchmarks {
         }
         //
         let mut event_list = Vec::new();
-        for i in 0..3000 {
+        for i in 0..30000 {
             let e = Event {
                 id: None,
                 timestamp: chrono::Utc::now() + Duration::seconds(i),
@@ -105,6 +105,15 @@ mod query_benchmarks {
             let code = String::from(
                 "
                 events = query_bucket(\"testid\");
+                events = events;
+                events = events;
+                events = events;
+                events = events;
+                events = events;
+                events = events;
+                events = events;
+                events = events;
+                events = events;
                 return events;
             ",
             );

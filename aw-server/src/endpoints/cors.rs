@@ -1,3 +1,14 @@
+/// Cross-Origin Resource Sharing is a way to specify the permissions websites that do not share the origin have.
+///
+/// However, it's a check done by the browser when a response has already been received (but before it's accessible by the origin site).
+/// As such, it does *not* protect against all kinds of cross-origin attacks. As an example, a GET
+/// requests which has side-effects will still have such effects, even though the response was
+/// blocked by the browser.
+///
+/// In many cases, pre-flight requests are made to check CORS before the real request is made.
+///
+/// For more info, see: https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
+///
 use rocket::http::Method;
 use rocket_cors::{AllowedHeaders, AllowedOrigins};
 

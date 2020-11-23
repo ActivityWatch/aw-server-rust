@@ -54,10 +54,9 @@ pub fn get_cache_dir() -> Result<PathBuf, ()> {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_log_dir() -> Result<PathBuf, ()> {
-    let mut dir = appdirs::user_cache_dir(Some("activitywatch"), None)?;
-    dir.push("log");
+    let mut dir = appdirs::user_log_dir(Some("activitywatch"), None)?;
     dir.push("aw-server-rust");
-    fs::create_dir_all(dir.clone()).expect("Unable to create cache dir");
+    fs::create_dir_all(dir.clone()).expect("Unable to create log dir");
     Ok(dir)
 }
 

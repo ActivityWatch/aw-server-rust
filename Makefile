@@ -26,11 +26,6 @@ endif
 test:
 	cargo test
 
-
-COV_CARGO_INCREMENTAL=0
-COV_RUSTFLAGS="-Zinstrument-coverage"
-COV_RUSTDOCFLAGS="-Cpanic=abort"
-
 test-coverage:
 ifndef COVERAGE_CACHE
 	# We need to remove build files in case a non-coverage test has been run
@@ -39,9 +34,7 @@ ifndef COVERAGE_CACHE
 endif
 	rm -rf **/*.profraw
 	# Build and test
-	env CARGO_INCREMENTAL=${COV_CARGO_INCREMENTAL} \
-	    RUSTFLAGS=${COV_RUSTFLAGS} \
-	    RUSTDOCFLAGS=${COV_RUSTDOCFLAGS} \
+	env RUSTFLAGS="-Zinstrument-coverage" \
 	    LLVM_PROFILE_FILE="grcov-%p-%m.profraw" \
 	    cargo test --verbose
 

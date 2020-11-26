@@ -58,6 +58,9 @@ jobs:
         key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-${{ env.cache-name }}-
+    - name:  Install llvm-tools
+      run: |
+        rustup component add llvm-tools-preview
     - name: Download grcov
       run: |
         curl -L https://github.com/mozilla/grcov/releases/latest/download/grcov-linux-x86_64.tar.bz2 | tar jxf -
@@ -67,7 +70,7 @@ jobs:
         export PATH=$PATH:.
         make coverage-lcov COVERAGE_CACHE=1
     - name: Upload coverage files
-      run: bash <(curl -s https://codecov.io/bash);
+      run: bash <(curl -s https://codecov.io/bash) -f target/debug/lcov.info;
 
   build-android:
     name: Build for Android

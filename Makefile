@@ -28,7 +28,7 @@ test:
 
 
 COV_CARGO_INCREMENTAL=0
-COV_RUSTFLAGS="-Zprofile -Ccodegen-units=1 -Copt-level=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests -Cpanic=abort"
+COV_RUSTFLAGS="-Zinstrument-coverage"
 COV_RUSTDOCFLAGS="-Cpanic=abort"
 
 test-coverage:
@@ -37,17 +37,23 @@ ifndef COVERAGE_CACHE
 	# before without RUST/CARGO flags needed for coverage
 	rm -rf target/debug
 endif
+	rm -rf **/*.profraw
 	# Build and test
-	CARGO_INCREMENTAL=${COV_CARGO_INCREMENTAL} \
-	RUSTFLAGS=${COV_RUSTFLAGS} \
-	RUSTDOCFLAGS=${COV_RUSTDOCFLAGS} \
-		cargo test --verbose
+	env CARGO_INCREMENTAL=${COV_CARGO_INCREMENTAL} \
+	    RUSTFLAGS=${COV_RUSTFLAGS} \
+	    RUSTDOCFLAGS=${COV_RUSTDOCFLAGS} \
+	    LLVM_PROFILE_FILE="grcov-%p-%m.profraw" \
+	    cargo test --verbose
+
+GRCOV_PARAMS=$(shell find . -name "grcov-*.profraw" -print) --binary-path=./target/debug/aw-server -s . --llvm --branch --ignore-not-existing
 
 coverage-html: test-coverage
-	grcov ./target/debug/ -s . -t html --llvm --branch --ignore-not-existing -o ./target/debug/$@/
+	grcov ${GRCOV_PARAMS} -t html -o ./target/debug/$@/
+	rm -rf **/*.profraw
 
 coverage-lcov: test-coverage
-	grcov ./target/debug/ -s . -t lcov --llvm --branch --ignore-not-existing -o ./target/debug/$@.txt
+	grcov ${GRCOV_PARAMS} -t lcov -o ./target/debug/lcov.info
+	rm -rf **/*.profraw
 
 coverage: coverage-html
 

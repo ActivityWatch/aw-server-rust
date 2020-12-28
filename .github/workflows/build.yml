@@ -18,6 +18,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Set up Rust nightly
+      id: toolchain
       uses: actions-rs/toolchain@v1
       with:
         profile: minimal
@@ -26,12 +27,13 @@ jobs:
     - name: Cache cargo build
       uses: actions/cache@v1
       env:
-        cache-name: cargo-build-target-2
+        cache-name: cargo-build-target
       with:
         path: target
-        key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+        # key needs to contain rustc_hash due to https://github.com/ActivityWatch/aw-server-rust/issues/180
+        key: ${{ runner.os }}-${{ env.cache-name }}-${{ steps.toolchain.outputs.rustc_hash }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-${{ env.cache-name }}-
+          ${{ runner.os }}-${{ env.cache-name }}-${{ steps.toolchain.outputs.rustc_hash }}-
     - name: Build
       run: cargo build --workspace --verbose
     - name: Run tests

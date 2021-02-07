@@ -1,6 +1,6 @@
+use core::marker::PhantomData;
 use schemars::{gen::SchemaGenerator, schema::Schema, JsonSchema};
 use serde::de::{DeserializeOwned, SeqAccess, Visitor};
-use serde::export::PhantomData;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;

@@ -9,9 +9,9 @@ use std::env;
 
 use aw_server::*;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86"))]
 extern crate jemallocator;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86"))]
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 

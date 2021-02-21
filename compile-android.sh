@@ -32,6 +32,7 @@ for archtargetstr in \
         export PATH="$NDK_ARCH_DIR:$ORIG_PATH"
         cargo build -p aw-server --target $target --lib $($RELEASE && echo '--release')
     else
-        echo "Couldn't find directory for target $arch"
+        echo "Couldn't find directory $NDK_ARCH_DIR"
+        exit 1
     fi
 done

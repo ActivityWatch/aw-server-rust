@@ -9,7 +9,7 @@ project_path="$(readlink -f "$script_dir/.")"
 
 if [ -z "$ANDROID_NDK_HOME" ]; then
     echo 'ANDROID_NDK_HOME not set, downloading NDK...';
-    wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-r20-linux-x86_64.zip;
+    wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-r21-linux-x86_64.zip;
     unzip -q -d NDK android-ndk.zip;
     ls NDK;
     mv NDK/*/* NDK/;
@@ -24,12 +24,12 @@ for arch in \
     'x86_64' \
     'i686' \
 ; do
-    sudo ln -s -f $NDK_TOOLCHAIN_BIN/$arch-linux-android26-clang $NDK_TOOLCHAIN_BIN/$arch-linux-android-clang
+    ln -s -f $NDK_TOOLCHAIN_BIN/$arch-linux-android26-clang $NDK_TOOLCHAIN_BIN/$arch-linux-android-clang
 done
 
 # This has a slightly different path from the ones above
-sudo ln -s -f $NDK_TOOLCHAIN_BIN/armv7a-linux-androideabi26-clang $NDK_TOOLCHAIN_BIN/armv7a-linux-androideabi-clang
-sudo ln -s -f $NDK_TOOLCHAIN_BIN/armv7a-linux-androideabi26-clang $NDK_TOOLCHAIN_BIN/arm-linux-androideabi-clang
+ln -s -f $NDK_TOOLCHAIN_BIN/armv7a-linux-androideabi26-clang $NDK_TOOLCHAIN_BIN/armv7a-linux-androideabi-clang
+ln -s -f $NDK_TOOLCHAIN_BIN/armv7a-linux-androideabi26-clang $NDK_TOOLCHAIN_BIN/arm-linux-androideabi-clang
 
 # Add to Rust
 echo "Setting up Rust toolchains..."
@@ -40,7 +40,7 @@ echo "Creating cargo config..."
 mkdir -p $project_path/.cargo
 echo "
 [target.aarch64-linux-android]
-ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-ar'
+ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar'
 linker = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang'
 
 [target.armv7-linux-androideabi]
@@ -48,10 +48,10 @@ ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-a
 linker = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi-clang'
 
 [target.i686-linux-android]
-ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-ar'
+ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android-ar'
 linker = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-clang'
 
 [target.x86_64-linux-android]
-ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-ar'
+ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android-ar'
 linker = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang'
 " > $project_path/.cargo/config

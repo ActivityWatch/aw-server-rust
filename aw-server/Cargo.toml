@@ -35,10 +35,10 @@ aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
 
-[target.'cfg(target_os="linux")'.dependencies]
+[target.'cfg(all(target_os="linux", target_arch="x86"))'.dependencies]
 jemallocator = "0.3.2"
 
-[target.'cfg(all(target_os="android", target_arch="x86"))'.dependencies]
+[target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.18", default-features = false }
 libc = "0.2"
 android_logger = "0.9"

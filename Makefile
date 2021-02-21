@@ -71,3 +71,6 @@ install:
 	# Install systemd user service
 	mkdir -p $(DESTDIR)$(PREFIX)/lib/systemd/user
 	install -m 644 aw-server.service $(DESTDIR)$(PREFIX)/lib/systemd/user/aw-server.service
+
+clean:
+	cargo clean

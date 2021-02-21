@@ -97,6 +97,7 @@ jobs:
           ${{ runner.os }}-${{ env.cache-name }}-
     - name: Install NDK
       run: |
+        export ANDROID_NDK_HOME=   # needed because GitHub Actions sets it by default...
         ./install-ndk.sh
     - name: Build
       run: |

@@ -115,7 +115,7 @@ jobs:
         # TODO: These binaries are debug builds
         name: binaries-android
         path: |
-          target/**/libaw_server.so
+          target/*/*/libaw_server.so
 
   lint:
     runs-on: ubuntu-latest

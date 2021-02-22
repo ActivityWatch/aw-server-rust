@@ -39,6 +39,11 @@ jobs:
       run: cargo build --workspace --verbose
     - name: Run tests
       run: cargo test --workspace --verbose
+    - uses: actions/upload-artifact@v2
+      with:
+        name: binaries-${{runner.os}}
+        path: |
+          target/*/aw-server
 
   build-coverage:
     name: Build with coverage
@@ -103,6 +108,11 @@ jobs:
       run: |
         export ANDROID_NDK_HOME=`pwd`/NDK
         ./compile-android.sh
+    - uses: actions/upload-artifact@v2
+      with:
+        name: binaries-android
+        path: |
+          target/**/libaw_server.so
 
   lint:
     runs-on: ubuntu-latest

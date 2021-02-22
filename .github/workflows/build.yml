@@ -41,9 +41,11 @@ jobs:
       run: cargo test --workspace --verbose
     - uses: actions/upload-artifact@v2
       with:
+        # TODO: These binaries are debug builds
         name: binaries-${{runner.os}}
         path: |
           target/*/aw-server
+          target/*/aw-server.exe
 
   build-coverage:
     name: Build with coverage
@@ -110,6 +112,7 @@ jobs:
         ./compile-android.sh
     - uses: actions/upload-artifact@v2
       with:
+        # TODO: These binaries are debug builds
         name: binaries-android
         path: |
           target/**/libaw_server.so

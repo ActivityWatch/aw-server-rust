@@ -34,7 +34,7 @@ mod import {
     use super::LegacyDatastoreImportError;
 
     fn dbfile_path() -> PathBuf {
-        let mut dir = appdirs::user_data_dir(Some("activitywatch"), None, false).unwrap();
+        let mut dir = appdirs::user_data_dir(Some("activitywatch"), Some("activitywatch"), false).unwrap();
         dir.push("aw-server");
         dir.push("peewee-sqlite.v2.db");
         dir
@@ -157,6 +157,7 @@ mod import {
     ) -> Result<(), LegacyDatastoreImportError> {
         let legacy_db_path = dbfile_path();
         if !legacy_db_path.exists() {
+            info!("Did not find an old database, skipping legacy import");
             return Ok(());
         }
         info!("Importing legacy DB");

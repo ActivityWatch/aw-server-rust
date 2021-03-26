@@ -34,7 +34,8 @@ mod import {
     use super::LegacyDatastoreImportError;
 
     fn dbfile_path() -> PathBuf {
-        let mut dir = appdirs::user_data_dir(Some("activitywatch"), Some("activitywatch"), false).unwrap();
+        let mut dir =
+            appdirs::user_data_dir(Some("activitywatch"), Some("activitywatch"), false).unwrap();
         dir.push("aw-server");
         dir.push("peewee-sqlite.v2.db");
         dir

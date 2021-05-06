@@ -44,3 +44,6 @@ pub use filter_period::filter_period_intersect;
 
 mod split_url;
 pub use split_url::split_url_event;
+
+mod union;
+pub use union::union_events_split;

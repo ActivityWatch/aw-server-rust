@@ -92,4 +92,21 @@ mod tests {
         assert_eq!(e_result[0].timestamp, dt);
         assert_eq!(e_result[0].duration, Duration::milliseconds(2000));
     }
+
+    /// Make sure nothing gets done when nothing to union (gaps present)
+    #[test]
+    fn test_period_union_nop() {
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"test": json!(1)},
+        };
+
+        let mut e2 = e1.clone();
+        e2.timestamp = DateTime::from_str("2000-01-01T00:00:03Z").unwrap();
+
+        let e_result = period_union(&[e1], &[e2]);
+        assert_eq!(e_result.len(), 2);
+    }
 }

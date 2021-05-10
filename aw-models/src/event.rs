@@ -7,6 +7,7 @@ use serde_json::Map;
 use serde_json::Value;
 
 use crate::duration::DurationSerialization;
+use crate::TimeInterval;
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct Event {
@@ -33,6 +34,9 @@ impl Event {
     pub fn calculate_endtime(&self) -> DateTime<Utc> {
         self.timestamp
             + chrono::Duration::nanoseconds(self.duration.num_nanoseconds().unwrap() as i64)
+    }
+    pub fn interval(&self) -> TimeInterval {
+        TimeInterval::new(self.timestamp, self.calculate_endtime())
     }
 }
 

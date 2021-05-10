@@ -1,3 +1,4 @@
+use std::cmp::{max, min};
 use std::fmt;
 
 use serde::de::{self, Deserialize, Deserializer, Visitor};
@@ -19,6 +20,7 @@ pub enum TimeIntervalError {
     ParseError(),
 }
 
+/// Python versions of many of these functions can be found at https://github.com/ErikBjare/timeslot
 impl TimeInterval {
     pub fn new(start: DateTime<Utc>, end: DateTime<Utc>) -> TimeInterval {
         TimeInterval { start, end }
@@ -51,6 +53,28 @@ impl TimeInterval {
 
     pub fn duration(&self) -> Duration {
         self.end - self.start
+    }
+
+    /// If intervals are separated by a non-zero gap, return the gap as a new TimeInterval, else None
+    pub fn gap(&self, other: &TimeInterval) -> Option<TimeInterval> {
+        if self.end < other.start {
+            Some(TimeInterval::new(self.end, other.start))
+        } else if other.end < self.start {
+            Some(TimeInterval::new(other.end, self.start))
+        } else {
+            None
+        }
+    }
+
+    /// Joins two intervals together if they don't have a gap, else None
+    pub fn union(&self, other: &TimeInterval) -> Option<TimeInterval> {
+        match self.gap(other) {
+            Some(_) => None,
+            None => Some(TimeInterval::new(
+                min(self.start, other.start),
+                max(self.end, other.end),
+            )),
+        }
     }
 }
 

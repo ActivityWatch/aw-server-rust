@@ -101,6 +101,10 @@ pub fn fill_env(env: &mut VarEnv) {
         "tag".to_string(),
         DataType::Function("tag".into(), qfunctions::tag),
     );
+    env.insert(
+        "period_union".to_string(),
+        DataType::Function("period_union".into(), qfunctions::period_union),
+    );
 }
 
 mod qfunctions {
@@ -502,6 +506,24 @@ mod qfunctions {
             }
         }
         Ok(DataType::List(event_list))
+    }
+
+    pub fn period_union(
+        args: Vec<DataType>,
+        _env: &VarEnv,
+        _ds: &Datastore,
+    ) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 2)?;
+        let events1: Vec<Event> = (&args[0]).try_into()?;
+        let events2: Vec<Event> = (&args[1]).try_into()?;
+
+        let mut result = aw_transform::filter_period_intersect(&events1, &events2);
+        let mut result_tagged = Vec::new();
+        for event in result.drain(..) {
+            result_tagged.push(DataType::Event(event));
+        }
+        Ok(DataType::List(result_tagged))
     }
 }
 

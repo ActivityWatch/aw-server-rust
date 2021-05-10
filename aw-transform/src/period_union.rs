@@ -1,6 +1,5 @@
 use super::sort::sort_by_timestamp;
 use aw_models::Event;
-use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 
 /// Takes a list of two events and returns a new list of events covering the union
@@ -47,11 +46,13 @@ pub fn period_union(events1: &[Event], events2: &[Event]) -> Vec<Event> {
         }
     }
 
-    // for event in merged_events:
-    //     # Clear data
-    //     event.data = {}
-
     events_union
+        .drain(..)
+        .map(|mut e| {
+            e.data = json_map! {};
+            e
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -101,7 +101,7 @@ mod test {
         );
         client.heartbeat(&bucketname, &event, 10.0).unwrap();
 
-        let events = client.get_events(&bucketname).unwrap();
+        let events = client.get_events(&bucketname, None, None, None).unwrap();
         println!("Events: {:?}", events);
         assert!(events[0].duration == Duration::seconds(1));
 

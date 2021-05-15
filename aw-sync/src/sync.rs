@@ -43,9 +43,9 @@ impl AccessMethod for Datastore {
         self.get_bucket(bucket_id)
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        let res = self.create_bucket(bucket)?;
+        self.create_bucket(bucket)?;
         self.force_commit().unwrap();
-        Ok(res)
+        Ok(())
     }
     fn get_events(
         &self,
@@ -85,23 +85,23 @@ impl AccessMethod for AwClient {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
-        Ok(self.get_events(bucket_id).unwrap())
+        Ok(self.get_events(bucket_id, start, end, limit).unwrap())
     }
-    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String> {
+    fn insert_events(&self, _bucket_id: &str, _events: Vec<Event>) -> Result<Vec<Event>, String> {
         //Ok(self.insert_events(bucket_id, &events[..]).unwrap())
         Err("Not implemented".to_string())
     }
-    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
+    fn get_event_count(&self, _bucket_id: &str) -> Result<i64, String> {
         //Ok(self.get_event_count(bucket_id, None, None).unwrap())
         Err("Not implemented".to_string())
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        Ok(self
-            .create_bucket(bucket.id.as_str(), bucket._type.as_str())
-            .unwrap())
+        self.create_bucket(bucket.id.as_str(), bucket._type.as_str())
+            .unwrap();
+        Ok(())
         //Err(DatastoreError::InternalError("Not implemented".to_string()))
     }
-    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<Event, String> {
+    fn heartbeat(&self, _bucket_id: &str, _event: Event, _duration: f64) -> Result<Event, String> {
         Err("Not implemented".to_string())
     }
 }
@@ -216,7 +216,7 @@ fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &dyn AccessMethod) -> 
             ds_to.create_bucket(&bucket_new).unwrap();
             ds_to.get_bucket(new_id.as_str()).unwrap()
         }
-        Err(e) => panic!(e),
+        Err(e) => panic!("{:?}", e),
     }
 }
 

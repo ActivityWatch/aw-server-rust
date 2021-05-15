@@ -6,6 +6,7 @@
 /// It manages a sync-folder by syncing the aw-server datastore with a copy/staging datastore in the folder (one for each host).
 /// The sync folder is then synced with remotes using Syncthing/Dropbox/whatever.
 extern crate chrono;
+extern crate reqwest;
 extern crate serde_json;
 
 use std::collections::HashMap;
@@ -14,6 +15,7 @@ use std::path::Path;
 
 use aw_client_rust::AwClient;
 use chrono::{DateTime, Duration, Utc};
+use reqwest::StatusCode;
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Bucket, Event};
@@ -76,7 +78,19 @@ impl AccessMethod for AwClient {
         Ok(self.get_buckets().unwrap())
     }
     fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        Ok(self.get_bucket(bucket_id).unwrap())
+        let bucket = self.get_bucket(bucket_id);
+        match bucket {
+            Ok(bucket) => Ok(bucket),
+            Err(e) => {
+                warn!("{:?}", e);
+                let code = e.status().unwrap();
+                if code == StatusCode::NOT_FOUND {
+                    Err(DatastoreError::NoSuchBucket(bucket_id.into()))
+                } else {
+                    panic!("Unexpected error");
+                }
+            }
+        }
     }
     fn get_events(
         &self,
@@ -91,9 +105,8 @@ impl AccessMethod for AwClient {
         //Ok(self.insert_events(bucket_id, &events[..]).unwrap())
         Err("Not implemented".to_string())
     }
-    fn get_event_count(&self, _bucket_id: &str) -> Result<i64, String> {
-        //Ok(self.get_event_count(bucket_id, None, None).unwrap())
-        Err("Not implemented".to_string())
+    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
+        Ok(self.get_event_count(bucket_id).unwrap())
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
         self.create_bucket(bucket.id.as_str(), bucket._type.as_str())
@@ -113,14 +126,15 @@ pub fn sync_run() {
     fs::create_dir_all(sync_directory).unwrap();
 
     // TODO: Use the local datastore here, preferably passed from main
-    let ds_local = Datastore::new(
-        sync_directory
-            .join("test-local.db")
-            .into_os_string()
-            .into_string()
-            .unwrap(),
-        false,
-    );
+    let ds_local = AwClient::new("127.0.0.1", "5666", "aw-sync-rust");
+    //let ds_local = Datastore::new(
+    //    sync_directory
+    //        .join("test-local.db")
+    //        .into_os_string()
+    //        .into_string()
+    //        .unwrap(),
+    //    false,
+    //);
     info!("Set up local datastore");
     //log_buckets(&ds_local)?;
 
@@ -185,8 +199,7 @@ fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
                     timestamp.to_rfc3339(),
                     i
                 );
-                let event = serde_json::from_str(&event_jsonstr).unwrap();
-                event
+                serde_json::from_str(&event_jsonstr).unwrap()
             })
             .collect::<Vec<Event>>();
 

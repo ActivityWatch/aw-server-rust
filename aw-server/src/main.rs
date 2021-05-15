@@ -32,6 +32,8 @@ fn main() {
     opts.optopt("", "port", "port to listent to", "PORT");
     opts.optopt("", "dbpath", "path to database", "PATH");
 
+    opts.optflag("", "no-legacy-import", "don't import from aw-server-python");
+
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
         Err(f) => panic!("{}", f.to_string()),
@@ -76,10 +78,12 @@ fn main() {
     let asset_path = get_asset_path();
     info!("Using aw-webui assets at path {:?}", asset_path);
 
+    let legacy_import = !matches.opt_present("no-legacy-import");
+
     let server_state = endpoints::ServerState {
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
-        datastore: Mutex::new(aw_datastore::Datastore::new(db_path, true)),
+        datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
         asset_path,
         device_id: device_id::get_device_id(),
     };

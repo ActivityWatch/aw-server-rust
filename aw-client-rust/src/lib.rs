@@ -35,7 +35,7 @@ impl AwClient {
 
     pub fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        let bucket: Bucket = self.client.get(&url).send()?.json()?;
+        let bucket = self.client.get(&url).send()?.error_for_status()?.json()?;
         Ok(bucket)
     }
 
@@ -128,8 +128,8 @@ impl AwClient {
 
     pub fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events/count", self.baseurl, bucketname);
-        let res = self.client.get(&url).send()?.text()?;
-        let count: i64 = match res.parse() {
+        let res = self.client.get(&url).send()?.error_for_status()?.text()?;
+        let count: i64 = match res.trim().parse() {
             Ok(count) => count,
             Err(err) => panic!("could not parse get_event_count response: {:?}", err),
         };

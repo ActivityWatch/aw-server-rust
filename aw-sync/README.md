@@ -23,15 +23,15 @@ cargo run --bin aw-server -- --testing --port $PORT --dbpath test-$PORT.sqlite -
 
 You can create some test data by opening `http://localhost:5667/#/stopwatch` and creating a few events.
 
-Then run `cargo run --bin aw-sync-rust` to sync your instance's buckets with the target directory.
+Then run `cargo run --bin aw-sync-rust -- --port 5667` to sync your instance's buckets with the target directory.
 
 ### Pulling from the sync directory
 
 Now to sync things back from the sync directory onto another instance. First, lets start another instance:
 
-```
+```sh
 PORT=5668
 cargo run --bin aw-server -- --testing --port $PORT --dbpath test-$PORT.sqlite --device-id $PORT --no-legacy-import
 ```
 
-Now run `aw-sync-rust` again.
+Now run `cargo run --bin aw-sync-rust -- --port 5668` to pull buckets from the sync dir (retrieving events from the 5667 instance) and push buckets from the 5668 instance to the sync dir.

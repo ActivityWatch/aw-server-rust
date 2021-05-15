@@ -19,13 +19,13 @@ Features missing compared to the Python implementation of aw-server:
 
 Install rust nightly with `rustup`:
 
-```
+```sh
 rustup default nightly
 ```
 
 Build with `cargo`:
 
-```
+```sh
 cargo build --release 
 ```
 
@@ -36,8 +36,12 @@ Your built executable will be located in `./target/release/aw-server-rust`
 
 If you want to quick-compile for debugging, run cargo run from the project root:
 
-```
+```sh
 cargo run --bin aw-server
 ```
 
 *NOTE:* This will start aw-server-rust in testing mode (on port 5666 instead of port 5600).
+
+### Syncing
+
+For details about aw-sync-rust, see the [README](./aw-sync/README.md) in its subdirectory.

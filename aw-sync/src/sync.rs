@@ -11,7 +11,7 @@ extern crate serde_json;
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aw_client_rust::AwClient;
 use chrono::{DateTime, Duration, Utc};
@@ -124,8 +124,6 @@ impl AccessMethod for AwClient {
 pub fn sync_run(sync_directory: &Path, client: AwClient) {
     fs::create_dir_all(sync_directory).unwrap();
 
-    // TODO: Get device id and use to name db file
-
     let info = client.get_info().unwrap();
     let ds_localremote = Datastore::new(
         sync_directory
@@ -137,18 +135,27 @@ pub fn sync_run(sync_directory: &Path, client: AwClient) {
     );
     info!("Set up remote for local device");
 
-    let ds_remotes = setup_test(sync_directory).unwrap();
-    info!("Set up remotes for testing");
+    //let ds_remotes = setup_test(sync_directory).unwrap();
+    //info!("Set up remotes for testing");
+
+    let remote_dbfiles = find_remotes_nonlocal(sync_directory, info.device_id.as_str());
+    info!("Found remotes: {:?}", remote_dbfiles);
+    let ds_remotes: Vec<Datastore> = remote_dbfiles.iter().map(create_datastore).collect();
 
     // Pull
     info!("Pulling...");
     for ds_from in &ds_remotes {
-        sync_datastores(ds_from, &client, false);
+        sync_datastores(ds_from, &client, false, None);
     }
 
     // Push local server buckets to sync folder
     info!("Pushing...");
-    sync_datastores(&client, &ds_localremote, true);
+    sync_datastores(
+        &client,
+        &ds_localremote,
+        true,
+        Some(info.device_id.as_str()),
+    );
 
     log_buckets(&client);
     log_buckets(&ds_localremote);
@@ -157,17 +164,41 @@ pub fn sync_run(sync_directory: &Path, client: AwClient) {
     }
 }
 
+fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let files = fs::read_dir(sync_directory)?
+        .map(|res| res.ok().unwrap())
+        .map(|e| e.path())
+        .filter(|path| path.extension().unwrap() == "db") // FIXME: Is this the correct file ext?
+        .collect();
+    Ok(files)
+}
+
+fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf> {
+    let remotes_all = find_remotes(sync_directory).unwrap();
+    // Filter out own remote
+    remotes_all
+        .into_iter()
+        .filter(|path| {
+            !path
+                .clone()
+                .into_os_string()
+                .into_string()
+                .unwrap()
+                .contains(device_id)
+        })
+        .collect()
+}
+
+fn create_datastore(dspath: &PathBuf) -> Datastore {
+    let pathstr = dspath.clone().into_os_string().into_string().unwrap();
+    Datastore::new(pathstr, false)
+}
+
 fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
     let mut datastores: Vec<Datastore> = Vec::new();
     for n in 0..2 {
-        let ds_ = Datastore::new(
-            sync_directory
-                .join(format!("test-remote-{}.db", n))
-                .into_os_string()
-                .into_string()
-                .unwrap(),
-            false,
-        );
+        let dspath = sync_directory.join(format!("test-remote-{}.db", n));
+        let ds_ = create_datastore(&dspath);
         let ds = &ds_ as &dyn AccessMethod;
 
         // Create a bucket
@@ -226,9 +257,16 @@ fn get_or_create_sync_bucket(
     let new_id = if is_push {
         bucket_from.id.clone()
     } else {
-        // Ensure the bucket ID ends in "-synced"
+        // Ensure the bucket ID ends in "-synced-from-{device id}"
         let orig_bucketid = bucket_from.id.split("-synced-from-").next().unwrap();
-        format!("{}-synced-from-{}", orig_bucketid, bucket_from.hostname)
+        let fallback = serde_json::to_value(&bucket_from.hostname).unwrap();
+        let origin = bucket_from
+            .data
+            .get("$aw.sync.origin")
+            .unwrap_or(&fallback)
+            .as_str()
+            .unwrap();
+        format!("{}-synced-from-{}", orig_bucketid, origin)
     };
 
     match ds_to.get_bucket(new_id.as_str()) {
@@ -250,19 +288,32 @@ fn get_or_create_sync_bucket(
 }
 
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
-fn sync_datastores(ds_from: &dyn AccessMethod, ds_to: &dyn AccessMethod, is_push: bool) {
+fn sync_datastores(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    is_push: bool,
+    src_did: Option<&str>,
+) {
     // FIXME: "-synced" should only be appended when synced to the local database, not to the
     // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
 
-    let buckets_from = ds_from.get_buckets().unwrap();
-    for bucket_from in buckets_from.values() {
-        // TODO: Refuse to sync buckets without hostname/device ID set, or if set to 'unknown'
-        if bucket_from.hostname == "unknown" {
-            warn!("Bucket hostname/device ID was invalid, skipping");
-            continue;
-        }
-        let bucket_to = get_or_create_sync_bucket(bucket_from, ds_to, is_push);
+    let buckets_from: Vec<Bucket> = ds_from
+        .get_buckets()
+        .unwrap()
+        .iter_mut()
+        .map(|tup| {
+            // TODO: Refuse to sync buckets without hostname/device ID set, or if set to 'unknown'
+            if tup.1.hostname == "unknown" {
+                warn!("Bucket hostname/device ID was invalid, setting to device ID/hostname");
+                tup.1.hostname = src_did.unwrap().to_string();
+            }
+            tup.1.clone()
+        })
+        .collect();
+
+    for bucket_from in buckets_from {
+        let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push);
         let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
         info!("Bucket: {:?}", bucket_to.id);
 
@@ -286,7 +337,6 @@ fn sync_datastores(ds_from: &dyn AccessMethod, ds_to: &dyn AccessMethod, is_push
             .map(|e| {
                 let mut new_e = e.clone();
                 new_e.id = None;
-                //info!("{:?}", new_e);
                 new_e
             })
             .collect();

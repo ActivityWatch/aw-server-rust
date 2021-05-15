@@ -6,9 +6,22 @@ extern crate serde_json;
 
 use std::path::Path;
 
+use clap::{AppSettings, Clap};
+
 use aw_client_rust::AwClient;
 
 mod sync;
+
+#[derive(Clap)]
+#[clap(version = "1.0", author = "Erik Bjäreholt")]
+#[clap(setting = AppSettings::ColoredHelp)]
+struct Opts {
+    /// Sets a custom config file. Could have been an Option<T> with no default too
+    #[clap(long, default_value = "127.0.0.1")]
+    host: String,
+    #[clap(long, default_value = "5666")]
+    port: String,
+}
 
 fn main() {
     // What needs to be done:
@@ -19,13 +32,16 @@ fn main() {
     //     - [ ] For which local server to use
     //     - [ ] For which sync dir to use
 
+    let opts: Opts = Opts::parse();
+
     println!("Started aw-sync-rust...");
+
     aw_server::logging::setup_logger(true).expect("Failed to setup logging");
 
     // TODO: Get path using dirs module
     let sync_directory = Path::new("sync-testing");
 
-    let client = AwClient::new("127.0.0.1", "5667", "aw-sync-rust");
+    let client = AwClient::new(opts.host.as_str(), opts.port.as_str(), "aw-sync-rust");
 
     sync::sync_run(sync_directory, client);
     info!("Finished successfully, exiting...");

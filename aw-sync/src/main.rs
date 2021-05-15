@@ -13,12 +13,13 @@ use aw_client_rust::AwClient;
 mod sync;
 
 #[derive(Clap)]
-#[clap(version = "1.0", author = "Erik Bjäreholt")]
+#[clap(version = "0.1", author = "Erik Bjäreholt")]
 #[clap(setting = AppSettings::ColoredHelp)]
 struct Opts {
-    /// Sets a custom config file. Could have been an Option<T> with no default too
+    /// Host of instance to connect to
     #[clap(long, default_value = "127.0.0.1")]
     host: String,
+    /// Port of instance to connect to
     #[clap(long, default_value = "5666")]
     port: String,
 }

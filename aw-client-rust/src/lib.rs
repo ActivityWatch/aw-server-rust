@@ -1,12 +1,12 @@
+extern crate aw_models;
 extern crate gethostname;
 extern crate reqwest;
-#[macro_use]
-extern crate aw_models;
 extern crate serde_json;
 
 use std::collections::HashMap;
 use std::vec::Vec;
 
+use chrono::{DateTime, Utc};
 use serde_json::Map;
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
@@ -67,15 +67,37 @@ impl AwClient {
         Ok(())
     }
 
-    pub fn get_events(&self, bucketname: &str) -> Result<Vec<Event>, reqwest::Error> {
-        let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
-        Ok(self.client.get(&url).send()?.json()?)
+    pub fn get_events(
+        &self,
+        bucketname: &str,
+        start: Option<DateTime<Utc>>,
+        stop: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, reqwest::Error> {
+        let mut url = reqwest::Url::parse(
+            format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname).as_str(),
+        )
+        .unwrap();
+
+        // Must be a better way to build URLs
+        if let Some(s) = start {
+            url.query_pairs_mut()
+                .append_pair("start", s.to_rfc3339().as_str());
+        };
+        if let Some(s) = stop {
+            url.query_pairs_mut()
+                .append_pair("end", s.to_rfc3339().as_str());
+        };
+        if let Some(s) = limit {
+            url.query_pairs_mut()
+                .append_pair("limit", s.to_string().as_str());
+        };
+        self.client.get(url).send()?.json()
     }
 
     pub fn insert_event(&self, bucketname: &str, event: &Event) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
-        let mut eventlist = Vec::new();
-        eventlist.push(event.clone());
+        let eventlist = vec![event.clone()];
         self.client.post(&url).json(&eventlist).send()?;
         Ok(())
     }

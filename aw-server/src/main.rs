@@ -29,6 +29,9 @@ fn main() {
     let mut opts = Options::new();
     opts.optflag("", "testing", "run in testing mode");
     opts.optflag("h", "help", "print this help menu");
+    opts.optopt("", "port", "port to listent to", "PORT");
+    opts.optopt("", "dbpath", "path to database", "PATH");
+
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
         Err(f) => panic!("{}", f.to_string()),
@@ -51,13 +54,23 @@ fn main() {
 
     logging::setup_logger(testing).expect("Failed to setup logging");
 
-    let config = config::create_config(testing);
+    let mut config = config::create_config(testing);
 
-    let db_path = dirs::db_path(testing)
-        .expect("Failed to get db path")
-        .to_str()
-        .unwrap()
-        .to_string();
+    // Set port if overridden
+    if let Ok(Some(port)) = matches.opt_get("port") {
+        config.port = port;
+    }
+
+    // Set db path if overridden
+    let db_path: String = if let Ok(Some(dbpath)) = matches.opt_get("dbpath") {
+        dbpath
+    } else {
+        dirs::db_path(testing)
+            .expect("Failed to get db path")
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
     info!("Using DB at path {:?}", db_path);
 
     let asset_path = get_asset_path();

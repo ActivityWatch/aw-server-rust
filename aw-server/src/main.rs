@@ -31,6 +31,7 @@ fn main() {
     opts.optflag("h", "help", "print this help menu");
     opts.optopt("", "port", "port to listent to", "PORT");
     opts.optopt("", "dbpath", "path to database", "PATH");
+    opts.optopt("", "device-id", "device ID override", "ID");
 
     opts.optflag("", "no-legacy-import", "don't import from aw-server-python");
 
@@ -80,12 +81,18 @@ fn main() {
 
     let legacy_import = !matches.opt_present("no-legacy-import");
 
+    let device_id: String = if let Ok(Some(id)) = matches.opt_get("device-id") {
+        id
+    } else {
+        device_id::get_device_id()
+    };
+
     let server_state = endpoints::ServerState {
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
         datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
         asset_path,
-        device_id: device_id::get_device_id(),
+        device_id,
     };
 
     endpoints::build_rocket(server_state, config).launch();

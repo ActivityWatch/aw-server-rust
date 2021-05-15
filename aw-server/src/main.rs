@@ -1,11 +1,10 @@
 #[macro_use]
 extern crate log;
-extern crate getopts;
-
-use getopts::Options;
-use rocket::config::Environment;
 
 use std::env;
+
+use clap::{AppSettings, Clap};
+use rocket::config::Environment;
 
 use aw_server::*;
 
@@ -15,36 +14,37 @@ extern crate jemallocator;
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
-fn print_usage(program: &str, opts: Options) {
-    let brief = format!("Usage: {} FILE [options]", program);
-    print!("{}", opts.usage(&brief));
+/// Rust server for ActivityWatch
+#[derive(Clap)]
+#[clap(version = "0.10", author = "Johan Bjäreholt, Erik Bjäreholt")]
+#[clap(setting = AppSettings::ColoredHelp)]
+struct Opts {
+    /// Run in testing mode
+    #[clap(long)]
+    testing: bool,
+    /// Address to listen to
+    #[clap(long)]
+    host: Option<String>,
+    /// Port to listen on
+    #[clap(long)]
+    port: Option<String>,
+    /// Path to database override
+    #[clap(long)]
+    dbpath: Option<String>,
+    /// Device ID override
+    #[clap(long)]
+    device_id: Option<String>,
+    /// Don't import from aw-server-python if no aw-server-rust db found
+    #[clap(long)]
+    no_legacy_import: bool,
 }
 
 fn main() {
+    let opts: Opts = Opts::parse();
+
     use std::sync::Mutex;
 
-    let args: Vec<String> = env::args().collect();
-    let program = args[0].clone();
-
-    let mut opts = Options::new();
-    opts.optflag("", "testing", "run in testing mode");
-    opts.optflag("h", "help", "print this help menu");
-    opts.optopt("", "port", "port to listent to", "PORT");
-    opts.optopt("", "dbpath", "path to database", "PATH");
-    opts.optopt("", "device-id", "device ID override", "ID");
-
-    opts.optflag("", "no-legacy-import", "don't import from aw-server-python");
-
-    let matches = match opts.parse(&args[1..]) {
-        Ok(m) => m,
-        Err(f) => panic!("{}", f.to_string()),
-    };
-    if matches.opt_present("h") {
-        print_usage(&program, opts);
-        return;
-    }
-
-    let mut testing = matches.opt_present("testing");
+    let mut testing = opts.testing;
     // Always override environment if --testing is specified
     if !testing {
         let env = Environment::active().expect("Failed to get current environment");
@@ -59,13 +59,18 @@ fn main() {
 
     let mut config = config::create_config(testing);
 
-    // Set port if overridden
-    if let Ok(Some(port)) = matches.opt_get("port") {
-        config.port = port;
+    // set host if overridden
+    if let Some(host) = opts.host {
+        config.address = host;
+    }
+
+    // set port if overridden
+    if let Some(port) = opts.port {
+        config.port = port.parse().unwrap();
     }
 
     // Set db path if overridden
-    let db_path: String = if let Ok(Some(dbpath)) = matches.opt_get("dbpath") {
+    let db_path: String = if let Some(dbpath) = opts.dbpath {
         dbpath
     } else {
         dirs::db_path(testing)
@@ -79,9 +84,9 @@ fn main() {
     let asset_path = get_asset_path();
     info!("Using aw-webui assets at path {:?}", asset_path);
 
-    let legacy_import = !matches.opt_present("no-legacy-import");
+    let legacy_import = !opts.no_legacy_import;
 
-    let device_id: String = if let Ok(Some(id)) = matches.opt_get("device-id") {
+    let device_id: String = if let Some(id) = opts.device_id {
         id
     } else {
         device_id::get_device_id()

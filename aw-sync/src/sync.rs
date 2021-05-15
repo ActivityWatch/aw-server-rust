@@ -288,7 +288,7 @@ fn get_or_create_sync_bucket(
 }
 
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
-fn sync_datastores(
+pub fn sync_datastores(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     is_push: bool,

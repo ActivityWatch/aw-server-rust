@@ -101,7 +101,7 @@ mod sync_tests {
         let state = init_teststate();
         create_bucket(&state.ds_src, 0);
 
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
 
         let buckets_src: HashMap<String, Bucket> = state.ds_src.get_buckets().unwrap();
         let buckets_dest: HashMap<String, Bucket> = state.ds_dest.get_buckets().unwrap();
@@ -111,8 +111,8 @@ mod sync_tests {
     fn check_synced_buckets_equal_to_src(all_buckets_map: &HashMap<String, (&Datastore, Bucket)>) {
         for (ds, bucket) in all_buckets_map.values() {
             if bucket.id.contains("-synced") {
-                let bucket_src_id = bucket.id.replace("-synced", "");
-                let (ds_src, bucket_src) = all_buckets_map.get(&bucket_src_id).unwrap();
+                let bucket_src_id = bucket.id.split("-synced-").next().unwrap();
+                let (ds_src, bucket_src) = all_buckets_map.get(bucket_src_id).unwrap();
                 let events_synced = ds.get_events(bucket.id.as_str(), None, None, None).unwrap();
                 let events_src = ds_src
                     .get_events(bucket_src.id.as_str(), None, None, None)
@@ -136,7 +136,7 @@ mod sync_tests {
             .heartbeat(bucket_id.as_str(), create_event("1"), 1.0)
             .unwrap();
 
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
 
         let all_datastores: Vec<&Datastore> =
             [&state.ds_src, &state.ds_dest].iter().cloned().collect();
@@ -150,7 +150,7 @@ mod sync_tests {
             .ds_src
             .heartbeat(bucket_id.as_str(), create_event("1"), 1.0)
             .unwrap();
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);
@@ -163,7 +163,7 @@ mod sync_tests {
         let bucket_id = create_bucket(&state.ds_src, 0);
         create_events(&state.ds_src, bucket_id.as_str(), 10);
 
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
 
         let all_datastores: Vec<&Datastore> =
             [&state.ds_src, &state.ds_dest].iter().cloned().collect();
@@ -174,7 +174,7 @@ mod sync_tests {
 
         // Add some more events
         create_events(&state.ds_src, bucket_id.as_str(), 10);
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest);
+        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);

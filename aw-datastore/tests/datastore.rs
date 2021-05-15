@@ -183,6 +183,43 @@ mod datastore_tests {
         assert_eq!(event_count, 2);
     }
 
+    /// Tests that events that cover a timeperiod get included when that timeperiod is queried.
+    #[test]
+    fn test_get_events_filters_cover() {
+        // TODO: Also test event-cutoff, although perhaps that happens in the transforms/queries?
+
+        // Setup datastore
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+
+        let now = Utc::now();
+
+        // Insert event
+        let e1 = Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(100),
+            data: json_map! {"key": json!("value")},
+        };
+
+        let event_list = [e1.clone()];
+        ds.insert_events(&bucket.id, &event_list).unwrap();
+
+        info!("Get event that covers queried timeperiod");
+        let query_start = now + Duration::seconds(1);
+        let query_end = query_start + Duration::seconds(1);
+        let fetched_events_limit = ds
+            .get_events(&bucket.id, Some(query_start), Some(query_end), Some(1))
+            .unwrap();
+        assert_eq!(fetched_events_limit.len(), 1);
+
+        // Get eventcount
+        let event_count = ds
+            .get_event_count(&bucket.id, Some(query_start), Some(query_end))
+            .unwrap();
+        assert_eq!(event_count, 1);
+    }
+
     #[test]
     fn test_events_delete() {
         // Setup datastore

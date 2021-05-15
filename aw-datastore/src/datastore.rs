@@ -792,7 +792,8 @@ impl DatastoreInstance {
             "
             SELECT count(*) FROM events
             WHERE bucketrow = ?1
-                AND (starttime >= ?2 OR endtime <= ?3)",
+                AND endtime >= ?2 
+                AND starttime <= ?3",
         ) {
             Ok(stmt) => stmt,
             Err(err) => {

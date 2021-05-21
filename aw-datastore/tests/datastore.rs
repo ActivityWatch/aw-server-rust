@@ -111,7 +111,7 @@ mod datastore_tests {
         // Delete bucket
         match ds.delete_bucket(&bucket.id) {
             Ok(_) => info!("bucket successfully deleted"),
-            Err(e) => panic!(e),
+            Err(e) => panic!("{:?}", e),
         }
         match ds.get_bucket(&bucket.id) {
             Ok(_) => {

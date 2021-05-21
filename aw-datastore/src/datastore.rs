@@ -163,7 +163,7 @@ fn _migrate_v3_to_v4(conn: &Connection) {
         value TEXT,
         last_modified NUMBER NOT NULL
     );",
-        rusqlite::NO_PARAMS,
+        [],
     )
     .expect("Failed to upgrade db and add key-value storage table");
 
@@ -792,7 +792,7 @@ impl DatastoreInstance {
             "
             SELECT count(*) FROM events
             WHERE bucketrow = ?1
-                AND endtime >= ?2 
+                AND endtime >= ?2
                 AND starttime <= ?3",
         ) {
             Ok(stmt) => stmt,

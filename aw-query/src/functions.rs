@@ -518,7 +518,7 @@ mod qfunctions {
         let events1: Vec<Event> = (&args[0]).try_into()?;
         let events2: Vec<Event> = (&args[1]).try_into()?;
 
-        let mut result = aw_transform::filter_period_intersect(&events1, &events2);
+        let mut result = aw_transform::period_union(&events1, &events2);
         let mut result_tagged = Vec::new();
         for event in result.drain(..) {
             result_tagged.push(DataType::Event(event));

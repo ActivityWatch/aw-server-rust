@@ -138,6 +138,7 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // Typecheck
         validate::args_length(&args, 1)?;
+
         let bucket_id: String = (&args[0]).try_into()?;
         let interval = validate::get_timeinterval(env)?;
 
@@ -189,8 +190,14 @@ mod qfunctions {
         _env: &VarEnv,
         ds: &Datastore,
     ) -> Result<DataType, QueryError> {
-        validate::args_length(&args, 1)?;
+        validate::args_length(&args, 1).or_else(|_| validate::args_length(&args, 2))?;
+
         let bucket_filter: String = (&args[0]).try_into()?;
+        let hostname_filter: Option<String> = match args.len() {
+            2 => Some((&args[1]).try_into()?),
+            _ => None,
+        };
+
         let buckets = match ds.get_buckets() {
             Ok(buckets) => buckets,
             Err(e) => {
@@ -200,15 +207,16 @@ mod qfunctions {
                 )))
             }
         };
-        let bucketname = match aw_transform::find_bucket(&bucket_filter, buckets.keys()) {
-            Some(bucketname) => bucketname,
-            None => {
-                return Err(QueryError::BucketQueryError(format!(
-                    "Couldn't find any bucket which starts with {}",
-                    bucket_filter
-                )));
-            }
-        };
+        let bucketname =
+            match aw_transform::find_bucket(&bucket_filter, &hostname_filter, buckets.values()) {
+                Some(bucketname) => bucketname,
+                None => {
+                    return Err(QueryError::BucketQueryError(format!(
+                        "Couldn't find any bucket which starts with {}",
+                        bucket_filter
+                    )));
+                }
+            };
         Ok(DataType::String(bucketname))
     }
 

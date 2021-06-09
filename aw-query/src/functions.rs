@@ -68,6 +68,10 @@ pub fn fill_env(env: &mut VarEnv) {
         ),
     );
     env.insert(
+        "exclude_keyvals".to_string(),
+        DataType::Function("exclude_keyvals".to_string(), qfunctions::exclude_keyvals),
+    );
+    env.insert(
         "filter_keyvals".to_string(),
         DataType::Function("filter_keyvals".to_string(), qfunctions::filter_keyvals),
     );
@@ -459,6 +463,25 @@ mod qfunctions {
         };
 
         let mut filtered_events = aw_transform::filter_keyvals_regex(events, &key, &regex);
+        let mut filtered_tagged_events = Vec::new();
+        for event in filtered_events.drain(..) {
+            filtered_tagged_events.push(DataType::Event(event));
+        }
+        Ok(DataType::List(filtered_tagged_events))
+    }
+
+    pub fn exclude_keyvals(
+        args: Vec<DataType>,
+        _env: &VarEnv,
+        _ds: &Datastore,
+    ) -> Result<DataType, QueryError> {
+        // typecheck
+        validate::args_length(&args, 3)?;
+        let events = (&args[0]).try_into()?;
+        let key: String = (&args[1]).try_into()?;
+        let vals: Vec<_> = (&args[2]).try_into()?;
+
+        let mut filtered_events = aw_transform::exclude_keyvals(events, &key, &vals);
         let mut filtered_tagged_events = Vec::new();
         for event in filtered_events.drain(..) {
             filtered_tagged_events.push(DataType::Event(event));

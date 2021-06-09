@@ -50,6 +50,30 @@ pub fn filter_keyvals_regex(mut events: Vec<Event>, key: &str, regex: &Regex) ->
     filtered_events
 }
 
+/// Drops events matching the specified key and value(s). Opposite of filter_keyvals.
+///
+/// # Example
+/// ```ignore
+///  key: a
+///  vals: [1,2]
+///  input:  [a:1][a:2][a:3][b:4]
+///  output: [a:3][b:4]
+/// ```
+pub fn exclude_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<Event> {
+    let mut filtered_events = Vec::new();
+    'events: for event in events.drain(..) {
+        if let Some(v) = event.data.get(key) {
+            for val in vals {
+                if val == v {
+                    continue 'events;
+                }
+            }
+        }
+        filtered_events.push(event);
+    }
+    filtered_events
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -61,7 +85,7 @@ mod tests {
 
     use aw_models::Event;
 
-    use super::{filter_keyvals, filter_keyvals_regex};
+    use super::{exclude_keyvals, filter_keyvals, filter_keyvals_regex};
 
     #[test]
     fn test_filter_keyvals() {
@@ -107,5 +131,21 @@ mod tests {
         assert_eq!(0, res.len());
         let res = filter_keyvals_regex(events.clone(), "key3", &regex_value);
         assert_eq!(0, res.len());
+    }
+
+    #[test]
+    fn test_exclude_keyvals() {
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"test": json!(1)},
+        };
+        let mut e2 = e1.clone();
+        e2.data = json_map! {"test": json!(1), "test2": json!(2)};
+        let mut e3 = e1.clone();
+        e3.data = json_map! {"test": json!(2)};
+        let res = exclude_keyvals(vec![e1.clone(), e2.clone(), e3], "test", &vec![json!(2)]);
+        assert_eq!(vec![e1, e2], res);
     }
 }

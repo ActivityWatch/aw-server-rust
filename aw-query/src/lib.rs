@@ -21,9 +21,11 @@ mod lexer;
     unused_braces
 )]
 mod parser;
+mod preprocess;
+mod varenv;
 
 pub use crate::datatype::DataType;
-pub use crate::interpret::VarEnv;
+pub use crate::varenv::VarEnv;
 
 // TODO: add line numbers to errors
 // (works during lexing, but not during parsing I believe)
@@ -50,6 +52,13 @@ impl fmt::Display for QueryError {
     }
 }
 
+fn init_env(ti: &TimeInterval) -> VarEnv {
+    let mut env = VarEnv::new();
+    env.declare_static("TIMEINTERVAL".to_string(), DataType::String(ti.to_string()));
+    functions::fill_env(&mut env);
+    env
+}
+
 pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
     let lexer = lexer::Lexer::new(code);
     let program = match parser::parse(lexer) {
@@ -60,5 +69,7 @@ pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, 
             return Err(QueryError::ParsingError(format!("{:?}", e)));
         }
     };
-    interpret::interpret_prog(program, ti, ds)
+    let mut env = init_env(ti);
+    preprocess::preprocess_prog(&program, &mut env, ds)?;
+    interpret::interpret_prog(program, &mut env, ds)
 }

@@ -7,97 +7,97 @@ pub type QueryFn =
     fn(args: Vec<DataType>, env: &VarEnv, ds: &Datastore) -> Result<DataType, QueryError>;
 
 pub fn fill_env(env: &mut VarEnv) {
-    env.insert(
+    env.declare_static(
         "print".to_string(),
         DataType::Function("print".to_string(), qfunctions::print),
     );
-    env.insert(
+    env.declare_static(
         "query_bucket".to_string(),
         DataType::Function("query_bucket".to_string(), qfunctions::query_bucket),
     );
-    env.insert(
+    env.declare_static(
         "query_bucket_names".to_string(),
         DataType::Function(
             "query_bucket_names".to_string(),
             qfunctions::query_bucket_names,
         ),
     );
-    env.insert(
+    env.declare_static(
         "sort_by_duration".to_string(),
         DataType::Function("sort_by_duration".to_string(), qfunctions::sort_by_duration),
     );
-    env.insert(
+    env.declare_static(
         "sort_by_timestamp".to_string(),
         DataType::Function(
             "sort_by_timestamp".to_string(),
             qfunctions::sort_by_timestamp,
         ),
     );
-    env.insert(
+    env.declare_static(
         "sum_durations".to_string(),
         DataType::Function("sum_durations".to_string(), qfunctions::sum_durations),
     );
-    env.insert(
+    env.declare_static(
         "limit_events".to_string(),
         DataType::Function("limit_events".to_string(), qfunctions::limit_events),
     );
-    env.insert(
+    env.declare_static(
         "contains".to_string(),
         DataType::Function("contains".to_string(), qfunctions::contains),
     );
-    env.insert(
+    env.declare_static(
         "flood".to_string(),
         DataType::Function("flood".to_string(), qfunctions::flood),
     );
-    env.insert(
+    env.declare_static(
         "find_bucket".to_string(),
         DataType::Function("find_bucket".to_string(), qfunctions::find_bucket),
     );
-    env.insert(
+    env.declare_static(
         "merge_events_by_keys".to_string(),
         DataType::Function(
             "merge_events_by_keys".to_string(),
             qfunctions::merge_events_by_keys,
         ),
     );
-    env.insert(
+    env.declare_static(
         "chunk_events_by_key".to_string(),
         DataType::Function(
             "chunk_events_by_key".to_string(),
             qfunctions::chunk_events_by_key,
         ),
     );
-    env.insert(
+    env.declare_static(
         "filter_keyvals".to_string(),
         DataType::Function("filter_keyvals".to_string(), qfunctions::filter_keyvals),
     );
-    env.insert(
+    env.declare_static(
         "filter_keyvals_regex".to_string(),
         DataType::Function(
             "filter_keyvals_regex".to_string(),
             qfunctions::filter_keyvals_regex,
         ),
     );
-    env.insert(
+    env.declare_static(
         "filter_period_intersect".to_string(),
         DataType::Function(
             "filter_period_intersect".to_string(),
             qfunctions::filter_period_intersect,
         ),
     );
-    env.insert(
+    env.declare_static(
         "split_url_events".to_string(),
         DataType::Function("split_url_events".to_string(), qfunctions::split_url_events),
     );
-    env.insert(
+    env.declare_static(
         "concat".to_string(),
         DataType::Function("concat".to_string(), qfunctions::concat),
     );
-    env.insert(
+    env.declare_static(
         "categorize".to_string(),
         DataType::Function("categorize".into(), qfunctions::categorize),
     );
-    env.insert(
+    env.declare_static(
         "tag".to_string(),
         DataType::Function("tag".into(), qfunctions::tag),
     );
@@ -551,7 +551,7 @@ mod validate {
     }
 
     pub fn get_timeinterval(env: &VarEnv) -> Result<TimeInterval, QueryError> {
-        let interval_str = match env.get("TIMEINTERVAL") {
+        let interval_str = match env.deprecated_get("TIMEINTERVAL") {
             Some(data_ti) => match data_ti {
                 DataType::String(ti_str) => ti_str,
                 _ => {

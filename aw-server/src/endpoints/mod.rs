@@ -77,7 +77,12 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
         "Starting aw-server-rust at {}:{}",
         config.address, config.port
     );
+    let cors = cors::cors(&config);
     rocket::custom(config.to_rocket_config())
+        .attach(cors.clone())
+        .manage(cors)
+        .manage(server_state)
+        .manage(config)
         .mount(
             "/",
             routes![
@@ -120,7 +125,5 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 settings::setting_delete
             ],
         )
-        .attach(cors::cors(&config))
-        .manage(server_state)
-        .manage(config)
+        .mount("/", rocket_cors::catch_all_options_routes())
 }

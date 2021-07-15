@@ -655,4 +655,17 @@ mod api_tests {
         let res = client.get("/api/0/settings/test_key").dispatch();
         assert_eq!(res.status(), rocket::http::Status::NotFound);
     }
+
+    #[test]
+    fn test_cors_catching() {
+        let server = setup_testserver();
+        let client = rocket::local::Client::new(server).expect("valid instance");
+
+        let mut res = client
+            .options("/api/0/buckets/")
+            .header(ContentType::JSON)
+            .dispatch();
+        debug!("{:?}", res.body_string());
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
 }

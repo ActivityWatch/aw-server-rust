@@ -4,12 +4,14 @@ use rocket_contrib::json::{Json, JsonValue};
 
 use aw_models::Query;
 
+use crate::endpoints::hostcheck::HostCheck;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[post("/", data = "<query_req>", format = "application/json")]
 pub fn query(
     query_req: Json<Query>,
     state: State<ServerState>,
+    _hc: HostCheck,
 ) -> Result<JsonValue, HttpErrorJson> {
     let query_code = query_req.0.query.join("\n");
     let intervals = &query_req.0.timeperiods;

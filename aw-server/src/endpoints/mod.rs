@@ -22,6 +22,7 @@ mod util;
 mod bucket;
 mod cors;
 mod export;
+mod hostcheck;
 mod import;
 mod query;
 mod settings;

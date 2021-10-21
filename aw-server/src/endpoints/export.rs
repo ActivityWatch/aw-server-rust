@@ -9,10 +9,14 @@ use rocket::State;
 use aw_models::BucketsExport;
 use aw_models::TryVec;
 
+use crate::endpoints::hostcheck::HostCheck;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[get("/")]
-pub fn buckets_export(state: State<ServerState>) -> Result<Response, HttpErrorJson> {
+pub fn buckets_export(
+    state: State<ServerState>,
+    _hc: HostCheck,
+) -> Result<Response, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let mut export = BucketsExport {
         buckets: HashMap::new(),

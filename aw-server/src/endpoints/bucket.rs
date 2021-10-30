@@ -16,13 +16,11 @@ use rocket::http::Status;
 use rocket::response::Response;
 use rocket::State;
 
-use crate::endpoints::hostcheck::HostCheck;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[get("/")]
 pub fn buckets_get(
     state: State<ServerState>,
-    _hc: HostCheck,
 ) -> Result<Json<HashMap<String, Bucket>>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.get_buckets() {
@@ -35,7 +33,6 @@ pub fn buckets_get(
 pub fn bucket_get(
     bucket_id: String,
     state: State<ServerState>,
-    _hc: HostCheck,
 ) -> Result<Json<Bucket>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.get_bucket(&bucket_id) {
@@ -49,7 +46,6 @@ pub fn bucket_new(
     bucket_id: String,
     message: Json<Bucket>,
     state: State<ServerState>,
-    _hc: HostCheck,
 ) -> Result<(), HttpErrorJson> {
     let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
@@ -70,7 +66,6 @@ pub fn bucket_events_get(
     end: Option<String>,
     limit: Option<u64>,
     state: State<ServerState>,
-    _hc: HostCheck,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     let starttime: Option<DateTime<Utc>> = match start {
         Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
@@ -113,7 +108,6 @@ pub fn bucket_events_create(
     bucket_id: String,
     events: Json<Vec<Event>>,
     state: State<ServerState>,
-    _hc: HostCheck,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let res = datastore.insert_events(&bucket_id, &events);
@@ -133,7 +127,6 @@ pub fn bucket_events_heartbeat(
     heartbeat_json: Json<Event>,
     pulsetime: f64,
     state: State<ServerState>,
-    _hc: HostCheck,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let heartbeat = heartbeat_json.into_inner();
     let datastore = endpoints_get_lock!(state.datastore);
@@ -147,7 +140,6 @@ pub fn bucket_events_heartbeat(
 pub fn bucket_event_count(
     bucket_id: String,
     state: State<ServerState>,
-    _hc: HostCheck,
 ) -> Result<Json<u64>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let res = datastore.get_event_count(&bucket_id, None, None);
@@ -162,7 +154,6 @@ pub fn bucket_events_delete_by_id(
     bucket_id: String,
     event_id: i64,
     state: State<ServerState>,
-    _hc: HostCheck,
 ) -> Result<(), HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.delete_events_by_id(&bucket_id, vec![event_id]) {
@@ -175,7 +166,6 @@ pub fn bucket_events_delete_by_id(
 pub fn bucket_export(
     bucket_id: String,
     state: State<ServerState>,
-    _hc: HostCheck,
 ) -> Result<Response, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let mut export = BucketsExport {
@@ -204,11 +194,7 @@ pub fn bucket_export(
 }
 
 #[delete("/<bucket_id>")]
-pub fn bucket_delete(
-    bucket_id: String,
-    state: State<ServerState>,
-    _hc: HostCheck,
-) -> Result<(), HttpErrorJson> {
+pub fn bucket_delete(bucket_id: String, state: State<ServerState>) -> Result<(), HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.delete_bucket(&bucket_id) {
         Ok(_) => Ok(()),

@@ -79,8 +79,10 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
         config.address, config.port
     );
     let cors = cors::cors(&config);
+    let hostcheck = hostcheck::HostCheck::new(&config);
     rocket::custom(config.to_rocket_config())
         .attach(cors.clone())
+        .attach(hostcheck)
         .manage(cors)
         .manage(server_state)
         .manage(config)

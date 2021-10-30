@@ -13,7 +13,6 @@ use aw_models::BucketsExport;
 
 use aw_datastore::Datastore;
 
-use crate::endpoints::hostcheck::HostCheck;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), HttpErrorJson> {
@@ -35,7 +34,6 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
 pub fn bucket_import_json(
     state: State<ServerState>,
     json_data: Json<BucketsExport>,
-    _hc: HostCheck,
 ) -> Result<(), HttpErrorJson> {
     import(&state.datastore, json_data.into_inner())
 }
@@ -47,7 +45,6 @@ pub fn bucket_import_form(
     state: State<ServerState>,
     cont_type: &ContentType,
     data: Data,
-    _hc: HostCheck,
 ) -> Result<(), HttpErrorJson> {
     let (_, boundary) = cont_type
         .params()

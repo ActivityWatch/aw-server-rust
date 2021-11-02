@@ -3,7 +3,7 @@ extern crate log;
 
 use std::env;
 
-use clap::{AppSettings, Clap};
+use clap::Parser;
 use rocket::config::Environment;
 
 use aw_server::*;
@@ -15,9 +15,8 @@ extern crate jemallocator;
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 /// Rust server for ActivityWatch
-#[derive(Clap)]
+#[derive(Parser)]
 #[clap(version = "0.10", author = "Johan Bjäreholt, Erik Bjäreholt")]
-#[clap(setting = AppSettings::ColoredHelp)]
 struct Opts {
     /// Run in testing mode
     #[clap(long)]

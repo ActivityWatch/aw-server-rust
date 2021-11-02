@@ -6,15 +6,14 @@ extern crate serde_json;
 
 use std::path::Path;
 
-use clap::{AppSettings, Clap};
+use clap::Parser;
 
 use aw_client_rust::AwClient;
 
 mod sync;
 
-#[derive(Clap)]
+#[derive(Parser)]
 #[clap(version = "0.1", author = "Erik Bjäreholt")]
-#[clap(setting = AppSettings::ColoredHelp)]
 struct Opts {
     /// Host of instance to connect to
     #[clap(long, default_value = "127.0.0.1")]

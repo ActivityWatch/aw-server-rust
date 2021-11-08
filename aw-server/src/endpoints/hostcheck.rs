@@ -13,6 +13,7 @@ use rocket::http::{Method, Status};
 use rocket::{Data, Request, Rocket, Route};
 
 use crate::config::AWConfig;
+use crate::endpoints::HttpErrorJson;
 
 static FAIRING_ROUTE_BASE: &str = "/checkheader_fairing";
 
@@ -29,8 +30,9 @@ impl HostCheck {
 }
 
 /// Route for HostCheck Fairing error
-fn fairing_error_route<'r>(_request: &'r Request<'_>, _: Data) -> Outcome<'r> {
-    Outcome::Failure(Status::BadRequest)
+fn fairing_error_route<'r>(req: &'r Request<'_>, _: Data) -> Outcome<'r> {
+    let err = HttpErrorJson::new(Status::BadRequest, "Host header is invalid".to_string());
+    Outcome::from(req, err)
 }
 
 /// Create a new `Route` for Fairing handling

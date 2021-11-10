@@ -89,7 +89,7 @@ impl Fairing for HostCheck {
             return;
         }
 
-        // Deny requests from hosts that are not localhost
+        // Deny requests to hosts that are not localhost
         let valid_hosts: Vec<&str> = vec!["127.0.0.1", "localhost"];
         let host = host_opt.unwrap();
         if !valid_hosts.contains(&host) {
@@ -97,7 +97,7 @@ impl Fairing for HostCheck {
             redirect_bad_request(request);
         }
 
-        // host is verified, proceed with request
+        // host header is verified, proceed with request
     }
 }
 

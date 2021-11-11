@@ -50,10 +50,10 @@ pub fn bucket_import_form(
         .params()
         .find(|&(k, _)| k == "boundary")
         .ok_or_else(|| {
-            return HttpErrorJson::new(
+            HttpErrorJson::new(
                 Status::BadRequest,
                 "`Content-Type: multipart/form-data` boundary param not provided".to_string(),
-            );
+            )
         })?;
 
     let string = process_multipart_packets(boundary, data);

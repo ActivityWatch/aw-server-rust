@@ -1,7 +1,8 @@
 use std::fs::File;
 use std::io::{Read, Write};
 
-use rocket::config::{Config, Environment, Limits};
+use rocket::config::Config;
+use rocket::data::{Limits, ToByteUnit};
 use serde::{Deserialize, Serialize};
 
 use crate::dirs;
@@ -42,21 +43,23 @@ impl Default for AWConfig {
 
 impl AWConfig {
     pub fn to_rocket_config(&self) -> rocket::Config {
-        let env = if self.testing {
-            Environment::Production
+        let mut config = if self.testing {
+            Config::release_default()
         } else {
-            Environment::Development
+            Config::debug_default()
         };
-        // Needed for bucket imports
-        let limits = Limits::new().limit("json", 1_000_000_000);
 
-        Config::build(env)
-            .address(self.address.clone())
-            .port(self.port)
-            .keep_alive(0)
-            .limits(limits)
-            .finalize()
-            .unwrap()
+        // Needed for bucket imports
+        let limits = Limits::default()
+            .limit("json", 1000u64.megabytes())
+            .limit("data-form", 1000u64.megabytes());
+
+        config.address = self.address.parse().unwrap();
+        config.port = self.port;
+        config.keep_alive = 0;
+        config.limits = limits;
+
+        config
     }
 }
 

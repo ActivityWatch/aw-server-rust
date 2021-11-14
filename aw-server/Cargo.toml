@@ -14,9 +14,9 @@ name = "aw-server"
 path = "src/main.rs"
 
 [dependencies]
-rocket = "0.4"
-rocket_contrib = { version = "*", default-features = false, features = ["json"] }
-rocket_cors = "0.5"
+rocket = { version = "0.5.0-rc.1", features = ["json"] }
+# TODO: Once rocket_cors has a version for rocket 0.5, use that instead
+rocket_cors = { git = "https://github.com/lawliet89/rocket_cors", rev = "a062933" }
 multipart = { version = "0.18", default-features = false, features = ["server"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

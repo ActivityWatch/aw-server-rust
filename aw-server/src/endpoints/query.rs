@@ -1,16 +1,13 @@
 use rocket::http::Status;
+use rocket::serde::json::{json, Json, Value};
 use rocket::State;
-use rocket_contrib::json::{Json, JsonValue};
 
 use aw_models::Query;
 
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[post("/", data = "<query_req>", format = "application/json")]
-pub fn query(
-    query_req: Json<Query>,
-    state: State<ServerState>,
-) -> Result<JsonValue, HttpErrorJson> {
+pub fn query(query_req: Json<Query>, state: &State<ServerState>) -> Result<Value, HttpErrorJson> {
     let query_code = query_req.0.query.join("\n");
     let intervals = &query_req.0.timeperiods;
     let mut results = Vec::new();

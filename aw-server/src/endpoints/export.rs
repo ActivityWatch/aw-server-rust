@@ -1,18 +1,15 @@
 use std::collections::HashMap;
-use std::io::Cursor;
 
-use rocket::http::Header;
-use rocket::http::Status;
-use rocket::response::Response;
 use rocket::State;
 
 use aw_models::BucketsExport;
 use aw_models::TryVec;
 
+use crate::endpoints::util::BucketsExportRocket;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[get("/")]
-pub fn buckets_export(state: State<ServerState>) -> Result<Response, HttpErrorJson> {
+pub fn buckets_export(state: &State<ServerState>) -> Result<BucketsExportRocket, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let mut export = BucketsExport {
         buckets: HashMap::new(),
@@ -30,14 +27,5 @@ pub fn buckets_export(state: State<ServerState>) -> Result<Response, HttpErrorJs
         export.buckets.insert(bid, bucket);
     }
 
-    Ok(Response::build()
-        .status(Status::Ok)
-        .header(Header::new(
-            "Content-Disposition",
-            "attachment; filename=aw-buckets-export.json",
-        ))
-        .sized_body(Cursor::new(
-            serde_json::to_string(&export).expect("Failed to serialize"),
-        ))
-        .finalize())
+    Ok(export.into())
 }

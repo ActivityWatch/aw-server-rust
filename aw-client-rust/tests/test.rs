@@ -2,7 +2,9 @@ extern crate aw_client_rust;
 extern crate aw_datastore;
 extern crate aw_server;
 extern crate chrono;
+extern crate rocket;
 extern crate serde_json;
+extern crate tokio_test;
 
 #[cfg(test)]
 mod test {
@@ -13,6 +15,7 @@ mod test {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::thread;
+    use tokio_test::block_on;
 
     // A random port, but still not guaranteed to not be bound
     // FIXME: Bind to a port that is free for certain and use that for the client instead
@@ -37,9 +40,7 @@ mod test {
         }
     }
 
-    fn setup_testserver() -> () {
-        // Start testserver and wait 10s for it to start up
-        // TODO: Properly shutdown
+    fn setup_testserver() -> rocket::Shutdown {
         use aw_server::endpoints::ServerState;
         let state = ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
@@ -49,10 +50,14 @@ mod test {
         let mut aw_config = aw_server::config::AWConfig::default();
         aw_config.port = PORT;
         let server = aw_server::endpoints::build_rocket(state, aw_config);
+        let server = block_on(server.ignite()).unwrap();
+        let shutdown_handler = server.shutdown();
 
         thread::spawn(move || {
-            server.launch();
+            block_on(server.launch()).unwrap();
         });
+
+        shutdown_handler
     }
 
     #[test]
@@ -62,7 +67,7 @@ mod test {
         let clientname = "aw-client-rust-test";
         let client: AwClient = AwClient::new(ip, &port, clientname);
 
-        setup_testserver();
+        let shutdown_handler = setup_testserver();
 
         wait_for_server(20, &client);
 
@@ -113,5 +118,7 @@ mod test {
         assert_eq!(count, 0);
 
         client.delete_bucket(&bucketname).unwrap();
+
+        shutdown_handler.notify();
     }
 }

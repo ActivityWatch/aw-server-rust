@@ -47,19 +47,14 @@ pub fn split_url_event(event: &mut Event) {
     event
         .data
         .insert("$domain".to_string(), Value::String(domain));
+
     // Path
-    let path = match uri.origin() {
-        Some(origin) => origin.path().to_string(),
-        None => "".to_string(),
-    };
+    let path = uri.path().to_string();
     event.data.insert("$path".to_string(), Value::String(path));
+
     // Params
-    // TODO: What's the difference between params and query?
-    let params = match uri.origin() {
-        Some(origin) => match origin.query() {
-            Some(query) => query.to_string(),
-            None => "".to_string(),
-        },
+    let params = match uri.query() {
+        Some(query) => query.to_string(),
         None => "".to_string(),
     };
     event

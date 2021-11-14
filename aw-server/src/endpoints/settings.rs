@@ -1,7 +1,7 @@
 use crate::endpoints::ServerState;
 use rocket::http::Status;
+use rocket::serde::json::Json;
 use rocket::State;
-use rocket_contrib::json::Json;
 use std::sync::MutexGuard;
 
 use aw_datastore::Datastore;
@@ -23,7 +23,7 @@ fn parse_key(key: String) -> Result<String, HttpErrorJson> {
 
 #[post("/", data = "<message>", format = "application/json")]
 pub fn setting_set(
-    state: State<ServerState>,
+    state: &State<ServerState>,
     message: Json<KeyValue>,
 ) -> Result<Status, HttpErrorJson> {
     let data = message.into_inner();
@@ -40,7 +40,7 @@ pub fn setting_set(
 }
 
 #[get("/")]
-pub fn settings_list_get(state: State<ServerState>) -> Result<Json<Vec<Key>>, HttpErrorJson> {
+pub fn settings_list_get(state: &State<ServerState>) -> Result<Json<Vec<Key>>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let queryresults = match datastore.get_keys_starting("settings.%") {
         Ok(result) => Ok(result),
@@ -57,7 +57,7 @@ pub fn settings_list_get(state: State<ServerState>) -> Result<Json<Vec<Key>>, Ht
 
 #[get("/<key>")]
 pub fn setting_get(
-    state: State<ServerState>,
+    state: &State<ServerState>,
     key: String,
 ) -> Result<Json<KeyValue>, HttpErrorJson> {
     let setting_key = parse_key(key)?;
@@ -71,7 +71,7 @@ pub fn setting_get(
 }
 
 #[delete("/<key>")]
-pub fn setting_delete(state: State<ServerState>, key: String) -> Result<(), HttpErrorJson> {
+pub fn setting_delete(state: &State<ServerState>, key: String) -> Result<(), HttpErrorJson> {
     let setting_key = parse_key(key)?;
 
     let datastore = endpoints_get_lock!(state.datastore);

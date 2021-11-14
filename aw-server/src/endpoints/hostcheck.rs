@@ -7,9 +7,9 @@
 //!
 //! [1]: https://github.com/ActivityWatch/activitywatch/security/advisories/GHSA-v9fg-6g9j-h4x4
 use rocket::fairing::Fairing;
-use rocket::handler::Outcome;
 use rocket::http::uri::Origin;
 use rocket::http::{Method, Status};
+use rocket::route::Outcome;
 use rocket::{Data, Request, Rocket, Route};
 
 use crate::config::AWConfig;
@@ -29,15 +29,25 @@ impl HostCheck {
     }
 }
 
-/// Route for HostCheck Fairing error
-fn fairing_error_route<'r>(req: &'r Request<'_>, _: Data) -> Outcome<'r> {
-    let err = HttpErrorJson::new(Status::BadRequest, "Host header is invalid".to_string());
-    Outcome::from(req, err)
+/// Create a `Handler` for Fairing error handling
+#[derive(Clone)]
+struct FairingErrorRoute {}
+
+#[rocket::async_trait]
+impl rocket::route::Handler for FairingErrorRoute {
+    async fn handle<'r>(
+        &self,
+        request: &'r Request<'_>,
+        _: rocket::Data<'r>,
+    ) -> rocket::route::Outcome<'r> {
+        let err = HttpErrorJson::new(Status::BadRequest, "Host header is invalid".to_string());
+        Outcome::from(request, err)
+    }
 }
 
 /// Create a new `Route` for Fairing handling
 fn fairing_route() -> Route {
-    Route::ranked(1, Method::Get, "/", fairing_error_route)
+    Route::ranked(1, Method::Get, "/", FairingErrorRoute {})
 }
 
 fn redirect_bad_request(request: &mut Request) {
@@ -47,15 +57,16 @@ fn redirect_bad_request(request: &mut Request) {
     request.set_uri(origin);
 }
 
+#[rocket::async_trait]
 impl Fairing for HostCheck {
     fn info(&self) -> rocket::fairing::Info {
         rocket::fairing::Info {
             name: "HostCheck",
-            kind: rocket::fairing::Kind::Attach | rocket::fairing::Kind::Request,
+            kind: rocket::fairing::Kind::Ignite | rocket::fairing::Kind::Request,
         }
     }
 
-    fn on_attach(&self, rocket: Rocket) -> Result<Rocket, Rocket> {
+    async fn on_ignite(&self, rocket: Rocket<rocket::Build>) -> rocket::fairing::Result {
         match self.validate {
             true => Ok(rocket.mount(FAIRING_ROUTE_BASE, vec![fairing_route()])),
             false => {
@@ -65,7 +76,7 @@ impl Fairing for HostCheck {
         }
     }
 
-    fn on_request(&self, request: &mut Request, _: &Data) {
+    async fn on_request(&self, request: &mut Request<'_>, _: &mut Data<'_>) {
         if !self.validate {
             // host header check is disabled
             return;
@@ -112,7 +123,7 @@ mod tests {
     use crate::config::AWConfig;
     use crate::endpoints;
 
-    fn setup_testserver(address: String) -> Rocket {
+    fn setup_testserver(address: String) -> Rocket<rocket::Build> {
         let state = endpoints::ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
             asset_path: PathBuf::from("aw-webui/dist"),
@@ -126,7 +137,7 @@ mod tests {
     #[test]
     fn test_public_address() {
         let server = setup_testserver("0.0.0.0".to_string());
-        let client = rocket::local::Client::new(server).expect("valid instance");
+        let client = rocket::local::blocking::Client::tracked(server).expect("valid instance");
 
         // When a public address is used, request should always pass, regardless
         // if the Host header is missing
@@ -140,7 +151,7 @@ mod tests {
     #[test]
     fn test_localhost_address() {
         let server = setup_testserver("127.0.0.1".to_string());
-        let client = rocket::local::Client::new(server).expect("valid instance");
+        let client = rocket::local::blocking::Client::tracked(server).expect("valid instance");
 
         // If Host header is missing we should get a BadRequest
         let res = client

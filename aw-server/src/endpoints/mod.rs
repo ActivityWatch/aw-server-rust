@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use gethostname::gethostname;
-use rocket::response::NamedFile;
+use rocket::fs::NamedFile;
+use rocket::serde::json::Json;
 use rocket::State;
-use rocket_contrib::json::Json;
 
 use crate::config::AWConfig;
 
@@ -30,37 +30,49 @@ mod settings;
 pub use util::HttpErrorJson;
 
 #[get("/")]
-fn root_index(state: State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("index.html")).ok()
+async fn root_index(state: &State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("index.html"))
+        .await
+        .ok()
 }
 
 #[get("/css/<file..>")]
-fn root_css(file: PathBuf, state: State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("css").join(file)).ok()
+async fn root_css(file: PathBuf, state: &State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("css").join(file))
+        .await
+        .ok()
 }
 
 #[get("/fonts/<file..>")]
-fn root_fonts(file: PathBuf, state: State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("fonts").join(file)).ok()
+async fn root_fonts(file: PathBuf, state: &State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("fonts").join(file))
+        .await
+        .ok()
 }
 
 #[get("/js/<file..>")]
-fn root_js(file: PathBuf, state: State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("js").join(file)).ok()
+async fn root_js(file: PathBuf, state: &State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("js").join(file))
+        .await
+        .ok()
 }
 
 #[get("/static/<file..>")]
-fn root_static(file: PathBuf, state: State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("static").join(file)).ok()
+async fn root_static(file: PathBuf, state: &State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("static").join(file))
+        .await
+        .ok()
 }
 
 #[get("/favicon.ico")]
-fn root_favicon(state: State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("favicon.ico")).ok()
+async fn root_favicon(state: &State<ServerState>) -> Option<NamedFile> {
+    NamedFile::open(state.asset_path.join("favicon.ico"))
+        .await
+        .ok()
 }
 
 #[get("/")]
-fn server_info(config: State<AWConfig>, state: State<ServerState>) -> Json<Info> {
+fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Info> {
     #[allow(clippy::or_fun_call)]
     let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
     const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
@@ -73,7 +85,7 @@ fn server_info(config: State<AWConfig>, state: State<ServerState>) -> Json<Info>
     })
 }
 
-pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rocket {
+pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rocket<rocket::Build> {
     info!(
         "Starting aw-server-rust at {}:{}",
         config.address, config.port

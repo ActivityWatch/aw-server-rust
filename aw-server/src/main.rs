@@ -4,7 +4,6 @@ extern crate log;
 use std::env;
 
 use clap::Parser;
-use rocket::config::Environment;
 
 use aw_server::*;
 
@@ -38,7 +37,8 @@ struct Opts {
     no_legacy_import: bool,
 }
 
-fn main() {
+#[rocket::main]
+async fn main() -> Result<(), rocket::Error> {
     let opts: Opts = Opts::parse();
 
     use std::sync::Mutex;
@@ -46,12 +46,9 @@ fn main() {
     let mut testing = opts.testing;
     // Always override environment if --testing is specified
     if !testing {
-        let env = Environment::active().expect("Failed to get current environment");
-        testing = match env {
-            Environment::Production => false,
-            Environment::Development => true,
-            Environment::Staging => panic!("Staging environment not supported"),
-        };
+        if cfg!(debug_assertions) {
+            testing = true;
+        }
     }
 
     logging::setup_logger(testing).expect("Failed to setup logging");
@@ -99,7 +96,7 @@ fn main() {
         device_id,
     };
 
-    endpoints::build_rocket(server_state, config).launch();
+    endpoints::build_rocket(server_state, config).launch().await
 }
 
 use std::path::PathBuf;

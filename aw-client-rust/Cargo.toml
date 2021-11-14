@@ -15,3 +15,5 @@ aw-models = { path = "../aw-models" }
 [dev-dependencies]
 aw-datastore = { path = "../aw-datastore" }
 aw-server = { path = "../aw-server", default-features = false, features=[] }
+rocket = "0.5.0-rc.1"
+tokio-test = "*"

@@ -12,6 +12,7 @@ use crate::dirs;
 
 use android_logger::Config;
 use log::Level;
+use rocket::serde::json::json;
 
 #[no_mangle]
 pub extern "C" fn rust_greeting(to: *const c_char) -> *mut c_char {

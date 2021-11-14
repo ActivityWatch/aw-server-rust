@@ -1,10 +1,13 @@
 use std::io::Cursor;
 
 use rocket::http::ContentType;
+use rocket::http::Header;
 use rocket::http::Status;
 use rocket::request::Request;
 use rocket::response::{self, Responder, Response};
 use serde::Serialize;
+
+use aw_models::BucketsExport;
 
 #[derive(Serialize, Debug)]
 pub struct HttpErrorJson {
@@ -22,14 +25,44 @@ impl HttpErrorJson {
     }
 }
 
-impl<'r> Responder<'r> for HttpErrorJson {
-    fn respond_to(self, _: &Request) -> response::Result<'r> {
+impl<'r> Responder<'r, 'static> for HttpErrorJson {
+    fn respond_to(self, _: &Request) -> response::Result<'static> {
         // TODO: Fix unwrap
         let body = serde_json::to_string(&self).unwrap();
         Response::build()
             .status(self.status)
-            .sized_body(Cursor::new(body))
+            .sized_body(body.len(), Cursor::new(body))
             .header(ContentType::new("application", "json"))
+            .ok()
+    }
+}
+
+pub struct BucketsExportRocket {
+    inner: BucketsExport,
+}
+
+impl Into<BucketsExportRocket> for BucketsExport {
+    fn into(self) -> BucketsExportRocket {
+        BucketsExportRocket { inner: self }
+    }
+}
+
+impl<'r> Responder<'r, 'static> for BucketsExportRocket {
+    fn respond_to(self, _: &Request) -> response::Result<'static> {
+        let body = serde_json::to_string(&self.inner).unwrap();
+        let header_content = match self.inner.buckets.len() == 1 {
+            true => format!(
+                "attachment; filename=aw-bucket-export_{}.json",
+                self.inner.buckets.into_keys().nth(0).unwrap()
+            ),
+            false => "attachment; filename=aw-buckets-export.json".to_string(),
+        };
+        // TODO: Fix unwrap
+        Response::build()
+            .status(Status::Ok)
+            .header(Header::new("Content-Disposition", header_content))
+            .sized_body(body.len(), Cursor::new(body))
+            //.header(ContentType::new("application", "json"))
             .ok()
     }
 }
@@ -75,6 +108,7 @@ macro_rules! endpoints_get_lock {
         match $lock.lock() {
             Ok(r) => r,
             Err(e) => {
+                use rocket::http::Status;
                 let err_msg = format!("Taking datastore lock failed, returning 504: {}", e);
                 warn!("{}", err_msg);
                 return Err(HttpErrorJson::new(Status::ServiceUnavailable, err_msg));

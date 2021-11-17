@@ -125,14 +125,16 @@ pub fn sync_run(sync_directory: &Path, client: AwClient) {
     fs::create_dir_all(sync_directory).unwrap();
 
     let info = client.get_info().unwrap();
-    let ds_localremote = Datastore::new(
-        sync_directory
-            .join(format!("test-{}.db", info.device_id))
-            .into_os_string()
-            .into_string()
-            .unwrap(),
-        false,
-    );
+    let remotedir = sync_directory.join(info.device_id.as_str());
+    fs::create_dir_all(&remotedir).unwrap();
+
+    let dbfile = remotedir
+        .join("test.db")
+        .into_os_string()
+        .into_string()
+        .unwrap();
+
+    let ds_localremote = Datastore::new(dbfile, false);
     info!("Set up remote for local device");
 
     //let ds_remotes = setup_test(sync_directory).unwrap();
@@ -164,15 +166,23 @@ pub fn sync_run(sync_directory: &Path, client: AwClient) {
     }
 }
 
+/// Returns a list of all remote dbs
 fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let files = fs::read_dir(sync_directory)?
-        .map(|res| res.ok().unwrap())
-        .map(|e| e.path())
+    println!("{}", sync_directory.display());
+    let dbs = fs::read_dir(sync_directory)?
+        .map(|res| res.ok().unwrap().path())
+        .filter(|p| p.is_dir())
+        .flat_map(|d| {
+            println!("{}", d.to_str().unwrap());
+            fs::read_dir(d).unwrap()
+        })
+        .map(|res| res.ok().unwrap().path())
         .filter(|path| path.extension().unwrap() == "db") // FIXME: Is this the correct file ext?
         .collect();
-    Ok(files)
+    Ok(dbs)
 }
 
+/// Returns a list of all remotes, excluding local ones
 fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf> {
     let remotes_all = find_remotes(sync_directory).unwrap();
     // Filter out own remote
@@ -288,6 +298,10 @@ fn get_or_create_sync_bucket(
 }
 
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
+///
+/// is_push: a bool indicating if we're pushing local buckets to the sync dir
+///          (as opposed to pulling from remotes)
+/// src_did: source device ID
 pub fn sync_datastores(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
@@ -298,7 +312,7 @@ pub fn sync_datastores(
     // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
 
-    let buckets_from: Vec<Bucket> = ds_from
+    let mut buckets_from: Vec<Bucket> = ds_from
         .get_buckets()
         .unwrap()
         .iter_mut()
@@ -312,48 +326,61 @@ pub fn sync_datastores(
         })
         .collect();
 
+    // Sync buckets in order of most recently updated
+    buckets_from.sort_by_key(|b| b.metadata.end);
+
     for bucket_from in buckets_from {
         let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push);
-        let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
-        info!("Bucket: {:?}", bucket_to.id);
-
-        // Sync events
-        // FIXME: This should use bucket_to.metadata.end, but it doesn't because it doesn't work
-        // for empty buckets (Should be None, is Some(unknown_time))
-        // let resume_sync_at = bucket_to.metadata.end;
-        let most_recent_events = ds_to
-            .get_events(bucket_to.id.as_str(), None, None, Some(1))
-            .unwrap();
-        let resume_sync_at = match most_recent_events.first() {
-            Some(e) => Some(e.timestamp + e.duration),
-            None => None,
-        };
-
-        info!("Resumed at: {:?}", resume_sync_at);
-        let mut events: Vec<Event> = ds_from
-            .get_events(bucket_from.id.as_str(), resume_sync_at, None, None)
-            .unwrap()
-            .iter()
-            .map(|e| {
-                let mut new_e = e.clone();
-                new_e.id = None;
-                new_e
-            })
-            .collect();
-
-        // Sort ascending
-        events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        //info!("{:?}", events);
-        for event in events {
-            ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
-        }
-
-        let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
-        info!(
-            "Synced {} new events",
-            eventcount_to_new - eventcount_to_old
-        );
+        sync_one(ds_from, ds_to, bucket_from, bucket_to);
     }
+}
+
+/// Syncs a single bucket from one datastore to another
+fn sync_one(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    bucket_from: Bucket,
+    bucket_to: Bucket,
+) {
+    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
+    info!("Bucket: {:?}", bucket_to.id);
+
+    // Sync events
+    // FIXME: This should use bucket_to.metadata.end, but it doesn't because it doesn't work
+    // for empty buckets (Should be None, is Some(unknown_time))
+    // let resume_sync_at = bucket_to.metadata.end;
+    let most_recent_events = ds_to
+        .get_events(bucket_to.id.as_str(), None, None, Some(1))
+        .unwrap();
+    let resume_sync_at = most_recent_events.first().map(|e| e.timestamp + e.duration);
+
+    info!("Resumed at: {:?}", resume_sync_at);
+    let mut events: Vec<Event> = ds_from
+        .get_events(bucket_from.id.as_str(), resume_sync_at, None, None)
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let mut new_e = e.clone();
+            new_e.id = None;
+            new_e
+        })
+        .collect();
+
+    // Sort ascending
+    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    //info!("{:?}", events);
+
+    // TODO: Do bulk insert using insert_events instead? (for performance)
+    for event in events {
+        print!("\r{}", event.timestamp);
+        ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
+    }
+
+    let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
+    info!(
+        "Synced {} new events",
+        eventcount_to_new - eventcount_to_old
+    );
 }
 
 fn log_buckets(ds: &dyn AccessMethod) {

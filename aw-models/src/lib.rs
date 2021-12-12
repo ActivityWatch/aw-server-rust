@@ -3,7 +3,6 @@ extern crate log;
 
 // TODO: Move me to an appropriate place
 #[cfg(test)] // Only macro use for tests
-#[macro_use]
 macro_rules! json_map {
     { $( $key:literal : $value:expr),* } => {{
         use serde_json::{Value};

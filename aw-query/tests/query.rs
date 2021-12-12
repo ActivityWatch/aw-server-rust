@@ -318,25 +318,19 @@ mod query_tests {
 
         let code = String::from("return no_such_function(1);");
         match aw_query::query(&code, &interval, &ds) {
-            Ok(ok) => panic!(format!("Expected QueryError, got {:?}", ok)),
+            Ok(ok) => panic!("Expected QueryError, got {:?}", ok),
             Err(e) => match e {
                 QueryError::VariableNotDefined(qe) => assert_eq!(qe, "no_such_function"),
-                qe => panic!(format!(
-                    "Expected QueryError::VariableNotDefined, got {:?}",
-                    qe
-                )),
+                qe => panic!("Expected QueryError::VariableNotDefined, got {:?}", qe),
             },
         }
 
         let code = String::from("invalid_type=1; return invalid_type(1);");
         match aw_query::query(&code, &interval, &ds) {
-            Ok(ok) => panic!(format!("Expected QueryError, got {:?}", ok)),
+            Ok(ok) => panic!("Expected QueryError, got {:?}", ok),
             Err(e) => match e {
                 QueryError::InvalidType(qe) => assert_eq!(qe, "invalid_type"),
-                qe => panic!(format!(
-                    "Expected QueryError::VariableNotDefined, got {:?}",
-                    qe
-                )),
+                qe => panic!("Expected QueryError::VariableNotDefined, got {:?}", qe),
             },
         }
     }

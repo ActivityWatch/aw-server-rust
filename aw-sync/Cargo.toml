@@ -2,7 +2,7 @@
 name = "aw-sync"
 version = "0.1.0"
 authors = ["Erik Bjäreholt <erik@bjareho.lt>"]
-edition = "2018"
+edition = "2021"
 
 [lib]
 name = "aw_sync"

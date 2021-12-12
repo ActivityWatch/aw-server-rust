@@ -89,8 +89,7 @@ pub mod android {
     }
 
     unsafe fn create_error_object(env: &JNIEnv, msg: String) -> jstring {
-        let mut obj = json!({});
-        obj["error"] = json!(msg).0;
+        let mut obj = json!({ "error": &msg });
         string_to_jstring(&env, obj.to_string())
     }
 

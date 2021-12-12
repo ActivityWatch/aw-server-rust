@@ -1,7 +1,7 @@
 [package]
 name = "aw-client-rust"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 authors = ["Johan Bjäreholt <johan@bjareho.lt>"]
 
 [dependencies]

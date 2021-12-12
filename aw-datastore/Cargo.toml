@@ -2,7 +2,7 @@
 name = "aw-datastore"
 version = "0.1.0"
 authors = ["Johan Bjäreholt <johan@bjareho.lt>"]
-edition = "2018"
+edition = "2021"
 
 [features]
 default = [] # no features by default

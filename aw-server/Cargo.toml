@@ -28,7 +28,7 @@ fern = { version = "0.6", features = ["colored"] }
 toml = "0.5"
 gethostname = "0.2"
 uuid = { version = "0.8", features = ["serde", "v4"] }
-clap = { version = "3.0.0-beta.5", features = ["derive"] }
+clap = { version = "3.0", features = ["derive"] }
 
 aw-datastore = { path = "../aw-datastore" }
 aw-models = { path = "../aw-models" }

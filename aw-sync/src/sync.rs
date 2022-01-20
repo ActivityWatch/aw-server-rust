@@ -142,6 +142,8 @@ pub fn sync_run(sync_directory: &Path, client: AwClient) {
 
     let remote_dbfiles = find_remotes_nonlocal(sync_directory, info.device_id.as_str());
     info!("Found remotes: {:?}", remote_dbfiles);
+
+    // TODO: Check for compatible remote db version before opening
     let ds_remotes: Vec<Datastore> = remote_dbfiles.iter().map(create_datastore).collect();
 
     // Pull

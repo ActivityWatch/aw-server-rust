@@ -29,6 +29,9 @@ struct Opts {
     /// Path to database override
     #[clap(long)]
     dbpath: Option<String>,
+    /// Path to webui override
+    #[clap(long)]
+    webpath: Option<String>,
     /// Device ID override
     #[clap(long)]
     device_id: Option<String>,
@@ -77,7 +80,10 @@ async fn main() -> Result<(), rocket::Error> {
     };
     info!("Using DB at path {:?}", db_path);
 
-    let asset_path = get_asset_path();
+    let asset_path = match opts.webpath {
+        Some(webpath) => PathBuf::from(webpath),
+        None => get_asset_path(),
+    };
     info!("Using aw-webui assets at path {:?}", asset_path);
 
     let legacy_import = !opts.no_legacy_import;
@@ -99,6 +105,7 @@ async fn main() -> Result<(), rocket::Error> {
     endpoints::build_rocket(server_state, config).launch().await
 }
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 // The appdirs implementation of site_data_dir is broken on computers which has flatpak installed
@@ -110,16 +117,26 @@ use std::path::PathBuf;
 // don't want this change?
 fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
     // Iterate over all XDG_DATA_DIRS and return first match that exists
-    if let Some(joined) = env::var_os("XDG_DATA_DIRS") {
-        for mut data_dir in env::split_paths(&joined) {
-            if let Some(app) = app {
-                data_dir.push(app);
+    let joined = match env::var_os("XDG_DATA_DIRS") {
+        // If $XDG_DATA_DIRS is either not set or empty, a value equal to /usr/local/share/:/usr/share/ should be used.
+        Some(path) => {
+            if path.is_empty() {
+                OsString::from("/usr/local/share:/usr/share")
+            } else {
+                path
             }
-            if !data_dir.is_dir() {
-                continue;
-            }
-            return Ok(data_dir);
         }
+        None => OsString::from("/usr/local/share:/usr/share"),
+    };
+
+    for mut data_dir in env::split_paths(&joined) {
+        if let Some(app) = app {
+            data_dir.push(app);
+        }
+        if !data_dir.is_dir() {
+            continue;
+        }
+        return Ok(data_dir);
     }
     // If no dirs exists in XDG_DATA_DIRS, fallback to /usr/local/share
     let default = "/usr/local/share";
@@ -138,8 +155,6 @@ fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
 
 fn get_asset_path() -> PathBuf {
     use std::env::current_exe;
-
-    // TODO: Add cmdline arg which can override asset path?
 
     // Search order for asset path is:
     // 1. ./aw-webui/dist

@@ -73,7 +73,7 @@ jobs:
         rustup component add llvm-tools-preview
     - name: Download grcov
       run: |
-        curl -L https://github.com/mozilla/grcov/releases/latest/download/grcov-linux-x86_64.tar.bz2 | tar jxf -
+        curl -L https://github.com/mozilla/grcov/releases/latest/download/grcov-x86_64-unknown-linux-gnu.tar.bz2  | tar jxf -
     - name: Run tests with coverage
       run: |
         # Add cwd to path to find grcov

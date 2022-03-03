@@ -662,6 +662,67 @@ impl DatastoreInstance {
         Ok(inserted_heartbeat)
     }
 
+    pub fn get_event(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        event_id: i64,
+    ) -> Result<Event, DatastoreError> {
+        let bucket = self.get_bucket(bucket_id)?;
+
+        let mut stmt = match conn.prepare(
+            "
+                SELECT id, starttime, endtime, data
+                FROM events
+                WHERE bucketrow = ?1
+                    AND id = ?2
+                LIMIT 1
+            ;",
+        ) {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to prepare get_event SQL statement: {}",
+                    err
+                )))
+            }
+        };
+
+        // TODO: Refactor to share row-parsing logic with get_events
+        let row = match stmt.query_row(&[&bucket.bid.unwrap(), &event_id], |row| {
+            let id = row.get(0)?;
+            let starttime_ns: i64 = row.get(1)?;
+            let endtime_ns: i64 = row.get(2)?;
+            let data_str: String = row.get(3)?;
+
+            let time_seconds: i64 = (starttime_ns / 1_000_000_000) as i64;
+            let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
+            let duration_ns = endtime_ns - starttime_ns;
+            let data: serde_json::map::Map<String, Value> =
+                serde_json::from_str(&data_str).unwrap();
+
+            Ok(Event {
+                id: Some(id),
+                timestamp: DateTime::<Utc>::from_utc(
+                    NaiveDateTime::from_timestamp(time_seconds, time_subnanos),
+                    Utc,
+                ),
+                duration: Duration::nanoseconds(duration_ns),
+                data,
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to map get_event SQL statement: {}",
+                    err
+                )))
+            }
+        };
+
+        Ok(row)
+    }
+
     pub fn get_events(
         &mut self,
         conn: &Connection,

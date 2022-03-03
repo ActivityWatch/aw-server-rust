@@ -122,6 +122,34 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_events_get_single() {
+        // Setup datastore
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+
+        // Insert event
+        let e1 = Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(0),
+            data: json_map! {"key": json!("value")},
+        };
+        let mut e2 = e1.clone();
+        e2.timestamp = e2.timestamp + Duration::nanoseconds(1);
+
+        let event_list = [e1.clone(), e2.clone()];
+        ds.insert_events(&bucket.id, &event_list).unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        let first_event = events.first().unwrap();
+        let first_event_id = first_event.id.unwrap();
+
+        let fetched_event = ds.get_event(&bucket.id, first_event_id).unwrap();
+        // TODO: Check entire events to ensure integrity
+        assert_eq!(fetched_event.id.unwrap(), first_event_id);
+    }
+
+    #[test]
     fn test_events_get_filters() {
         // Setup datastore
         let ds = Datastore::new_in_memory(false);

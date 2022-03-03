@@ -1,6 +1,6 @@
 [package]
 name = "aw-server"
-version = "0.11.0"
+version = "0.12.0"
 authors = ["Johan Bjäreholt <johan@bjareho.lt>", "Erik Bjäreholt <erik@bjareho.lt>"]
 edition = "2021"
 

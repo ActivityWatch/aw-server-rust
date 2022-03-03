@@ -101,10 +101,13 @@ pub fn bucket_events_get(
     }
 }
 
-#[get("/<bucket_id>/events/<event_id>")]
+// Needs unused parameter, otherwise there'll be a route collision
+// See: https://api.rocket.rs/master/rocket/struct.Route.html#resolving-collisions
+#[get("/<bucket_id>/events/<event_id>?<_unused..>")]
 pub fn bucket_events_get_single(
     bucket_id: String,
     event_id: i64,
+    _unused: Option<u64>,
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);

@@ -101,6 +101,20 @@ pub fn bucket_events_get(
     }
 }
 
+#[get("/<bucket_id>/events/<event_id>")]
+pub fn bucket_events_get_single(
+    bucket_id: String,
+    event_id: i64,
+    state: &State<ServerState>,
+) -> Result<Json<Event>, HttpErrorJson> {
+    let datastore = endpoints_get_lock!(state.datastore);
+    let res = datastore.get_event(&bucket_id, event_id);
+    match res {
+        Ok(events) => Ok(Json(events)),
+        Err(err) => Err(err.into()),
+    }
+}
+
 #[post("/<bucket_id>/events", data = "<events>", format = "application/json")]
 pub fn bucket_events_create(
     bucket_id: String,

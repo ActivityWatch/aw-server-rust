@@ -64,6 +64,7 @@ pub enum Command {
     GetBuckets(),
     InsertEvents(String, Vec<Event>),
     Heartbeat(String, Event, f64),
+    GetEvent(String, i64),
     GetEvents(
         String,
         Option<DateTime<Utc>>,
@@ -241,6 +242,12 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
+            Command::GetEvent(bucketname, event_id) => {
+                match ds.get_event(&transaction, &bucketname, event_id) {
+                    Ok(el) => Ok(Response::Event(el)),
+                    Err(e) => Err(e),
+                }
+            }
             Command::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt) => {
                 match ds.get_events(
                     &transaction,
@@ -389,6 +396,18 @@ impl Datastore {
         match receiver.collect().unwrap() {
             Ok(r) => match r {
                 Response::Event(e) => Ok(e),
+                _ => panic!("Invalid response"),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn get_event(&self, bucket_id: &str, event_id: i64) -> Result<Event, DatastoreError> {
+        let cmd = Command::GetEvent(bucket_id.to_string(), event_id);
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Response::Event(el) => Ok(el),
                 _ => panic!("Invalid response"),
             },
             Err(e) => Err(e),

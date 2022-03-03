@@ -119,6 +119,7 @@ fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
     // Iterate over all XDG_DATA_DIRS and return first match that exists
     let joined = match env::var_os("XDG_DATA_DIRS") {
         // If $XDG_DATA_DIRS is either not set or empty, a value equal to /usr/local/share/:/usr/share/ should be used.
+        // https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
         Some(path) => {
             if path.is_empty() {
                 OsString::from("/usr/local/share:/usr/share")

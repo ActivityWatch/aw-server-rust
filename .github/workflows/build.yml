@@ -22,7 +22,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         profile: minimal
-        toolchain: nightly
+        toolchain: nightly-2022-03-14  # https://github.com/rust-lang/rust/issues/94998
         override: true
     - name: Cache cargo build
       uses: actions/cache@v1
@@ -57,7 +57,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         profile: minimal
-        toolchain: nightly
+        toolchain: nightly-2022-03-14  # https://github.com/rust-lang/rust/issues/94998
         override: true
     - name: Cache cargo build
       uses: actions/cache@v1
@@ -91,7 +91,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         profile: minimal
-        toolchain: nightly
+        toolchain: nightly-2022-03-14  # https://github.com/rust-lang/rust/issues/94998
         override: true
     - name: Cache cargo build
       uses: actions/cache@v1

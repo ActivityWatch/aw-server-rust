@@ -233,6 +233,32 @@ mod tests {
     }
 
     #[test]
+    fn test_flood_partial_overlap() {
+        // Tests flooding an identical event contained within another event
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
+            duration: Duration::seconds(10),
+            data: json_map! {"type": "a"},
+        };
+        let e2 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:05Z").unwrap(),
+            duration: Duration::seconds(10),
+            data: json_map! {"type": "a"},
+        };
+        let e1_expected = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
+            duration: Duration::seconds(15),
+            data: json_map! {"type": "a"},
+        };
+        let res = flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
+        assert_eq!(1, res.len());
+        assert_eq!(&res[0], &e1_expected);
+    }
+
+    #[test]
     fn test_flood_containing() {
         // Tests flooding an identical event contained within another event
         let e1 = Event {

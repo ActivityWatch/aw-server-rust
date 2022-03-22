@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
+    name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -48,7 +48,7 @@ jobs:
           target/*/aw-server.exe
 
   build-android:
-    name: Build for Android
+    name: Android
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
@@ -86,7 +86,7 @@ jobs:
   # Works better than grcov, but not as many fancy features (no branch coverage, no LLVM)
   # See: https://shift.click/blog/github-actions-rust/#code-coverage
   build-coverage-tarpaulin:
-    name: Generate code coverage
+    name: Code coverage
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
@@ -142,22 +142,3 @@ jobs:
   #      make coverage-lcov COVERAGE_CACHE=1
   #  - name: Upload coverage files
   #    run: bash <(curl -s https://codecov.io/bash) -f target/debug/lcov.info;
-
-  lint:
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v2
-    - name: Set up Rust nightly
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: nightly
-        components: clippy, rustfmt
-        override: true
-    - name: Check formatting
-      if: always()
-      run: cargo fmt -- --check
-    - name: Run clippy  # Doesn't fail build
-      if: always()
-      run: cargo clippy

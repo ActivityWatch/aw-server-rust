@@ -1,4 +1,4 @@
-.PHONY: all aw-server aw-webui build install package test test-coverage coverage coverage-html coverage-lcov
+.PHONY: all aw-server aw-webui build install package test test-coverage test-coverage-tarpaulin test-coverage-grcov coverage coverage-html coverage-lcov
 
 all: build
 build: aw-server aw-webui
@@ -26,7 +26,7 @@ endif
 test:
 	cargo test
 
-test-coverage:
+test-coverage-grcov:
 ifndef COVERAGE_CACHE
 	# We need to remove build files in case a non-coverage test has been run
 	# before without RUST/CARGO flags needed for coverage
@@ -34,21 +34,24 @@ ifndef COVERAGE_CACHE
 endif
 	rm -rf **/*.profraw
 	# Build and test
-	env RUSTFLAGS="-Zinstrument-coverage" \
-	    LLVM_PROFILE_FILE="grcov-%p-%m.profraw" \
+	env RUSTFLAGS="-C instrument-coverage -C link-dead-code -C opt-level=0" \
+	    LLVM_PROFILE_FILE=".cov/grcov-%p-%m.profraw" \
 	    cargo test --verbose
 
-GRCOV_PARAMS=$(shell find . -name "grcov-*.profraw" -print) --binary-path=./target/debug/aw-server -s . --llvm --branch --ignore-not-existing
+coverage-tarpaulin-html:
+	cargo tarpaulin -o html --output-dir coverage-html
 
-coverage-html: test-coverage
+GRCOV_PARAMS=$(shell find .cov -name "grcov-*.profraw" -print) --binary-path=./target/debug/aw-server -s . --llvm --branch --ignore-not-existing
+
+coverage-grcov-html: test-coverage-grcov
 	grcov ${GRCOV_PARAMS} -t html -o ./target/debug/$@/
 	rm -rf **/*.profraw
 
-coverage-lcov: test-coverage
+coverage-grcov-lcov: test-coverage-grcov
 	grcov ${GRCOV_PARAMS} -t lcov -o ./target/debug/lcov.info
 	rm -rf **/*.profraw
 
-coverage: coverage-html
+coverage: coverage-tarpaulin-html
 
 package:
 	# Clean and prepare target/package folder

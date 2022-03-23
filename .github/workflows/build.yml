@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
+    name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -22,7 +22,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         profile: minimal
-        toolchain: nightly-2022-03-14  # https://github.com/rust-lang/rust/issues/94998
+        toolchain: nightly
         override: true
     - name: Cache cargo build
       uses: actions/cache@v1
@@ -47,43 +47,8 @@ jobs:
           target/*/aw-server
           target/*/aw-server.exe
 
-  build-coverage:
-    name: Build with coverage
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v2
-    - name: Set up Rust nightly
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: nightly-2022-03-14  # https://github.com/rust-lang/rust/issues/94998
-        override: true
-    - name: Cache cargo build
-      uses: actions/cache@v1
-      env:
-        cache-name: cargo-build-target-coverage
-      with:
-        path: target
-        key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-${{ env.cache-name }}-
-    - name:  Install llvm-tools
-      run: |
-        rustup component add llvm-tools-preview
-    - name: Download grcov
-      run: |
-        curl -L https://github.com/mozilla/grcov/releases/latest/download/grcov-x86_64-unknown-linux-gnu.tar.bz2  | tar jxf -
-    - name: Run tests with coverage
-      run: |
-        # Add cwd to path to find grcov
-        export PATH=$PATH:.
-        make coverage-lcov COVERAGE_CACHE=1
-    - name: Upload coverage files
-      run: bash <(curl -s https://codecov.io/bash) -f target/debug/lcov.info;
-
   build-android:
-    name: Build for Android
+    name: Android
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
@@ -91,7 +56,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         profile: minimal
-        toolchain: nightly-2022-03-14  # https://github.com/rust-lang/rust/issues/94998
+        toolchain: nightly
         override: true
     - name: Cache cargo build
       uses: actions/cache@v1
@@ -117,9 +82,12 @@ jobs:
         path: |
           target/*/*/libaw_server.so
 
-  lint:
+  # Code coverage using tarpaulin
+  # Works better than grcov, but not as many fancy features (no branch coverage, no LLVM)
+  # See: https://shift.click/blog/github-actions-rust/#code-coverage
+  build-coverage-tarpaulin:
+    name: Code coverage
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v2
     - name: Set up Rust nightly
@@ -127,11 +95,50 @@ jobs:
       with:
         profile: minimal
         toolchain: nightly
-        components: clippy, rustfmt
         override: true
-    - name: Check formatting
-      if: always()
-      run: cargo fmt -- --check
-    - name: Run clippy  # Doesn't fail build
-      if: always()
-      run: cargo clippy
+
+    # Note: If you need to combine the coverage info of multiple
+    # feature sets, you need a `.tarpaulin.toml` config file, see
+    # the link above for those docs.
+    - uses: actions-rs/tarpaulin@v0.1
+
+    # Note: closed-source code needs to provide a token,
+    # but open source code does not.
+    - name: Upload to codecov.io
+      uses: codecov/codecov-action@v1
+
+  # Code coverage using grcov
+  #build-coverage-grcov:
+  #  name: Build with coverage
+  #  runs-on: ubuntu-latest
+
+  #  steps:
+  #  - uses: actions/checkout@v2
+  #  - name: Set up Rust nightly
+  #    uses: actions-rs/toolchain@v1
+  #    with:
+  #      profile: minimal
+  #      toolchain: nightly
+  #      override: true
+  #  - name: Cache cargo build
+  #    uses: actions/cache@v1
+  #    env:
+  #      cache-name: cargo-build-target-coverage
+  #    with:
+  #      path: target
+  #      key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
+  #      restore-keys: |
+  #        ${{ runner.os }}-${{ env.cache-name }}-
+  #  - name:  Install llvm-tools
+  #    run: |
+  #      rustup component add llvm-tools-preview
+  #  - name: Download grcov
+  #    run: |
+  #      curl -L https://github.com/mozilla/grcov/releases/latest/download/grcov-x86_64-unknown-linux-gnu.tar.bz2  | tar jxf -
+  #  - name: Run tests with coverage
+  #    run: |
+  #      # Add cwd to path to find grcov
+  #      export PATH=$PATH:.
+  #      make coverage-lcov COVERAGE_CACHE=1
+  #  - name: Upload coverage files
+  #    run: bash <(curl -s https://codecov.io/bash) -f target/debug/lcov.info;

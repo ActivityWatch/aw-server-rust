@@ -121,7 +121,12 @@ impl AccessMethod for AwClient {
 }
 
 /// Performs a single sync pass
-pub fn sync_run(sync_directory: &Path, client: AwClient) {
+pub fn sync_run(
+    sync_directory: &Path,
+    client: AwClient,
+    buckets: Vec<String>,
+    start: Option<DateTime<Utc>>,
+) -> Result<(), String> {
     fs::create_dir_all(sync_directory).unwrap();
 
     let info = client.get_info().unwrap();
@@ -166,6 +171,8 @@ pub fn sync_run(sync_directory: &Path, client: AwClient) {
     for ds_from in &ds_remotes {
         log_buckets(ds_from);
     }
+
+    Ok(())
 }
 
 /// Returns a list of all remote dbs

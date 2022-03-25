@@ -135,6 +135,7 @@ fn create_datastore(dspath: &PathBuf) -> Datastore {
     Datastore::new(pathstr, false)
 }
 
+// TODO: Move into tests
 fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
     let mut datastores: Vec<Datastore> = Vec::new();
     for n in 0..2 {
@@ -238,7 +239,7 @@ pub fn sync_datastores(
     ds_to: &dyn AccessMethod,
     is_push: bool,
     src_did: Option<&str>,
-    buckets: &Vec<String>,
+    buckets: &[String],
 ) {
     // FIXME: "-synced" should only be appended when synced to the local database, not to the
     // staging area for local buckets.
@@ -258,7 +259,7 @@ pub fn sync_datastores(
         })
         // If buckets vec isn't empty, filter out buckets not in the buckets vec
         .filter(|bucket| {
-            if buckets.len() > 0 {
+            if buckets.is_empty() {
                 buckets.iter().any(|b_id| b_id == &bucket.id)
             } else {
                 true

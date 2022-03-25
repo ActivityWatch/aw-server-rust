@@ -62,7 +62,7 @@ pub fn sync_run(
     // Pull
     info!("Pulling...");
     for ds_from in &ds_remotes {
-        sync_datastores(ds_from, &client, false, None, &buckets);
+        sync_datastores(ds_from, &client, false, None, buckets);
     }
 
     // Push local server buckets to sync folder
@@ -72,7 +72,7 @@ pub fn sync_run(
         &ds_localremote,
         true,
         Some(info.device_id.as_str()),
-        &buckets,
+        buckets,
     );
 
     list_buckets(&client, sync_directory);
@@ -256,8 +256,14 @@ pub fn sync_datastores(
             }
             tup.1.clone()
         })
-        // Filter out buckets not in the buckets vec
-        .filter(|bucket| buckets.iter().any(|b_id| b_id == &bucket.id))
+        // If buckets vec isn't empty, filter out buckets not in the buckets vec
+        .filter(|bucket| {
+            if buckets.len() > 0 {
+                buckets.iter().any(|b_id| b_id == &bucket.id)
+            } else {
+                true
+            }
+        })
         .collect();
 
     // Sync buckets in order of most recently updated

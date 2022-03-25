@@ -1,6 +1,11 @@
 target
-**/*.rs.bk
-NDK
 .cargo/config
+NDK
+
+**/*.rs.bk
 *.zip
 *.profraw
+
+*.sqlite*
+*.db
+*.db-journal

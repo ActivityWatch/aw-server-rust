@@ -60,7 +60,7 @@ enum Commands {
         /// Specify buckets to sync
         /// If not specified, all buckets will be synced
         #[clap(long)]
-        buckets: Vec<String>,
+        buckets: Option<Vec<String>>,
     },
     /// List buckets and their sync status
     List {},
@@ -100,8 +100,13 @@ fn main() -> std::io::Result<()> {
                     .unwrap()
                     .with_timezone(&chrono::Utc)
             });
+            let sync_spec = sync::SyncSpec {
+                path: sync_directory.to_path_buf(),
+                buckets: buckets.clone(),
+                start,
+            };
 
-            sync::sync_run(sync_directory, client, buckets, start).map_err(|e| {
+            sync::sync_run(client, &sync_spec).map_err(|e| {
                 println!("Error: {}", e);
                 std::io::Error::new(std::io::ErrorKind::Other, e)
             })?;

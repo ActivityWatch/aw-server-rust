@@ -20,49 +20,49 @@ use aw_models::{Bucket, Event};
 
 use crate::accessmethod::AccessMethod;
 
-fn setup_local_remote(client: &AwClient, sync_directory: &Path) -> Result<Datastore, String> {
-    // FIXME: Don't run twice if already exists
-    fs::create_dir_all(sync_directory).unwrap();
+pub struct SyncSpec {
+    /// Path of sync folder
+    pub path: PathBuf,
+    /// Bucket IDs to sync
+    pub buckets: Option<Vec<String>>,
+    /// Start of time range to sync
+    pub start: Option<DateTime<Utc>>,
+}
 
-    let info = client.get_info().unwrap();
-    let remotedir = sync_directory.join(info.device_id.as_str());
-    fs::create_dir_all(&remotedir).unwrap();
-
-    let dbfile = remotedir
-        .join("test.db")
-        .into_os_string()
-        .into_string()
-        .unwrap();
-
-    let ds_localremote = Datastore::new(dbfile, false);
-    info!("Set up remote for local device");
-
-    Ok(ds_localremote)
+impl Default for SyncSpec {
+    fn default() -> Self {
+        // TODO: Better default path
+        let path = Path::new("/tmp/aw-sync").to_path_buf();
+        SyncSpec {
+            path,
+            buckets: None,
+            start: None,
+        }
+    }
 }
 
 /// Performs a single sync pass
-pub fn sync_run(
-    sync_directory: &Path,
-    client: AwClient,
-    buckets: &Vec<String>,
-    start: Option<DateTime<Utc>>,
-) -> Result<(), String> {
-    let ds_localremote = setup_local_remote(&client, sync_directory)?;
+pub fn sync_run(client: AwClient, sync_spec: &SyncSpec) -> Result<(), String> {
+    let ds_localremote = setup_local_remote(&client, sync_spec.path.as_path())?;
 
     //let ds_remotes = setup_test(sync_directory).unwrap();
     //info!("Set up remotes for testing");
 
     let info = client.get_info().unwrap();
-    let remote_dbfiles = find_remotes_nonlocal(sync_directory, info.device_id.as_str());
+    let remote_dbfiles = find_remotes_nonlocal(sync_spec.path.as_path(), info.device_id.as_str());
     info!("Found remotes: {:?}", remote_dbfiles);
 
     // TODO: Check for compatible remote db version before opening
-    let ds_remotes: Vec<Datastore> = remote_dbfiles.iter().map(create_datastore).collect();
+    let ds_remotes: Vec<Datastore> = remote_dbfiles
+        .iter()
+        .map(|p| p.as_path())
+        .map(create_datastore)
+        .collect();
 
     // Pull
     info!("Pulling...");
     for ds_from in &ds_remotes {
-        sync_datastores(ds_from, &client, false, None, buckets);
+        sync_datastores(ds_from, &client, false, None, sync_spec);
     }
 
     // Push local server buckets to sync folder
@@ -72,10 +72,10 @@ pub fn sync_run(
         &ds_localremote,
         true,
         Some(info.device_id.as_str()),
-        buckets,
+        sync_spec,
     );
 
-    list_buckets(&client, sync_directory);
+    list_buckets(&client, sync_spec.path.as_path());
 
     Ok(())
 }
@@ -88,13 +88,37 @@ pub fn list_buckets(client: &AwClient, sync_directory: &Path) {
     info!("Found remotes: {:?}", remote_dbfiles);
 
     // TODO: Check for compatible remote db version before opening
-    let ds_remotes: Vec<Datastore> = remote_dbfiles.iter().map(create_datastore).collect();
+    let ds_remotes: Vec<Datastore> = remote_dbfiles
+        .iter()
+        .map(|p| p.as_path())
+        .map(create_datastore)
+        .collect();
 
     log_buckets(client);
     log_buckets(&ds_localremote);
     for ds_from in &ds_remotes {
         log_buckets(ds_from);
     }
+}
+
+fn setup_local_remote(client: &AwClient, path: &Path) -> Result<Datastore, String> {
+    // FIXME: Don't run twice if already exists
+    fs::create_dir_all(path).unwrap();
+
+    let info = client.get_info().unwrap();
+    let remotedir = path.join(info.device_id.as_str());
+    fs::create_dir_all(&remotedir).unwrap();
+
+    let dbfile = remotedir
+        .join("test.db")
+        .into_os_string()
+        .into_string()
+        .unwrap();
+
+    let ds_localremote = Datastore::new(dbfile, false);
+    info!("Set up remote for local device");
+
+    Ok(ds_localremote)
 }
 
 /// Returns a list of all remote dbs
@@ -130,9 +154,9 @@ fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf>
         .collect()
 }
 
-fn create_datastore(dspath: &PathBuf) -> Datastore {
-    let pathstr = dspath.clone().into_os_string().into_string().unwrap();
-    Datastore::new(pathstr, false)
+fn create_datastore(path: &Path) -> Datastore {
+    let pathstr = path.as_os_str().to_str().unwrap();
+    Datastore::new(pathstr.to_string(), false)
 }
 
 // TODO: Move into tests
@@ -239,7 +263,7 @@ pub fn sync_datastores(
     ds_to: &dyn AccessMethod,
     is_push: bool,
     src_did: Option<&str>,
-    buckets: &[String],
+    sync_spec: &SyncSpec,
 ) {
     // FIXME: "-synced" should only be appended when synced to the local database, not to the
     // staging area for local buckets.
@@ -259,7 +283,7 @@ pub fn sync_datastores(
         })
         // If buckets vec isn't empty, filter out buckets not in the buckets vec
         .filter(|bucket| {
-            if buckets.is_empty() {
+            if let Some(buckets) = &sync_spec.buckets {
                 buckets.iter().any(|b_id| b_id == &bucket.id)
             } else {
                 true

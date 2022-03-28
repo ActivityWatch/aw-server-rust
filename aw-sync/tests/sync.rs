@@ -10,6 +10,7 @@ mod sync_tests {
     use aw_datastore::{Datastore, DatastoreError};
     use aw_models::{Bucket, Event};
     use aw_sync;
+    use aw_sync::SyncSpec;
 
     struct TestState {
         ds_src: Datastore,
@@ -101,7 +102,13 @@ mod sync_tests {
         let state = init_teststate();
         create_bucket(&state.ds_src, 0);
 
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None, &[]);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         let buckets_src: HashMap<String, Bucket> = state.ds_src.get_buckets().unwrap();
         let buckets_dest: HashMap<String, Bucket> = state.ds_dest.get_buckets().unwrap();
@@ -136,7 +143,13 @@ mod sync_tests {
             .heartbeat(bucket_id.as_str(), create_event("1"), 1.0)
             .unwrap();
 
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None, &[]);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         let all_datastores: Vec<&Datastore> =
             [&state.ds_src, &state.ds_dest].iter().cloned().collect();
@@ -150,7 +163,13 @@ mod sync_tests {
             .ds_src
             .heartbeat(bucket_id.as_str(), create_event("1"), 1.0)
             .unwrap();
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None, &[]);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);
@@ -163,7 +182,13 @@ mod sync_tests {
         let bucket_id = create_bucket(&state.ds_src, 0);
         create_events(&state.ds_src, bucket_id.as_str(), 10);
 
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None, &[]);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         let all_datastores: Vec<&Datastore> =
             [&state.ds_src, &state.ds_dest].iter().cloned().collect();
@@ -174,7 +199,13 @@ mod sync_tests {
 
         // Add some more events
         create_events(&state.ds_src, bucket_id.as_str(), 10);
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None, &[]);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);

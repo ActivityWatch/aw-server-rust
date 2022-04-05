@@ -77,12 +77,18 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec) -> Result<(), String> {
     );
 
     // Close open database connections
-    for ds_from in &ds_remotes {
-        ds_from.close();
-    }
-    ds_localremote.close();
+    //for ds_from in &ds_remotes {
+    //    ds_from.close();
+    //}
+    //ds_localremote.close();
 
-    // Will fail if db connections not closed (as it will open them again)
+    // Dropping also works to close the database connections, weirdly enough.
+    // Probably because once the database is dropped, the thread will stop,
+    // and then the Connection will be dropped, which closes the connection.
+    std::mem::drop(ds_remotes);
+    std::mem::drop(ds_localremote);
+
+    // NOTE: Will fail if db connections not closed (as it will open them again)
     list_buckets(&client, sync_spec.path.as_path());
 
     Ok(())
@@ -163,7 +169,7 @@ fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf>
         .collect()
 }
 
-fn create_datastore(path: &Path) -> Datastore {
+pub fn create_datastore(path: &Path) -> Datastore {
     let pathstr = path.as_os_str().to_str().unwrap();
     Datastore::new(pathstr.to_string(), false)
 }

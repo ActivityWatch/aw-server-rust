@@ -153,9 +153,9 @@ impl DatastoreWorker {
         // Start handling and respond to requests
         loop {
             let last_commit_time: DateTime<Utc> = Utc::now();
-            let mut transaction: Transaction =
+            let mut tx: Transaction =
                 match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
-                    Ok(transaction) => transaction,
+                    Ok(tx) => tx,
                     Err(err) => {
                         error!("Unable to start transaction! {:?}", err);
                         // Wait 1s before retrying
@@ -163,7 +163,7 @@ impl DatastoreWorker {
                         continue;
                     }
                 };
-            transaction.set_drop_behavior(DropBehavior::Commit);
+            tx.set_drop_behavior(DropBehavior::Commit);
 
             self.uncommited_events = 0;
             self.commit = false;
@@ -177,16 +177,20 @@ impl DatastoreWorker {
                         break;
                     }
                 };
-                let response = self.handle_request(request, &mut ds);
+                let response = self.handle_request(request, &mut ds, &tx);
                 match response {
-                    // The empty response is given by commands like close(), which should
+                    // The NoResponse is used by commands like close(), which should
                     // not be responded to, as the requester might have disappeared.
                     Ok(Response::NoResponse()) => (),
                     _ => response_sender.respond(response),
                 }
                 let now: DateTime<Utc> = Utc::now();
                 let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
-                if self.commit || commit_interval_passed || self.uncommited_events > 100 {
+                if self.commit
+                    || commit_interval_passed
+                    || self.uncommited_events > 100
+                    || self.quit
+                {
                     break;
                 };
             }
@@ -194,7 +198,7 @@ impl DatastoreWorker {
                 "Commiting DB! Force commit {}, {} uncommited events",
                 self.commit, self.uncommited_events
             );
-            match transaction.commit() {
+            match tx.commit() {
                 Ok(_) => (),
                 Err(err) => panic!("Failed to commit datastore transaction! {}", err),
             }
@@ -209,17 +213,17 @@ impl DatastoreWorker {
         &mut self,
         request: Command,
         ds: &mut DatastoreInstance,
-        transaction: &Transaction,
+        tx: &Transaction,
     ) -> Result<Response, DatastoreError> {
         match request {
-            Command::CreateBucket(bucket) => match ds.create_bucket(transaction, bucket) {
+            Command::CreateBucket(bucket) => match ds.create_bucket(tx, bucket) {
                 Ok(_) => {
                     self.commit = true;
                     Ok(Response::Empty())
                 }
                 Err(e) => Err(e),
             },
-            Command::DeleteBucket(bucketname) => match ds.delete_bucket(transaction, &bucketname) {
+            Command::DeleteBucket(bucketname) => match ds.delete_bucket(tx, &bucketname) {
                 Ok(_) => {
                     self.commit = true;
                     Ok(Response::Empty())
@@ -232,7 +236,7 @@ impl DatastoreWorker {
             },
             Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets())),
             Command::InsertEvents(bucketname, events) => {
-                match ds.insert_events(transaction, &bucketname, events) {
+                match ds.insert_events(tx, &bucketname, events) {
                     Ok(events) => {
                         self.uncommited_events += events.len();
                         self.last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
@@ -242,13 +246,7 @@ impl DatastoreWorker {
                 }
             }
             Command::Heartbeat(bucketname, event, pulsetime) => {
-                match ds.heartbeat(
-                    transaction,
-                    &bucketname,
-                    event,
-                    pulsetime,
-                    &mut self.last_heartbeat,
-                ) {
+                match ds.heartbeat(tx, &bucketname, event, pulsetime, &mut self.last_heartbeat) {
                     Ok(e) => {
                         self.uncommited_events += 1;
                         Ok(Response::Event(e))
@@ -257,31 +255,25 @@ impl DatastoreWorker {
                 }
             }
             Command::GetEvent(bucketname, event_id) => {
-                match ds.get_event(transaction, &bucketname, event_id) {
+                match ds.get_event(tx, &bucketname, event_id) {
                     Ok(el) => Ok(Response::Event(el)),
                     Err(e) => Err(e),
                 }
             }
             Command::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt) => {
-                match ds.get_events(
-                    transaction,
-                    &bucketname,
-                    starttime_opt,
-                    endtime_opt,
-                    limit_opt,
-                ) {
+                match ds.get_events(tx, &bucketname, starttime_opt, endtime_opt, limit_opt) {
                     Ok(el) => Ok(Response::EventList(el)),
                     Err(e) => Err(e),
                 }
             }
             Command::GetEventCount(bucketname, starttime_opt, endtime_opt) => {
-                match ds.get_event_count(transaction, &bucketname, starttime_opt, endtime_opt) {
+                match ds.get_event_count(tx, &bucketname, starttime_opt, endtime_opt) {
                     Ok(n) => Ok(Response::Count(n)),
                     Err(e) => Err(e),
                 }
             }
             Command::DeleteEventsById(bucketname, event_ids) => {
-                match ds.delete_events_by_id(transaction, &bucketname, event_ids) {
+                match ds.delete_events_by_id(tx, &bucketname, event_ids) {
                     Ok(()) => Ok(Response::Empty()),
                     Err(e) => Err(e),
                 }
@@ -290,26 +282,26 @@ impl DatastoreWorker {
                 self.commit = true;
                 Ok(Response::Empty())
             }
-            Command::InsertKeyValue(key, data) => {
-                match ds.insert_key_value(transaction, &key, &data) {
-                    Ok(()) => Ok(Response::Empty()),
-                    Err(e) => Err(e),
-                }
-            }
-            Command::GetKeyValue(key) => match ds.get_key_value(transaction, &key) {
-                Ok(result) => Ok(Response::KeyValue(result)),
-                Err(e) => Err(e),
-            },
-            Command::GetKeysStarting(pattern) => {
-                match ds.get_keys_starting(transaction, &pattern) {
-                    Ok(result) => Ok(Response::StringVec(result)),
-                    Err(e) => Err(e),
-                }
-            }
-            Command::DeleteKeyValue(key) => match ds.delete_key_value(transaction, &key) {
+            Command::InsertKeyValue(key, data) => match ds.insert_key_value(tx, &key, &data) {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
             },
+            Command::GetKeyValue(key) => match ds.get_key_value(tx, &key) {
+                Ok(result) => Ok(Response::KeyValue(result)),
+                Err(e) => Err(e),
+            },
+            Command::GetKeysStarting(pattern) => match ds.get_keys_starting(tx, &pattern) {
+                Ok(result) => Ok(Response::StringVec(result)),
+                Err(e) => Err(e),
+            },
+            Command::DeleteKeyValue(key) => match ds.delete_key_value(tx, &key) {
+                Ok(()) => Ok(Response::Empty()),
+                Err(e) => Err(e),
+            },
+            Command::Close() => {
+                self.quit = true;
+                Ok(Response::NoResponse())
+            }
         }
     }
 }

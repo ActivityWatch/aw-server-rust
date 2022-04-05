@@ -4,13 +4,14 @@ extern crate aw_sync;
 
 #[cfg(test)]
 mod sync_tests {
-    use chrono::{DateTime, Utc};
     use std::collections::HashMap;
+    use std::path::Path;
+
+    use chrono::{DateTime, Duration, Utc};
 
     use aw_datastore::{Datastore, DatastoreError};
     use aw_models::{Bucket, Event};
-    use aw_sync;
-    use aw_sync::SyncSpec;
+    use aw_sync::{create_datastore, AccessMethod, SyncSpec};
 
     struct TestState {
         ds_src: Datastore,

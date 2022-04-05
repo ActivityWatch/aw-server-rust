@@ -58,6 +58,7 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec) -> Result<(), String> {
         .map(|p| p.as_path())
         .map(create_datastore)
         .collect();
+    info!("Remote datastores: {:?}", ds_remotes);
 
     // Pull
     info!("Pulling...");
@@ -75,11 +76,19 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec) -> Result<(), String> {
         sync_spec,
     );
 
+    // Close open database connections
+    for ds_from in &ds_remotes {
+        ds_from.close();
+    }
+    ds_localremote.close();
+
+    // Will fail if db connections not closed (as it will open them again)
     list_buckets(&client, sync_spec.path.as_path());
 
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn list_buckets(client: &AwClient, sync_directory: &Path) {
     let ds_localremote = setup_local_remote(client, sync_directory).unwrap();
 
@@ -144,12 +153,12 @@ fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf>
     remotes_all
         .into_iter()
         .filter(|path| {
-            !path
+            !(path
                 .clone()
                 .into_os_string()
                 .into_string()
                 .unwrap()
-                .contains(device_id)
+                .contains(device_id))
         })
         .collect()
 }

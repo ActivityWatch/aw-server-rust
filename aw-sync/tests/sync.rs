@@ -211,7 +211,7 @@ mod sync_tests {
         check_synced_buckets_equal_to_src(&all_buckets_map);
     }
 
-    // TODO: Move into tests
+    // TODO: Find a way to reuse this (previously used in an integration test)
     fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         let mut datastores: Vec<Datastore> = Vec::new();
         for n in 0..2 {

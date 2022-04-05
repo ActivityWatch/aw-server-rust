@@ -53,6 +53,8 @@ pub enum Response {
     Count(i64),
     KeyValue(KeyValue),
     StringVec(Vec<String>),
+    // Used to indicate that no response should occur at all (not even an empty one)
+    NoResponse(),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -78,6 +80,7 @@ pub enum Command {
     GetKeyValue(String),
     GetKeysStarting(String),
     DeleteKeyValue(String),
+    Close(),
 }
 
 fn _unwrap_response(
@@ -149,12 +152,7 @@ impl DatastoreWorker {
 
         // Start handling and respond to requests
         loop {
-            if self.quit {
-                break;
-            };
-
             let last_commit_time: DateTime<Utc> = Utc::now();
-            info!("Method '{:?}'", &method);
             let mut transaction: Transaction =
                 match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
                     Ok(transaction) => transaction,
@@ -179,8 +177,13 @@ impl DatastoreWorker {
                         break;
                     }
                 };
-                let response = self.handle_request(request, &mut ds, &transaction);
-                response_sender.respond(response);
+                let response = self.handle_request(request, &mut ds);
+                match response {
+                    // The empty response is given by commands like close(), which should
+                    // not be responded to, as the requester might have disappeared.
+                    Ok(Response::NoResponse()) => (),
+                    _ => response_sender.respond(response),
+                }
                 let now: DateTime<Utc> = Utc::now();
                 let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
                 if self.commit || commit_interval_passed || self.uncommited_events > 100 {
@@ -195,6 +198,9 @@ impl DatastoreWorker {
                 Ok(_) => (),
                 Err(err) => panic!("Failed to commit datastore transaction! {}", err),
             }
+            if self.quit {
+                break;
+            };
         }
         info!("DB Worker thread finished");
     }
@@ -523,5 +529,11 @@ impl Datastore {
             },
             Err(e) => Err(e),
         }
+    }
+
+    // TODO: Should this block until worker has stopped?
+    pub fn close(&self) {
+        info!("Sending close request to database");
+        self.requester.request(Command::Close()).unwrap();
     }
 }

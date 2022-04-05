@@ -6,6 +6,8 @@ use chrono::NaiveDateTime;
 use chrono::Utc;
 
 use rusqlite::Connection;
+use rusqlite::Transaction;
+use rusqlite::TransactionBehavior;
 
 use serde_json::value::Value;
 

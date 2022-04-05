@@ -15,7 +15,7 @@ extern crate serde_json;
 
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 
 use aw_client_rust::AwClient;
@@ -31,38 +31,42 @@ struct Opts {
     #[clap(subcommand)]
     command: Commands,
 
-    /// Host of instance to connect to
+    /// Host of instance to connect to.
     #[clap(long, default_value = "127.0.0.1")]
     host: String,
-    /// Port of instance to connect to
+    /// Port of instance to connect to.
     #[clap(long, default_value = DEFAULT_PORT)]
     port: String,
     /// Convenience option for using the default testing host and port.
     #[clap(long)]
     testing: bool,
-    /// Path to sync directory
-    /// If not specified, exit
+    /// Path to sync directory.
+    /// If not specified, exit.
     #[clap(long)]
     sync_dir: String,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Clones repos
+    /// Sync subcommand.
+    ///
+    /// Pulls remote buckets then pushes local buckets.
+    /// First pulls remote buckets in the sync directory to the local aw-server.
+    /// Then pushes local buckets from the aw-server to the local sync directory.
     #[clap(arg_required_else_help = true)]
     Sync {
-        /// Date to start syncing from
-        /// If not specified, start from beginning
+        /// Date to start syncing from.
+        /// If not specified, start from beginning.
         /// NOTE: might be unstable, as count cannot be used to verify integrity of sync.
         /// Format: YYYY-MM-DD
         #[clap(long)]
         start_date: Option<String>,
-        /// Specify buckets to sync
-        /// If not specified, all buckets will be synced
+        /// Specify buckets to sync.
+        /// If not specified, all buckets will be synced.
         #[clap(long)]
         buckets: Option<Vec<String>>,
     },
-    /// List buckets and their sync status
+    /// List buckets and their sync status.
     List {},
 }
 
@@ -95,10 +99,13 @@ fn main() -> std::io::Result<()> {
             buckets,
         } => {
             let start: Option<DateTime<Utc>> = start_date.as_ref().map(|date| {
-                let date_copy = date.clone();
-                chrono::DateTime::parse_from_rfc3339(&date_copy)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc)
+                println!("{}", date.clone());
+                chrono::NaiveDate::parse_from_str(&date.clone(), "%Y-%m-%d")
+                    .map(|nd| {
+                        let dt = Utc.ymd(nd.year(), nd.month(), nd.day());
+                        dt.and_hms(0, 0, 0)
+                    })
+                    .expect("Date was not on the format YYYY-MM-DD")
             });
             let sync_spec = sync::SyncSpec {
                 path: sync_directory.to_path_buf(),

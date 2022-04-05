@@ -118,7 +118,7 @@ impl DatastoreWorker {
 
     fn work_loop(&mut self, method: DatastoreMethod) {
         // Open SQLite connection
-        let mut conn = match method {
+        let mut conn = match &method {
             DatastoreMethod::Memory() => {
                 Connection::open_in_memory().expect("Failed to create in-memory datastore")
             }
@@ -149,13 +149,26 @@ impl DatastoreWorker {
 
         // Start handling and respond to requests
         loop {
+            if self.quit {
+                break;
+            };
+
             let last_commit_time: DateTime<Utc> = Utc::now();
-            let mut transaction = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .unwrap();
+            info!("Method '{:?}'", &method);
+            let mut transaction: Transaction =
+                match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
+                    Ok(transaction) => transaction,
+                    Err(err) => {
+                        error!("Unable to start transaction! {:?}", err);
+                        // Wait 1s before retrying
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
+                        continue;
+                    }
+                };
+            transaction.set_drop_behavior(DropBehavior::Commit);
+
             self.uncommited_events = 0;
             self.commit = false;
-            transaction.set_drop_behavior(DropBehavior::Commit);
             loop {
                 let (request, response_sender) = match self.responder.poll() {
                     Ok((req, res_sender)) => (req, res_sender),
@@ -182,9 +195,6 @@ impl DatastoreWorker {
                 Ok(_) => (),
                 Err(err) => panic!("Failed to commit datastore transaction! {}", err),
             }
-            if self.quit {
-                break;
-            };
         }
         info!("DB Worker thread finished");
     }
@@ -196,29 +206,27 @@ impl DatastoreWorker {
         transaction: &Transaction,
     ) -> Result<Response, DatastoreError> {
         match request {
-            Command::CreateBucket(bucket) => match ds.create_bucket(&transaction, bucket) {
+            Command::CreateBucket(bucket) => match ds.create_bucket(transaction, bucket) {
                 Ok(_) => {
                     self.commit = true;
                     Ok(Response::Empty())
                 }
                 Err(e) => Err(e),
             },
-            Command::DeleteBucket(bucketname) => {
-                match ds.delete_bucket(&transaction, &bucketname) {
-                    Ok(_) => {
-                        self.commit = true;
-                        Ok(Response::Empty())
-                    }
-                    Err(e) => Err(e),
+            Command::DeleteBucket(bucketname) => match ds.delete_bucket(transaction, &bucketname) {
+                Ok(_) => {
+                    self.commit = true;
+                    Ok(Response::Empty())
                 }
-            }
+                Err(e) => Err(e),
+            },
             Command::GetBucket(bucketname) => match ds.get_bucket(&bucketname) {
                 Ok(b) => Ok(Response::Bucket(b)),
                 Err(e) => Err(e),
             },
             Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets())),
             Command::InsertEvents(bucketname, events) => {
-                match ds.insert_events(&transaction, &bucketname, events) {
+                match ds.insert_events(transaction, &bucketname, events) {
                     Ok(events) => {
                         self.uncommited_events += events.len();
                         self.last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
@@ -229,7 +237,7 @@ impl DatastoreWorker {
             }
             Command::Heartbeat(bucketname, event, pulsetime) => {
                 match ds.heartbeat(
-                    &transaction,
+                    transaction,
                     &bucketname,
                     event,
                     pulsetime,
@@ -243,14 +251,14 @@ impl DatastoreWorker {
                 }
             }
             Command::GetEvent(bucketname, event_id) => {
-                match ds.get_event(&transaction, &bucketname, event_id) {
+                match ds.get_event(transaction, &bucketname, event_id) {
                     Ok(el) => Ok(Response::Event(el)),
                     Err(e) => Err(e),
                 }
             }
             Command::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt) => {
                 match ds.get_events(
-                    &transaction,
+                    transaction,
                     &bucketname,
                     starttime_opt,
                     endtime_opt,
@@ -261,13 +269,13 @@ impl DatastoreWorker {
                 }
             }
             Command::GetEventCount(bucketname, starttime_opt, endtime_opt) => {
-                match ds.get_event_count(&transaction, &bucketname, starttime_opt, endtime_opt) {
+                match ds.get_event_count(transaction, &bucketname, starttime_opt, endtime_opt) {
                     Ok(n) => Ok(Response::Count(n)),
                     Err(e) => Err(e),
                 }
             }
             Command::DeleteEventsById(bucketname, event_ids) => {
-                match ds.delete_events_by_id(&transaction, &bucketname, event_ids) {
+                match ds.delete_events_by_id(transaction, &bucketname, event_ids) {
                     Ok(()) => Ok(Response::Empty()),
                     Err(e) => Err(e),
                 }
@@ -277,22 +285,22 @@ impl DatastoreWorker {
                 Ok(Response::Empty())
             }
             Command::InsertKeyValue(key, data) => {
-                match ds.insert_key_value(&transaction, &key, &data) {
+                match ds.insert_key_value(transaction, &key, &data) {
                     Ok(()) => Ok(Response::Empty()),
                     Err(e) => Err(e),
                 }
             }
-            Command::GetKeyValue(key) => match ds.get_key_value(&transaction, &key) {
+            Command::GetKeyValue(key) => match ds.get_key_value(transaction, &key) {
                 Ok(result) => Ok(Response::KeyValue(result)),
                 Err(e) => Err(e),
             },
             Command::GetKeysStarting(pattern) => {
-                match ds.get_keys_starting(&transaction, &pattern) {
+                match ds.get_keys_starting(transaction, &pattern) {
                     Ok(result) => Ok(Response::StringVec(result)),
                     Err(e) => Err(e),
                 }
             }
-            Command::DeleteKeyValue(key) => match ds.delete_key_value(&transaction, &key) {
+            Command::DeleteKeyValue(key) => match ds.delete_key_value(transaction, &key) {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
             },

@@ -22,6 +22,7 @@ mod worker;
 pub use self::datastore::DatastoreInstance;
 pub use self::worker::Datastore;
 
+#[derive(Debug, Clone)]
 pub enum DatastoreMethod {
     Memory(),
     File(String),

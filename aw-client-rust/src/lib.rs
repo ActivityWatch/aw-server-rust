@@ -23,7 +23,10 @@ pub struct AwClient {
 impl AwClient {
     pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
         let baseurl = format!("http://{}:{}", ip, port);
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
         let hostname = gethostname::gethostname().into_string().unwrap();
         AwClient {
             client,

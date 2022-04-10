@@ -61,10 +61,10 @@ enum Commands {
         /// Format: YYYY-MM-DD
         #[clap(long)]
         start_date: Option<String>,
-        /// Specify buckets to sync.
+        /// Specify buckets to sync using a comma-separated list.
         /// If not specified, all buckets will be synced.
         #[clap(long)]
-        buckets: Option<Vec<String>>,
+        buckets: Option<String>,
     },
     /// List buckets and their sync status.
     List {},
@@ -73,7 +73,7 @@ enum Commands {
 fn main() -> std::io::Result<()> {
     let opts: Opts = Opts::parse();
 
-    println!("Started aw-sync-rust...");
+    info!("Started aw-sync...");
 
     aw_server::logging::setup_logger(true).expect("Failed to setup logging");
 
@@ -83,6 +83,7 @@ fn main() -> std::io::Result<()> {
     } else {
         Path::new(&opts.sync_dir)
     };
+    info!("Using sync dir: {}", sync_directory.display());
 
     let port = if opts.testing && opts.port == DEFAULT_PORT {
         "5666"
@@ -90,7 +91,7 @@ fn main() -> std::io::Result<()> {
         &opts.port
     };
 
-    let client = AwClient::new(opts.host.as_str(), port, "aw-sync-rust");
+    let client = AwClient::new(opts.host.as_str(), port, "aw-sync");
 
     match &opts.command {
         // Perform two-way sync
@@ -107,9 +108,15 @@ fn main() -> std::io::Result<()> {
                     })
                     .expect("Date was not on the format YYYY-MM-DD")
             });
+
+            // Parse comma-separated list
+            let buckets_vec: Option<Vec<String>> = buckets
+                .as_ref()
+                .map(|b| b.split(',').map(|s| s.to_string()).collect());
+
             let sync_spec = sync::SyncSpec {
                 path: sync_directory.to_path_buf(),
-                buckets: buckets.clone(),
+                buckets: buckets_vec,
                 start,
             };
 

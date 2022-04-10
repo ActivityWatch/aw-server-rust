@@ -29,6 +29,13 @@ pub struct SyncSpec {
     pub start: Option<DateTime<Utc>>,
 }
 
+#[derive(PartialEq)]
+pub enum SyncMode {
+    Push,
+    Pull,
+    Both,
+}
+
 impl Default for SyncSpec {
     fn default() -> Self {
         // TODO: Better default path
@@ -42,7 +49,7 @@ impl Default for SyncSpec {
 }
 
 /// Performs a single sync pass
-pub fn sync_run(client: AwClient, sync_spec: &SyncSpec) -> Result<(), String> {
+pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
     let ds_localremote = setup_local_remote(&client, sync_spec.path.as_path())?;
 
     let info = client.get_info().unwrap();
@@ -74,20 +81,24 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec) -> Result<(), String> {
     }
 
     // Pull
-    info!("Pulling...");
-    for ds_from in &ds_remotes {
-        sync_datastores(ds_from, &client, false, None, sync_spec);
+    if mode == SyncMode::Pull || mode == SyncMode::Both {
+        info!("Pulling...");
+        for ds_from in &ds_remotes {
+            sync_datastores(ds_from, &client, false, None, sync_spec);
+        }
     }
 
     // Push local server buckets to sync folder
-    info!("Pushing...");
-    sync_datastores(
-        &client,
-        &ds_localremote,
-        true,
-        Some(info.device_id.as_str()),
-        sync_spec,
-    );
+    if mode == SyncMode::Push || mode == SyncMode::Both {
+        info!("Pushing...");
+        sync_datastores(
+            &client,
+            &ds_localremote,
+            true,
+            Some(info.device_id.as_str()),
+            sync_spec,
+        );
+    }
 
     // Close open database connections
     //for ds_from in &ds_remotes {
@@ -137,18 +148,14 @@ fn setup_local_remote(client: &AwClient, path: &Path) -> Result<Datastore, Strin
     let remotedir = path.join(info.device_id.as_str());
     fs::create_dir_all(&remotedir).unwrap();
 
-    let dbfile = remotedir
-        .join("test.db")
-        .into_os_string()
-        .into_string()
-        .unwrap();
+    let dbfile = remotedir.join("test.db");
 
     // Print a message if dbfile doesn't already exist
-    if !Path::new(&dbfile).exists() {
-        info!("Creating new database file: {}", dbfile);
+    if !dbfile.exists() {
+        info!("Creating new database file: {}", dbfile.display());
     }
-    let ds_localremote = Datastore::new(dbfile, false);
 
+    let ds_localremote = create_datastore(&dbfile);
     Ok(ds_localremote)
 }
 
@@ -261,7 +268,7 @@ pub fn sync_datastores(
         .map(|tup| {
             // TODO: Refuse to sync buckets without hostname/device ID set, or if set to 'unknown'
             if tup.1.hostname == "unknown" {
-                warn!("Bucket hostname/device ID was invalid, setting to device ID/hostname");
+                warn!(" ! Bucket hostname/device ID was invalid, setting to device ID/hostname");
                 tup.1.hostname = src_did.unwrap().to_string();
             }
             tup.1.clone()
@@ -272,7 +279,7 @@ pub fn sync_datastores(
     if let Some(buckets) = &sync_spec.buckets {
         for b_id in buckets {
             if buckets_from.iter().find(|b| b.id == *b_id).is_none() {
-                error!("Bucket \"{}\" not found in source datastore", b_id);
+                error!(" ! Bucket \"{}\" not found in source datastore", b_id);
             }
         }
     }
@@ -294,7 +301,7 @@ fn sync_one(
     bucket_to: Bucket,
 ) {
     let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
-    info!("Syncing bucket '{}'...", bucket_to.id);
+    info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
     // Sync events
     // FIXME: This should use bucket_to.metadata.end, but it doesn't because it doesn't work
@@ -306,9 +313,9 @@ fn sync_one(
     let resume_sync_at = most_recent_events.first().map(|e| e.timestamp + e.duration);
 
     if let Some(resume_time) = resume_sync_at {
-        info!(" + Resuming at {:?}", resume_time);
+        info!("   + Resuming at {:?}", resume_time);
     } else {
-        info!(" + Starting from beginning");
+        info!("   + Starting from beginning");
     }
     let mut events: Vec<Event> = ds_from
         .get_events(bucket_from.id.as_str(), resume_sync_at, None, None)
@@ -335,9 +342,9 @@ fn sync_one(
     let new_events_count = eventcount_to_new - eventcount_to_old;
     assert!(new_events_count >= 0);
     if new_events_count > 0 {
-        info!(" = Synced {} new events", new_events_count);
+        info!("  = Synced {} new events", new_events_count);
     } else {
-        info!(" = Already up to date!");
+        info!("  ✓ Already up to date!");
     }
 }
 

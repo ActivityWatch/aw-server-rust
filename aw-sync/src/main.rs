@@ -65,6 +65,10 @@ enum Commands {
         /// If not specified, all buckets will be synced.
         #[clap(long)]
         buckets: Option<String>,
+        /// Mode to sync in. Can be "push", "pull", or "both".
+        /// Defaults to "both".
+        #[clap(long, default_value = "both")]
+        mode: String,
     },
     /// List buckets and their sync status.
     List {},
@@ -98,6 +102,7 @@ fn main() -> std::io::Result<()> {
         Commands::Sync {
             start_date,
             buckets,
+            mode,
         } => {
             let start: Option<DateTime<Utc>> = start_date.as_ref().map(|date| {
                 println!("{}", date.clone());
@@ -120,11 +125,17 @@ fn main() -> std::io::Result<()> {
                 start,
             };
 
-            sync::sync_run(client, &sync_spec).map_err(|e| {
+            let mode_enum = match mode.as_str() {
+                "push" => sync::SyncMode::Push,
+                "pull" => sync::SyncMode::Pull,
+                "both" => sync::SyncMode::Both,
+                _ => panic!("Invalid mode"),
+            };
+
+            sync::sync_run(client, &sync_spec, mode_enum).map_err(|e| {
                 println!("Error: {}", e);
                 std::io::Error::new(std::io::ErrorKind::Other, e)
             })?;
-            info!("Finished successfully, exiting...");
             Ok(())
         }
 

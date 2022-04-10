@@ -12,12 +12,17 @@ use serde_json::Map;
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
 
-#[derive(Debug)]
 pub struct AwClient {
     client: reqwest::blocking::Client,
     pub baseurl: String,
     pub name: String,
     pub hostname: String,
+}
+
+impl std::fmt::Debug for AwClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "AwClient(baseurl={:?})", self.baseurl)
+    }
 }
 
 impl AwClient {

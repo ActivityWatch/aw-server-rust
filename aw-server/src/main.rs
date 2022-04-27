@@ -27,6 +27,7 @@ struct Opts {
     #[clap(long)]
     port: Option<String>,
     /// Path to database override
+    /// Also implies --no-legacy-import if no db found
     #[clap(long)]
     dbpath: Option<String>,
     /// Path to webui override
@@ -69,7 +70,7 @@ async fn main() -> Result<(), rocket::Error> {
     }
 
     // Set db path if overridden
-    let db_path: String = if let Some(dbpath) = opts.dbpath {
+    let db_path: String = if let Some(dbpath) = opts.dbpath.clone() {
         dbpath
     } else {
         dirs::db_path(testing)
@@ -86,7 +87,11 @@ async fn main() -> Result<(), rocket::Error> {
     };
     info!("Using aw-webui assets at path {:?}", asset_path);
 
-    let legacy_import = !opts.no_legacy_import;
+    // Only use legacy import if opts.dbpath is not set
+    let legacy_import = !opts.no_legacy_import && opts.dbpath.is_none();
+    if opts.dbpath.is_some() {
+        info!("Since custom dbpath is set, --no-legacy-import is implied");
+    }
 
     let device_id: String = if let Some(id) = opts.device_id {
         id

@@ -8,13 +8,22 @@ Works by syncing local buckets with a special folder, which in turn should be sy
 
 ## Usage
 
+TODO: Write usage instructions for how to use with a normal testing/staging (5666) instance, to actually sync between devices.
+
+```
+cargo run --bin aw-sync-rust -- --port 5666 --help
+```
+
+
+## Testing
+
 **Note:** this documents usage for testing, it is not yet ready for production usage.
+
+It assumes you're running temporary aw-server instances.
 
 ### Pushing to the sync directory
 
-First start your aw-server instance. 
-
-For example: 
+First start the sending aw-server instance. For example: 
 
 ```sh
 PORT=5667
@@ -27,7 +36,9 @@ Then run `cargo run --bin aw-sync-rust -- --port 5667` to sync your instance's b
 
 ### Pulling from the sync directory
 
-Now to sync things back from the sync directory onto another instance. First, lets start another instance:
+Now to sync things back from the sync directory into another instance. 
+
+First, lets start another instance:
 
 ```sh
 PORT=5668

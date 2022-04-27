@@ -9,243 +9,192 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use aw_client_rust::AwClient;
-use chrono::{DateTime, Duration, Utc};
-use reqwest::StatusCode;
+use chrono::{DateTime, Utc};
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Bucket, Event};
 
-// This trait should be implemented by both AwClient and Datastore, unifying them under a single API
-pub trait AccessMethod: std::fmt::Debug {
-    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String>;
-    fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError>;
-    fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError>;
-    fn get_events(
-        &self,
-        bucket_id: &str,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
-        limit: Option<u64>,
-    ) -> Result<Vec<Event>, String>;
-    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String>;
-    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
-    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
+use crate::accessmethod::AccessMethod;
+
+pub struct SyncSpec {
+    /// Path of sync folder
+    pub path: PathBuf,
+    /// Bucket IDs to sync
+    pub buckets: Option<Vec<String>>,
+    /// Start of time range to sync
+    pub start: Option<DateTime<Utc>>,
 }
 
-impl AccessMethod for Datastore {
-    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
-        Ok(self.get_buckets().unwrap())
-    }
-    fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        self.get_bucket(bucket_id)
-    }
-    fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        self.create_bucket(bucket)?;
-        self.force_commit().unwrap();
-        Ok(())
-    }
-    fn get_events(
-        &self,
-        bucket_id: &str,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
-        limit: Option<u64>,
-    ) -> Result<Vec<Event>, String> {
-        Ok(self.get_events(bucket_id, start, end, limit).unwrap())
-    }
-    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
-        self.heartbeat(bucket_id, event, duration).unwrap();
-        self.force_commit().unwrap();
-        Ok(())
-    }
-    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String> {
-        let res = self.insert_events(bucket_id, &events[..]).unwrap();
-        self.force_commit().unwrap();
-        Ok(res)
-    }
-    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
-        Ok(self.get_event_count(bucket_id, None, None).unwrap())
-    }
+#[derive(PartialEq)]
+pub enum SyncMode {
+    Push,
+    Pull,
+    Both,
 }
 
-impl AccessMethod for AwClient {
-    fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
-        Ok(self.get_buckets().unwrap())
-    }
-    fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        let bucket = self.get_bucket(bucket_id);
-        match bucket {
-            Ok(bucket) => Ok(bucket),
-            Err(e) => {
-                warn!("{:?}", e);
-                let code = e.status().unwrap();
-                if code == StatusCode::NOT_FOUND {
-                    Err(DatastoreError::NoSuchBucket(bucket_id.into()))
-                } else {
-                    panic!("Unexpected error");
-                }
-            }
+impl Default for SyncSpec {
+    fn default() -> Self {
+        // TODO: Better default path
+        let path = Path::new("/tmp/aw-sync").to_path_buf();
+        SyncSpec {
+            path,
+            buckets: None,
+            start: None,
         }
-    }
-    fn get_events(
-        &self,
-        bucket_id: &str,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
-        limit: Option<u64>,
-    ) -> Result<Vec<Event>, String> {
-        Ok(self.get_events(bucket_id, start, end, limit).unwrap())
-    }
-    fn insert_events(&self, _bucket_id: &str, _events: Vec<Event>) -> Result<Vec<Event>, String> {
-        //Ok(self.insert_events(bucket_id, &events[..]).unwrap())
-        Err("Not implemented".to_string())
-    }
-    fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
-        Ok(self.get_event_count(bucket_id).unwrap())
-    }
-    fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        self.create_bucket(bucket.id.as_str(), bucket._type.as_str())
-            .unwrap();
-        Ok(())
-        //Err(DatastoreError::InternalError("Not implemented".to_string()))
-    }
-    fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
-        self.heartbeat(bucket_id, &event, duration)
-            .map_err(|e| format!("{:?}", e))
     }
 }
 
 /// Performs a single sync pass
-pub fn sync_run(sync_directory: &Path, client: AwClient) {
-    fs::create_dir_all(sync_directory).unwrap();
+pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
+    let ds_localremote = setup_local_remote(&client, sync_spec.path.as_path())?;
 
     let info = client.get_info().unwrap();
-    let ds_localremote = Datastore::new(
-        sync_directory
-            .join(format!("test-{}.db", info.device_id))
-            .into_os_string()
-            .into_string()
-            .unwrap(),
-        false,
-    );
-    info!("Set up remote for local device");
+    let remote_dbfiles = find_remotes_nonlocal(sync_spec.path.as_path(), info.device_id.as_str());
 
-    //let ds_remotes = setup_test(sync_directory).unwrap();
-    //info!("Set up remotes for testing");
+    // Log if remotes found
+    // TODO: Only log remotes of interest
+    if !remote_dbfiles.is_empty() {
+        println!(
+            "Found {} remote db files: {:?}",
+            remote_dbfiles.len(),
+            remote_dbfiles
+        );
+    }
 
-    let remote_dbfiles = find_remotes_nonlocal(sync_directory, info.device_id.as_str());
-    info!("Found remotes: {:?}", remote_dbfiles);
-    let ds_remotes: Vec<Datastore> = remote_dbfiles.iter().map(create_datastore).collect();
+    // TODO: Check for compatible remote db version before opening
+    let ds_remotes: Vec<Datastore> = remote_dbfiles
+        .iter()
+        .map(|p| p.as_path())
+        .map(create_datastore)
+        .collect();
+
+    if !ds_remotes.is_empty() {
+        println!(
+            "Found {} remote datastores: {:?}",
+            ds_remotes.len(),
+            ds_remotes
+        );
+    }
 
     // Pull
-    info!("Pulling...");
-    for ds_from in &ds_remotes {
-        sync_datastores(ds_from, &client, false, None);
+    if mode == SyncMode::Pull || mode == SyncMode::Both {
+        info!("Pulling...");
+        for ds_from in &ds_remotes {
+            sync_datastores(ds_from, &client, false, None, sync_spec);
+        }
     }
 
     // Push local server buckets to sync folder
-    info!("Pushing...");
-    sync_datastores(
-        &client,
-        &ds_localremote,
-        true,
-        Some(info.device_id.as_str()),
-    );
+    if mode == SyncMode::Push || mode == SyncMode::Both {
+        info!("Pushing...");
+        sync_datastores(
+            &client,
+            &ds_localremote,
+            true,
+            Some(info.device_id.as_str()),
+            sync_spec,
+        );
+    }
 
-    log_buckets(&client);
+    // Close open database connections
+    //for ds_from in &ds_remotes {
+    //    ds_from.close();
+    //}
+    //ds_localremote.close();
+
+    // Dropping also works to close the database connections, weirdly enough.
+    // Probably because once the database is dropped, the thread will stop,
+    // and then the Connection will be dropped, which closes the connection.
+    std::mem::drop(ds_remotes);
+    std::mem::drop(ds_localremote);
+
+    // NOTE: Will fail if db connections not closed (as it will open them again)
+    //list_buckets(&client, sync_spec.path.as_path());
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn list_buckets(client: &AwClient, sync_directory: &Path) {
+    let ds_localremote = setup_local_remote(client, sync_directory).unwrap();
+
+    let info = client.get_info().unwrap();
+    let remote_dbfiles = find_remotes_nonlocal(sync_directory, info.device_id.as_str());
+    info!("Found remotes: {:?}", remote_dbfiles);
+
+    // TODO: Check for compatible remote db version before opening
+    let ds_remotes: Vec<Datastore> = remote_dbfiles
+        .iter()
+        .map(|p| p.as_path())
+        .map(create_datastore)
+        .collect();
+
+    log_buckets(client);
     log_buckets(&ds_localremote);
     for ds_from in &ds_remotes {
         log_buckets(ds_from);
     }
 }
 
-fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let files = fs::read_dir(sync_directory)?
-        .map(|res| res.ok().unwrap())
-        .map(|e| e.path())
-        .filter(|path| path.extension().unwrap() == "db") // FIXME: Is this the correct file ext?
-        .collect();
-    Ok(files)
+fn setup_local_remote(client: &AwClient, path: &Path) -> Result<Datastore, String> {
+    // FIXME: Don't run twice if already exists
+    fs::create_dir_all(path).unwrap();
+
+    let info = client.get_info().unwrap();
+    let remotedir = path.join(info.device_id.as_str());
+    fs::create_dir_all(&remotedir).unwrap();
+
+    let dbfile = remotedir.join("test.db");
+
+    // Print a message if dbfile doesn't already exist
+    if !dbfile.exists() {
+        info!("Creating new database file: {}", dbfile.display());
+    }
+
+    let ds_localremote = create_datastore(&dbfile);
+    Ok(ds_localremote)
 }
 
+/// Returns a list of all remote dbs
+fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
+    //info!("Using sync dir: {}", sync_directory.display());
+    let dbs = fs::read_dir(sync_directory)?
+        .map(|res| res.ok().unwrap().path())
+        .filter(|p| p.is_dir())
+        .flat_map(|d| {
+            //println!("{}", d.to_str().unwrap());
+            fs::read_dir(d).unwrap()
+        })
+        .map(|res| res.ok().unwrap().path())
+        .filter(|path| path.extension().unwrap() == "db") // FIXME: Is this the correct file ext?
+        .collect();
+    Ok(dbs)
+}
+
+/// Returns a list of all remotes, excluding local ones
 fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf> {
     let remotes_all = find_remotes(sync_directory).unwrap();
     // Filter out own remote
     remotes_all
         .into_iter()
         .filter(|path| {
-            !path
+            !(path
                 .clone()
                 .into_os_string()
                 .into_string()
                 .unwrap()
-                .contains(device_id)
+                .contains(device_id))
         })
         .collect()
 }
 
-fn create_datastore(dspath: &PathBuf) -> Datastore {
-    let pathstr = dspath.clone().into_os_string().into_string().unwrap();
-    Datastore::new(pathstr, false)
-}
-
-fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
-    let mut datastores: Vec<Datastore> = Vec::new();
-    for n in 0..2 {
-        let dspath = sync_directory.join(format!("test-remote-{}.db", n));
-        let ds_ = create_datastore(&dspath);
-        let ds = &ds_ as &dyn AccessMethod;
-
-        // Create a bucket
-        // NOTE: Created with duplicate name to make sure it still works under such conditions
-        let bucket_jsonstr = format!(
-            r#"{{
-                "id": "bucket",
-                "type": "test",
-                "hostname": "device-{}",
-                "client": "test"
-            }}"#,
-            n
-        );
-        let bucket: Bucket = serde_json::from_str(&bucket_jsonstr)?;
-        match ds.create_bucket(&bucket) {
-            Ok(()) => (),
-            Err(e) => match e {
-                DatastoreError::BucketAlreadyExists(_) => {
-                    debug!("bucket already exists, skipping");
-                }
-                e => panic!("woops! {:?}", e),
-            },
-        };
-
-        // Insert some testing events into the bucket
-        let events: Vec<Event> = (0..3)
-            .map(|i| {
-                let timestamp: DateTime<Utc> = Utc::now() + Duration::milliseconds(i * 10);
-                let event_jsonstr = format!(
-                    r#"{{
-                "timestamp": "{}",
-                "duration": 0,
-                "data": {{"test": {} }}
-            }}"#,
-                    timestamp.to_rfc3339(),
-                    i
-                );
-                serde_json::from_str(&event_jsonstr).unwrap()
-            })
-            .collect::<Vec<Event>>();
-
-        ds.insert_events(bucket.id.as_str(), events).unwrap();
-        //let new_eventcount = ds.get_event_count(bucket.id.as_str(), None, None).unwrap();
-        //info!("Eventcount: {:?} ({} new)", new_eventcount, events.len());
-        datastores.push(ds_);
-    }
-    Ok(datastores)
+pub fn create_datastore(path: &Path) -> Datastore {
+    let pathstr = path.as_os_str().to_str().unwrap();
+    Datastore::new(pathstr.to_string(), false)
 }
 
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
@@ -288,71 +237,152 @@ fn get_or_create_sync_bucket(
 }
 
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
+///
+/// is_push: a bool indicating if we're pushing local buckets to the sync dir
+///          (as opposed to pulling from remotes)
+/// src_did: source device ID
 pub fn sync_datastores(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     is_push: bool,
     src_did: Option<&str>,
+    sync_spec: &SyncSpec,
 ) {
     // FIXME: "-synced" should only be appended when synced to the local database, not to the
     // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
 
-    let buckets_from: Vec<Bucket> = ds_from
+    let mut buckets_from: Vec<Bucket> = ds_from
         .get_buckets()
         .unwrap()
         .iter_mut()
+        // If buckets vec isn't empty, filter out buckets not in the buckets vec
+        .filter(|tup| {
+            let bucket = &tup.1;
+            if let Some(buckets) = &sync_spec.buckets {
+                buckets.iter().any(|b_id| b_id == &bucket.id)
+            } else {
+                true
+            }
+        })
         .map(|tup| {
             // TODO: Refuse to sync buckets without hostname/device ID set, or if set to 'unknown'
             if tup.1.hostname == "unknown" {
-                warn!("Bucket hostname/device ID was invalid, setting to device ID/hostname");
+                warn!(" ! Bucket hostname/device ID was invalid, setting to device ID/hostname");
                 tup.1.hostname = src_did.unwrap().to_string();
             }
             tup.1.clone()
         })
         .collect();
 
+    // Log warning for buckets requested but not found
+    if let Some(buckets) = &sync_spec.buckets {
+        for b_id in buckets {
+            if buckets_from.iter().find(|b| b.id == *b_id).is_none() {
+                error!(" ! Bucket \"{}\" not found in source datastore", b_id);
+            }
+        }
+    }
+
+    // Sync buckets in order of most recently updated
+    buckets_from.sort_by_key(|b| b.metadata.end);
+
     for bucket_from in buckets_from {
         let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push);
-        let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
-        info!("Bucket: {:?}", bucket_to.id);
+        sync_one(ds_from, ds_to, bucket_from, bucket_to);
+    }
+}
 
-        // Sync events
-        // FIXME: This should use bucket_to.metadata.end, but it doesn't because it doesn't work
-        // for empty buckets (Should be None, is Some(unknown_time))
-        // let resume_sync_at = bucket_to.metadata.end;
-        let most_recent_events = ds_to
-            .get_events(bucket_to.id.as_str(), None, None, Some(1))
-            .unwrap();
-        let resume_sync_at = match most_recent_events.first() {
-            Some(e) => Some(e.timestamp + e.duration),
-            None => None,
-        };
+/// Syncs a single bucket from one datastore to another
+fn sync_one(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    bucket_from: Bucket,
+    bucket_to: Bucket,
+) {
+    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
+    info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
-        info!("Resumed at: {:?}", resume_sync_at);
-        let mut events: Vec<Event> = ds_from
-            .get_events(bucket_from.id.as_str(), resume_sync_at, None, None)
-            .unwrap()
-            .iter()
-            .map(|e| {
-                let mut new_e = e.clone();
-                new_e.id = None;
-                new_e
-            })
-            .collect();
+    // Sync events
+    // FIXME: This should use bucket_to.metadata.end, but it doesn't because it doesn't work
+    // for empty buckets (Should be None, is Some(unknown_time))
+    // let resume_sync_at = bucket_to.metadata.end;
+    let most_recent_events = ds_to
+        .get_events(bucket_to.id.as_str(), None, None, Some(1))
+        .unwrap();
+    let resume_sync_at = most_recent_events.first().map(|e| e.timestamp + e.duration);
 
-        // Sort ascending
-        events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        //info!("{:?}", events);
-        for event in events {
+    if let Some(resume_time) = resume_sync_at {
+        info!("   + Resuming at {:?}", resume_time);
+    } else {
+        info!("   + Starting from beginning");
+    }
+
+    // Fetch events
+    // Unset ID on events, as they are not globally unique
+    // TODO: Fetch at most ~5,000 events at a time (or so, to avoid timeout from huge buckets)
+    let mut events: Vec<Event> = ds_from
+        .get_events(bucket_from.id.as_str(), resume_sync_at, None, None)
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let mut new_e = e.clone();
+            new_e.id = None;
+            new_e
+        })
+        .collect();
+
+    // Sort ascending
+    // FIXME: What happens here if two events have the same timestamp?
+    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    // TODO: Do bulk insert using insert_events instead? (for performance)
+    //       Client-side heartbeat queueing should keep things somewhat performant though?
+    // NOTE: First event needs to be inserted with heartbeat, to ensure appropriate
+    // merging/updating of pulsed events.
+    let events_total = events.len();
+    let mut events_sent = 0;
+    let mut events_iter = events.into_iter();
+    if let Some(e) = events_iter.next() {
+        ds_to.heartbeat(bucket_to.id.as_str(), e, 0.0).unwrap();
+        events_sent += 1;
+    }
+
+    const BATCH_SIZE: usize = 5000;
+    if BATCH_SIZE == 1 {
+        for event in events_iter {
+            print!("{} ({}/{})\r", &event.timestamp, events_sent, events_total);
             ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
+            events_sent += 1;
+        }
+    } else {
+        let mut batch_events = Vec::with_capacity(BATCH_SIZE);
+        for e in events_iter {
+            print!("{} ({}/{})\r", e.timestamp, events_sent, events_total);
+            batch_events.push(e);
+            events_sent += 1;
+            if batch_events.len() >= BATCH_SIZE {
+                ds_to
+                    .insert_events(bucket_to.id.as_str(), batch_events.clone())
+                    .unwrap();
+                batch_events.clear();
+            }
         }
 
-        let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
-        info!(
-            "Synced {} new events",
-            eventcount_to_new - eventcount_to_old
-        );
+        if !batch_events.is_empty() {
+            ds_to
+                .insert_events(bucket_to.id.as_str(), batch_events)
+                .unwrap();
+        }
+    }
+
+    let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
+    let new_events_count = eventcount_to_new - eventcount_to_old;
+    assert!(new_events_count >= 0);
+    if new_events_count > 0 {
+        info!("  = Synced {} new events", new_events_count);
+    } else {
+        info!("  ✓ Already up to date!");
     }
 }
 

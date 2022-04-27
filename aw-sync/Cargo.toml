@@ -9,7 +9,7 @@ name = "aw_sync"
 path = "src/lib.rs"
 
 [[bin]]
-name = "aw-sync-rust"
+name = "aw-sync"
 path = "src/main.rs"
 
 [dependencies]

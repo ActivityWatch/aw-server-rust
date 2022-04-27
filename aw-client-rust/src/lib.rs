@@ -12,7 +12,6 @@ use serde_json::Map;
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
 
-#[derive(Debug)]
 pub struct AwClient {
     client: reqwest::blocking::Client,
     pub baseurl: String,
@@ -20,10 +19,19 @@ pub struct AwClient {
     pub hostname: String,
 }
 
+impl std::fmt::Debug for AwClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "AwClient(baseurl={:?})", self.baseurl)
+    }
+}
+
 impl AwClient {
     pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
         let baseurl = format!("http://{}:{}", ip, port);
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap();
         let hostname = gethostname::gethostname().into_string().unwrap();
         AwClient {
             client,
@@ -44,9 +52,18 @@ impl AwClient {
         self.client.get(&url).send()?.json()
     }
 
-    pub fn create_bucket(&self, bucketname: &str, buckettype: &str) -> Result<(), reqwest::Error> {
-        let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        let data = Bucket {
+    pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), reqwest::Error> {
+        let url = format!("{}/api/0/buckets/{}", self.baseurl, bucket.id);
+        self.client.post(&url).json(bucket).send()?;
+        Ok(())
+    }
+
+    pub fn create_bucket_simple(
+        &self,
+        bucketname: &str,
+        buckettype: &str,
+    ) -> Result<(), reqwest::Error> {
+        let bucket = Bucket {
             bid: None,
             id: bucketname.to_string(),
             client: self.name.clone(),
@@ -58,8 +75,7 @@ impl AwClient {
             created: None,
             last_updated: None,
         };
-        self.client.post(&url).json(&data).send()?;
-        Ok(())
+        self.create_bucket(&bucket)
     }
 
     pub fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
@@ -100,6 +116,16 @@ impl AwClient {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
         let eventlist = vec![event.clone()];
         self.client.post(&url).json(&eventlist).send()?;
+        Ok(())
+    }
+
+    pub fn insert_events(
+        &self,
+        bucketname: &str,
+        events: Vec<Event>,
+    ) -> Result<(), reqwest::Error> {
+        let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
+        self.client.post(&url).json(&events).send()?;
         Ok(())
     }
 

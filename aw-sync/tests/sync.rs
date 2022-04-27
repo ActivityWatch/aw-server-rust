@@ -4,12 +4,14 @@ extern crate aw_sync;
 
 #[cfg(test)]
 mod sync_tests {
-    use chrono::{DateTime, Utc};
     use std::collections::HashMap;
+    use std::path::Path;
+
+    use chrono::{DateTime, Duration, Utc};
 
     use aw_datastore::{Datastore, DatastoreError};
     use aw_models::{Bucket, Event};
-    use aw_sync;
+    use aw_sync::{create_datastore, AccessMethod, SyncSpec};
 
     struct TestState {
         ds_src: Datastore,
@@ -101,7 +103,13 @@ mod sync_tests {
         let state = init_teststate();
         create_bucket(&state.ds_src, 0);
 
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         let buckets_src: HashMap<String, Bucket> = state.ds_src.get_buckets().unwrap();
         let buckets_dest: HashMap<String, Bucket> = state.ds_dest.get_buckets().unwrap();
@@ -136,7 +144,13 @@ mod sync_tests {
             .heartbeat(bucket_id.as_str(), create_event("1"), 1.0)
             .unwrap();
 
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         let all_datastores: Vec<&Datastore> =
             [&state.ds_src, &state.ds_dest].iter().cloned().collect();
@@ -150,7 +164,13 @@ mod sync_tests {
             .ds_src
             .heartbeat(bucket_id.as_str(), create_event("1"), 1.0)
             .unwrap();
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);
@@ -163,7 +183,13 @@ mod sync_tests {
         let bucket_id = create_bucket(&state.ds_src, 0);
         create_events(&state.ds_src, bucket_id.as_str(), 10);
 
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         let all_datastores: Vec<&Datastore> =
             [&state.ds_src, &state.ds_dest].iter().cloned().collect();
@@ -174,9 +200,70 @@ mod sync_tests {
 
         // Add some more events
         create_events(&state.ds_src, bucket_id.as_str(), 10);
-        aw_sync::sync_datastores(&state.ds_src, &state.ds_dest, false, None);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);
+    }
+
+    // TODO: Find a way to reuse this (previously used in an integration test)
+    fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
+        let mut datastores: Vec<Datastore> = Vec::new();
+        for n in 0..2 {
+            let dspath = sync_directory.join(format!("test-remote-{}.db", n));
+            let ds_ = create_datastore(&dspath);
+            let ds = &ds_ as &dyn AccessMethod;
+
+            // Create a bucket
+            // NOTE: Created with duplicate name to make sure it still works under such conditions
+            let bucket_jsonstr = format!(
+                r#"{{
+                    "id": "bucket",
+                    "type": "test",
+                    "hostname": "device-{}",
+                    "client": "test"
+                }}"#,
+                n
+            );
+            let bucket: Bucket = serde_json::from_str(&bucket_jsonstr)?;
+            match ds.create_bucket(&bucket) {
+                Ok(()) => (),
+                Err(e) => match e {
+                    DatastoreError::BucketAlreadyExists(_) => {
+                        debug!("bucket already exists, skipping");
+                    }
+                    e => panic!("woops! {:?}", e),
+                },
+            };
+
+            // Insert some testing events into the bucket
+            let events: Vec<Event> = (0..3)
+                .map(|i| {
+                    let timestamp: DateTime<Utc> = Utc::now() + Duration::milliseconds(i * 10);
+                    let event_jsonstr = format!(
+                        r#"{{
+                            "timestamp": "{}",
+                            "duration": 0,
+                            "data": {{"test": {} }}
+                        }}"#,
+                        timestamp.to_rfc3339(),
+                        i
+                    );
+                    serde_json::from_str(&event_jsonstr).unwrap()
+                })
+                .collect::<Vec<Event>>();
+
+            ds.insert_events(bucket.id.as_str(), events).unwrap();
+            //let new_eventcount = ds.get_event_count(bucket.id.as_str(), None, None).unwrap();
+            //info!("Eventcount: {:?} ({} new)", new_eventcount, events.len());
+            datastores.push(ds_);
+        }
+        Ok(datastores)
     }
 }

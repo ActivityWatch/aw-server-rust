@@ -76,7 +76,9 @@ mod test {
 
         let bucketname = format!("aw-client-rust-test_{}", client.hostname);
         let buckettype = "test-type";
-        client.create_bucket(&bucketname, &buckettype).unwrap();
+        client
+            .create_bucket_simple(&bucketname, &buckettype)
+            .unwrap();
 
         let bucket = client.get_bucket(&bucketname).unwrap();
         assert!(bucket.id == bucketname);

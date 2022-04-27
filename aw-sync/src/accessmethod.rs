@@ -19,7 +19,7 @@ pub trait AccessMethod: std::fmt::Debug {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String>;
-    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String>;
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String>;
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
     fn close(&self);
@@ -30,10 +30,10 @@ impl AccessMethod for Datastore {
         Ok(self.get_buckets().unwrap())
     }
     fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        self.get_bucket(bucket_id)
+        Datastore::get_bucket(self, bucket_id)
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        self.create_bucket(bucket)?;
+        Datastore::create_bucket(self, bucket)?;
         self.force_commit().unwrap();
         Ok(())
     }
@@ -44,23 +44,23 @@ impl AccessMethod for Datastore {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
-        Ok(self.get_events(bucket_id, start, end, limit).unwrap())
+        Ok(Datastore::get_events(self, bucket_id, start, end, limit).unwrap())
     }
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
-        self.heartbeat(bucket_id, event, duration).unwrap();
+        Datastore::heartbeat(self, bucket_id, event, duration).unwrap();
         self.force_commit().unwrap();
         Ok(())
     }
-    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<Vec<Event>, String> {
-        let res = self.insert_events(bucket_id, &events[..]).unwrap();
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
+        Datastore::insert_events(self, bucket_id, &events[..]).unwrap();
         self.force_commit().unwrap();
-        Ok(res)
+        Ok(())
     }
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
-        Ok(self.get_event_count(bucket_id, None, None).unwrap())
+        Ok(Datastore::get_event_count(self, bucket_id, None, None).unwrap())
     }
     fn close(&self) {
-        self.close();
+        Datastore::close(self);
     }
 }
 
@@ -92,18 +92,15 @@ impl AccessMethod for AwClient {
     ) -> Result<Vec<Event>, String> {
         Ok(self.get_events(bucket_id, start, end, limit).unwrap())
     }
-    fn insert_events(&self, _bucket_id: &str, _events: Vec<Event>) -> Result<Vec<Event>, String> {
-        //Ok(self.insert_events(bucket_id, &events[..]).unwrap())
-        Err("Not implemented".to_string())
+    fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
+        AwClient::insert_events(self, bucket_id, events).map_err(|e| e.to_string())
     }
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
         Ok(self.get_event_count(bucket_id).unwrap())
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        self.create_bucket(bucket.id.as_str(), bucket._type.as_str())
-            .unwrap();
+        AwClient::create_bucket(self, bucket).unwrap();
         Ok(())
-        //Err(DatastoreError::InternalError("Not implemented".to_string()))
     }
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
         self.heartbeat(bucket_id, &event, duration)

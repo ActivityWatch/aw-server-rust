@@ -317,6 +317,10 @@ fn sync_one(
     } else {
         info!("   + Starting from beginning");
     }
+
+    // Fetch events
+    // Unset ID on events, as they are not globally unique
+    // TODO: Fetch at most ~5,000 events at a time (or so, to avoid timeout from huge buckets)
     let mut events: Vec<Event> = ds_from
         .get_events(bucket_from.id.as_str(), resume_sync_at, None, None)
         .unwrap()
@@ -329,13 +333,47 @@ fn sync_one(
         .collect();
 
     // Sort ascending
+    // FIXME: What happens here if two events have the same timestamp?
     events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-    //info!("{:?}", events);
 
     // TODO: Do bulk insert using insert_events instead? (for performance)
-    for event in events {
-        //print!("\r{}", event.timestamp);
-        ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
+    //       Client-side heartbeat queueing should keep things somewhat performant though?
+    // NOTE: First event needs to be inserted with heartbeat, to ensure appropriate
+    // merging/updating of pulsed events.
+    let events_total = events.len();
+    let mut events_sent = 0;
+    let mut events_iter = events.into_iter();
+    if let Some(e) = events_iter.next() {
+        ds_to.heartbeat(bucket_to.id.as_str(), e, 0.0).unwrap();
+        events_sent += 1;
+    }
+
+    const BATCH_SIZE: usize = 5000;
+    if BATCH_SIZE == 1 {
+        for event in events_iter {
+            print!("{} ({}/{})\r", &event.timestamp, events_sent, events_total);
+            ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
+            events_sent += 1;
+        }
+    } else {
+        let mut batch_events = Vec::with_capacity(BATCH_SIZE);
+        for e in events_iter {
+            print!("{} ({}/{})\r", e.timestamp, events_sent, events_total);
+            batch_events.push(e);
+            events_sent += 1;
+            if batch_events.len() >= BATCH_SIZE {
+                ds_to
+                    .insert_events(bucket_to.id.as_str(), batch_events.clone())
+                    .unwrap();
+                batch_events.clear();
+            }
+        }
+
+        if !batch_events.is_empty() {
+            ds_to
+                .insert_events(bucket_to.id.as_str(), batch_events)
+                .unwrap();
+        }
     }
 
     let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();

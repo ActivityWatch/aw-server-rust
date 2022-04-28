@@ -8,14 +8,36 @@ Works by syncing local buckets with a special folder, which in turn should be sy
 
 ## Usage
 
-TODO: Write usage instructions for how to use with a normal testing/staging (5666) instance, to actually sync between devices.
+NOTE: Basic usage not quite ready yet, see the below testing sections for MVP usage.
 
 ```
 cargo run --bin aw-sync-rust -- --port 5666 --help
 ```
 
+## Testing with real data on a testing instance
 
-## Testing
+To test syncing real events to a sync folder which can then be pulled from, we will use some helper scripts to do the following:
+
+1. `./test-sync.sh`
+    - Creates a sync directory **for you to set up sync** with Syncthing/Dropbox/Gdrive/rclone/whatever
+      - By default `~/ActivityWatchSync`
+    - Creates a datastore for the current host in the sync folder
+    - Sync all local buckets of interest (window & afk buckets, by default) to the sync dir
+
+2. `./test-server.sh`
+    - Starts a testing server **on port 5667** using a temporary directory as datastore (`/tmp/...`)
+
+3. `./test-import-sync.sh`
+    - Imports all the events from sync folder into the testing server on port 5667
+
+4. You should now have all events synced to a local testing instance!
+    - You can browse [127.0.0.1:5667](http://127.0.0.1:5667) to view testing instance, where you'll see events from synced all hosts.
+    - You can now set up syncing for `~/ActivityWatchSync` on more devices, and on each one use the script `./test-sync.sh` to push their events into the sync folder, then run `./test-import-sync.sh` on the device where you have the testing instance to update the data there.
+
+In the end, You should get something like this: https://twitter.com/ErikBjare/status/1519399784234246147
+
+
+## Testing with fake data
 
 **Note:** this documents usage for testing, it is not yet ready for production usage.
 

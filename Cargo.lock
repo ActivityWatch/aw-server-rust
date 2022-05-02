@@ -334,9 +334,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "3.1.14"
+version = "3.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "535434c063ced786eb04aaf529308092c5ab60889e8fe24275d15de07b01fa97"
+checksum = "85a35a599b11c089a7f49105658d089b8f2cf0882993c17daf6de15285c2c35d"
 dependencies = [
  "atty",
  "bitflags",
@@ -1382,7 +1382,7 @@ version = "1.0.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec757218438d5fda206afc041538b2f6d889286160d649a86a24d37e1235afd1"
 dependencies = [
- "unicode-xid 0.2.2",
+ "unicode-xid 0.2.3",
 ]
 
 [[package]]
@@ -1614,13 +1614,14 @@ dependencies = [
  "quote 1.0.18",
  "rocket_http",
  "syn 1.0.92",
- "unicode-xid 0.2.2",
+ "unicode-xid 0.2.3",
 ]
 
 [[package]]
 name = "rocket_cors"
-version = "0.5.2"
-source = "git+https://github.com/lawliet89/rocket_cors?rev=a062933#a062933c1b109949c618b0dba296ac33e4b1a105"
+version = "0.6.0-alpha1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f5aa2c9cdb5dabbbf38bd4fb0038844cc47598399fed70fc938185679154793"
 dependencies = [
  "log",
  "regex",
@@ -2024,7 +2025,7 @@ checksum = "7ff7c592601f11445996a06f8ad0c27f094a58857c2f89e97974ab9235b92c52"
 dependencies = [
  "proc-macro2 1.0.37",
  "quote 1.0.18",
- "unicode-xid 0.2.2",
+ "unicode-xid 0.2.3",
 ]
 
 [[package]]
@@ -2150,9 +2151,9 @@ checksum = "cda74da7e1a664f795bb1f8a87ec406fb89a02522cf6e50620d016add6dbbf5c"
 
 [[package]]
 name = "tokio"
-version = "1.18.0"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f48b6d60512a392e34dbf7fd456249fd2de3c83669ab642e021903f4015185b"
+checksum = "dce653fb475565de9f6fb0614b28bca8df2c430c0cf84bcd9c843f15de5414cc"
 dependencies = [
  "bytes",
  "libc",
@@ -2393,9 +2394,9 @@ checksum = "fc72304796d0818e357ead4e000d19c9c174ab23dc11093ac919054d20a6a7fc"
 
 [[package]]
 name = "unicode-xid"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ccb82d61f80a663efe1f787a51b16b5a51e3314d6ac365b08639f52387b33f3"
+checksum = "957e51f3646910546462e67d5f7599b9e4fb8acdd304b087a6494730f9eebf04"
 
 [[package]]
 name = "url"

@@ -16,13 +16,13 @@ path = "src/main.rs"
 [dependencies]
 rocket = { version = "0.5.0-rc.1", features = ["json"] }
 # TODO: Once rocket_cors has a version for rocket 0.5, use that instead
-rocket_cors = { git = "https://github.com/lawliet89/rocket_cors", rev = "a062933" }
+rocket_cors = { version = "0.6.0-alpha1" }
 multipart = { version = "0.18", default-features = false, features = ["server"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 appdirs = "0.2.0"
-lazy_static = "1.2"
+lazy_static = "1.4"
 log = "0.4"
 fern = { version = "0.6", features = ["colored"] }
 toml = "0.5"

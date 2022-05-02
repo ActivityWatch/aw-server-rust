@@ -12,7 +12,7 @@ pub fn get_device_id() -> String {
     if path.exists() {
         fs::read_to_string(path).unwrap()
     } else {
-        let uuid = Uuid::new_v4().to_hyphenated().to_string();
+        let uuid = Uuid::new_v4().as_hyphenated().to_string();
         fs::write(path, &uuid).unwrap();
         uuid
     }

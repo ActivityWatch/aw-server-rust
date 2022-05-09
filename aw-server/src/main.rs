@@ -107,7 +107,11 @@ async fn main() -> Result<(), rocket::Error> {
         device_id,
     };
 
-    endpoints::build_rocket(server_state, config).launch().await
+    endpoints::build_rocket(server_state, config)
+        .launch()
+        .await?;
+
+    Ok(())
 }
 
 use std::ffi::OsString;

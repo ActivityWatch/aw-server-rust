@@ -530,7 +530,7 @@ impl DatastoreInstance {
         Ok(())
     }
 
-    // TODO: Function for deleteing events by timerange with limit
+    // TODO: Function for deleting events by timerange with limit
 
     fn update_endtime(&mut self, bucket: &mut Bucket, event: &Event) {
         let mut update = false;

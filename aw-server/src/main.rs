@@ -4,6 +4,7 @@ extern crate log;
 use std::env;
 
 use clap::Parser;
+use clap::crate_version;
 
 use aw_server::*;
 
@@ -15,7 +16,7 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 /// Rust server for ActivityWatch
 #[derive(Parser)]
-#[clap(version = "0.10", author = "Johan Bjäreholt, Erik Bjäreholt")]
+#[clap(version = crate_version!(), author = "Johan Bjäreholt, Erik Bjäreholt, et al.")]
 struct Opts {
     /// Run in testing mode
     #[clap(long)]
@@ -48,11 +49,10 @@ async fn main() -> Result<(), rocket::Error> {
     use std::sync::Mutex;
 
     let mut testing = opts.testing;
+
     // Always override environment if --testing is specified
-    if !testing {
-        if cfg!(debug_assertions) {
-            testing = true;
-        }
+    if !testing && cfg!(debug_assertions) {
+        testing = true;
     }
 
     logging::setup_logger(testing).expect("Failed to setup logging");

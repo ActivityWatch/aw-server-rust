@@ -3,8 +3,8 @@ extern crate log;
 
 use std::env;
 
-use clap::Parser;
 use clap::crate_version;
+use clap::Parser;
 
 use aw_server::*;
 
@@ -21,22 +21,28 @@ struct Opts {
     /// Run in testing mode
     #[clap(long)]
     testing: bool,
+
     /// Address to listen to
     #[clap(long)]
     host: Option<String>,
+
     /// Port to listen on
     #[clap(long)]
     port: Option<String>,
+
     /// Path to database override
     /// Also implies --no-legacy-import if no db found
     #[clap(long)]
     dbpath: Option<String>,
+
     /// Path to webui override
     #[clap(long)]
     webpath: Option<String>,
+
     /// Device ID override
     #[clap(long)]
     device_id: Option<String>,
+
     /// Don't import from aw-server-python if no aw-server-rust db found
     #[clap(long)]
     no_legacy_import: bool,

@@ -106,7 +106,7 @@ where
 
     // Format a message stating what data this Visitor expects to receive.
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a seqence")
+        formatter.write_str("a sequence")
     }
 
     fn visit_seq<M>(self, mut access: M) -> Result<Self::Value, M::Error>

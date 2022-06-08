@@ -39,7 +39,7 @@ impl fmt::Debug for Datastore {
  * TODO:
  * - Allow read requests to go straight through a read-only db connection instead of requesting the
  * worker thread for better performance?
- * TODO: Add an seperate "Import" request which does an import with an transaction
+ * TODO: Add an separate "Import" request which does an import with an transaction
  */
 
 #[allow(clippy::large_enum_variant)]
@@ -99,7 +99,7 @@ struct DatastoreWorker {
     responder: RequestReceiver,
     legacy_import: bool,
     quit: bool,
-    uncommited_events: usize,
+    uncommitted_events: usize,
     commit: bool,
     last_heartbeat: HashMap<String, Option<Event>>,
 }
@@ -113,7 +113,7 @@ impl DatastoreWorker {
             responder,
             legacy_import,
             quit: false,
-            uncommited_events: 0,
+            uncommitted_events: 0,
             commit: false,
             last_heartbeat: HashMap::new(),
         }
@@ -165,7 +165,7 @@ impl DatastoreWorker {
                 };
             tx.set_drop_behavior(DropBehavior::Commit);
 
-            self.uncommited_events = 0;
+            self.uncommitted_events = 0;
             self.commit = false;
             loop {
                 let (request, response_sender) = match self.responder.poll() {
@@ -188,15 +188,15 @@ impl DatastoreWorker {
                 let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
                 if self.commit
                     || commit_interval_passed
-                    || self.uncommited_events > 100
+                    || self.uncommitted_events > 100
                     || self.quit
                 {
                     break;
                 };
             }
             debug!(
-                "Commiting DB! Force commit {}, {} uncommited events",
-                self.commit, self.uncommited_events
+                "Committing DB! Force commit {}, {} uncommitted events",
+                self.commit, self.uncommitted_events
             );
             match tx.commit() {
                 Ok(_) => (),
@@ -238,7 +238,7 @@ impl DatastoreWorker {
             Command::InsertEvents(bucketname, events) => {
                 match ds.insert_events(tx, &bucketname, events) {
                     Ok(events) => {
-                        self.uncommited_events += events.len();
+                        self.uncommitted_events += events.len();
                         self.last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
                         Ok(Response::EventList(events))
                     }
@@ -248,7 +248,7 @@ impl DatastoreWorker {
             Command::Heartbeat(bucketname, event, pulsetime) => {
                 match ds.heartbeat(tx, &bucketname, event, pulsetime, &mut self.last_heartbeat) {
                     Ok(e) => {
-                        self.uncommited_events += 1;
+                        self.uncommitted_events += 1;
                         Ok(Response::Event(e))
                     }
                     Err(e) => Err(e),

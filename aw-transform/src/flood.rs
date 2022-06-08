@@ -98,7 +98,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
                     warned_negative_gap_safe = true;
                 }
                 let start = std::cmp::min(e1.timestamp, e2.timestamp);
-                let end = std::cmp::max(e1.calculate_endtime(), e2.calculate_endtime()); // e2 isn't guarranteed to end last
+                let end = std::cmp::max(e1.calculate_endtime(), e2.calculate_endtime()); // e2 isn't guaranteed to end last
                 e1.timestamp = start;
                 e1.duration = end - start;
                 // Drop next event since it is merged/flooded into e1
@@ -134,8 +134,8 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
             // If data is the same, we should merge them.
             if e1.data == e2.data {
                 // Choose the longest event and set the endtime to it
-                let start = std::cmp::min(e1.timestamp, e2.timestamp); // isn't e1 guarranteed to start?
-                let end = std::cmp::max(e1.calculate_endtime(), e2.calculate_endtime()); // e2 isn't guarranteed to end last
+                let start = std::cmp::min(e1.timestamp, e2.timestamp); // isn't e1 guaranteed to start?
+                let end = std::cmp::max(e1.calculate_endtime(), e2.calculate_endtime()); // e2 isn't guaranteed to end last
                 e1.timestamp = start;
                 e1.duration = end - start;
                 // Drop next event since it is merged/flooded into e1

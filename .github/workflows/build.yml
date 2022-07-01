@@ -46,6 +46,8 @@ jobs:
         path: |
           target/*/aw-server
           target/*/aw-server.exe
+          target/*/aw-sync
+          target/*/aw-sync.exe
 
   build-android:
     name: Android

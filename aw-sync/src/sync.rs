@@ -9,6 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,13 @@ use aw_models::{Bucket, Event};
 
 use crate::accessmethod::AccessMethod;
 
+#[derive(PartialEq)]
+pub enum SyncMode {
+    Push,
+    Pull,
+    Both,
+}
+
 pub struct SyncSpec {
     /// Path of sync folder
     pub path: PathBuf,
@@ -27,13 +35,6 @@ pub struct SyncSpec {
     pub buckets: Option<Vec<String>>,
     /// Start of time range to sync
     pub start: Option<DateTime<Utc>>,
-}
-
-#[derive(PartialEq)]
-pub enum SyncMode {
-    Push,
-    Pull,
-    Both,
 }
 
 impl Default for SyncSpec {
@@ -52,7 +53,7 @@ impl Default for SyncSpec {
 pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
     let ds_localremote = setup_local_remote(&client, sync_spec.path.as_path())?;
 
-    let info = client.get_info().unwrap();
+    let info = client.get_info().map_err(|e| e.to_string())?;
     let remote_dbfiles = find_remotes_nonlocal(sync_spec.path.as_path(), info.device_id.as_str());
 
     // Log if remotes found
@@ -119,10 +120,10 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
 }
 
 #[allow(dead_code)]
-pub fn list_buckets(client: &AwClient, sync_directory: &Path) {
-    let ds_localremote = setup_local_remote(client, sync_directory).unwrap();
+pub fn list_buckets(client: &AwClient, sync_directory: &Path) -> Result<(), String> {
+    let ds_localremote = setup_local_remote(client, sync_directory)?;
 
-    let info = client.get_info().unwrap();
+    let info = client.get_info().map_err(|e| e.to_string())?;
     let remote_dbfiles = find_remotes_nonlocal(sync_directory, info.device_id.as_str());
     info!("Found remotes: {:?}", remote_dbfiles);
 
@@ -138,13 +139,15 @@ pub fn list_buckets(client: &AwClient, sync_directory: &Path) {
     for ds_from in &ds_remotes {
         log_buckets(ds_from);
     }
+
+    Ok(())
 }
 
 fn setup_local_remote(client: &AwClient, path: &Path) -> Result<Datastore, String> {
     // FIXME: Don't run twice if already exists
     fs::create_dir_all(path).unwrap();
 
-    let info = client.get_info().unwrap();
+    let info = client.get_info().map_err(|e| e.to_string())?;
     let remotedir = path.join(info.device_id.as_str());
     fs::create_dir_all(&remotedir).unwrap();
 
@@ -161,16 +164,12 @@ fn setup_local_remote(client: &AwClient, path: &Path) -> Result<Datastore, Strin
 
 /// Returns a list of all remote dbs
 fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
-    //info!("Using sync dir: {}", sync_directory.display());
     let dbs = fs::read_dir(sync_directory)?
         .map(|res| res.ok().unwrap().path())
         .filter(|p| p.is_dir())
-        .flat_map(|d| {
-            //println!("{}", d.to_str().unwrap());
-            fs::read_dir(d).unwrap()
-        })
+        .flat_map(|d| fs::read_dir(d).unwrap())
         .map(|res| res.ok().unwrap().path())
-        .filter(|path| path.extension().unwrap() == "db") // FIXME: Is this the correct file ext?
+        .filter(|path| path.extension().unwrap_or_else(|| OsStr::new("")) == "db")
         .collect();
     Ok(dbs)
 }

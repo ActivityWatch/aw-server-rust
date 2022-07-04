@@ -13,6 +13,7 @@ extern crate chrono;
 extern crate serde;
 extern crate serde_json;
 
+use std::error::Error;
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
@@ -74,7 +75,7 @@ enum Commands {
     List {},
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<(), Box<dyn Error>> {
     let opts: Opts = Opts::parse();
 
     info!("Started aw-sync...");
@@ -132,23 +133,12 @@ fn main() -> std::io::Result<()> {
                 _ => panic!("Invalid mode"),
             };
 
-            sync::sync_run(client, &sync_spec, mode_enum).map_err(|e| {
-                println!("Error: {}", e);
-                std::io::Error::new(std::io::ErrorKind::Other, e)
-            })?;
-            Ok(())
+            sync::sync_run(client, &sync_spec, mode_enum)
         }
 
         // List all buckets
-        Commands::List {} => {
-            sync::list_buckets(&client, sync_directory);
-            Ok(())
-        }
-    }
-    .map_err(|e: String| {
-        println!("Error: {}", e);
-        std::io::Error::new(std::io::ErrorKind::Other, e)
-    })?;
+        Commands::List {} => sync::list_buckets(&client, sync_directory),
+    }?;
 
     // Needed to give the datastores some time to commit before program is shut down.
     // 100ms isn't actually needed, seemed to work fine with as little as 10ms, but I'd rather give

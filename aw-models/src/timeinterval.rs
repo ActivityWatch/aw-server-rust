@@ -1,3 +1,4 @@
+use crate::Event;
 use std::cmp::{max, min};
 use std::fmt;
 
@@ -76,6 +77,28 @@ impl TimeInterval {
             )),
         }
     }
+
+    /// The intersection of two intervals
+    pub fn intersection(&self, other: &TimeInterval) -> Option<TimeInterval> {
+        let last_start = max(self.start, other.start);
+        let first_end = min(self.end, other.end);
+        if last_start < first_end {
+            Some(TimeInterval::new(last_start, first_end))
+        } else {
+            None
+        }
+    }
+
+    /// A boolean wether the two intervals intersect
+    pub fn intersects(&self, other: &TimeInterval) -> bool {
+        self.intersection(other).is_some()
+    }
+}
+
+impl From<&Event> for TimeInterval {
+    fn from(e: &Event) -> TimeInterval {
+        TimeInterval::new(e.timestamp, e.timestamp + e.duration)
+    }
 }
 
 impl fmt::Display for TimeInterval {
@@ -136,4 +159,20 @@ fn test_timeinterval() {
     assert_eq!(tp.end(), &end);
     assert_eq!(tp.duration(), duration);
     assert_eq!(tp.to_string(), period_str);
+}
+
+#[test]
+fn test_timeinterval_intersection() {
+    use std::str::FromStr;
+
+    // Check that two exactly adjacent events don't intersect
+    let tp1 = TimeInterval::new(
+        DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
+        DateTime::from_str("2000-01-01T00:01:00Z").unwrap(),
+    );
+    let tp2 = TimeInterval::new(
+        DateTime::from_str("2000-01-01T00:01:00Z").unwrap(),
+        DateTime::from_str("2000-01-01T00:02:00Z").unwrap(),
+    );
+    assert!(!tp1.intersects(&tp2));
 }

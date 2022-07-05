@@ -47,3 +47,6 @@ pub use split_url::split_url_event;
 
 mod period_union;
 pub use period_union::period_union;
+
+mod union_no_overlap;
+pub use union_no_overlap::union_no_overlap;

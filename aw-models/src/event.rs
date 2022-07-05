@@ -31,6 +31,14 @@ pub struct Event {
 }
 
 impl Event {
+    pub fn new(timestamp: DateTime<Utc>, duration: Duration, data: Map<String, Value>) -> Self {
+        Event {
+            id: None,
+            timestamp,
+            duration,
+            data,
+        }
+    }
     pub fn calculate_endtime(&self) -> DateTime<Utc> {
         self.timestamp
             + chrono::Duration::nanoseconds(self.duration.num_nanoseconds().unwrap() as i64)

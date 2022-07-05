@@ -121,7 +121,7 @@ impl<'de> Visitor<'de> for TimeIntervalVisitor {
     where
         E: de::Error,
     {
-        match TimeInterval::new_from_string(&value) {
+        match TimeInterval::new_from_string(value) {
             Ok(ti) => Ok(ti),
             Err(e) => {
                 warn!("{:?}", e);

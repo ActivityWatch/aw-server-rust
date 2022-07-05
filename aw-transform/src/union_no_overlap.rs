@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 ///   events1  |  ----     ------   -- |
 ///   result   | xxx--  xx ----xxx  -- |
 /// ```
+#[allow(clippy::collapsible_else_if)]
 pub fn union_no_overlap(events1: Vec<Event>, mut events2: Vec<Event>) -> Vec<Event> {
     let mut events_union: Vec<Event> = Vec::new();
     let mut e1_i = 0;
@@ -96,6 +97,12 @@ mod tests {
         let e2 = e2_opt.unwrap();
         assert_eq!(e2.timestamp, now + td1h);
         assert_eq!(e2.duration, td1h);
+
+        // Now a test which does not lead to a split
+        let (e1, e2_opt) = split_event(&e, now);
+        assert_eq!(e1.timestamp, now);
+        assert_eq!(e1.duration, Duration::hours(2));
+        assert!(e2_opt.is_none());
     }
 
     #[test]
@@ -105,10 +112,22 @@ mod tests {
         let td1h = Duration::hours(1);
         let e1 = Event::new(now, td1h, serde_json::Map::new());
         let e2 = Event::new(now + td1h, td1h, serde_json::Map::new());
-        let events1 = vec![e1];
-        let events2 = vec![e2];
+        let events1 = vec![e1.clone()];
+        let events2 = vec![e2.clone()];
         let events_union = union_no_overlap(events1, events2);
 
+        assert_eq!(events_union.len(), 2);
+        assert_eq!(events_union[0].timestamp, now);
+        assert_eq!(events_union[0].duration, td1h);
+        assert_eq!(events_union[1].timestamp, now + td1h);
+        assert_eq!(events_union[1].duration, td1h);
+
+        // Now do in reverse order
+        let events1 = vec![e2];
+        let events2 = vec![e1];
+        let events_union = union_no_overlap(events1, events2);
+
+        // Resulting order should be the same, since there is no overlap.
         assert_eq!(events_union.len(), 2);
         assert_eq!(events_union[0].timestamp, now);
         assert_eq!(events_union[0].duration, td1h);
@@ -123,8 +142,21 @@ mod tests {
         let td1h = Duration::hours(1);
         let e1 = Event::new(now, td1h, serde_json::Map::new());
         let e2 = Event::new(now, Duration::hours(2), serde_json::Map::new());
-        let events1 = vec![e1];
-        let events2 = vec![e2];
+        let events1 = vec![e1.clone()];
+        let events2 = vec![e2.clone()];
+        let events_union = union_no_overlap(events1, events2);
+
+        assert_eq!(events_union.len(), 2);
+        assert_eq!(events_union[0].timestamp, now);
+        assert_eq!(events_union[0].duration, td1h);
+        assert_eq!(events_union[1].timestamp, now + td1h);
+        assert_eq!(events_union[1].duration, td1h);
+
+        // Now test the case where e2 starts before e1
+        let e1 = Event::new(now + td1h, td1h, serde_json::Map::new());
+        let e2 = Event::new(now, Duration::hours(2), serde_json::Map::new());
+        let events1 = vec![e1.clone()];
+        let events2 = vec![e2.clone()];
         let events_union = union_no_overlap(events1, events2);
 
         assert_eq!(events_union.len(), 2);

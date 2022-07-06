@@ -40,7 +40,6 @@ impl rocket::route::Handler for FairingErrorRoute {
         request: &'r Request<'_>,
         _: rocket::Data<'r>,
     ) -> rocket::route::Outcome<'r> {
-        let _ = &__arg2;
         let err = HttpErrorJson::new(Status::BadRequest, "Host header is invalid".to_string());
         Outcome::from(request, err)
     }

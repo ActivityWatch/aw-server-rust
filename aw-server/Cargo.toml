@@ -15,8 +15,11 @@ path = "src/main.rs"
 
 [dependencies]
 rocket = { version = "0.5.0-rc.2", features = ["json"] }
+
 # TODO: Once rocket_cors has a version for rocket 0.5, use that instead
-rocket_cors = { version = "0.6.0-alpha1" }
+# Needs to install from git, due to unreleased: https://github.com/lawliet89/rocket_cors/pull/109
+rocket_cors = { git = "https://github.com/lawliet89/rocket_cors", rev = "54fae07" }
+
 multipart = { version = "0.18", default-features = false, features = ["server"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

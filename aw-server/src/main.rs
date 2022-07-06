@@ -113,7 +113,7 @@ async fn main() -> Result<(), rocket::Error> {
         device_id,
     };
 
-    endpoints::build_rocket(server_state, config)
+    let _ = endpoints::build_rocket(server_state, config)
         .launch()
         .await?;
 

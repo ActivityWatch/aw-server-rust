@@ -26,10 +26,20 @@ rustup default nightly
 Build with `cargo`:
 
 ```sh
-cargo build --release 
+cargo build --release
 ```
 
-Your built executable will be located in `./target/release/aw-server-rust`
+You can also build with make, which will build the web assets as well:
+
+```
+make build
+```
+
+Your built executable will be located in `./target/release/aw-server-rust`. If you want to use it with a development version of `aw-qt` you'll want to copy this binary into your `venv`:
+
+```shell
+cp target/release/aw-server ../venv/bin/aw-server-rust
+```
 
 
 ### How to run

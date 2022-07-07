@@ -444,7 +444,7 @@ mod qfunctions {
         Ok(DataType::List(filtered_tagged_events))
     }
 
-    use regex::RegexBuilder;
+    use fancy_regex::RegexBuilder;
 
     pub fn filter_keyvals_regex(
         args: Vec<DataType>,

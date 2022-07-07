@@ -2,7 +2,7 @@
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
 use aw_models::Event;
-use regex::{Regex, RegexBuilder};
+use fancy_regex::Regex;
 
 pub enum Rule {
     None,
@@ -27,10 +27,16 @@ pub struct RegexRule {
 }
 
 impl RegexRule {
-    pub fn new(regex_str: &str, ignore_case: bool) -> Result<RegexRule, regex::Error> {
-        let mut regex_builder = RegexBuilder::new(regex_str);
-        regex_builder.case_insensitive(ignore_case);
-        let regex = regex_builder.build()?;
+    pub fn new(regex_str: &str, ignore_case: bool) -> Result<RegexRule, fancy_regex::Error> {
+        // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
+        // so we need to prefix with `(?i)` to make it case insensitive.
+        let regex = if ignore_case {
+            let regex_str = format!("(?i){}", regex_str);
+            Regex::new(&regex_str)?
+        } else {
+            Regex::new(regex_str)?
+        };
+
         Ok(RegexRule { regex })
     }
 }
@@ -46,7 +52,7 @@ impl RuleTrait for RegexRule {
             .data
             .values()
             .filter(|val| val.is_string())
-            .any(|val| self.regex.is_match(val.as_str().unwrap()))
+            .any(|val| self.regex.is_match(val.as_str().unwrap()).unwrap())
     }
 }
 
@@ -137,6 +143,18 @@ fn test_rule() {
     assert_eq!(rule_from_new.matches(&e_no_match), false);
 
     assert_eq!(rule_none.matches(&e_match), false);
+}
+
+#[test]
+fn test_rule_lookahead() {
+    // Originally requested by a user here, to match aw-server-python: https://canary.discord.com/channels/755040852727955476/755334543891759194/994291987878522961
+    let mut e_match = Event::default();
+    e_match
+        .data
+        .insert("test".into(), serde_json::json!("testing lookahead"));
+
+    let rule_from_regex = Rule::from(Regex::new("testing (?!lookahead)").unwrap());
+    assert_eq!(rule_from_regex.matches(&e_match), false);
 }
 
 #[test]

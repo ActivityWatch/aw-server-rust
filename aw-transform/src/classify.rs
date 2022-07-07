@@ -2,7 +2,7 @@
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
 use aw_models::Event;
-use fancy_regex::{Regex, RegexBuilder};
+use fancy_regex::Regex;
 
 pub enum Rule {
     None,
@@ -28,10 +28,15 @@ pub struct RegexRule {
 
 impl RegexRule {
     pub fn new(regex_str: &str, ignore_case: bool) -> Result<RegexRule, fancy_regex::Error> {
-        let mut regex_builder = RegexBuilder::new(regex_str);
-        // FIXME: Add case_insensitive upstream in fancy_regex
-        //regex_builder.case_insensitive(ignore_case);
-        let regex = regex_builder.build()?;
+        // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
+        // so we need to prefix with `(?i)` to make it case insensitive.
+        let regex = if ignore_case {
+            let regex_str = format!("(?i){}", regex_str);
+            Regex::new(&regex_str)?
+        } else {
+            Regex::new(regex_str)?
+        };
+
         Ok(RegexRule { regex })
     }
 }

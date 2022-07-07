@@ -203,9 +203,9 @@ dependencies = [
  "aw-models",
  "aw-transform",
  "chrono",
+ "fancy-regex",
  "log",
  "plex",
- "regex",
  "serde",
  "serde_json",
 ]
@@ -261,8 +261,8 @@ version = "0.1.0"
 dependencies = [
  "aw-models",
  "chrono",
+ "fancy-regex",
  "log",
- "regex",
  "rocket",
  "serde",
  "serde_json",
@@ -286,7 +286,16 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9bf6104718e80d7b26a68fdbacff3481cfc05df670821affc7e9cbc1884400c"
 dependencies = [
- "bit-vec",
+ "bit-vec 0.4.4",
+]
+
+[[package]]
+name = "bit-set"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e11e16035ea35e4e5997b393eacbf6f63983188f7a2ad25bfb13465f5ad59de"
+dependencies = [
+ "bit-vec 0.6.3",
 ]
 
 [[package]]
@@ -294,6 +303,12 @@ name = "bit-vec"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02b4ff8b16e6076c3e14220b39fbc1fabb6737522281a388998046859400895f"
+
+[[package]]
+name = "bit-vec"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
 name = "bitflags"
@@ -608,6 +623,16 @@ name = "fallible-streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
+name = "fancy-regex"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0678ab2d46fa5195aaf59ad034c083d351377d4af57f3e073c074d0da3e3c766"
+dependencies = [
+ "bit-set 0.5.2",
+ "regex",
+]
 
 [[package]]
 name = "fastrand"
@@ -1570,7 +1595,7 @@ version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29cc2771cc9f5fb0061cdedc05a37170254694dffec6b89920a6e767f08c4220"
 dependencies = [
- "bit-set",
+ "bit-set 0.4.0",
  "vec_map",
 ]
 

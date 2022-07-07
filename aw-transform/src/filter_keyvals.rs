@@ -1,4 +1,4 @@
-use regex::Regex;
+use fancy_regex::Regex;
 use serde_json::value::Value;
 
 use aw_models::Event;
@@ -42,7 +42,7 @@ pub fn filter_keyvals_regex(mut events: Vec<Event>, key: &str, regex: &Regex) ->
 
     for event in events.drain(..) {
         if let Some(v) = event.data.get(key) {
-            if regex.is_match(v.as_str().unwrap()) {
+            if regex.is_match(v.as_str().unwrap()).unwrap() {
                 filtered_events.push(event);
             }
         }
@@ -78,9 +78,8 @@ pub fn exclude_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec
 mod tests {
     use std::str::FromStr;
 
-    use chrono::DateTime;
-    use chrono::Duration;
-    use regex::RegexBuilder;
+    use chrono::{DateTime, Duration};
+    use fancy_regex::RegexBuilder;
     use serde_json::json;
 
     use aw_models::Event;

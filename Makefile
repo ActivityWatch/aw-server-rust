@@ -19,7 +19,9 @@ aw-server:
 	cargo build $(cargoflag) --bin aw-server
 
 aw-webui:
-ifndef SKIP_WEBUI  # Skip building webui if SKIP_WEBUI is defined
+ifeq ($(SKIP_WEBUI),true) # Skip building webui if SKIP_WEBUI is true
+	@echo "Skipping building webui"
+else
 	make -C ./aw-webui build
 endif
 
@@ -59,10 +61,14 @@ package:
 	mkdir -p target/package
 	# Copy binary
 	cp target/$(targetdir)/aw-server target/package/aw-server-rust
-	# Copy webui assets
-	cp -rf aw-webui/dist target/package/static
 	# Copy service file
 	cp -f aw-server.service target/package/aw-server.service
+	# Copy webui assets
+ifeq ($(SKIP_WEBUI),true)
+	@echo "Skipping packaging webui"
+else
+	cp -rf aw-webui/dist target/package/static
+endif
 
 install:
 	# Install aw-server executable

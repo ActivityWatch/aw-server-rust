@@ -41,7 +41,7 @@ In the end, You should get something like this: https://twitter.com/ErikBjare/st
 
 **Note:** this documents usage for testing, it is not yet ready for production usage.
 
-It assumes you're running temporary aw-server instances.
+It assumes you're running a temporary aw-server instances.
 
 ### Pushing to the sync directory
 

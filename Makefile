@@ -25,6 +25,10 @@ else
 	make -C ./aw-webui build
 endif
 
+android:
+	./install-ndk.sh
+	./compile-android.sh
+
 test:
 	cargo test
 

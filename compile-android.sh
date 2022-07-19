@@ -3,9 +3,14 @@
 set -e
 
 if [ -z "$ANDROID_NDK_HOME" ]; then
-    # NOTE: I had some issues with this and cargo that magically resolved themselves when I made the path absolute.
-    echo "Environment variable ANDROID_NDK_HOME not set, please set to location of Android NDK."
-    exit 1
+    if [ -d `pwd`/"NDK" ]; then
+        echo "Found NDK folder in root, using."
+        ANDROID_NDK_HOME=`pwd`/NDK
+    else
+        # NOTE: I had some issues with this and cargo that magically resolved themselves when I made the path absolute.
+        echo "Environment variable ANDROID_NDK_HOME not set, please set to location of Android NDK."
+        exit 1
+    fi
 fi
 
 if [ "$RELEASE" = "true" ]; then

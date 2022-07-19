@@ -8,11 +8,15 @@ script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 project_path="$(readlink -f "$script_dir/.")"
 
 if [ -z "$ANDROID_NDK_HOME" ]; then
-    echo 'ANDROID_NDK_HOME not set, downloading NDK...';
-    wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-r21-linux-x86_64.zip;
-    unzip -q -d NDK android-ndk.zip;
-    ls NDK;
-    mv NDK/*/* NDK/;
+    if [ -d `pwd`/"NDK" ]; then
+        echo "Found NDK folder in root, using."
+    else
+        echo 'ANDROID_NDK_HOME not set, downloading NDK...';
+        wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-r21-linux-x86_64.zip;
+        unzip -q -d NDK android-ndk.zip;
+        ls NDK;
+        mv NDK/*/* NDK/;
+    fi
     ANDROID_NDK_HOME=`pwd`/NDK;
 fi
 

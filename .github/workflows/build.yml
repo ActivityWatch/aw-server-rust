@@ -69,14 +69,10 @@ jobs:
         key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-${{ env.cache-name }}-
-    - name: Install NDK
-      run: |
-        export ANDROID_NDK_HOME=   # needed because GitHub Actions sets it by default...
-        ./install-ndk.sh
     - name: Build
       run: |
-        export ANDROID_NDK_HOME=`pwd`/NDK
-        ./compile-android.sh
+        export ANDROID_NDK_HOME=   # needed because GitHub Actions sets it by default...
+        make android
     - uses: actions/upload-artifact@v2
       with:
         # TODO: These binaries are debug builds

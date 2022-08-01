@@ -45,4 +45,4 @@ jemallocator = "0.5.0"
 jni = { version = "0.19", default-features = false }
 libc = "0.2"
 android_logger = "0.11"
-openssl-sys = { version = "0.9.58", features = ["vendored"]}
+openssl-sys = { version = "0.9.75", features = ["vendored"]}

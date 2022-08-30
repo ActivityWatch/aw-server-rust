@@ -27,7 +27,7 @@ pub trait AccessMethod: std::fmt::Debug {
 
 impl AccessMethod for Datastore {
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
-        Ok(self.get_buckets().unwrap())
+        Ok(Datastore::get_buckets(self).unwrap())
     }
     fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
         Datastore::get_bucket(self, bucket_id)
@@ -66,10 +66,10 @@ impl AccessMethod for Datastore {
 
 impl AccessMethod for AwClient {
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
-        Ok(self.get_buckets().unwrap())
+        Ok(AwClient::get_buckets(self).unwrap())
     }
     fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        let bucket = self.get_bucket(bucket_id);
+        let bucket = AwClient::get_bucket(self, bucket_id);
         match bucket {
             Ok(bucket) => Ok(bucket),
             Err(e) => {
@@ -90,21 +90,20 @@ impl AccessMethod for AwClient {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
-        Ok(self.get_events(bucket_id, start, end, limit).unwrap())
+        Ok(AwClient::get_events(self, bucket_id, start, end, limit).unwrap())
     }
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
         AwClient::insert_events(self, bucket_id, events).map_err(|e| e.to_string())
     }
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
-        Ok(self.get_event_count(bucket_id).unwrap())
+        Ok(AwClient::get_event_count(self, bucket_id).unwrap())
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
         AwClient::create_bucket(self, bucket).unwrap();
         Ok(())
     }
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
-        self.heartbeat(bucket_id, &event, duration)
-            .map_err(|e| format!("{:?}", e))
+        AwClient::heartbeat(self, bucket_id, &event, duration).map_err(|e| format!("{:?}", e))
     }
     fn close(&self) {
         // NOP

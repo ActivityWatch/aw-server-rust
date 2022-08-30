@@ -349,6 +349,8 @@ fn sync_one(
 
     const BATCH_SIZE: usize = 5000;
     if BATCH_SIZE == 1 {
+        // TODO: Don't print progress messages if not in a suitable terminal environment (such as a
+        // pipe or systemd journal)
         for event in events_iter {
             print!("{} ({}/{})\r", &event.timestamp, events_sent, events_total);
             ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();

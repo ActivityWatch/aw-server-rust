@@ -13,6 +13,7 @@ if [ "$(lsof -i:$PORT -sTCP:LISTEN -t)" ]; then
 else
     # Set up an isolated ActivityWatch instance
     ./test-server.sh $PORT &
+    SERVER_PID=$!
 fi
 
 
@@ -32,5 +33,6 @@ for host in $(ls $SYNCROOTDIR); do
 done
 
 # kill aw-server-rust
-#kill %1
-fg
+if [ "$SERVER_PID" ]; then
+    kill $SERVER_PID
+fi

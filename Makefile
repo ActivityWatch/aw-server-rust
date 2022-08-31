@@ -37,10 +37,11 @@ set-version:
 	@# as such, we then need to set the Cargo.toml version to the tag name (with leading 'v' stripped)
 	@# if tag is on Python-format (short pre-release suffixes), then we need to convert it to Rust-format (long pre-release suffixes)
 	@# Example: v0.12.0b3 should become 0.12.0-beta.3
+	@# Can't use sed with `-i` on macOS due to: https://stackoverflow.com/a/4247319/965332
 	@if [ "$(GITHUB_REF_TYPE)" = "tag" ] && [ -n "$(GITHUB_REF_NAME)" ]; then \
 		VERSION_SEMVER=$(shell echo $(GITHUB_REF_NAME:v%=%) | sed -E 's/([0-9]+)\.([0-9]+)\.([0-9]+)-?(a|alpha|b|beta|rc)([0-9]+)/\1.\2.\3-\4.\5/; s/-b(.[0-9]+)/-beta\1/; s/-a(.[0-9+])/-alpha\1/'); \
 		echo "Building release $(GITHUB_REF_NAME) ($$VERSION_SEMVER), setting version in Cargo.toml"; \
-		sed -i "s/^version = .*/version = \"$$VERSION_SEMVER\"/" aw-server/Cargo.toml; \
+	    perl -i -pe "s/^version = .*/version = \"$$VERSION_SEMVER\"/" aw-server/Cargo.toml; \
 	fi
 
 test-coverage-grcov:

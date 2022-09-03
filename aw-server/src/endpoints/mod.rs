@@ -5,8 +5,10 @@ use gethostname::gethostname;
 use rocket::fs::NamedFile;
 use rocket::serde::json::Json;
 use rocket::State;
+use rocket::fs::FileServer;
 
 use crate::config::AWConfig;
+use crate::dirs;
 
 use aw_datastore::Datastore;
 use aw_models::Info;
@@ -92,6 +94,8 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
     );
     let cors = cors::cors(&config);
     let hostcheck = hostcheck::HostCheck::new(&config);
+    let mut visualizations_path = dirs::get_data_dir().unwrap();
+    visualizations_path.push("visualizations");
     rocket::custom(config.to_rocket_config())
         .attach(cors.clone())
         .attach(hostcheck)
@@ -142,4 +146,5 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             ],
         )
         .mount("/", rocket_cors::catch_all_options_routes())
+        .mount("/pages", FileServer::from(visualizations_path))
 }

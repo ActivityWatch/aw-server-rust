@@ -1,3 +1,4 @@
+#![feature(option_result_contains)]
 #[macro_use]
 extern crate log;
 

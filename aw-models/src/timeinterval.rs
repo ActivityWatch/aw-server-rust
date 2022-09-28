@@ -89,7 +89,7 @@ impl TimeInterval {
         }
     }
 
-    /// A boolean wether the two intervals intersect
+    /// A boolean whether the two intervals intersect
     pub fn intersects(&self, other: &TimeInterval) -> bool {
         self.intersection(other).is_some()
     }

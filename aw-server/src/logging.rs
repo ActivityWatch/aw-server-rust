@@ -25,10 +25,24 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
         .warn(Color::Yellow)
         .error(Color::Red);
 
+    let default_log_level = if testing {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+
+    let log_level = match std::env::var("LOG_LEVEL").unwrap_or("info".to_string()).to_lowercase().as_str() {
+        "trace" => log::LevelFilter::Trace,
+        "debug" => log::LevelFilter::Debug,
+        "info" => log::LevelFilter::Info,
+        "warn" => log::LevelFilter::Warn,
+        "error" => log::LevelFilter::Error,
+        _ => default_log_level,
+    };
+
     fern::Dispatch::new()
         // Set some Rocket messages to debug level
-        // TODO: Log more if run in development/testing mode
-        .level(log::LevelFilter::Info)
+        .level(log_level)
         .level_for("rocket", log::LevelFilter::Warn)
         .level_for("_", log::LevelFilter::Warn) // Rocket requests
         .level_for("launch_", log::LevelFilter::Warn) // Rocket config info

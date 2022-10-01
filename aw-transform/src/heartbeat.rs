@@ -12,6 +12,7 @@ use aw_models::Event;
 pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Option<Event> {
     // Verify that data is the same
     if heartbeat.data != last_event.data {
+        debug!("Can't merge, data is different");
         return None;
     }
 
@@ -22,9 +23,11 @@ pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Optio
     let pulsetime_ns: i64 = (pulsetime * 1_000_000_000.0).round() as i64;
     let last_endtime_allowed = last_event_endtime + chrono::Duration::nanoseconds(pulsetime_ns);
     if last_event.timestamp > heartbeat.timestamp {
+        debug!("Can't merge, last event timestamp is after heartbeat timestamp");
         return None;
     }
     if heartbeat.timestamp > last_endtime_allowed {
+        debug!("Can't merge, heartbeat timestamp is after last event endtime");
         return None;
     }
 

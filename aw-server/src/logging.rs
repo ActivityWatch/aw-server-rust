@@ -31,7 +31,11 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
         log::LevelFilter::Info
     };
 
-    let log_level = match std::env::var("LOG_LEVEL").unwrap_or("info".to_string()).to_lowercase().as_str() {
+    let log_level = match std::env::var("LOG_LEVEL")
+        .unwrap_or("info".to_string())
+        .to_lowercase()
+        .as_str()
+    {
         "trace" => log::LevelFilter::Trace,
         "debug" => log::LevelFilter::Debug,
         "info" => log::LevelFilter::Info,

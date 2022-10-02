@@ -649,11 +649,12 @@ impl DatastoreInstance {
         };
         let inserted_heartbeat = match aw_transform::heartbeat(&last_event, &heartbeat, pulsetime) {
             Some(merged_heartbeat) => {
+                debug!("Merged heartbeat successfully");
                 self.replace_last_event(conn, &bucket_id, &merged_heartbeat)?;
                 merged_heartbeat
             }
             None => {
-                debug!("Failed to merge heartbeat!");
+                debug!("Failed to merge heartbeat");
                 self.insert_events(conn, &bucket_id, vec![heartbeat.clone()])?;
                 heartbeat
             }

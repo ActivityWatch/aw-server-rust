@@ -95,6 +95,34 @@ mod tests {
     }
 
     #[test]
+    fn test_heartbeat_long_pulse_merge() {
+        let now = Utc::now();
+        let event = Event {
+            id: None,
+            timestamp: now,
+            duration: Duration::seconds(1),
+            data: json_map! {"test": json!(1)},
+        };
+        let long_pulse_event = Event {
+            id: None,
+            // note that no duration is sent, which is how aw-client works
+            duration: Duration::seconds(0),
+            timestamp: now + Duration::seconds(120),
+            data: json_map! {"test": json!(1)},
+        };
+
+        // Merge result
+        let res_merge = heartbeat(&event, &long_pulse_event, 120.0).unwrap();
+        assert_eq!(res_merge.timestamp, now);
+        assert_eq!(res_merge.data, event.data);
+        assert_eq!(res_merge.duration, Duration::seconds(120));
+
+        // No merge result when pulsetime is less than the timestamp delta between heartbeats
+        let res_no_merge = heartbeat(&event, &long_pulse_event, 60.0);
+        assert!(res_no_merge.is_none());
+    }
+
+    #[test]
     fn test_heartbeat_data() {
         let now = Utc::now();
         let event = Event {

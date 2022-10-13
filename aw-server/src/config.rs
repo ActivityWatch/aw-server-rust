@@ -26,6 +26,8 @@ pub struct AWConfig {
     pub port: u16,
     #[serde(skip, default = "default_testing")]
     pub testing: bool, // This is not written to the config file (serde(skip))
+    #[serde(default = "default_apikey")]
+    pub apikey: Option<String>,
     #[serde(default = "default_cors")]
     pub cors: Vec<String>,
 }
@@ -36,6 +38,7 @@ impl Default for AWConfig {
             address: default_address(),
             port: default_port(),
             testing: default_testing(),
+            apikey: default_apikey(),
             cors: default_cors(),
         }
     }
@@ -73,6 +76,10 @@ fn default_cors() -> Vec<String> {
 
 fn default_testing() -> bool {
     is_testing()
+}
+
+fn default_apikey() -> Option<String> {
+    None
 }
 
 fn default_port() -> u16 {

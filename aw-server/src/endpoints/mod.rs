@@ -19,6 +19,7 @@ pub struct ServerState {
 
 #[macro_use]
 mod util;
+mod auth;
 mod bucket;
 mod cors;
 mod export;

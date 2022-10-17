@@ -186,6 +186,8 @@ fn get_asset_path() -> PathBuf {
         return cargo_dev_path;
     }
 
+    info!("Cannot find assets {:?}", cargo_dev_path.as_path());
+
     // current_exe_path
     // (for self-contained deployed binaries)
     if let Ok(mut current_exe_path) = current_exe() {

@@ -9,4 +9,3 @@ NDK
 *.sqlite*
 *.db
 *.db-journal
-aw-server/static/*

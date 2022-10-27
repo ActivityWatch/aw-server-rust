@@ -63,6 +63,10 @@ async fn main() -> Result<(), rocket::Error> {
 
     logging::setup_logger(testing).expect("Failed to setup logging");
 
+    if testing {
+        info!("Running server in Testing mode");
+    }
+
     let mut config = config::create_config(testing);
 
     // set host if overridden

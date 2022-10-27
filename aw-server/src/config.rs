@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 
 use rocket::config::Config;
 use rocket::data::{Limits, ToByteUnit};
+use rocket::log::LogLevel;
 use serde::{Deserialize, Serialize};
 
 use crate::dirs;
@@ -43,10 +44,12 @@ impl Default for AWConfig {
 
 impl AWConfig {
     pub fn to_rocket_config(&self) -> rocket::Config {
-        let mut config = if self.testing {
-            Config::release_default()
+        let mut config;
+        if self.testing {
+            config = Config::debug_default();
+            config.log_level = LogLevel::Debug;
         } else {
-            Config::debug_default()
+            config = Config::release_default()
         };
 
         // Needed for bucket imports

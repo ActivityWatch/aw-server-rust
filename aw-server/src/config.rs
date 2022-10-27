@@ -45,12 +45,11 @@ impl Default for AWConfig {
 impl AWConfig {
     pub fn to_rocket_config(&self) -> rocket::Config {
         let mut config;
-        
         if self.testing {
-            config = Config::release_default()
-        } else {
             config = Config::debug_default();
             config.log_level = LogLevel::Debug;
+        } else {
+            config = Config::release_default()
         };
 
         // Needed for bucket imports

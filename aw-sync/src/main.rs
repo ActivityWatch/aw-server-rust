@@ -24,8 +24,6 @@ use aw_client_rust::AwClient;
 mod accessmethod;
 mod sync;
 
-const DEFAULT_PORT: &str = "5600";
-
 #[derive(Parser)]
 #[clap(version = "0.1", author = "Erik Bjäreholt")]
 struct Opts {
@@ -36,15 +34,22 @@ struct Opts {
     #[clap(long, default_value = "127.0.0.1")]
     host: String,
     /// Port of instance to connect to.
-    #[clap(long, default_value = DEFAULT_PORT)]
+    #[clap(long, default_value = "5600")]
     port: String,
     /// Convenience option for using the default testing host and port.
     #[clap(long)]
     testing: bool,
-    /// Path to sync directory.
+    /// Path to sync directory, which is setup with 3rd party syncing service(eg. Dropbox etc.)
     /// If not specified, exit.
     #[clap(long)]
     sync_dir: String,
+    /// Path to sync staging directory, which will be used for staging.
+    /// Default (..)/aw-server-rust/aw-sync/staging/ will be used.
+    #[clap(long)]
+    sync_stg_dir: String,
+    /// Sync adaptor to use
+    #[clap(long, default_value = "file")]
+    sync_adp: String,
 }
 
 #[derive(Subcommand)]
@@ -57,12 +62,32 @@ enum Commands {
     #[clap(arg_required_else_help = true)]
     Sync {
         /// Date to start syncing from.
-        /// If not specified, start from beginning.
+        /// If not specified, starts from beginning.
         /// NOTE: might be unstable, as count cannot be used to verify integrity of sync.
         /// Format: YYYY-MM-DD
         #[clap(long)]
         start_date: Option<String>,
-        /// Specify buckets to sync using a comma-separated list.
+        /// Specify bucket names to sync using a comma-separated list.
+        /// If not specified, all buckets will be synced.
+        #[clap(long)]
+        buckets: Option<String>,
+        /// Mode to sync in. Can be "push", "pull", or "both".
+        /// Defaults to "both".
+        #[clap(long, default_value = "both")]
+        mode: String,
+    },
+    /// Run subcommand.
+    ///
+    /// Pulls remote buckets, pushes local buckets periodically.
+    /// from/to sync_dir
+    Run {
+        /// Date to start syncing from.
+        /// If not specified, starts from beginning.
+        /// NOTE: might be unstable, as count cannot be used to verify integrity of sync.
+        /// Format: YYYY-MM-DD
+        #[clap(long)]
+        start_date: Option<String>,
+        /// Specify bucket names to sync using a comma-separated list.
         /// If not specified, all buckets will be synced.
         #[clap(long)]
         buckets: Option<String>,
@@ -78,10 +103,12 @@ enum Commands {
 fn main() -> Result<(), Box<dyn Error>> {
     let opts: Opts = Opts::parse();
 
+    aw_server::logging::setup_logger(true).expect("Failed to setup logging");
     info!("Started aw-sync...");
 
-    aw_server::logging::setup_logger(true).expect("Failed to setup logging");
-
+    if opts.testing {
+        info!("Running in Testing mode...")
+    }
     let sync_directory = if opts.sync_dir.is_empty() {
         println!("No sync directory specified, exiting...");
         std::process::exit(1);
@@ -90,11 +117,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     info!("Using sync dir: {}", sync_directory.display());
 
-    let port = if opts.testing && opts.port == DEFAULT_PORT {
-        "5666"
-    } else {
-        &opts.port
-    };
+    let port = if opts.testing { "5666" } else { &opts.port };
 
     let client = AwClient::new(opts.host.as_str(), port, "aw-sync");
 

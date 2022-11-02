@@ -44,65 +44,43 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
         _ => default_log_level,
     };
 
-    match log_level {
-        log::LevelFilter::Debug | log::LevelFilter::Trace => fern::Dispatch::new()
-            // Set some Rocket messages to debug level
-            .level(log_level)
-            .format(move |out, message, record| {
-                out.finish(format_args!(
-                    "[{}][{}][{}]: {}",
-                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                    colors.color(record.level()),
-                    record.target(),
-                    message,
-                ))
-            })
-            // Color and higher log levels to stdout
-            .chain(fern::Dispatch::new().chain(std::io::stdout()))
-            // No color and lower log levels to logfile
-            .chain(
-                fern::Dispatch::new()
-                    .format(|out, message, _record| {
-                        out.finish(format_args!(
-                            // TODO: Strip color info
-                            "{}",
-                            message,
-                        ))
-                    })
-                    .chain(fern::log_file(logfile_path)?),
-            )
-            .apply()?,
-        _ => fern::Dispatch::new()
-            // Set some Rocket messages to debug level
-            .level(log_level)
+    let mut dispatch = fern::Dispatch::new().level(log_level);
+    // Set some Rocket messages to debug level
+
+    let is_debug = matches!(log_level, log::LevelFilter::Trace | log::LevelFilter::Debug);
+    if is_debug {
+        dispatch = dispatch
             .level_for("rocket", log::LevelFilter::Warn)
             .level_for("_", log::LevelFilter::Warn) // Rocket requests
-            .level_for("launch_", log::LevelFilter::Warn) // Rocket config info
-            .format(move |out, message, record| {
-                out.finish(format_args!(
-                    "[{}][{}][{}]: {}",
-                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                    colors.color(record.level()),
-                    record.target(),
-                    message,
-                ))
-            })
-            // Color and higher log levels to stdout
-            .chain(fern::Dispatch::new().chain(std::io::stdout()))
-            // No color and lower log levels to logfile
-            .chain(
-                fern::Dispatch::new()
-                    .format(|out, message, _record| {
-                        out.finish(format_args!(
-                            // TODO: Strip color info
-                            "{}",
-                            message,
-                        ))
-                    })
-                    .chain(fern::log_file(logfile_path)?),
-            )
-            .apply()?,
+            .level_for("launch_", log::LevelFilter::Warn); // Rocket config info
     }
+
+    dispatch
+        // Formatting
+        .format(move |out, message, record| {
+            out.finish(format_args!(
+                "[{}][{}][{}]: {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                colors.color(record.level()),
+                record.target(),
+                message,
+            ))
+        })
+        // Color and higher log levels to stdout
+        .chain(fern::Dispatch::new().chain(std::io::stdout()))
+        // No color and lower log levels to logfile
+        .chain(
+            fern::Dispatch::new()
+                .format(|out, message, _record| {
+                    out.finish(format_args!(
+                        // TODO: Strip color info
+                        "{}",
+                        message,
+                    ))
+                })
+                .chain(fern::log_file(logfile_path)?),
+        )
+        .apply()?;
     Ok(())
 }
 

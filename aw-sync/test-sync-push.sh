@@ -2,13 +2,27 @@
 # Helper script meant to be used to test aw-sync
 # Example of a single-entry for cronjobs and the like
 
-HOSTNAME=$(hostnamectl --static)
+# exit on fail
+set -e
+
+# on Linux, use `hostnamectl`, on macOS, use `hostname`
+if [ -x "$(command -v hostnamectl)" ]; then
+    HOSTNAME=$(hostnamectl --static)
+else
+    HOSTNAME=$(hostname)
+fi
+
 # TODO: Fetch in a cross-platform way (from aw-client command output?)
 AWSERVERCONF=~/.config/activitywatch/aw-server/aw-server.toml
 
 # trim everything in file AWSERVERCONF before '[server-testing]' section
 # grep for the aw-server port in aw-server.toml
-PORT=$(sed '/\[server-testing\]/,/\[.*\]/{//!d}' $AWSERVERCONF | grep -oP 'port = "\K[0-9]+')
+# if config doesn't exist, assume 5600
+if [ -f "$AWSERVERCONF" ]; then
+    PORT=$(sed '/\[server-testing\]/,/\[.*\]/{//!d}' $AWSERVERCONF | grep -oP 'port = "\K[0-9]+')
+else
+    PORT=5600
+fi
 
 SYNCDIR="$HOME/ActivityWatchSync/$HOSTNAME"
 AWSYNCPARAMS="--port $PORT --sync-dir $SYNCDIR"

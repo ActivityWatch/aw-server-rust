@@ -21,7 +21,7 @@ use aw_models::{Bucket, Event};
 
 use crate::accessmethod::AccessMethod;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq)]
 pub enum SyncMode {
     Push,
     Pull,
@@ -51,15 +51,21 @@ impl Default for SyncSpec {
 
 /// Performs a single sync pass
 pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
-    let ds_localremote = setup_local_remote(&client, sync_spec.path.as_path())?;
-
     let info = client.get_info().map_err(|e| e.to_string())?;
-    let remote_dbfiles = find_remotes_nonlocal(sync_spec.path.as_path(), info.device_id.as_str());
+
+    // FIXME: Here it is assumed that the device_id for the local server is the one used by
+    // aw-server-rust, which is not necessarily true (aw-server-python has seperate device_id).
+    // Therefore, this may sometimes fail to pick up the correct local datastore.
+    let device_id = info.device_id.as_str();
+
+    // FIXME: Bad device_id assumption?
+    let ds_localremote = setup_local_remote(sync_spec.path.as_path(), device_id)?;
+    let remote_dbfiles = find_remotes_nonlocal(sync_spec.path.as_path(), device_id);
 
     // Log if remotes found
     // TODO: Only log remotes of interest
     if !remote_dbfiles.is_empty() {
-        println!(
+        info!(
             "Found {} remote db files: {:?}",
             remote_dbfiles.len(),
             remote_dbfiles
@@ -74,7 +80,7 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
         .collect();
 
     if !ds_remotes.is_empty() {
-        println!(
+        info!(
             "Found {} remote datastores: {:?}",
             ds_remotes.len(),
             ds_remotes
@@ -92,13 +98,7 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
     // Push local server buckets to sync folder
     if mode == SyncMode::Push || mode == SyncMode::Both {
         info!("Pushing...");
-        sync_datastores(
-            &client,
-            &ds_localremote,
-            true,
-            Some(info.device_id.as_str()),
-            sync_spec,
-        );
+        sync_datastores(&client, &ds_localremote, true, Some(device_id), sync_spec);
     }
 
     // Close open database connections
@@ -121,10 +121,13 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
 
 #[allow(dead_code)]
 pub fn list_buckets(client: &AwClient, sync_directory: &Path) -> Result<(), String> {
-    let ds_localremote = setup_local_remote(client, sync_directory)?;
-
     let info = client.get_info().map_err(|e| e.to_string())?;
-    let remote_dbfiles = find_remotes_nonlocal(sync_directory, info.device_id.as_str());
+
+    // FIXME: Incorrect device_id assumption?
+    let device_id = info.device_id.as_str();
+    let ds_localremote = setup_local_remote(sync_directory, device_id)?;
+
+    let remote_dbfiles = find_remotes_nonlocal(sync_directory, device_id);
     info!("Found remotes: {:?}", remote_dbfiles);
 
     // TODO: Check for compatible remote db version before opening
@@ -143,12 +146,11 @@ pub fn list_buckets(client: &AwClient, sync_directory: &Path) -> Result<(), Stri
     Ok(())
 }
 
-fn setup_local_remote(client: &AwClient, path: &Path) -> Result<Datastore, String> {
+fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, String> {
     // FIXME: Don't run twice if already exists
     fs::create_dir_all(path).unwrap();
 
-    let info = client.get_info().map_err(|e| e.to_string())?;
-    let remotedir = path.join(info.device_id.as_str());
+    let remotedir = path.join(device_id);
     fs::create_dir_all(&remotedir).unwrap();
 
     let dbfile = remotedir.join("test.db");

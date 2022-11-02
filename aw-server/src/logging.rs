@@ -44,12 +44,19 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
         _ => default_log_level,
     };
 
-    fern::Dispatch::new()
-        // Set some Rocket messages to debug level
-        .level(log_level)
-        .level_for("rocket", log::LevelFilter::Warn)
-        .level_for("_", log::LevelFilter::Warn) // Rocket requests
-        .level_for("launch_", log::LevelFilter::Warn) // Rocket config info
+    let mut dispatch = fern::Dispatch::new().level(log_level);
+    // Set some Rocket messages to debug level
+
+    let is_debug = matches!(log_level, log::LevelFilter::Trace | log::LevelFilter::Debug);
+    if is_debug {
+        dispatch = dispatch
+            .level_for("rocket", log::LevelFilter::Warn)
+            .level_for("_", log::LevelFilter::Warn) // Rocket requests
+            .level_for("launch_", log::LevelFilter::Warn); // Rocket config info
+    }
+
+    dispatch
+        // Formatting
         .format(move |out, message, record| {
             out.finish(format_args!(
                 "[{}][{}][{}]: {}",
@@ -74,7 +81,6 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
                 .chain(fern::log_file(logfile_path)?),
         )
         .apply()?;
-
     Ok(())
 }
 

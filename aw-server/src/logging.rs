@@ -48,7 +48,7 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
     // Set some Rocket messages to debug level
 
     let is_debug = matches!(log_level, log::LevelFilter::Trace | log::LevelFilter::Debug);
-    if is_debug {
+    if !is_debug {
         dispatch = dispatch
             .level_for("rocket", log::LevelFilter::Warn)
             .level_for("_", log::LevelFilter::Warn) // Rocket requests

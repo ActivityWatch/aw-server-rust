@@ -219,10 +219,15 @@ mod qfunctions {
             match aw_transform::find_bucket(&bucket_filter, &hostname_filter, buckets.values()) {
                 Some(bucketname) => bucketname,
                 None => {
-                    return Err(QueryError::BucketQueryError(format!(
-                        "Couldn't find any bucket which starts with {}",
-                        bucket_filter
-                    )));
+                    return Err(QueryError::BucketQueryError(match hostname_filter {
+                        None => {
+                            format!("Failed to find bucket matching filter '{}'", bucket_filter)
+                        }
+                        Some(hostname_filter) => format!(
+                            "Failed to find bucket matching filter '{}' and hostname '{}'",
+                            bucket_filter, hostname_filter
+                        ),
+                    }));
                 }
             };
         Ok(DataType::String(bucketname))

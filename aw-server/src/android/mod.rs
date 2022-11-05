@@ -36,8 +36,18 @@ pub mod android {
     use self::jni::sys::{jdouble, jint, jstring};
     use self::jni::JNIEnv;
     use super::*;
+
+    use std::path::PathBuf;
+    use std::sync::RwLock;
+    use once_cell::sync::Lazy;
+
+    use android_logger::FilterBuilder;
+    use log::LevelFilter;
     use aw_datastore::Datastore;
     use aw_models::{Bucket, Event};
+    use crate::endpoints;
+    use crate::config::AWConfig;
+    use crate::endpoints::ServerState;
 
     static mut DATASTORE: Option<Datastore> = None;
 
@@ -92,34 +102,46 @@ pub mod android {
         let mut obj = json!({ "error": &msg });
         string_to_jstring(&env, obj.to_string())
     }
+    
+    lazy_static! {
+        static ref ASSET_PATH: RwLock<String> = RwLock::new(String::new());
+    }
 
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_startServer(
         env: JNIEnv,
         _: JClass,
         java_asset_path: JString,
-    ) {
-        use crate::config::AWConfig;
-        use std::path::PathBuf;
-
-        use crate::endpoints;
-
-        info!("Building server state...");
-
-        let asset_path = jstring_to_string(&env, java_asset_path);
-        info!("Using asset dir: {}", asset_path);
-
-        let server_state = endpoints::ServerState {
-            datastore: Mutex::new(openDatastore()),
-            asset_path: PathBuf::from(asset_path),
-            device_id: device_id::get_device_id(),
-        };
-
-        let mut config = AWConfig::default();
-        config.port = 5600;
+    ) {        
         info!("Starting server...");
-        endpoints::build_rocket(server_state, config).launch();
+        
+        *ASSET_PATH.write().unwrap() = jstring_to_string(&env, java_asset_path);
+
+        // endpoints::build_rocket(server_state, config).launch().await;
+        start_server();
+
         info!("Server exited");
+    }
+
+    #[rocket::main]
+    async fn start_server()
+    {
+        unsafe {
+            info!("Building server state...");
+
+            let server_state: ServerState = endpoints::ServerState {
+                datastore: Mutex::new(openDatastore()),
+                asset_path: PathBuf::from(ASSET_PATH.read().unwrap().to_owned()),
+                device_id: device_id::get_device_id(),
+            };
+            
+            info!("Using server_state:: asset dir: {}; device_id: {}", server_state.asset_path.display(), server_state.device_id);
+
+            let mut server_config: AWConfig = AWConfig::default();
+            server_config.port = 5600;
+
+            endpoints::build_rocket(server_state, server_config).launch().await;
+        }
     }
 
     static mut INITIALIZED: bool = false;
@@ -157,8 +179,9 @@ pub mod android {
         _: JClass,
         java_dir: JString,
     ) {
-        debug!("Setting android data dir");
-        dirs::set_android_data_dir(&jstring_to_string(&env, java_dir));
+        let path = &jstring_to_string(&env, java_dir);
+        debug!("Setting android data dir as {}", path);
+        dirs::set_android_data_dir(path);
     }
 
     #[no_mangle]

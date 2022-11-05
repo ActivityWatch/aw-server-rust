@@ -37,17 +37,17 @@ pub mod android {
     use self::jni::JNIEnv;
     use super::*;
 
+    use once_cell::sync::Lazy;
     use std::path::PathBuf;
     use std::sync::RwLock;
-    use once_cell::sync::Lazy;
 
+    use crate::config::AWConfig;
+    use crate::endpoints;
+    use crate::endpoints::ServerState;
     use android_logger::FilterBuilder;
-    use log::LevelFilter;
     use aw_datastore::Datastore;
     use aw_models::{Bucket, Event};
-    use crate::endpoints;
-    use crate::config::AWConfig;
-    use crate::endpoints::ServerState;
+    use log::LevelFilter;
 
     static mut DATASTORE: Option<Datastore> = None;
 
@@ -102,7 +102,7 @@ pub mod android {
         let mut obj = json!({ "error": &msg });
         string_to_jstring(&env, obj.to_string())
     }
-    
+
     lazy_static! {
         static ref ASSET_PATH: RwLock<String> = RwLock::new(String::new());
     }
@@ -112,9 +112,9 @@ pub mod android {
         env: JNIEnv,
         _: JClass,
         java_asset_path: JString,
-    ) {        
+    ) {
         info!("Starting server...");
-        
+
         *ASSET_PATH.write().unwrap() = jstring_to_string(&env, java_asset_path);
 
         // endpoints::build_rocket(server_state, config).launch().await;
@@ -124,8 +124,7 @@ pub mod android {
     }
 
     #[rocket::main]
-    async fn start_server()
-    {
+    async fn start_server() {
         unsafe {
             info!("Building server state...");
 
@@ -134,13 +133,19 @@ pub mod android {
                 asset_path: PathBuf::from(ASSET_PATH.read().unwrap().to_owned()),
                 device_id: device_id::get_device_id(),
             };
-            
-            info!("Using server_state:: asset dir: {}; device_id: {}", server_state.asset_path.display(), server_state.device_id);
+
+            info!(
+                "Using server_state:: asset dir: {}; device_id: {}",
+                server_state.asset_path.display(),
+                server_state.device_id
+            );
 
             let mut server_config: AWConfig = AWConfig::default();
             server_config.port = 5600;
 
-            endpoints::build_rocket(server_state, server_config).launch().await;
+            endpoints::build_rocket(server_state, server_config)
+                .launch()
+                .await;
         }
     }
 

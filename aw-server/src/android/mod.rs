@@ -125,15 +125,14 @@ pub mod android {
 
     #[rocket::main]
     async fn start_server() {
-        unsafe {
-            info!("Building server state...");
+        info!("Building server state...");
 
+        unsafe {
             let server_state: ServerState = endpoints::ServerState {
                 datastore: Mutex::new(openDatastore()),
                 asset_path: PathBuf::from(ASSET_PATH.read().unwrap().to_owned()),
                 device_id: device_id::get_device_id(),
             };
-
             info!(
                 "Using server_state:: asset dir: {}; device_id: {}",
                 server_state.asset_path.display(),

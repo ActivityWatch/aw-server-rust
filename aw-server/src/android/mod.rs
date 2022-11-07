@@ -74,7 +74,7 @@ pub mod android {
             .new_string(world_ptr.to_str().unwrap())
             .expect("Couldn't create java string!");
 
-        output.into_inner()
+        output.into_raw()
     }
 
     unsafe fn jstring_to_string(env: &JNIEnv, string: JString) -> String {
@@ -85,7 +85,7 @@ pub mod android {
     unsafe fn string_to_jstring(env: &JNIEnv, string: String) -> jstring {
         env.new_string(string)
             .expect("Couldn't create java string")
-            .into_inner()
+            .into_raw()
     }
 
     unsafe fn create_error_object(env: &JNIEnv, msg: String) -> jstring {

@@ -127,6 +127,7 @@ pub mod android {
     async fn start_server() {
         info!("Building server state...");
 
+        // FIXME: Why is unsafe needed here? Can we get rid of it?
         unsafe {
             let server_state: ServerState = endpoints::ServerState {
                 datastore: Mutex::new(openDatastore()),

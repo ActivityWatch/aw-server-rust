@@ -30,11 +30,16 @@ for archtargetstr in \
 ; do
     arch=$(echo $archtargetstr | cut -d " " -f 1)
     target=$(echo $archtargetstr | cut -d " " -f 2)
+    target_underscore=$(echo $target | sed 's/-/_/g')
+
     NDK_ARCH_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
     echo "Building for $arch..."
 
     if [ -d "$NDK_ARCH_DIR" ]; then
         export PATH="$NDK_ARCH_DIR:$ORIG_PATH"
+        # Need to set AR for target since NDK 21+:
+        #   https://github.com/rust-lang/cc-rs/issues/636#issuecomment-1075352495
+        declare -x "AR_${target_underscore}"="$NDK_ARCH_DIR/llvm-ar"
         cargo build -p aw-server --target $target --lib $($RELEASE && echo '--release')
     else
         echo "Couldn't find directory $NDK_ARCH_DIR"

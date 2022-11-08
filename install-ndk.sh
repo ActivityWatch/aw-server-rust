@@ -12,7 +12,7 @@ if [ -z "$ANDROID_NDK_HOME" ]; then
         echo "Found NDK folder in root, using."
     else
         echo 'ANDROID_NDK_HOME not set, downloading NDK...';
-        wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-r21-linux-x86_64.zip;
+        wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-r25b-linux.zip;
         unzip -q -d NDK android-ndk.zip;
         ls NDK;
         mv NDK/*/* NDK/;
@@ -44,18 +44,18 @@ echo "Creating cargo config..."
 mkdir -p $project_path/.cargo
 echo "
 [target.aarch64-linux-android]
-ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar'
+ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
 linker = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang'
 
 [target.armv7-linux-androideabi]
-ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi-ar'
+ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
 linker = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi-clang'
 
 [target.i686-linux-android]
-ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android-ar'
+ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
 linker = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-clang'
 
 [target.x86_64-linux-android]
-ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android-ar'
+ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
 linker = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang'
 " > $project_path/.cargo/config

@@ -37,9 +37,8 @@ pub mod android {
     use self::jni::JNIEnv;
     use super::*;
 
-    use once_cell::sync::Lazy;
     use std::path::PathBuf;
-    use std::sync::RwLock;
+    use std::sync::Mutex;
 
     use crate::config::AWConfig;
     use crate::endpoints;
@@ -47,7 +46,6 @@ pub mod android {
     use android_logger::FilterBuilder;
     use aw_datastore::Datastore;
     use aw_models::{Bucket, Event};
-    use log::LevelFilter;
 
     static mut DATASTORE: Option<Datastore> = None;
 
@@ -104,7 +102,7 @@ pub mod android {
     }
 
     lazy_static! {
-        static ref ASSET_PATH: RwLock<String> = RwLock::new(String::new());
+        static ref ASSET_PATH: Mutex<String> = Mutex::new(String::new());
     }
 
     #[no_mangle]
@@ -115,9 +113,8 @@ pub mod android {
     ) {
         info!("Starting server...");
 
-        *ASSET_PATH.write().unwrap() = jstring_to_string(&env, java_asset_path);
+        *ASSET_PATH.lock().unwrap() = jstring_to_string(&env, java_asset_path);
 
-        // endpoints::build_rocket(server_state, config).launch().await;
         start_server();
 
         info!("Server exited");
@@ -131,7 +128,7 @@ pub mod android {
         unsafe {
             let server_state: ServerState = endpoints::ServerState {
                 datastore: Mutex::new(openDatastore()),
-                asset_path: PathBuf::from(ASSET_PATH.read().unwrap().to_owned()),
+                asset_path: PathBuf::from(ASSET_PATH.lock().unwrap().to_owned()),
                 device_id: device_id::get_device_id(),
             };
             info!(

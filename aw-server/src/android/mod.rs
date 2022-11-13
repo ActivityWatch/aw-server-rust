@@ -43,7 +43,6 @@ pub mod android {
     use crate::config::AWConfig;
     use crate::endpoints;
     use crate::endpoints::ServerState;
-    use android_logger::FilterBuilder;
     use aw_datastore::Datastore;
     use aw_models::{Bucket, Event};
 

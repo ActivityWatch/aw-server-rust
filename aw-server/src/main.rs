@@ -39,6 +39,10 @@ struct Opts {
     #[clap(long)]
     webpath: Option<String>,
 
+    /// Mapping of custom static paths to serve, in the format: watcher1=/path,watcher2=/path2
+    #[clap(long)]
+    custom_static: Option<String>,
+
     /// Device ID override
     #[clap(long)]
     device_id: Option<String>,
@@ -77,6 +81,29 @@ async fn main() -> Result<(), rocket::Error> {
     // set port if overridden
     if let Some(port) = opts.port {
         config.port = port.parse().unwrap();
+    }
+
+    // set custom_static if overridden, transform into map
+    if let Some(custom_static_str) = opts.custom_static {
+        let custom_static_map: std::collections::HashMap<String, String> = custom_static_str
+            .split(',')
+            .map(|s| {
+                let mut split = s.split('=');
+                let key = split.next().unwrap().to_string();
+                let value = split.next().unwrap().to_string();
+                (key, value)
+            })
+            .collect();
+        config.custom_static.extend(custom_static_map);
+
+        // validate paths, log error if invalid
+        // remove invalid paths
+        for (name, path) in config.custom_static.clone().iter() {
+            if !std::path::Path::new(path).exists() {
+                error!("custom_static path for {} does not exist ({})", name, path);
+                config.custom_static.remove(name);
+            }
+        }
     }
 
     // Set db path if overridden

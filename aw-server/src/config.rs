@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dirs;
 
-/* Far from an optimal way to solve it, but works and is simple */
+// Far from an optimal way to solve it, but works and is simple
 static mut TESTING: bool = true;
 pub fn set_testing(testing: bool) {
     unsafe {
@@ -23,12 +23,20 @@ pub fn is_testing() -> bool {
 pub struct AWConfig {
     #[serde(default = "default_address")]
     pub address: String,
+
     #[serde(default = "default_port")]
     pub port: u16,
+
     #[serde(skip, default = "default_testing")]
     pub testing: bool, // This is not written to the config file (serde(skip))
+
     #[serde(default = "default_cors")]
     pub cors: Vec<String>,
+
+    // A mapping of watcher names to paths where the
+    // custom visualizations are located.
+    #[serde(default = "default_custom_static")]
+    pub custom_static: std::collections::HashMap<String, String>,
 }
 
 impl Default for AWConfig {
@@ -38,6 +46,7 @@ impl Default for AWConfig {
             port: default_port(),
             testing: default_testing(),
             cors: default_cors(),
+            custom_static: default_custom_static(),
         }
     }
 }
@@ -84,6 +93,10 @@ fn default_port() -> u16 {
     } else {
         5600
     }
+}
+
+fn default_custom_static() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::new()
 }
 
 pub fn create_config(testing: bool) -> AWConfig {

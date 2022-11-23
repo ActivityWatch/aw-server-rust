@@ -2,11 +2,13 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use gethostname::gethostname;
+use rocket::fs::FileServer;
 use rocket::fs::NamedFile;
 use rocket::serde::json::Json;
 use rocket::State;
 
 use crate::config::AWConfig;
+use crate::dirs;
 
 use aw_datastore::Datastore;
 use aw_models::Info;
@@ -92,7 +94,9 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
     );
     let cors = cors::cors(&config);
     let hostcheck = hostcheck::HostCheck::new(&config);
-    rocket::custom(config.to_rocket_config())
+    let custom_static = config.custom_static.clone();
+
+    let mut rocket = rocket::custom(config.to_rocket_config())
         .attach(cors.clone())
         .attach(hostcheck)
         .manage(cors)
@@ -141,5 +145,15 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 settings::setting_delete
             ],
         )
-        .mount("/", rocket_cors::catch_all_options_routes())
+        .mount("/", rocket_cors::catch_all_options_routes());
+
+    // for each custom static directory, mount it at the given name
+    for (name, dir) in custom_static {
+        info!(
+            "Serving /pages/{} custom static directory from {}",
+            name, dir
+        );
+        rocket = rocket.mount(&format!("/pages/{}", name), FileServer::from(dir));
+    }
+    rocket
 }

@@ -36,6 +36,13 @@ pub mod android {
     use self::jni::sys::{jdouble, jint, jstring};
     use self::jni::JNIEnv;
     use super::*;
+
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    use crate::config::AWConfig;
+    use crate::endpoints;
+    use crate::endpoints::ServerState;
     use aw_datastore::Datastore;
     use aw_models::{Bucket, Event};
 
@@ -93,33 +100,49 @@ pub mod android {
         string_to_jstring(&env, obj.to_string())
     }
 
+    lazy_static! {
+        static ref ASSET_PATH: Mutex<String> = Mutex::new(String::new());
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_startServer(
         env: JNIEnv,
         _: JClass,
         java_asset_path: JString,
     ) {
-        use crate::config::AWConfig;
-        use std::path::PathBuf;
+        info!("Starting server...");
 
-        use crate::endpoints;
+        *ASSET_PATH.lock().unwrap() = jstring_to_string(&env, java_asset_path);
 
+        start_server();
+
+        info!("Server exited");
+    }
+
+    #[rocket::main]
+    async fn start_server() {
         info!("Building server state...");
 
-        let asset_path = jstring_to_string(&env, java_asset_path);
-        info!("Using asset dir: {}", asset_path);
+        // FIXME: Why is unsafe needed here? Can we get rid of it?
+        unsafe {
+            let server_state: ServerState = endpoints::ServerState {
+                datastore: Mutex::new(openDatastore()),
+                asset_path: PathBuf::from(ASSET_PATH.lock().unwrap().to_owned()),
+                device_id: device_id::get_device_id(),
+            };
+            info!(
+                "Using server_state:: asset dir: {}; device_id: {}",
+                server_state.asset_path.display(),
+                server_state.device_id
+            );
 
-        let server_state = endpoints::ServerState {
-            datastore: Mutex::new(openDatastore()),
-            asset_path: PathBuf::from(asset_path),
-            device_id: device_id::get_device_id(),
-        };
+            let mut server_config: AWConfig = AWConfig::default();
+            server_config.port = 5600;
 
-        let mut config = AWConfig::default();
-        config.port = 5600;
-        info!("Starting server...");
-        endpoints::build_rocket(server_state, config).launch();
-        info!("Server exited");
+            endpoints::build_rocket(server_state, server_config)
+                .launch()
+                .await;
+        }
     }
 
     static mut INITIALIZED: bool = false;
@@ -157,8 +180,9 @@ pub mod android {
         _: JClass,
         java_dir: JString,
     ) {
-        debug!("Setting android data dir");
-        dirs::set_android_data_dir(&jstring_to_string(&env, java_dir));
+        let path = &jstring_to_string(&env, java_dir);
+        debug!("Setting android data dir as {}", path);
+        dirs::set_android_data_dir(path);
     }
 
     #[no_mangle]

@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -e
+platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
 if [ -z "$ANDROID_NDK_HOME" ]; then
     if [ -d `pwd`/"NDK" ]; then
@@ -32,7 +33,7 @@ for archtargetstr in \
     target=$(echo $archtargetstr | cut -d " " -f 2)
     target_underscore=$(echo $target | sed 's/-/_/g')
 
-    NDK_ARCH_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    NDK_ARCH_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$platform-x86_64/bin"
     echo "Building for $arch..."
 
     if [ -d "$NDK_ARCH_DIR" ]; then

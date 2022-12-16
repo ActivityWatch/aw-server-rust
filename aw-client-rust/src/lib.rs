@@ -62,10 +62,10 @@ impl AwClient {
         &self,
         bucketname: &str,
         buckettype: &str,
-    ) -> Result<(), reqwest::Error> {
+    ) -> Result<Bucket, reqwest::Error> {
         let bucket = Bucket {
             bid: None,
-            id: bucketname.to_string(),
+            id: format!("{}_{}", bucketname, self.hostname),
             client: self.name.clone(),
             _type: buckettype.to_string(),
             hostname: self.hostname.clone(),
@@ -75,7 +75,8 @@ impl AwClient {
             created: None,
             last_updated: None,
         };
-        self.create_bucket(&bucket)
+        self.create_bucket(&bucket)?;
+        Ok(bucket)
     }
 
     pub fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {

@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "aw-server"
-version = "0.12.0-beta.3"
+version = "0.12.1"
 dependencies = [
  "android_logger",
  "appdirs",

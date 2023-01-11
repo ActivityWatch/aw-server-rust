@@ -35,8 +35,6 @@ mod datastore_tests {
     }
 
     #[cfg(not(target_os = "android"))]
-    
-    #[cfg(not(target_os = "android"))]
     use std::fs;
     use std::path::PathBuf;
     pub fn get_cache_dir() -> Result<PathBuf, ()> {

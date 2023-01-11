@@ -135,9 +135,9 @@ impl DatastoreWorker {
         if self.legacy_import {
             let transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
                 Ok(transaction) => transaction,
-                Err(err) => panic!(
-                    "Unable to start immediate transaction on SQLite database! {err}"
-                ),
+                Err(err) => {
+                    panic!("Unable to start immediate transaction on SQLite database! {err}")
+                }
             };
             match ds.ensure_legacy_import(&transaction) {
                 Ok(_) => (),

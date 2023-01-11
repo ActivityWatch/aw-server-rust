@@ -82,9 +82,8 @@ pub fn bucket_events_get(
         Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
             Ok(dt) => Some(dt.with_timezone(&Utc)),
             Err(e) => {
-                let err_msg = format!(
-                    "Failed to parse endtime, datetime needs to be in rfc3339 format: {e}"
-                );
+                let err_msg =
+                    format!("Failed to parse endtime, datetime needs to be in rfc3339 format: {e}");
                 warn!("{}", err_msg);
                 return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
             }

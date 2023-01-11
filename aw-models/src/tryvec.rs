@@ -119,9 +119,7 @@ where
             let res = match access.next_element() {
                 Ok(val) => val,
                 Err(err) => {
-                    println!(
-                        "Failed to parse event because '{err}', the event will be discarded"
-                    );
+                    println!("Failed to parse event because '{err}', the event will be discarded");
                     continue;
                 }
             };

@@ -20,7 +20,7 @@ macro_rules! json_map {
 
 #[cfg(test)]
 mod query_tests {
-    
+
     use chrono::Duration;
     use serde_json::json;
     use std::convert::TryFrom;

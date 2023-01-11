@@ -151,8 +151,7 @@ mod sync_tests {
             &SyncSpec::default(),
         );
 
-        let all_datastores: Vec<&Datastore> =
-            [&state.ds_src, &state.ds_dest].to_vec();
+        let all_datastores: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
         let all_buckets_map = get_all_buckets_map(all_datastores);
 
         // Check that all synced buckets are identical to source bucket
@@ -190,8 +189,7 @@ mod sync_tests {
             &SyncSpec::default(),
         );
 
-        let all_datastores: Vec<&Datastore> =
-            [&state.ds_src, &state.ds_dest].to_vec();
+        let all_datastores: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
         let all_buckets_map = get_all_buckets_map(all_datastores);
 
         // Check that all synced buckets are identical to source bucket

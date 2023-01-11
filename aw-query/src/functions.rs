@@ -212,11 +212,14 @@ mod qfunctions {
                 )))
             }
         };
-        let bucketname =
-            match aw_transform::find_bucket(&bucket_filter, &hostname_filter, buckets.values()) {
-                Some(bucketname) => bucketname,
-                None => {
-                    return Err(QueryError::BucketQueryError(match hostname_filter {
+        let bucketname = match aw_transform::find_bucket(
+            &bucket_filter,
+            &hostname_filter,
+            buckets.values(),
+        ) {
+            Some(bucketname) => bucketname,
+            None => {
+                return Err(QueryError::BucketQueryError(match hostname_filter {
                         None => {
                             format!("Failed to find bucket matching filter '{bucket_filter}'")
                         }
@@ -224,8 +227,8 @@ mod qfunctions {
                             "Failed to find bucket matching filter '{bucket_filter}' and hostname '{hostname_filter}'"
                         ),
                     }));
-                }
-            };
+            }
+        };
         Ok(DataType::String(bucketname))
     }
 

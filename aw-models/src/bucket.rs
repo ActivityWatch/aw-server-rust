@@ -30,15 +30,12 @@ pub struct Bucket {
     pub last_updated: Option<DateTime<Utc>>, // TODO: Should probably be moved into metadata field
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
-#[derive(Default)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default)]
 pub struct BucketMetadata {
     #[serde(default)]
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
 }
-
-
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct BucketsExport {

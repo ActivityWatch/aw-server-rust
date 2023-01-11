@@ -27,9 +27,7 @@ mod test {
                 Ok(_) => break,
                 Err(err) => {
                     if i == timeout_s - 1 {
-                        panic!(
-                            "Timed out starting aw-server after {timeout_s}s: {err:?}"
-                        );
+                        panic!("Timed out starting aw-server after {timeout_s}s: {err:?}");
                     }
                 }
             }

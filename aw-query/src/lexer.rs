@@ -60,7 +60,7 @@ lexer! {
     r#"[0-9]+[\.]?[0-9]*"# => {
         let tok = match text.parse() {
             Ok(n) => Token::Number(n),
-            Err(e) => panic!("Integer {} is out of range: {}", text, e),
+            Err(e) => panic!("Integer {text} is out of range: {e}"),
         };
         (tok, text)
     }

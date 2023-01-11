@@ -35,7 +35,7 @@ mod datastore_tests {
     }
 
     #[cfg(not(target_os = "android"))]
-    use appdirs;
+    
     #[cfg(not(target_os = "android"))]
     use std::fs;
     use std::path::PathBuf;
@@ -45,7 +45,7 @@ mod datastore_tests {
             let mut dir = appdirs::user_cache_dir(Some("activitywatch"), None)?;
             dir.push("aw-server-rust");
             fs::create_dir_all(dir.clone()).expect("Unable to create cache dir");
-            return Ok(dir);
+            Ok(dir)
         }
 
         #[cfg(target_os = "android")]
@@ -111,7 +111,7 @@ mod datastore_tests {
         // Delete bucket
         match ds.delete_bucket(&bucket.id) {
             Ok(_) => info!("bucket successfully deleted"),
-            Err(e) => panic!("{:?}", e),
+            Err(e) => panic!("{e:?}"),
         }
         match ds.get_bucket(&bucket.id) {
             Ok(_) => {
@@ -135,9 +135,9 @@ mod datastore_tests {
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
-        e2.timestamp = e2.timestamp + Duration::nanoseconds(1);
+        e2.timestamp += Duration::nanoseconds(1);
 
-        let event_list = [e1.clone(), e2.clone()];
+        let event_list = [e1, e2];
         ds.insert_events(&bucket.id, &event_list).unwrap();
 
         let events = ds.get_events(&bucket.id, None, None, None).unwrap();
@@ -163,7 +163,7 @@ mod datastore_tests {
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
-        e2.timestamp = e2.timestamp + Duration::nanoseconds(1);
+        e2.timestamp += Duration::nanoseconds(1);
 
         let event_list = [e1.clone(), e2.clone()];
 
@@ -190,7 +190,7 @@ mod datastore_tests {
 
         info!("Get events with starttime filter");
         let fetched_events_start = ds
-            .get_events(&bucket.id, Some(e2.timestamp.clone()), None, None)
+            .get_events(&bucket.id, Some(e2.timestamp), None, None)
             .unwrap();
         assert_eq!(fetched_events_start.len(), 1);
         assert_eq!(fetched_events_start[0].timestamp, e2.timestamp);
@@ -199,7 +199,7 @@ mod datastore_tests {
 
         info!("Get events with endtime filter");
         let fetched_events_start = ds
-            .get_events(&bucket.id, None, Some(e1.timestamp.clone()), None)
+            .get_events(&bucket.id, None, Some(e1.timestamp), None)
             .unwrap();
         assert_eq!(fetched_events_start.len(), 1);
         assert_eq!(fetched_events_start[0].timestamp, e1.timestamp);
@@ -230,7 +230,7 @@ mod datastore_tests {
             data: json_map! {"key": json!("value")},
         };
 
-        let event_list = [e1.clone()];
+        let event_list = [e1];
         ds.insert_events(&bucket.id, &event_list).unwrap();
 
         info!("Get event that covers queried timeperiod");
@@ -262,7 +262,7 @@ mod datastore_tests {
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
-        e2.timestamp = e2.timestamp + Duration::seconds(1);
+        e2.timestamp += Duration::seconds(1);
 
         let event_list = [e1.clone(), e2.clone()];
 
@@ -314,7 +314,7 @@ mod datastore_tests {
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
-        e2.timestamp = e2.timestamp + Duration::nanoseconds(1);
+        e2.timestamp += Duration::nanoseconds(1);
 
         let event_list = [e1.clone(), e2.clone()];
 
@@ -340,10 +340,10 @@ mod datastore_tests {
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
-        e2.timestamp = e2.timestamp + Duration::seconds(1);
+        e2.timestamp += Duration::seconds(1);
 
         let mut e_diff_data = e2.clone();
-        e_diff_data.timestamp = e_diff_data.timestamp + Duration::seconds(1);
+        e_diff_data.timestamp += Duration::seconds(1);
         e_diff_data.data = json_map! {"key": json!("other value")};
 
         // First event
@@ -356,7 +356,7 @@ mod datastore_tests {
         let e1 = &fetched_events[0];
 
         // Heartbeat match
-        ds.heartbeat(&bucket.id, e2.clone(), 10.0).unwrap();
+        ds.heartbeat(&bucket.id, e2, 10.0).unwrap();
         let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
         assert_eq!(fetched_events.len(), 1);
         assert_eq!(fetched_events[0].timestamp, e1.timestamp);
@@ -392,10 +392,10 @@ mod datastore_tests {
         e1.data = json_map! {"key": json!("value1")};
         let mut e2 = e.clone();
         e2.data = json_map! {"key": json!("value2")};
-        let mut e3 = e.clone();
+        let mut e3 = e;
         e3.data = json_map! {"key": json!("value3")};
 
-        let events_init = &[e1.clone(), e2.clone(), e3.clone()];
+        let events_init = &[e1, e2, e3];
         let events_ret = ds.insert_events(&bucket.id, events_init).unwrap();
         // Validate return from insert
         assert_eq!(events_ret[0].id, Some(1));
@@ -481,7 +481,7 @@ mod datastore_tests {
         }
         {
             // Load database again
-            let ds = Datastore::new(db_path_str.clone(), false);
+            let ds = Datastore::new(db_path_str, false);
             // Check that all bucket data is correct after reload
             let buckets = ds.get_buckets().unwrap();
             assert_eq!(buckets[&empty_bucket.id].metadata.start, None);

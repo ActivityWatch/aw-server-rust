@@ -19,8 +19,8 @@ pub struct HttpErrorJson {
 impl HttpErrorJson {
     pub fn new(status: Status, err: String) -> HttpErrorJson {
         HttpErrorJson {
-            status: status,
-            message: format!("{}", err),
+            status,
+            message: err,
         }
     }
 }
@@ -41,9 +41,9 @@ pub struct BucketsExportRocket {
     inner: BucketsExport,
 }
 
-impl Into<BucketsExportRocket> for BucketsExport {
-    fn into(self) -> BucketsExportRocket {
-        BucketsExportRocket { inner: self }
+impl From<BucketsExport> for BucketsExportRocket {
+    fn from(val: BucketsExport) -> Self {
+        BucketsExportRocket { inner: val }
     }
 }
 
@@ -53,7 +53,7 @@ impl<'r> Responder<'r, 'static> for BucketsExportRocket {
         let header_content = match self.inner.buckets.len() == 1 {
             true => format!(
                 "attachment; filename=aw-bucket-export_{}.json",
-                self.inner.buckets.into_keys().nth(0).unwrap()
+                self.inner.buckets.into_keys().next().unwrap()
             ),
             false => "attachment; filename=aw-buckets-export.json".to_string(),
         };
@@ -74,15 +74,15 @@ impl Into<HttpErrorJson> for DatastoreError {
         match self {
             DatastoreError::NoSuchBucket(bucket_id) => HttpErrorJson::new(
                 Status::NotFound,
-                format!("The requested bucket '{}' does not exist", bucket_id),
+                format!("The requested bucket '{bucket_id}' does not exist"),
             ),
             DatastoreError::BucketAlreadyExists(bucket_id) => HttpErrorJson::new(
                 Status::NotModified,
-                format!("Bucket '{}' already exists", bucket_id),
+                format!("Bucket '{bucket_id}' already exists"),
             ),
             DatastoreError::NoSuchKey(key) => HttpErrorJson::new(
                 Status::NotFound,
-                format!("The requested key(s) '{}' do not exist", key),
+                format!("The requested key(s) '{key}' do not exist"),
             ),
             DatastoreError::MpscError => HttpErrorJson::new(
                 Status::InternalServerError,

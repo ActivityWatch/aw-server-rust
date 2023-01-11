@@ -142,8 +142,8 @@ mod tests {
         let td1h = Duration::hours(1);
         let e1 = Event::new(now, td1h, serde_json::Map::new());
         let e2 = Event::new(now, Duration::hours(2), serde_json::Map::new());
-        let events1 = vec![e1.clone()];
-        let events2 = vec![e2.clone()];
+        let events1 = vec![e1];
+        let events2 = vec![e2];
         let events_union = union_no_overlap(events1, events2);
 
         assert_eq!(events_union.len(), 2);
@@ -155,8 +155,8 @@ mod tests {
         // Now test the case where e2 starts before e1
         let e1 = Event::new(now + td1h, td1h, serde_json::Map::new());
         let e2 = Event::new(now, Duration::hours(2), serde_json::Map::new());
-        let events1 = vec![e1.clone()];
-        let events2 = vec![e2.clone()];
+        let events1 = vec![e1];
+        let events2 = vec![e2];
         let events_union = union_no_overlap(events1, events2);
 
         assert_eq!(events_union.len(), 2);

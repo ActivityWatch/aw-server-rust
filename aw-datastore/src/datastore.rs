@@ -113,7 +113,7 @@ fn _migrate_v0_to_v1(conn: &Connection) {
     .expect("Failed to create events_endtime index");
 
     /* Update database version */
-    conn.pragma_update(None, "user_version", &1)
+    conn.pragma_update(None, "user_version", 1)
         .expect("Failed to update database version!");
 }
 
@@ -125,7 +125,7 @@ fn _migrate_v1_to_v2(conn: &Connection) {
     )
     .expect("Failed to upgrade database when adding data field to buckets");
 
-    conn.pragma_update(None, "user_version", &2)
+    conn.pragma_update(None, "user_version", 2)
         .expect("Failed to update database version!");
 }
 
@@ -141,7 +141,7 @@ fn _migrate_v2_to_v3(conn: &Connection) {
         Ok(_) => (),
         // This error is okay, it still has the intended effects
         Err(rusqlite::Error::ExecuteReturnedResults) => (),
-        Err(e) => panic!("Unexpected error: {:?}", e),
+        Err(e) => panic!("Unexpected error: {e:?}"),
     };
 
     // Create new correct column
@@ -151,7 +151,7 @@ fn _migrate_v2_to_v3(conn: &Connection) {
     )
     .expect("Failed to upgrade database when adding new data field to buckets");
 
-    conn.pragma_update(None, "user_version", &3)
+    conn.pragma_update(None, "user_version", 3)
         .expect("Failed to update database version!");
 }
 
@@ -167,7 +167,7 @@ fn _migrate_v3_to_v4(conn: &Connection) {
     )
     .expect("Failed to upgrade db and add key-value storage table");
 
-    conn.pragma_update(None, "user_version", &4)
+    conn.pragma_update(None, "user_version", 4)
         .expect("Failed to update database version!");
 }
 
@@ -183,10 +183,10 @@ impl DatastoreInstance {
         migrate_enabled: bool,
     ) -> Result<DatastoreInstance, DatastoreError> {
         let mut first_init = false;
-        let db_version = _get_db_version(&conn);
+        let db_version = _get_db_version(conn);
 
         if migrate_enabled {
-            first_init = _create_tables(&conn, db_version);
+            first_init = _create_tables(conn, db_version);
         } else if db_version < 0 {
             return Err(DatastoreError::Uninitialized(
                 "Tried to open an uninitialized datastore with migration disabled".to_string(),
@@ -195,8 +195,7 @@ impl DatastoreInstance {
             return Err(DatastoreError::OldDbVersion(format!(
                 "\
                 Tried to open an database with an incompatible database version!
-                Database has version {} while the supported version is {}",
-                db_version, NEWEST_DB_VERSION
+                Database has version {db_version} while the supported version is {NEWEST_DB_VERSION}"
             )));
         }
 
@@ -205,7 +204,7 @@ impl DatastoreInstance {
             first_init,
             db_version,
         };
-        ds.get_stored_buckets(&conn)?;
+        ds.get_stored_buckets(conn)?;
         Ok(ds)
     }
 
@@ -224,8 +223,7 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare get_stored_buckets SQL statement: {}",
-                    err.to_string()
+                    "Failed to prepare get_stored_buckets SQL statement: {err}"
                 )))
             }
         };
@@ -233,10 +231,10 @@ impl DatastoreInstance {
             let opt_start_ns: Option<i64> = row.get(6)?;
             let opt_start = match opt_start_ns {
                 Some(starttime_ns) => {
-                    let seconds: i64 = (starttime_ns / 1_000_000_000) as i64;
+                    let seconds: i64 = starttime_ns / 1_000_000_000;
                     let subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
                     Some(DateTime::<Utc>::from_utc(
-                        NaiveDateTime::from_timestamp(seconds, subnanos),
+                        NaiveDateTime::from_timestamp_opt(seconds, subnanos).unwrap(),
                         Utc,
                     ))
                 }
@@ -246,10 +244,10 @@ impl DatastoreInstance {
             let opt_end_ns: Option<i64> = row.get(7)?;
             let opt_end = match opt_end_ns {
                 Some(endtime_ns) => {
-                    let seconds: i64 = (endtime_ns / 1_000_000_000) as i64;
+                    let seconds: i64 = endtime_ns / 1_000_000_000;
                     let subnanos: u32 = (endtime_ns % 1_000_000_000) as u32;
                     Some(DateTime::<Utc>::from_utc(
-                        NaiveDateTime::from_timestamp(seconds, subnanos),
+                        NaiveDateTime::from_timestamp_opt(seconds, subnanos).unwrap(),
                         Utc,
                     ))
                 }
@@ -262,8 +260,7 @@ impl DatastoreInstance {
                 Ok(data) => data,
                 Err(e) => {
                     return Err(rusqlite::Error::InvalidColumnName(format!(
-                        "Failed to parse data to JSON: {:?}",
-                        e
+                        "Failed to parse data to JSON: {e:?}"
                     )))
                 }
             };
@@ -287,8 +284,7 @@ impl DatastoreInstance {
             Ok(buckets) => buckets,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to query get_stored_buckets SQL statement: {:?}",
-                    err
+                    "Failed to query get_stored_buckets SQL statement: {err:?}"
                 )))
             }
         };
@@ -299,8 +295,7 @@ impl DatastoreInstance {
                 }
                 Err(e) => {
                     return Err(DatastoreError::InternalError(format!(
-                        "Failed to parse bucket from SQLite, database is corrupt! {:?}",
-                        e
+                        "Failed to parse bucket from SQLite, database is corrupt! {e:?}"
                     )))
                 }
             }
@@ -314,10 +309,10 @@ impl DatastoreInstance {
             Ok(false)
         } else {
             self.first_init = false;
-            match legacy_import(self, &conn) {
+            match legacy_import(self, conn) {
                 Ok(_) => {
                     info!("Successfully imported legacy database");
-                    self.get_stored_buckets(&conn).unwrap();
+                    self.get_stored_buckets(conn).unwrap();
                     Ok(true)
                 }
                 Err(err) => {
@@ -345,13 +340,12 @@ impl DatastoreInstance {
             Ok(buckets) => buckets,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare create_bucket SQL statement: {}",
-                    err.to_string()
+                    "Failed to prepare create_bucket SQL statement: {err}"
                 )))
             }
         };
         let data = serde_json::to_string(&bucket.data).unwrap();
-        let res = stmt.execute(&[
+        let res = stmt.execute([
             &bucket.id,
             &bucket._type,
             &bucket.client,
@@ -385,13 +379,11 @@ impl DatastoreInstance {
                         Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string()))
                     }
                     _ => Err(DatastoreError::InternalError(format!(
-                        "Failed to execute create_bucket SQL statement: {}",
-                        err
+                        "Failed to execute create_bucket SQL statement: {err}"
                     ))),
                 },
                 _ => Err(DatastoreError::InternalError(format!(
-                    "Failed to execute create_bucket SQL statement: {}",
-                    err
+                    "Failed to execute create_bucket SQL statement: {err}"
                 ))),
             },
         }
@@ -402,14 +394,14 @@ impl DatastoreInstance {
         conn: &Connection,
         bucket_id: &str,
     ) -> Result<(), DatastoreError> {
-        let bucket = (self.get_bucket(&bucket_id))?;
+        let bucket = (self.get_bucket(bucket_id))?;
         // Delete all events in bucket
-        match conn.execute("DELETE FROM events WHERE bucketrow = ?1", &[&bucket.bid]) {
+        match conn.execute("DELETE FROM events WHERE bucketrow = ?1", [&bucket.bid]) {
             Ok(_) => (),
             Err(err) => return Err(DatastoreError::InternalError(err.to_string())),
         }
         // Delete bucket itself
-        match conn.execute("DELETE FROM buckets WHERE id = ?1", &[&bucket.bid]) {
+        match conn.execute("DELETE FROM buckets WHERE id = ?1", [&bucket.bid]) {
             Ok(_) => {
                 self.buckets_cache.remove(bucket_id);
                 Ok(())
@@ -444,7 +436,7 @@ impl DatastoreInstance {
         bucket_id: &str,
         mut events: Vec<Event>,
     ) -> Result<Vec<Event>, DatastoreError> {
-        let mut bucket = self.get_bucket(&bucket_id)?;
+        let mut bucket = self.get_bucket(bucket_id)?;
 
         let mut stmt = match conn.prepare(
             "
@@ -454,8 +446,7 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare insert_events SQL statement: {}",
-                    err
+                    "Failed to prepare insert_events SQL statement: {err}"
                 )))
             }
         };
@@ -471,7 +462,7 @@ impl DatastoreInstance {
             };
             let endtime_nanos = starttime_nanos + duration_nanos;
             let data = serde_json::to_string(&event.data).unwrap();
-            let res = stmt.execute(&[
+            let res = stmt.execute([
                 &bucket.bid.unwrap(),
                 &event.id as &dyn ToSql,
                 &starttime_nanos,
@@ -480,14 +471,13 @@ impl DatastoreInstance {
             ]);
             match res {
                 Ok(_) => {
-                    self.update_endtime(&mut bucket, &event);
+                    self.update_endtime(&mut bucket, event);
                     let rowid = conn.last_insert_rowid();
                     event.id = Some(rowid);
                 }
                 Err(err) => {
                     return Err(DatastoreError::InternalError(format!(
-                        "Failed to insert event: {:?}, {}",
-                        event, err
+                        "Failed to insert event: {event:?}, {err}"
                     )));
                 }
             };
@@ -501,7 +491,7 @@ impl DatastoreInstance {
         bucket_id: &str,
         event_ids: Vec<i64>,
     ) -> Result<(), DatastoreError> {
-        let bucket = self.get_bucket(&bucket_id)?;
+        let bucket = self.get_bucket(bucket_id)?;
         let mut stmt = match conn.prepare(
             "
                 DELETE FROM events
@@ -510,19 +500,17 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare insert_events SQL statement: {}",
-                    err
+                    "Failed to prepare insert_events SQL statement: {err}"
                 )))
             }
         };
         for id in event_ids {
-            let res = stmt.execute(&[&bucket.bid.unwrap(), &id as &dyn ToSql]);
+            let res = stmt.execute([&bucket.bid.unwrap(), &id as &dyn ToSql]);
             match res {
                 Ok(_) => {}
                 Err(err) => {
                     return Err(DatastoreError::InternalError(format!(
-                        "Failed to delete event with id {} in bucket {}: {:?}",
-                        id, bucket_id, err
+                        "Failed to delete event with id {id} in bucket {bucket_id}: {err:?}"
                     )));
                 }
             };
@@ -573,7 +561,7 @@ impl DatastoreInstance {
         bucket_id: &str,
         event: &Event,
     ) -> Result<(), DatastoreError> {
-        let mut bucket = self.get_bucket(&bucket_id)?;
+        let mut bucket = self.get_bucket(bucket_id)?;
 
         let mut stmt = match conn.prepare(
             "
@@ -586,8 +574,7 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare replace_last_event SQL statement: {}",
-                    err
+                    "Failed to prepare replace_last_event SQL statement: {err}"
                 )))
             }
         };
@@ -602,7 +589,7 @@ impl DatastoreInstance {
         };
         let endtime_nanos = starttime_nanos + duration_nanos;
         let data = serde_json::to_string(&event.data).unwrap();
-        match stmt.execute(&[
+        match stmt.execute([
             &bucket.bid.unwrap(),
             &starttime_nanos,
             &endtime_nanos,
@@ -611,8 +598,7 @@ impl DatastoreInstance {
             Ok(_) => self.update_endtime(&mut bucket, event),
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to execute replace_last_event SQL statement: {}",
-                    err
+                    "Failed to execute replace_last_event SQL statement: {err}"
                 )))
             }
         };
@@ -627,7 +613,7 @@ impl DatastoreInstance {
         pulsetime: f64,
         last_heartbeat: &mut HashMap<String, Option<Event>>,
     ) -> Result<Event, DatastoreError> {
-        self.get_bucket(&bucket_id)?;
+        self.get_bucket(bucket_id)?;
         if !last_heartbeat.contains_key(bucket_id) {
             last_heartbeat.insert(bucket_id.to_string(), None);
         }
@@ -636,12 +622,12 @@ impl DatastoreInstance {
             Some(last_event) => last_event,
             None => {
                 // last heartbeat was not in cache, fetch from DB
-                let mut last_event_vec = self.get_events(conn, &bucket_id, None, None, Some(1))?;
+                let mut last_event_vec = self.get_events(conn, bucket_id, None, None, Some(1))?;
                 match last_event_vec.pop() {
                     Some(last_event) => last_event,
                     None => {
                         // There was no last event, insert and return
-                        self.insert_events(conn, &bucket_id, vec![heartbeat.clone()])?;
+                        self.insert_events(conn, bucket_id, vec![heartbeat.clone()])?;
                         return Ok(heartbeat);
                     }
                 }
@@ -650,12 +636,12 @@ impl DatastoreInstance {
         let inserted_heartbeat = match aw_transform::heartbeat(&last_event, &heartbeat, pulsetime) {
             Some(merged_heartbeat) => {
                 debug!("Merged heartbeat successfully");
-                self.replace_last_event(conn, &bucket_id, &merged_heartbeat)?;
+                self.replace_last_event(conn, bucket_id, &merged_heartbeat)?;
                 merged_heartbeat
             }
             None => {
                 debug!("Failed to merge heartbeat");
-                self.insert_events(conn, &bucket_id, vec![heartbeat.clone()])?;
+                self.insert_events(conn, bucket_id, vec![heartbeat.clone()])?;
                 heartbeat
             }
         };
@@ -683,20 +669,19 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare get_event SQL statement: {}",
-                    err
+                    "Failed to prepare get_event SQL statement: {err}"
                 )))
             }
         };
 
         // TODO: Refactor to share row-parsing logic with get_events
-        let row = match stmt.query_row(&[&bucket.bid.unwrap(), &event_id], |row| {
+        let row = match stmt.query_row([&bucket.bid.unwrap(), &event_id], |row| {
             let id = row.get(0)?;
             let starttime_ns: i64 = row.get(1)?;
             let endtime_ns: i64 = row.get(2)?;
             let data_str: String = row.get(3)?;
 
-            let time_seconds: i64 = (starttime_ns / 1_000_000_000) as i64;
+            let time_seconds: i64 = starttime_ns / 1_000_000_000;
             let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
             let duration_ns = endtime_ns - starttime_ns;
             let data: serde_json::map::Map<String, Value> =
@@ -705,7 +690,7 @@ impl DatastoreInstance {
             Ok(Event {
                 id: Some(id),
                 timestamp: DateTime::<Utc>::from_utc(
-                    NaiveDateTime::from_timestamp(time_seconds, time_subnanos),
+                    NaiveDateTime::from_timestamp_opt(time_seconds, time_subnanos).unwrap(),
                     Utc,
                 ),
                 duration: Duration::nanoseconds(duration_ns),
@@ -715,8 +700,7 @@ impl DatastoreInstance {
             Ok(rows) => rows,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to map get_event SQL statement: {}",
-                    err
+                    "Failed to map get_event SQL statement: {err}"
                 )))
             }
         };
@@ -732,7 +716,7 @@ impl DatastoreInstance {
         endtime_opt: Option<DateTime<Utc>>,
         limit_opt: Option<u64>,
     ) -> Result<Vec<Event>, DatastoreError> {
-        let bucket = self.get_bucket(&bucket_id)?;
+        let bucket = self.get_bucket(bucket_id)?;
 
         let mut list = Vec::new();
 
@@ -740,8 +724,8 @@ impl DatastoreInstance {
             Some(dt) => dt.timestamp_nanos(),
             None => 0,
         };
-        let endtime_filter_ns = match endtime_opt {
-            Some(dt) => dt.timestamp_nanos() as i64,
+        let endtime_filter_ns: i64 = match endtime_opt {
+            Some(dt) => dt.timestamp_nanos(),
             None => std::i64::MAX,
         };
         if starttime_filter_ns > endtime_filter_ns {
@@ -767,14 +751,13 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare get_events SQL statement: {}",
-                    err
+                    "Failed to prepare get_events SQL statement: {err}"
                 )))
             }
         };
 
         let rows = match stmt.query_map(
-            &[
+            [
                 &bucket.bid.unwrap(),
                 &starttime_filter_ns,
                 &endtime_filter_ns,
@@ -794,7 +777,7 @@ impl DatastoreInstance {
                 }
                 let duration_ns = endtime_ns - starttime_ns;
 
-                let time_seconds: i64 = (starttime_ns / 1_000_000_000) as i64;
+                let time_seconds: i64 = starttime_ns / 1_000_000_000;
                 let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
                 let data: serde_json::map::Map<String, Value> =
                     serde_json::from_str(&data_str).unwrap();
@@ -802,7 +785,7 @@ impl DatastoreInstance {
                 Ok(Event {
                     id: Some(id),
                     timestamp: DateTime::<Utc>::from_utc(
-                        NaiveDateTime::from_timestamp(time_seconds, time_subnanos),
+                        NaiveDateTime::from_timestamp_opt(time_seconds, time_subnanos).unwrap(),
                         Utc,
                     ),
                     duration: Duration::nanoseconds(duration_ns),
@@ -813,8 +796,7 @@ impl DatastoreInstance {
             Ok(rows) => rows,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to map get_events SQL statement: {}",
-                    err
+                    "Failed to map get_events SQL statement: {err}"
                 )))
             }
         };
@@ -835,14 +817,14 @@ impl DatastoreInstance {
         starttime_opt: Option<DateTime<Utc>>,
         endtime_opt: Option<DateTime<Utc>>,
     ) -> Result<i64, DatastoreError> {
-        let bucket = self.get_bucket(&bucket_id)?;
+        let bucket = self.get_bucket(bucket_id)?;
 
-        let starttime_filter_ns = match starttime_opt {
-            Some(dt) => dt.timestamp_nanos() as i64,
+        let starttime_filter_ns: i64 = match starttime_opt {
+            Some(dt) => dt.timestamp_nanos(),
             None => 0,
         };
-        let endtime_filter_ns = match endtime_opt {
-            Some(dt) => dt.timestamp_nanos() as i64,
+        let endtime_filter_ns: i64 = match endtime_opt {
+            Some(dt) => dt.timestamp_nanos(),
             None => std::i64::MAX,
         };
         if starttime_filter_ns >= endtime_filter_ns {
@@ -860,14 +842,13 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare get_event_count SQL statement: {}",
-                    err
+                    "Failed to prepare get_event_count SQL statement: {err}",
                 )))
             }
         };
 
         let count = match stmt.query_row(
-            &[
+            [
                 &bucket.bid.unwrap(),
                 &starttime_filter_ns,
                 &endtime_filter_ns,
@@ -877,8 +858,7 @@ impl DatastoreInstance {
             Ok(count) => count,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to query get_event_count SQL statement: {}",
-                    err
+                    "Failed to query get_event_count SQL statement: {err}"
                 )))
             }
         };
@@ -900,20 +880,19 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare insert_value SQL statement: {}",
-                    err
+                    "Failed to prepare insert_value SQL statement: {err}"
                 )))
             }
         };
         let timestamp = Utc::now().timestamp();
         #[allow(clippy::expect_fun_call)]
         stmt.execute(params![key, data, &timestamp])
-            .expect(&format!("Failed to insert key-value pair: {}", key));
+            .expect(&format!("Failed to insert key-value pair: {key}"));
         Ok(())
     }
 
     pub fn delete_key_value(&self, conn: &Connection, key: &str) -> Result<(), DatastoreError> {
-        conn.execute("DELETE FROM key_value WHERE key = ?1", &[key])
+        conn.execute("DELETE FROM key_value WHERE key = ?1", [key])
             .expect("Error deleting value from database");
         Ok(())
     }
@@ -926,18 +905,17 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare get_value SQL statement: {}",
-                    err
+                    "Failed to prepare get_value SQL statement: {err}"
                 )))
             }
         };
 
-        match stmt.query_row(&[key], |row| {
+        match stmt.query_row([key], |row| {
             Ok(KeyValue {
                 key: row.get(0)?,
                 value: row.get(1)?,
                 timestamp: Some(DateTime::from_utc(
-                    NaiveDateTime::from_timestamp(row.get(2)?, 0),
+                    NaiveDateTime::from_timestamp_opt(row.get(2)?, 0).unwrap(),
                     Utc,
                 )),
             })
@@ -948,8 +926,7 @@ impl DatastoreInstance {
                     Err(DatastoreError::NoSuchKey(key.to_string()))
                 }
                 _ => Err(DatastoreError::InternalError(format!(
-                    "Get value query failed for key {}",
-                    key
+                    "Get value query failed for key {key}"
                 ))),
             },
         }
@@ -964,15 +941,14 @@ impl DatastoreInstance {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare get_value SQL statement: {}",
-                    err
+                    "Failed to prepare get_value SQL statement: {err}"
                 )))
             }
         };
 
         let mut output = Vec::<String>::new();
         // Rusqlite's get wants index and item type as parameters.
-        let result = stmt.query_map(&[pattern], |row| row.get::<usize, String>(0));
+        let result = stmt.query_map([pattern], |row| row.get::<usize, String>(0));
         match result {
             Ok(keys) => {
                 for row in keys {
@@ -987,8 +963,7 @@ impl DatastoreInstance {
                     Err(DatastoreError::NoSuchKey(pattern.to_string()))
                 }
                 _ => Err(DatastoreError::InternalError(format!(
-                    "Failed to get key_value rows starting with pattern {}",
-                    pattern
+                    "Failed to get key_value rows starting with pattern {pattern}"
                 ))),
             },
         }

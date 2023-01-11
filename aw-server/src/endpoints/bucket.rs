@@ -70,8 +70,7 @@ pub fn bucket_events_get(
             Ok(dt) => Some(dt.with_timezone(&Utc)),
             Err(e) => {
                 let err_msg = format!(
-                    "Failed to parse starttime, datetime needs to be in rfc3339 format: {}",
-                    e
+                    "Failed to parse starttime, datetime needs to be in rfc3339 format: {e}"
                 );
                 warn!("{}", err_msg);
                 return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
@@ -84,8 +83,7 @@ pub fn bucket_events_get(
             Ok(dt) => Some(dt.with_timezone(&Utc)),
             Err(e) => {
                 let err_msg = format!(
-                    "Failed to parse endtime, datetime needs to be in rfc3339 format: {}",
-                    e
+                    "Failed to parse endtime, datetime needs to be in rfc3339 format: {e}"
                 );
                 warn!("{}", err_msg);
                 return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
@@ -195,7 +193,7 @@ pub fn bucket_export(
         .get_events(&bucket_id, None, None, None)
         .expect("Failed to get events for bucket");
     bucket.events = Some(TryVec::new(events));
-    export.buckets.insert(bucket_id.clone(), bucket);
+    export.buckets.insert(bucket_id, bucket);
 
     Ok(export.into())
 }

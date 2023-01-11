@@ -31,7 +31,7 @@ impl RegexRule {
         // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
         // so we need to prefix with `(?i)` to make it case insensitive.
         let regex = if ignore_case {
-            let regex_str = format!("(?i){}", regex_str);
+            let regex_str = format!("(?i){regex_str}");
             Regex::new(&regex_str)?
         } else {
             Regex::new(regex_str)?
@@ -79,7 +79,7 @@ fn categorize_one(mut event: Event, rules: &[(Vec<String>, Rule)]) -> Event {
     let mut category: Vec<String> = vec!["Uncategorized".into()];
     for (cat, rule) in rules {
         if rule.matches(&event) {
-            category = _pick_highest_ranking_category(category, &cat);
+            category = _pick_highest_ranking_category(category, cat);
         }
     }
     event
@@ -95,7 +95,7 @@ fn categorize_one(mut event: Event, rules: &[(Vec<String>, Rule)]) -> Event {
 pub fn tag(mut events: Vec<Event>, rules: &[(String, Rule)]) -> Vec<Event> {
     let mut events_tagged = Vec::new();
     for event in events.drain(..) {
-        events_tagged.push(tag_one(event, &rules));
+        events_tagged.push(tag_one(event, rules));
     }
     events_tagged
 }

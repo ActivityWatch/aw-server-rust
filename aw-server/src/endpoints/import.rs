@@ -17,7 +17,7 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(e) => {
-                let err_msg = format!("Failed to import bucket: {:?}", e);
+                let err_msg = format!("Failed to import bucket: {e:?}");
                 warn!("{}", err_msg);
                 return Err(HttpErrorJson::new(Status::InternalServerError, err_msg));
             }

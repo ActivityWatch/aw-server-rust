@@ -8,7 +8,6 @@ use rocket::serde::json::Json;
 use rocket::State;
 
 use crate::config::AWConfig;
-use crate::dirs;
 
 use aw_datastore::Datastore;
 use aw_models::Info;
@@ -153,7 +152,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             "Serving /pages/{} custom static directory from {}",
             name, dir
         );
-        rocket = rocket.mount(&format!("/pages/{}", name), FileServer::from(dir));
+        rocket = rocket.mount(&format!("/pages/{name}"), FileServer::from(dir));
     }
     rocket
 }

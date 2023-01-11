@@ -103,7 +103,7 @@ impl AccessMethod for AwClient {
         Ok(())
     }
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
-        AwClient::heartbeat(self, bucket_id, &event, duration).map_err(|e| format!("{:?}", e))
+        AwClient::heartbeat(self, bucket_id, &event, duration).map_err(|e| format!("{e:?}"))
     }
     fn close(&self) {
         // NOP

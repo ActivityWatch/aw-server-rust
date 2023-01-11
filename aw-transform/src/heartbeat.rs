@@ -130,13 +130,13 @@ mod tests {
         let now = Utc::now();
         let event = Event {
             id: None,
-            timestamp: now.clone(),
+            timestamp: now,
             duration: Duration::seconds(0),
             data: json_map! {"test": json!(1)},
         };
         let heartbeat_same_data = Event {
             id: None,
-            timestamp: now.clone(),
+            timestamp: now,
             duration: Duration::seconds(1),
             data: json_map! {"test": json!(1)},
         };
@@ -147,7 +147,7 @@ mod tests {
 
         let heartbeat_different_data = Event {
             id: None,
-            timestamp: now.clone(),
+            timestamp: now,
             duration: Duration::seconds(1),
             data: json_map! {"test": json!(2)},
         };
@@ -161,13 +161,13 @@ mod tests {
         let now = Utc::now();
         let event = Event {
             id: None,
-            timestamp: now.clone(),
+            timestamp: now,
             duration: Duration::seconds(0),
             data: json_map! {"test": json!(1)},
         };
         let heartbeat_same_data = Event {
             id: None,
-            timestamp: now.clone(),
+            timestamp: now,
             duration: Duration::seconds(1),
             data: json_map! {"test": json!(1)},
         };

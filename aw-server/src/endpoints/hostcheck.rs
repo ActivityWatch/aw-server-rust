@@ -93,7 +93,7 @@ impl Fairing for HostCheck {
         // Parse hostname from host header
         // hostname contains port, which we don't care about and filter out
         let hostheader = hostheader_opt.unwrap();
-        let host_opt = hostheader.split(":").next();
+        let host_opt = hostheader.split(':').next();
         if host_opt.is_none() {
             info!("Host header '{}' not allowed, denying request", hostheader);
             redirect_bad_request(request);

@@ -159,8 +159,7 @@ mod qfunctions {
             Ok(events) => events,
             Err(e) => {
                 return Err(QueryError::BucketQueryError(format!(
-                    "Failed to query bucket: {:?}",
-                    e
+                    "Failed to query bucket: {e:?}"
                 )))
             }
         };
@@ -182,8 +181,7 @@ mod qfunctions {
             Ok(buckets) => buckets,
             Err(e) => {
                 return Err(QueryError::BucketQueryError(format!(
-                    "Failed to query bucket names: {:?}",
-                    e
+                    "Failed to query bucket names: {e:?}"
                 )))
             }
         };
@@ -210,8 +208,7 @@ mod qfunctions {
             Ok(buckets) => buckets,
             Err(e) => {
                 return Err(QueryError::BucketQueryError(format!(
-                    "Failed to query bucket names: {:?}",
-                    e
+                    "Failed to query bucket names: {e:?}"
                 )))
             }
         };
@@ -221,11 +218,10 @@ mod qfunctions {
                 None => {
                     return Err(QueryError::BucketQueryError(match hostname_filter {
                         None => {
-                            format!("Failed to find bucket matching filter '{}'", bucket_filter)
+                            format!("Failed to find bucket matching filter '{bucket_filter}'")
                         }
                         Some(hostname_filter) => format!(
-                            "Failed to find bucket matching filter '{}' and hostname '{}'",
-                            bucket_filter, hostname_filter
+                            "Failed to find bucket matching filter '{bucket_filter}' and hostname '{hostname_filter}'"
                         ),
                     }));
                 }
@@ -465,8 +461,7 @@ mod qfunctions {
             Ok(regex) => regex,
             Err(e) => {
                 return Err(QueryError::RegexCompileError(format!(
-                    "Failed to compile regex string '{}': {}",
-                    regex_str, e
+                    "Failed to compile regex string '{regex_str}': {e}"
                 )))
             }
         };
@@ -616,11 +611,10 @@ mod validate {
                 ))
             }
         };
-        match TimeInterval::new_from_string(&interval_str) {
+        match TimeInterval::new_from_string(interval_str) {
             Ok(ti) => Ok(ti),
             Err(_e) => Err(QueryError::TimeIntervalError(format!(
-                "Failed to parse TIMEINTERVAL: {}",
-                interval_str
+                "Failed to parse TIMEINTERVAL: {interval_str}"
             ))),
         }
     }

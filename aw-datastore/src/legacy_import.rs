@@ -68,8 +68,7 @@ mod import {
             Ok(buckets) => buckets,
             Err(err) => {
                 return Err(LegacyDatastoreImportError::SQLMapError(format!(
-                    "Failed to query get_legacy_buckets SQL statement: {:?}",
-                    err
+                    "Failed to query get_legacy_buckets SQL statement: {err:?}"
                 )))
             }
         };
@@ -78,7 +77,7 @@ mod import {
         for bucket_res in bucket_rows {
             match bucket_res {
                 Ok(bucket) => buckets.push(bucket),
-                Err(err) => panic!("{:?}", err),
+                Err(err) => panic!("{err:?}"),
             }
         }
         Ok(buckets)
@@ -100,7 +99,7 @@ mod import {
             Err(err) => return Err(LegacyDatastoreImportError::SQLPrepareError(err.to_string())),
         };
 
-        let rows = match stmt.query_map(&[&bucket_id], |row| {
+        let rows = match stmt.query_map([&bucket_id], |row| {
             let timestamp_str: String = row.get(0)?;
             let duration_float: f64 = row.get(1)?;
             let data_str: String = row.get(2)?;
@@ -109,8 +108,7 @@ mod import {
             Ok(rows) => rows,
             Err(err) => {
                 return Err(LegacyDatastoreImportError::SQLMapError(format!(
-                    "Failed to query get_legacy_events SQL statement: {:?}",
-                    err
+                    "Failed to query get_legacy_events SQL statement: {err:?}"
                 )))
             }
         };
@@ -118,10 +116,10 @@ mod import {
         for row in rows {
             match row {
                 Ok((timestamp_str, duration_float, data_str)) => {
-                    let timestamp_str = timestamp_str.replace(" ", "T");
+                    let timestamp_str = timestamp_str.replace(' ', "T");
                     let timestamp = match DateTime::parse_from_rfc3339(&timestamp_str) {
                         Ok(timestamp) => timestamp.with_timezone(&Utc),
-                        Err(err) => panic!("Timestamp string {}: {:?}", timestamp_str, err),
+                        Err(err) => panic!("Timestamp string {timestamp_str}: {err:?}"),
                     };
 
                     let duration_ns = (duration_float * 1_000_000_000.0) as i64;
@@ -146,7 +144,7 @@ mod import {
                     };
                     list.push(event)
                 }
-                Err(err) => panic!("Corrupt event in bucket {}: {}", bucket_id, err),
+                Err(err) => panic!("Corrupt event in bucket {bucket_id}: {err}"),
             };
         }
         Ok(list)
@@ -167,7 +165,7 @@ mod import {
 
         let buckets = get_legacy_buckets(&legacy_conn)?;
         for bucket in &buckets {
-            println!("Importing legacy bucket: {:?}", bucket);
+            println!("Importing legacy bucket: {bucket:?}");
             match new_ds.create_bucket(new_conn, bucket.clone()) {
                 Ok(_) => (),
                 Err(err) => panic!("Failed to create bucket '{}': {:?}", bucket.id, err),
@@ -203,7 +201,7 @@ mod import {
             "Failed to ensure legacy import"
         );
         let buckets = ds.get_buckets();
-        assert!(buckets.len() > 0);
+        assert!(!buckets.is_empty());
         let mut num_events = 0;
         for (bucket_id, _bucket) in buckets {
             let events = ds

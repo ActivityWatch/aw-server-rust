@@ -109,8 +109,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!("{}", date.clone());
                 chrono::NaiveDate::parse_from_str(&date.clone(), "%Y-%m-%d")
                     .map(|nd| {
-                        let dt = Utc.ymd(nd.year(), nd.month(), nd.day());
-                        dt.and_hms(0, 0, 0)
+                        Utc.with_ymd_and_hms(nd.year(), nd.month(), nd.day(), 0, 0, 0)
+                            .single()
+                            .unwrap()
                     })
                     .expect("Date was not on the format YYYY-MM-DD")
             });

@@ -55,7 +55,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
         None => e1_iter.next(),
     } {
         if let Some(gap) = gap_prev {
-            e1.timestamp = e1.timestamp - (gap / 2);
+            e1.timestamp -= gap / 2;
             e1.duration = e1.duration + (gap / 2);
             gap_prev = None;
         }
@@ -194,7 +194,7 @@ mod tests {
             duration: Duration::seconds(4),
             data: json_map! {"test": json!(1)},
         };
-        let res = flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
+        let res = flood(vec![e1, e2], Duration::seconds(5));
         assert_eq!(1, res.len());
         assert_eq!(&res[0], &e_expected);
     }
@@ -226,7 +226,7 @@ mod tests {
             duration: Duration::seconds(2),
             data: json_map! {"test": json!(2)},
         };
-        let res = flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
+        let res = flood(vec![e1, e2], Duration::seconds(5));
         assert_eq!(2, res.len());
         assert_eq!(&res[0], &e1_expected);
         assert_eq!(&res[1], &e2_expected);
@@ -253,7 +253,7 @@ mod tests {
             duration: Duration::seconds(15),
             data: json_map! {"type": "a"},
         };
-        let res = flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
+        let res = flood(vec![e1, e2], Duration::seconds(5));
         assert_eq!(1, res.len());
         assert_eq!(&res[0], &e1_expected);
     }
@@ -273,7 +273,7 @@ mod tests {
             duration: Duration::seconds(5),
             data: json_map! {"type": "a"},
         };
-        let res = flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
+        let res = flood(vec![e1.clone(), e2], Duration::seconds(5));
         assert_eq!(1, res.len());
         assert_eq!(&res[0], &e1);
     }
@@ -331,7 +331,7 @@ mod tests {
             data: json_map! {"status": "afk"},
         };
         let res = flood(
-            vec![e1.clone(), e2.clone(), e3.clone(), e4.clone()],
+            vec![e1.clone(), e2.clone(), e3, e4.clone()],
             Duration::seconds(5),
         );
         assert_eq!(3, res.len());
@@ -378,7 +378,7 @@ mod tests {
             data: json_map! {"status": "afk"},
         };
         let res = flood(
-            vec![e1.clone(), e2.clone(), e3.clone(), e4.clone(), e5.clone()],
+            vec![e1.clone(), e2, e3, e4.clone(), e5.clone()],
             Duration::seconds(5),
         );
         assert_eq!(3, res.len());

@@ -31,20 +31,14 @@ pub struct Bucket {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[derive(Default)]
 pub struct BucketMetadata {
     #[serde(default)]
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
 }
 
-impl Default for BucketMetadata {
-    fn default() -> BucketMetadata {
-        BucketMetadata {
-            start: None,
-            end: None,
-        }
-    }
-}
+
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct BucketsExport {

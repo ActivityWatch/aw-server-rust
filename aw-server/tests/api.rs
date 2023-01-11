@@ -483,7 +483,7 @@ mod api_tests {
     fn set_setting_request(client: &Client, key: &str, value: Value) -> Status {
         let body = serde_json::to_string(&KeyValue {
             key: key.to_string(),
-            value: value,
+            value,
             timestamp: None,
         })
         .unwrap();

@@ -136,8 +136,7 @@ impl DatastoreWorker {
             let transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
                 Ok(transaction) => transaction,
                 Err(err) => panic!(
-                    "Unable to start immediate transaction on SQLite database! {}",
-                    err
+                    "Unable to start immediate transaction on SQLite database! {err}"
                 ),
             };
             match ds.ensure_legacy_import(&transaction) {
@@ -146,7 +145,7 @@ impl DatastoreWorker {
             }
             match transaction.commit() {
                 Ok(_) => (),
-                Err(err) => panic!("Failed to commit datastore transaction! {}", err),
+                Err(err) => panic!("Failed to commit datastore transaction! {err}"),
             }
         }
 
@@ -200,7 +199,7 @@ impl DatastoreWorker {
             );
             match tx.commit() {
                 Ok(_) => (),
-                Err(err) => panic!("Failed to commit datastore transaction! {}", err),
+                Err(err) => panic!("Failed to commit datastore transaction! {err}"),
             }
             if self.quit {
                 break;
@@ -367,8 +366,7 @@ impl Datastore {
             Ok(r) => match r {
                 Response::BucketMap(bm) => Ok(bm),
                 e => Err(DatastoreError::InternalError(format!(
-                    "Invalid response: {:?}",
-                    e
+                    "Invalid response: {e:?}"
                 ))),
             },
             Err(e) => Err(e),

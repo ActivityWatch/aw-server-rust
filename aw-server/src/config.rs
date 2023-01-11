@@ -117,9 +117,9 @@ pub fn create_config(testing: bool) -> AWConfig {
         let default_config_str =
             toml::to_string(&default_config).expect("Failed to convert default config to string");
         let mut default_config_str_commented = String::new();
-        default_config_str_commented.push_str(&"### DEFAULT SETTINGS ###\n");
+        default_config_str_commented.push_str("### DEFAULT SETTINGS ###\n");
         for line in default_config_str.lines() {
-            default_config_str_commented.push_str(&format!("#{}\n", line));
+            default_config_str_commented.push_str(&format!("#{line}\n"));
         }
         wfile
             .write_all(&default_config_str_commented.into_bytes())

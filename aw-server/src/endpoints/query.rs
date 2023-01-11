@@ -13,7 +13,7 @@ pub fn query(query_req: Json<Query>, state: &State<ServerState>) -> Result<Value
     let mut results = Vec::new();
     let datastore = endpoints_get_lock!(state.datastore);
     for interval in intervals {
-        let result = match aw_query::query(&query_code, &interval, &datastore) {
+        let result = match aw_query::query(&query_code, interval, &datastore) {
             Ok(data) => data,
             Err(e) => {
                 warn!("Query failed: {:?}", e);

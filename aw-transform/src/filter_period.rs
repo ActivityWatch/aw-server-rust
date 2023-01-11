@@ -82,7 +82,7 @@ mod tests {
         };
 
         let filtered_events =
-            filter_period_intersect(&vec![e1, e2, e3, e4, e5], &vec![filter_event]);
+            filter_period_intersect(&vec![e1, e2, e3, e4, e5], &[filter_event]);
         assert_eq!(filtered_events.len(), 3);
         assert_eq!(filtered_events[0].duration, Duration::milliseconds(500));
         assert_eq!(filtered_events[1].duration, Duration::milliseconds(1000));

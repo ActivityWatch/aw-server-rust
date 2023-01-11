@@ -118,7 +118,7 @@ mod tests {
             duration: Duration::seconds(9),
             data: json_map! {"test": json!(1)},
         };
-        let in_events = vec![e1.clone(), e2.clone(), e3.clone(), e4.clone()];
+        let in_events = vec![e1, e2, e3, e4];
         let res1 = merge_events_by_keys(in_events, vec!["test".to_string()]);
         // Needed, otherwise the order is undeterministic
         let res2 = sort_by_timestamp(res1);

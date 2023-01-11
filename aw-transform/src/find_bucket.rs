@@ -35,7 +35,7 @@ mod tests {
             bid: None,
             id: "no match".to_string(),
             _type: "type".to_string(),
-            hostname: expected_hostname.clone(),
+            hostname: expected_hostname,
             client: "testclient".to_string(),
             created: None,
             data: json_map! {},
@@ -47,7 +47,7 @@ mod tests {
         b2.id = expected_bucketname.clone();
         let b3 = b1.clone();
 
-        let buckets = vec![b1.clone(), b2.clone(), b3.clone()];
+        let buckets = vec![b1.clone(), b2, b3.clone()];
 
         // Check that it correctly finds bucket
         let res = find_bucket("aw-datastore-test", &Some("testhost".to_string()), &buckets);

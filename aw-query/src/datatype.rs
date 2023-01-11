@@ -47,13 +47,13 @@ impl fmt::Debug for DataType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             DataType::None() => write!(f, "None()"),
-            DataType::Bool(b) => write!(f, "Bool({})", b),
-            DataType::Number(n) => write!(f, "Number({})", n),
-            DataType::String(s) => write!(f, "String({})", s),
-            DataType::Event(e) => write!(f, "Event({:?})", e),
-            DataType::List(l) => write!(f, "List({:?})", l),
-            DataType::Dict(d) => write!(f, "Dict({:?})", d),
-            DataType::Function(name, _fun) => write!(f, "Function({})", name),
+            DataType::Bool(b) => write!(f, "Bool({b})"),
+            DataType::Number(n) => write!(f, "Number({n})"),
+            DataType::String(s) => write!(f, "String({s})"),
+            DataType::Event(e) => write!(f, "Event({e:?})"),
+            DataType::List(l) => write!(f, "List({l:?})"),
+            DataType::Dict(d) => write!(f, "Dict({d:?})"),
+            DataType::Function(name, _fun) => write!(f, "Function({name})"),
         }
     }
 }
@@ -73,8 +73,7 @@ impl DataType {
             (DataType::Dict(d1), DataType::Dict(d2)) => Ok(d1 == d2),
             // We do not care about comparing functions
             _ => Err(QueryError::InvalidType(format!(
-                "Cannot compare values of different types {:?} and {:?}",
-                self, other
+                "Cannot compare values of different types {self:?} and {other:?}"
             ))),
         }
     }
@@ -104,8 +103,7 @@ impl TryFrom<&DataType> for Vec<DataType> {
         match value {
             DataType::List(ref s) => Ok(s.clone()),
             ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
-                "Expected function parameter of type List, got {:?}",
-                invalid_type
+                "Expected function parameter of type List, got {invalid_type:?}"
             ))),
         }
     }
@@ -117,8 +115,7 @@ impl TryFrom<&DataType> for String {
         match value {
             DataType::String(s) => Ok(s.clone()),
             ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
-                "Expected function parameter of type String, list contains {:?}",
-                invalid_type
+                "Expected function parameter of type String, list contains {invalid_type:?}"
             ))),
         }
     }
@@ -147,8 +144,7 @@ impl TryFrom<&DataType> for Vec<Event> {
                 DataType::Event(e) => events.push(e.clone()),
                 ref invalid_type => {
                     return Err(QueryError::InvalidFunctionParameters(format!(
-                        "Expected function parameter of type List of Events, list contains {:?}",
-                        invalid_type
+                        "Expected function parameter of type List of Events, list contains {invalid_type:?}"
                     )))
                 }
             }
@@ -168,19 +164,18 @@ impl TryFrom<&DataType> for Vec<(String, Rule)> {
                     let tag: String = match l.get(0) {
                         Some(tag) => tag.try_into()?,
                         None => return Err(QueryError::InvalidFunctionParameters(
-                            format!("Expected function parameter of type list of (tag, rule) tuples, list contains {:?}", l)))
+                            format!("Expected function parameter of type list of (tag, rule) tuples, list contains {l:?}")))
                     };
                     let rule: Rule = match l.get(1) {
                         Some(rule) => rule.try_into()?,
                         None => return Err(QueryError::InvalidFunctionParameters(
-                            format!("Expected function parameter of type list of (tag, rule) tuples, list contains {:?}", l)))
+                            format!("Expected function parameter of type list of (tag, rule) tuples, list contains {l:?}")))
                     };
                     lists.push((tag, rule));
                 }
                 ref invalid_type => {
                     return Err(QueryError::InvalidFunctionParameters(format!(
-                        "Expected function parameter of type list of (tag, rule) tuples, got {:?}",
-                        invalid_type
+                        "Expected function parameter of type list of (tag, rule) tuples, got {invalid_type:?}"
                     )))
                 }
             }
@@ -200,19 +195,18 @@ impl TryFrom<&DataType> for Vec<(Vec<String>, Rule)> {
                     let category: Vec<String> = match l.get(0) {
                         Some(category) => category.try_into()?,
                         None => return Err(QueryError::InvalidFunctionParameters(
-                            format!("Expected function parameter of type list of (category, rule) tuples, list contains {:?}", l)))
+                            format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
                     };
                     let rule: Rule = match l.get(1) {
                         Some(rule) => rule.try_into()?,
                         None => return Err(QueryError::InvalidFunctionParameters(
-                            format!("Expected function parameter of type list of (category, rule) tuples, list contains {:?}", l)))
+                            format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
                     };
                     lists.push((category, rule));
                 }
                 ref invalid_type => {
                     return Err(QueryError::InvalidFunctionParameters(format!(
-                    "Expected function parameter of type list of (category, rule) tuples, got {:?}",
-                    invalid_type
+                    "Expected function parameter of type list of (category, rule) tuples, got {invalid_type:?}"
                 )))
                 }
             }
@@ -227,8 +221,7 @@ impl TryFrom<&DataType> for f64 {
         match value {
             DataType::Number(f) => Ok(*f),
             ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
-                "Expected function parameter of type Number, got {:?}",
-                invalid_type
+                "Expected function parameter of type Number, got {invalid_type:?}"
             ))),
         }
     }
@@ -259,8 +252,7 @@ impl TryFrom<&DataType> for Value {
                 Ok(Value::Array(values))
             }
             ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
-                "Query2 support for parsing values is limited, does not support parsing {:?}",
-                invalid_type
+                "Query2 support for parsing values is limited, does not support parsing {invalid_type:?}"
             ))),
         }
     }
@@ -286,8 +278,7 @@ impl TryFrom<&DataType> for Rule {
             DataType::Dict(dict) => dict,
             _ => {
                 return Err(QueryError::InvalidFunctionParameters(format!(
-                    "Expected rule dict, got {:?}",
-                    data
+                    "Expected rule dict, got {data:?}"
                 )))
             }
         };
@@ -342,16 +333,14 @@ impl TryFrom<&DataType> for Rule {
                 Ok(regex_rule) => regex_rule,
                 Err(err) => {
                     return Err(QueryError::RegexCompileError(format!(
-                        "Failed to compile regex string '{}': '{:?}",
-                        regex_str, err
+                        "Failed to compile regex string '{regex_str}': '{err:?}"
                     )))
                 }
             };
             Ok(Self::Regex(regex_rule))
         } else {
             Err(QueryError::InvalidFunctionParameters(format!(
-                "Unknown rule type '{}'",
-                rtype
+                "Unknown rule type '{rtype}'"
             )))
         }
     }

@@ -121,14 +121,14 @@ mod tests {
         let regex_value1 = RegexBuilder::new("value1").build().unwrap();
 
         let res = filter_keyvals_regex(events.clone(), "key1", &regex_value);
-        assert_eq!(vec![e1.clone(), e2.clone()], res);
+        assert_eq!(vec![e1.clone(), e2], res);
         let res = filter_keyvals_regex(events.clone(), "key1", &regex_value1);
-        assert_eq!(vec![e1.clone()], res);
+        assert_eq!(vec![e1], res);
         let res = filter_keyvals_regex(events.clone(), "key2", &regex_value);
-        assert_eq!(vec![e3.clone()], res);
+        assert_eq!(vec![e3], res);
         let res = filter_keyvals_regex(events.clone(), "key2", &regex_value1);
         assert_eq!(0, res.len());
-        let res = filter_keyvals_regex(events.clone(), "key3", &regex_value);
+        let res = filter_keyvals_regex(events, "key3", &regex_value);
         assert_eq!(0, res.len());
     }
 

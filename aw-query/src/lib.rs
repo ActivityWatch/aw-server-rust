@@ -46,7 +46,7 @@ pub enum QueryError {
 
 impl fmt::Display for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -57,7 +57,7 @@ pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, 
         Err(e) => {
             // TODO: Improve parsing error message
             warn!("ParsingError: {:?}", e);
-            return Err(QueryError::ParsingError(format!("{:?}", e)));
+            return Err(QueryError::ParsingError(format!("{e:?}")));
         }
     };
     interpret::interpret_prog(program, ti, ds)

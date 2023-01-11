@@ -27,7 +27,7 @@ impl std::fmt::Debug for AwClient {
 
 impl AwClient {
     pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
-        let baseurl = format!("http://{}:{}", ip, port);
+        let baseurl = format!("http://{ip}:{port}");
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
@@ -43,18 +43,18 @@ impl AwClient {
 
     pub fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        let bucket = self.client.get(&url).send()?.error_for_status()?.json()?;
+        let bucket = self.client.get(url).send()?.error_for_status()?.json()?;
         Ok(bucket)
     }
 
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, reqwest::Error> {
         let url = format!("{}/api/0/buckets/", self.baseurl);
-        self.client.get(&url).send()?.json()
+        self.client.get(url).send()?.json()
     }
 
     pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucket.id);
-        self.client.post(&url).json(bucket).send()?;
+        self.client.post(url).json(bucket).send()?;
         Ok(())
     }
 
@@ -80,7 +80,7 @@ impl AwClient {
 
     pub fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        self.client.delete(&url).send()?;
+        self.client.delete(url).send()?;
         Ok(())
     }
 
@@ -115,7 +115,7 @@ impl AwClient {
     pub fn insert_event(&self, bucketname: &str, event: &Event) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
         let eventlist = vec![event.clone()];
-        self.client.post(&url).json(&eventlist).send()?;
+        self.client.post(url).json(&eventlist).send()?;
         Ok(())
     }
 
@@ -125,7 +125,7 @@ impl AwClient {
         events: Vec<Event>,
     ) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
-        self.client.post(&url).json(&events).send()?;
+        self.client.post(url).json(&events).send()?;
         Ok(())
     }
 
@@ -139,7 +139,7 @@ impl AwClient {
             "{}/api/0/buckets/{}/heartbeat?pulsetime={}",
             self.baseurl, bucketname, pulsetime
         );
-        self.client.post(&url).json(&event).send()?;
+        self.client.post(url).json(&event).send()?;
         Ok(())
     }
 
@@ -148,22 +148,22 @@ impl AwClient {
             "{}/api/0/buckets/{}/events/{}",
             self.baseurl, bucketname, event_id
         );
-        self.client.delete(&url).send()?;
+        self.client.delete(url).send()?;
         Ok(())
     }
 
     pub fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events/count", self.baseurl, bucketname);
-        let res = self.client.get(&url).send()?.error_for_status()?.text()?;
+        let res = self.client.get(url).send()?.error_for_status()?.text()?;
         let count: i64 = match res.trim().parse() {
             Ok(count) => count,
-            Err(err) => panic!("could not parse get_event_count response: {:?}", err),
+            Err(err) => panic!("could not parse get_event_count response: {err:?}"),
         };
         Ok(count)
     }
 
     pub fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {
         let url = format!("{}/api/0/info", self.baseurl);
-        self.client.get(&url).send()?.json()
+        self.client.get(url).send()?.json()
     }
 }

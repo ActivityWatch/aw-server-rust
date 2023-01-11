@@ -39,7 +39,7 @@ mod query_benchmarks {
     static TIME_INTERVAL: &str = "1980-01-01T00:00:00Z/2080-01-02T00:00:00Z";
 
     fn setup_datastore() -> Datastore {
-        return Datastore::new_in_memory(false);
+        Datastore::new_in_memory(false)
     }
 
     fn create_bucket(ds: &Datastore, bucketname: String) {
@@ -84,7 +84,7 @@ mod query_benchmarks {
             let code = String::from("return a=1;");
             match aw_query::query(&code, &interval, &ds).unwrap() {
                 aw_query::DataType::None() => (),
-                ref data => panic!("Wrong datatype, {:?}", data),
+                ref data => panic!("Wrong datatype, {data:?}"),
             };
         });
     }
@@ -93,7 +93,7 @@ mod query_benchmarks {
     fn bench_many_events(b: &mut Bencher) {
         let ds = setup_datastore();
         create_bucket(&ds, BUCKETNAME.to_string());
-        insert_events(&ds, &BUCKETNAME, 5000);
+        insert_events(&ds, BUCKETNAME, 5000);
 
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
         b.iter(|| {

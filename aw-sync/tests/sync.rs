@@ -19,23 +19,22 @@ mod sync_tests {
     }
 
     fn init_teststate() -> TestState {
-        return TestState {
+        TestState {
             ds_src: Datastore::new_in_memory(false),
             ds_dest: Datastore::new_in_memory(false),
-        };
+        }
     }
 
     fn create_bucket(ds: &Datastore, n: i32) -> String {
         // Create a bucket
-        let bucket_id = format!("bucket-{}", n);
+        let bucket_id = format!("bucket-{n}");
         let bucket_jsonstr = format!(
             r#"{{
-            "id": "{}",
+            "id": "{bucket_id}",
             "type": "test",
-            "hostname": "device-{}",
+            "hostname": "device-{n}",
             "client": "test"
-        }}"#,
-            bucket_id, n
+        }}"#
         );
         let bucket: Bucket = serde_json::from_str(&bucket_jsonstr).unwrap();
         match ds.create_bucket(&bucket) {
@@ -44,7 +43,7 @@ mod sync_tests {
                 DatastoreError::BucketAlreadyExists(_) => {
                     debug!("bucket already exists, skipping");
                 }
-                e => panic!("woops! {:?}", e),
+                e => panic!("woops! {e:?}"),
             },
         };
         bucket_id
@@ -70,7 +69,7 @@ mod sync_tests {
 
     fn create_events(ds: &Datastore, bucket_id: &str, n: i64) {
         let events: Vec<Event> = (0..n)
-            .map(|i| create_event(format!("{}", i).as_str()))
+            .map(|i| create_event(format!("{i}").as_str()))
             .collect::<Vec<Event>>();
 
         ds.insert_events(bucket_id, &events[..]).unwrap();
@@ -125,8 +124,8 @@ mod sync_tests {
                 let events_src = ds_src
                     .get_events(bucket_src.id.as_str(), None, None, None)
                     .unwrap();
-                println!("{:?}", events_synced);
-                println!("{:?}", events_src);
+                println!("{events_synced:?}");
+                println!("{events_src:?}");
                 assert!(events_synced == events_src);
             }
         }
@@ -153,7 +152,7 @@ mod sync_tests {
         );
 
         let all_datastores: Vec<&Datastore> =
-            [&state.ds_src, &state.ds_dest].iter().cloned().collect();
+            [&state.ds_src, &state.ds_dest].to_vec();
         let all_buckets_map = get_all_buckets_map(all_datastores);
 
         // Check that all synced buckets are identical to source bucket
@@ -192,7 +191,7 @@ mod sync_tests {
         );
 
         let all_datastores: Vec<&Datastore> =
-            [&state.ds_src, &state.ds_dest].iter().cloned().collect();
+            [&state.ds_src, &state.ds_dest].to_vec();
         let all_buckets_map = get_all_buckets_map(all_datastores);
 
         // Check that all synced buckets are identical to source bucket
@@ -216,7 +215,7 @@ mod sync_tests {
     fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         let mut datastores: Vec<Datastore> = Vec::new();
         for n in 0..2 {
-            let dspath = sync_directory.join(format!("test-remote-{}.db", n));
+            let dspath = sync_directory.join(format!("test-remote-{n}.db"));
             let ds_ = create_datastore(&dspath);
             let ds = &ds_ as &dyn AccessMethod;
 
@@ -226,10 +225,9 @@ mod sync_tests {
                 r#"{{
                     "id": "bucket",
                     "type": "test",
-                    "hostname": "device-{}",
+                    "hostname": "device-{n}",
                     "client": "test"
-                }}"#,
-                n
+                }}"#
             );
             let bucket: Bucket = serde_json::from_str(&bucket_jsonstr)?;
             match ds.create_bucket(&bucket) {
@@ -238,7 +236,7 @@ mod sync_tests {
                     DatastoreError::BucketAlreadyExists(_) => {
                         debug!("bucket already exists, skipping");
                     }
-                    e => panic!("woops! {:?}", e),
+                    e => panic!("woops! {e:?}"),
                 },
             };
 

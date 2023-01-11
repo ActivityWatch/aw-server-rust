@@ -63,7 +63,7 @@ impl<T: JsonSchema> TryVec<T> {
                 _ => continue,
             };
         }
-        return vec;
+        vec
     }
 }
 
@@ -120,8 +120,7 @@ where
                 Ok(val) => val,
                 Err(err) => {
                     println!(
-                        "Failed to parse event because '{}', the event will be discarded",
-                        err
+                        "Failed to parse event because '{err}', the event will be discarded"
                     );
                     continue;
                 }

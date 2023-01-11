@@ -74,8 +74,7 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
                 .format(|out, message, _record| {
                     out.finish(format_args!(
                         // TODO: Strip color info
-                        "{}",
-                        message,
+                        "{message}",
                     ))
                 })
                 .chain(fern::log_file(logfile_path)?),

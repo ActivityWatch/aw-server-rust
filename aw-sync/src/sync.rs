@@ -216,7 +216,7 @@ fn get_or_create_sync_bucket(
             .unwrap_or(&fallback)
             .as_str()
             .unwrap();
-        format!("{}-synced-from-{}", orig_bucketid, origin)
+        format!("{orig_bucketid}-synced-from-{origin}")
     };
 
     match ds_to.get_bucket(new_id.as_str()) {
@@ -233,7 +233,7 @@ fn get_or_create_sync_bucket(
             ds_to.create_bucket(&bucket_new).unwrap();
             ds_to.get_bucket(new_id.as_str()).unwrap()
         }
-        Err(e) => panic!("{:?}", e),
+        Err(e) => panic!("{e:?}"),
     }
 }
 
@@ -279,7 +279,7 @@ pub fn sync_datastores(
     // Log warning for buckets requested but not found
     if let Some(buckets) = &sync_spec.buckets {
         for b_id in buckets {
-            if buckets_from.iter().find(|b| b.id == *b_id).is_none() {
+            if !buckets_from.iter().any(|b| b.id == *b_id) {
                 error!(" ! Bucket \"{}\" not found in source datastore", b_id);
             }
         }

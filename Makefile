@@ -32,6 +32,10 @@ android:
 test:
 	cargo test
 
+fix:
+	cargo fmt
+	cargo clippy --fix
+
 set-version:
 	@# if GITHUB_REF_TYPE is tag and GITHUB_REF_NAME is not empty, then we are building a release
 	@# as such, we then need to set the Cargo.toml version to the tag name (with leading 'v' stripped)

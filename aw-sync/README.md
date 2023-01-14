@@ -5,6 +5,8 @@ Synchronization for ActivityWatch.
 
 Works by syncing local buckets with a special folder, which in turn should be synchronized by rsync/Syncthing/Dropbox/whatever.
 
+Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch/aw-server/pull/50
+
 
 ## Usage
 

@@ -3,7 +3,7 @@ aw-sync-rust
 
 Synchronization for ActivityWatch.
 
-Works by syncing local buckets with a special folder, which in turn should be synchronized by rsync/Syncthing/Dropbox/whatever.
+Works by syncing local buckets with a special folder, which in turn should be synchronized by rsync/Syncthing/Dropbox/GDrive/whatever.
 
 Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch/aw-server/pull/50
 
@@ -16,9 +16,14 @@ NOTE: Basic usage not quite ready yet, see the below testing sections for MVP us
 cargo run --bin aw-sync-rust -- --port 5666 --help
 ```
 
-## Testing with real data on a testing instance
+## Running with real data on a testing instance
 
-To test syncing real events to a sync folder which can then be pulled from, we will use some helper scripts to do the following:
+If you want to try sync, you can do so by following these steps.
+
+We will use a separate testing instance of aw-server(-rust) to store and view the synced data from the sync directory. This is to avoid testing against & potentially pollute production instances in write-scenarios. We will sync all devices with the sync folder, and then sync the sync folder into our testing instance to view.
+
+To test syncing real events to a sync folder which can then be pulled from. 
+We will use some helper scripts to do the following:
 
 1. `./test-sync-push.sh`
     - Creates a sync directory **for you to set up sync** with Syncthing/Dropbox/Gdrive/rclone/whatever

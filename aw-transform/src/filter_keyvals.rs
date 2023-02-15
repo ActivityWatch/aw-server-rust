@@ -41,10 +41,12 @@ pub fn filter_keyvals_regex(mut events: Vec<Event>, key: &str, regex: &Regex) ->
     let mut filtered_events = Vec::new();
 
     for event in events.drain(..) {
-        if let Some(v) = event.data.get(key) {
-            if regex.is_match(v.as_str().unwrap()).unwrap() {
-                filtered_events.push(event);
-            }
+        if let Some(value) = event.data.get(key).and_then(|v| v.as_str()) {
+            match regex.is_match(value) {
+                Ok(true) => filtered_events.push(event),
+                Ok(false) => (),
+                Err(err) => warn!("Failed to run regex: {}", err),
+            };
         }
     }
     filtered_events
@@ -130,6 +132,20 @@ mod tests {
         assert_eq!(0, res.len());
         let res = filter_keyvals_regex(events, "key3", &regex_value);
         assert_eq!(0, res.len());
+    }
+
+    #[test]
+    fn test_filter_keyvals_regex_non_string_data_value() {
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"key1": json!(100)},
+        };
+        let events = vec![e1.clone()];
+        let regex_value = RegexBuilder::new("value").build().unwrap();
+        let res = filter_keyvals_regex(events.clone(), "key1", &regex_value);
+        assert!(res.is_empty());
     }
 
     #[test]

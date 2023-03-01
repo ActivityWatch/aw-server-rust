@@ -44,5 +44,5 @@ jemallocator = "0.5.0"
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.20", default-features = false }
 libc = "0.2"
-android_logger = "0.11"
+android_logger = "0.13"
 openssl-sys = { version = "0.9.58", features = ["vendored"]}

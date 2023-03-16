@@ -4,7 +4,12 @@ all: build
 build: aw-server aw-webui
 
 DESTDIR :=
-PREFIX := /usr/local
+ifeq ($(SUDO_USER),)
+    PREFIX := $(HOME)/.local
+else
+    PREFIX := /usr/local
+endif
+
 
 # Build in release mode by default, unless RELEASE=false
 ifeq ($(RELEASE), false)

@@ -31,8 +31,14 @@ cargo build --release
 
 You can also build with make, which will build the web assets as well:
 
-```
+```shell
 make build
+```
+
+running `make install` will default to installing things in `~/.local` unless run as root or with sudo, but you can override this by setting the prefix as an environment variable
+
+```shell
+env PREFIX="$HOME/myapps" make install
 ```
 
 Your built executable will be located in `./target/release/aw-server-rust`. If you want to use it with a development version of `aw-qt` you'll want to copy this binary into your `venv`:

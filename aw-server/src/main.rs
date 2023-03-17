@@ -162,22 +162,19 @@ use std::path::PathBuf;
 // TODO: Should we talk to upstream about this? This changes the behavior quite a lot so maybe they
 // don't want this change?
 fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
-    // Iterate over all XDG_DATA_DIRS and return first match that exists
-    let joined = match env::var_os("XDG_DATA_DIRS") {
-        // If $XDG_DATA_DIRS is either not set or empty, a value equal to /usr/local/share/:/usr/share/ should be used.
-        // https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
+    //because XDG directory specification mentioned that XDG_DATA_HOME should be searched first
+    //followed by XDG_DATA_DIRS, first we either use XDG_DATA_HOME or fallback to default
+    //then append the XDG_DATA_DIRS or system defaults
+    let mut joined = match env::var_os("XDG_DATA_HOME") {
         Some(path) => {
             if path.is_empty() {
-                OsString::from("/usr/local/share:/usr/share")
+                let mut path = env::home_dir().unwrap();
+                path.push(".local/share");
+                path.into_os_string()
             } else {
                 path
             }
         }
-        None => OsString::from("/usr/local/share:/usr/share"),
-    };
-    // additionally add ~/.local/share to the list, which may or may not be set to XDG_DATA_HOME
-    let data_home = match env::var_os("XDG_DATA_HOME") {
-        Some(path) => path,
         None => {
             //env home directory is deprecated because of windows behavior
             //but this code is linux specific so...
@@ -186,18 +183,24 @@ fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
             path.into_os_string()
         }
     };
-    //check if data_home is already in joined
-    let joined = if joined
-        .to_string_lossy()
-        .contains(&*data_home.to_string_lossy())
-    {
-        joined
-    } else {
-        // if not, append it
-        let mut joined = joined;
-        joined.push(":");
-        joined.push(data_home);
-        joined
+    // Iterate over all XDG_DATA_DIRS and return first match that exists
+    let joined = match env::var_os("XDG_DATA_DIRS") {
+        // If $XDG_DATA_DIRS is either not set or empty, a value equal to /usr/local/share/:/usr/share/ should be used.
+        // https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
+        Some(path) => {
+            if path.is_empty() {
+                joined.push(":/usr/local/share:/usr/share");
+                joined
+            } else {
+                joined.push(":");
+                joined.push(path);
+                joined
+            }
+        }
+        None => {
+            joined.push(":/usr/local/share:/usr/share");
+            joined
+        }
     };
 
     for mut data_dir in env::split_paths(&joined) {

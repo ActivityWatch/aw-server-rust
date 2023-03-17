@@ -175,6 +175,30 @@ fn site_data_dir(app: Option<&str>, _: Option<&str>) -> Result<PathBuf, ()> {
         }
         None => OsString::from("/usr/local/share:/usr/share"),
     };
+    // additionally add ~/.local/share to the list, which may or may not be set to XDG_DATA_HOME
+    let data_home = match env::var_os("XDG_DATA_HOME") {
+        Some(path) => path,
+        None => {
+            //env home directory is deprecated because of windows behavior
+            //but this code is linux specific so...
+            let mut path = env::home_dir().unwrap();
+            path.push(".local/share");
+            path.into_os_string()
+        }
+    };
+    //check if data_home is already in joined
+    let joined = if joined
+        .to_string_lossy()
+        .contains(&*data_home.to_string_lossy())
+    {
+        joined
+    } else {
+        // if not, append it
+        let mut joined = joined;
+        joined.push(":");
+        joined.push(data_home);
+        joined
+    };
 
     for mut data_dir in env::split_paths(&joined) {
         if let Some(app) = app {

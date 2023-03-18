@@ -6,8 +6,12 @@ build: aw-server aw-webui
 DESTDIR :=
 # confirm we are neither root nor running as sudo
 # if not, use XDG_DATA_HOME or ~/.local as default PREFIX
-ifeq ($(SUDO_USER),) && ($(USER),!root)
-    PREFIX ?= $(HOME)/.local 
+ifeq ($(USER), root) 
+	PREFIX ?= /usr/local
+endif
+
+ifeq ($(SUDO_USER),) #&& ($(USER),!root)
+    PREFIX ?= $(HOME)/.local
 else
     PREFIX ?= /usr/local
 endif

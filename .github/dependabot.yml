@@ -1,39 +1,45 @@
 version: 2
 updates:
-- package-ecosystem: cargo
-  directory: "/"
-  schedule:
-    interval: monthly
-  open-pull-requests-limit: 10
-  ignore:
-  - dependency-name: libc
-    versions:
-    - 0.2.84
-    - 0.2.86
-  - dependency-name: serde_json
-    versions:
-    - 1.0.64
-  - dependency-name: reqwest
-    versions:
-    - 0.11.1
-  - dependency-name: rocket
-    versions:
-    - 0.4.7
-  - dependency-name: rocket_contrib
-    versions:
-    - 0.4.7
-  - dependency-name: regex
-    versions:
-    - 1.4.3
-  - dependency-name: uuid
-    versions:
-    - 0.8.2
-  - dependency-name: serde
-    versions:
-    - 1.0.123
-  - dependency-name: multipart
-    versions:
-    - 0.17.1
-  - dependency-name: log
-    versions:
-    - 0.4.14
+  # Maintain submodule versions
+  - package-ecosystem: "gitsubmodule"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 10
+    ignore:
+    - dependency-name: libc
+      versions:
+      - 0.2.84
+      - 0.2.86
+    - dependency-name: serde_json
+      versions:
+      - 1.0.64
+    - dependency-name: reqwest
+      versions:
+      - 0.11.1
+    - dependency-name: rocket
+      versions:
+      - 0.4.7
+    - dependency-name: rocket_contrib
+      versions:
+      - 0.4.7
+    - dependency-name: regex
+      versions:
+      - 1.4.3
+    - dependency-name: uuid
+      versions:
+      - 0.8.2
+    - dependency-name: serde
+      versions:
+      - 1.0.123
+    - dependency-name: multipart
+      versions:
+      - 0.17.1
+    - dependency-name: log
+      versions:
+      - 0.4.14

@@ -4,7 +4,7 @@
 
 set -e;
 
-NDK_VERSION=r21e
+NDK_VERSION=r25c
 
 script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 project_path="$(readlink -f "$script_dir/.")"
@@ -17,7 +17,7 @@ if [ -z "$ANDROID_NDK_HOME" ]; then
     else
         echo 'ANDROID_NDK_HOME not set, downloading NDK...';
         # Download Linux NDK or macOS NDK, depending on OS
-        wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-$NDK_VERSION-$platform-x86_64.zip;
+        wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-$NDK_VERSION-$platform.zip;
         unzip -q -d NDK android-ndk.zip;
         ls NDK;
         mv NDK/*/* NDK/;

@@ -5,13 +5,11 @@ extern crate android_logger;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::sync::Mutex;
 
 use crate::device_id;
 use crate::dirs;
 
 use android_logger::Config;
-use log::Level;
 use rocket::serde::json::json;
 
 #[no_mangle]
@@ -96,7 +94,7 @@ pub mod android {
     }
 
     unsafe fn create_error_object(env: &JNIEnv, msg: String) -> jstring {
-        let mut obj = json!({ "error": &msg });
+        let obj = json!({ "error": &msg });
         string_to_jstring(&env, obj.to_string())
     }
 
@@ -155,7 +153,7 @@ pub mod android {
         if !INITIALIZED {
             android_logger::init_once(
                 Config::default()
-                    .with_min_level(Level::Info) // limit log level
+                    .with_max_level(log::LevelFilter::Info) // limit log level
                     .with_tag("aw-server-rust"), // logs will show under mytag tag
                                                  //.with_filter( // configure messages for specific crate
                                                  //    FilterBuilder::new()

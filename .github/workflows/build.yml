@@ -99,6 +99,8 @@ jobs:
     # feature sets, you need a `.tarpaulin.toml` config file, see
     # the link above for those docs.
     - uses: actions-rs/tarpaulin@v0.1
+      with:
+        version: "0.22.0"  # not latest, due to error/bug in action (after release artifacts changed name?)
 
     # Note: closed-source code needs to provide a token,
     # but open source code does not.

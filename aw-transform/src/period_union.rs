@@ -22,7 +22,7 @@ pub fn period_union(events1: &[Event], events2: &[Event]) -> Vec<Event> {
 
     let mut events_union = Vec::new();
 
-    if ![events1, events2].concat().is_empty() {
+    if !sorted_events.is_empty() {
         events_union.push(sorted_events.pop_front().unwrap())
     }
 

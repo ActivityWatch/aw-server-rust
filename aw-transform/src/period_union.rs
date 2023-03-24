@@ -22,7 +22,7 @@ pub fn period_union(events1: &[Event], events2: &[Event]) -> Vec<Event> {
 
     let mut events_union = Vec::new();
 
-    if !events1.is_empty() {
+    if !sorted_events.is_empty() {
         events_union.push(sorted_events.pop_front().unwrap())
     }
 
@@ -109,5 +109,31 @@ mod tests {
 
         let e_result = period_union(&[e1], &[e2]);
         assert_eq!(e_result.len(), 2);
+    }
+
+    #[test]
+    fn test_period_union_2nd_empty() {
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"test": json!(1)},
+        };
+
+        let e_result = period_union(&[e1], &[]);
+        assert_eq!(e_result.len(), 1);
+    }
+
+    #[test]
+    fn test_period_union_1st_empty() {
+        let e1 = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"test": json!(1)},
+        };
+
+        let e_result = period_union(&[], &[e1]);
+        assert_eq!(e_result.len(), 1);
     }
 }

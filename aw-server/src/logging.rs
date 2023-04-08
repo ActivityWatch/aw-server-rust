@@ -19,9 +19,6 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
             .to_string(),
     );
 
-    log_panics::Config::new()
-        .backtrace_mode(log_panics::BacktraceMode::Unresolved)
-        .install_panic_hook();
     log_panics::init();
 
     let colors = ColoredLevelConfig::new()

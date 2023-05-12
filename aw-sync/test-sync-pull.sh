@@ -27,8 +27,14 @@ SYNCROOTDIR="$HOME/ActivityWatchSync"
 function sync_host() {
     host=$1
     SYNCDIR="$SYNCROOTDIR/$host"
-    for db in $(ls $SYNCDIR/*/*.db); do
-        AWSYNCPARAMS="--port $PORT --sync-dir $SYNCDIR"
+    dbs=$(find $SYNCDIR -name "*.db")
+    for db in $dbs; do
+        # workaround to avoid trying to sync empty database files (size 45056)
+        if [ "$(stat -c%s $db)" -lt 50000 ]; then
+            continue
+        fi
+
+        AWSYNCPARAMS="--port $PORT --sync-dir $SYNCDIR --sync-db $db"
         BUCKETS="aw-watcher-window_$host,aw-watcher-afk_$host"
 
         echo "Syncing $db to $host"
@@ -45,7 +51,18 @@ if [ -z "$host" ]; then
     echo "Syncing all hosts"
     sleep 0.5
     # For each host in the sync directory, pull the data from each database file using aw-sync
-    for host in $(ls $SYNCROOTDIR); do
+    # Use `find` to get all directories in the sync directory
+    hostnames=$(find $SYNCROOTDIR -maxdepth 1 -type d -exec basename {} \;)
+    # filter out "erb-m2.local"
+    hostnames=$(echo $hostnames | tr ' ' '\n' | grep -v "erb-m2.local")
+    # filter out folder not containing subfolders with .db files
+    for host in $hostnames; do
+        if [ ! "$(find $SYNCROOTDIR/$host -name "*.db")" ]; then
+            hostnames=$(echo $hostnames | tr ' ' '\n' | grep -v $host)
+        fi
+    done
+    # Sync each host, file-by-file
+    for host in $hostnames; do
         sync_host $host
     done
 else

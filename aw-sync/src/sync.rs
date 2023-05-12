@@ -31,6 +31,9 @@ pub enum SyncMode {
 pub struct SyncSpec {
     /// Path of sync folder
     pub path: PathBuf,
+    /// Path of sync db
+    /// If None, will use all
+    pub path_db: Option<PathBuf>,
     /// Bucket IDs to sync
     pub buckets: Option<Vec<String>>,
     /// Start of time range to sync
@@ -43,6 +46,7 @@ impl Default for SyncSpec {
         let path = Path::new("/tmp/aw-sync").to_path_buf();
         SyncSpec {
             path,
+            path_db: None,
             buckets: None,
             start: None,
         }
@@ -60,7 +64,11 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
 
     // FIXME: Bad device_id assumption?
     let ds_localremote = setup_local_remote(sync_spec.path.as_path(), device_id)?;
-    let remote_dbfiles = find_remotes_nonlocal(sync_spec.path.as_path(), device_id);
+    let remote_dbfiles = find_remotes_nonlocal(
+        sync_spec.path.as_path(),
+        device_id,
+        sync_spec.path_db.as_ref(),
+    );
 
     // Log if remotes found
     // TODO: Only log remotes of interest
@@ -127,7 +135,7 @@ pub fn list_buckets(client: &AwClient, sync_directory: &Path) -> Result<(), Stri
     let device_id = info.device_id.as_str();
     let ds_localremote = setup_local_remote(sync_directory, device_id)?;
 
-    let remote_dbfiles = find_remotes_nonlocal(sync_directory, device_id);
+    let remote_dbfiles = find_remotes_nonlocal(sync_directory, device_id, None);
     info!("Found remotes: {:?}", remote_dbfiles);
 
     // TODO: Check for compatible remote db version before opening
@@ -177,11 +185,15 @@ fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 /// Returns a list of all remotes, excluding local ones
-fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf> {
+fn find_remotes_nonlocal(
+    sync_directory: &Path,
+    device_id: &str,
+    sync_db: Option<&PathBuf>,
+) -> Vec<PathBuf> {
     let remotes_all = find_remotes(sync_directory).unwrap();
-    // Filter out own remote
     remotes_all
         .into_iter()
+        // Filter out own remote
         .filter(|path| {
             !(path
                 .clone()
@@ -189,6 +201,14 @@ fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf>
                 .into_string()
                 .unwrap()
                 .contains(device_id))
+        })
+        // If sync_db is Some, return only remotes in that path
+        .filter(|path| {
+            if let Some(sync_db) = sync_db {
+                path.starts_with(sync_db)
+            } else {
+                true
+            }
         })
         .collect()
 }
@@ -231,7 +251,10 @@ fn get_or_create_sync_bucket(
                 serde_json::json!(bucket_from.hostname),
             );
             ds_to.create_bucket(&bucket_new).unwrap();
-            ds_to.get_bucket(new_id.as_str()).unwrap()
+            match ds_to.get_bucket(new_id.as_str()) {
+                Ok(bucket) => bucket,
+                Err(e) => panic!("{e:?}"),
+            }
         }
         Err(e) => panic!("{e:?}"),
     }

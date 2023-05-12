@@ -15,6 +15,7 @@ extern crate serde_json;
 
 use std::error::Error;
 use std::path::Path;
+use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use clap::{Parser, Subcommand};
@@ -41,10 +42,15 @@ struct Opts {
     /// Convenience option for using the default testing host and port.
     #[clap(long)]
     testing: bool,
-    /// Path to sync directory.
+    /// Full path to sync directory.
     /// If not specified, exit.
     #[clap(long)]
     sync_dir: String,
+    /// Full path to sync db file
+    /// Useful for syncing buckets from a specific db file in the sync directory.
+    /// Must be a valid absolute path to a file in the sync directory.
+    #[clap(long)]
+    sync_db: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -90,6 +96,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     info!("Using sync dir: {}", sync_directory.display());
 
+    if let Some(sync_db) = &opts.sync_db {
+        info!("Using sync db: {}", sync_db);
+    }
+
     let port = if opts.testing && opts.port == DEFAULT_PORT {
         "5666"
     } else {
@@ -121,8 +131,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .map(|b| b.split(',').map(|s| s.to_string()).collect());
 
+            let sync_db: Option<PathBuf> = opts.sync_db.as_ref().map(|db| {
+                let db_path = Path::new(db);
+                if !db_path.is_absolute() {
+                    panic!("Sync db path must be absolute");
+                }
+                if !db_path.starts_with(sync_directory) {
+                    panic!("Sync db path must be in sync directory");
+                }
+                db_path.to_path_buf()
+            });
+
             let sync_spec = sync::SyncSpec {
                 path: sync_directory.to_path_buf(),
+                path_db: sync_db,
                 buckets: buckets_vec,
                 start,
             };

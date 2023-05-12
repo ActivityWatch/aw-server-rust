@@ -5,6 +5,19 @@
 ///
 /// It manages a sync-folder by syncing the aw-server datastore with a copy/staging datastore in the folder (one for each host).
 /// The sync folder is then synced with remotes using Syncthing/Dropbox/whatever.
+///
+/// An example of the sync folder structure:
+///
+/// ```txt
+/// sync/
+/// ├── erb-main2-arch
+/// │   └── ce6a92f2-32b2-4461-b4cd-a8ce3df4ebfd
+/// │       └── test.db
+/// ├── erb-laptop2-arch
+/// │   └── 57bca552-ff65-4dc6-83f2-e96e563ef5e1
+/// │       └── test.db
+/// ...
+/// ```
 extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
@@ -35,6 +48,8 @@ pub struct SyncSpec {
     pub buckets: Option<Vec<String>>,
     /// Start of time range to sync
     pub start: Option<DateTime<Utc>>,
+    /// Device ID of remote to sync with (which subfolder in the sync folder to sync with)
+    pub device_id: Option<String>,
 }
 
 impl Default for SyncSpec {
@@ -45,12 +60,13 @@ impl Default for SyncSpec {
             path,
             buckets: None,
             start: None,
+            device_id: None,
         }
     }
 }
 
 /// Performs a single sync pass
-pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
+pub fn sync_run(client: &AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
     let info = client.get_info().map_err(|e| e.to_string())?;
 
     // FIXME: Here it is assumed that the device_id for the local server is the one used by
@@ -60,7 +76,11 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
 
     // FIXME: Bad device_id assumption?
     let ds_localremote = setup_local_remote(sync_spec.path.as_path(), device_id)?;
-    let remote_dbfiles = find_remotes_nonlocal(sync_spec.path.as_path(), device_id);
+    let remote_dbfiles = find_remotes_nonlocal(
+        sync_spec.path.as_path(),
+        device_id,
+        sync_spec.device_id.clone(),
+    );
 
     // Log if remotes found
     // TODO: Only log remotes of interest
@@ -91,14 +111,14 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
     if mode == SyncMode::Pull || mode == SyncMode::Both {
         info!("Pulling...");
         for ds_from in &ds_remotes {
-            sync_datastores(ds_from, &client, false, None, sync_spec);
+            sync_datastores(ds_from, client, false, None, sync_spec);
         }
     }
 
     // Push local server buckets to sync folder
     if mode == SyncMode::Push || mode == SyncMode::Both {
         info!("Pushing...");
-        sync_datastores(&client, &ds_localremote, true, Some(device_id), sync_spec);
+        sync_datastores(client, &ds_localremote, true, Some(device_id), sync_spec);
     }
 
     // Close open database connections
@@ -126,8 +146,7 @@ pub fn list_buckets(client: &AwClient, sync_directory: &Path) -> Result<(), Stri
     // FIXME: Incorrect device_id assumption?
     let device_id = info.device_id.as_str();
     let ds_localremote = setup_local_remote(sync_directory, device_id)?;
-
-    let remote_dbfiles = find_remotes_nonlocal(sync_directory, device_id);
+    let remote_dbfiles = find_remotes_nonlocal(sync_directory, device_id, None);
     info!("Found remotes: {:?}", remote_dbfiles);
 
     // TODO: Check for compatible remote db version before opening
@@ -176,10 +195,17 @@ fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(dbs)
 }
 
-/// Returns a list of all remotes, excluding local ones
-fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf> {
-    let remotes_all = find_remotes(sync_directory).unwrap();
+/// Returns a list of all remotes, excluding:
+///  - local ones (i.e. those with the same device_id)
+///  - ones not on the specified host (if host is set)
+fn find_remotes_nonlocal(
+    sync_dir: &Path,
+    device_id_local: &str,
+    device_id_remote: Option<String>,
+) -> Vec<PathBuf> {
+    let remotes_all = find_remotes(sync_dir).unwrap();
     // Filter out own remote
+    // If host set, filter out remotes except for that host
     remotes_all
         .into_iter()
         .filter(|path| {
@@ -188,7 +214,18 @@ fn find_remotes_nonlocal(sync_directory: &Path, device_id: &str) -> Vec<PathBuf>
                 .into_os_string()
                 .into_string()
                 .unwrap()
-                .contains(device_id))
+                .contains(device_id_local))
+        })
+        .filter(|path| {
+            if let Some(device_id_remote) = &device_id_remote {
+                path.clone()
+                    .into_os_string()
+                    .into_string()
+                    .unwrap()
+                    .contains(device_id_remote)
+            } else {
+                true
+            }
         })
         .collect()
 }
@@ -266,8 +303,40 @@ pub fn sync_datastores(
                 true
             }
         })
+        // Skip buckets without hostname/device ID set, or if set to 'unknown'
+        .filter(|tup| {
+            let bucket = &tup.1;
+            if bucket.hostname == "unknown" {
+                warn!(
+                    " ! Bucket hostname was 'unknown' for {}, refusing to sync",
+                    bucket.id
+                );
+                false
+            } else if bucket.data.get("device_id").is_none() {
+                warn!(
+                    " ! Bucket device_id was not set for {}, refusing to sync",
+                    bucket.id
+                );
+                false
+            } else {
+                true
+            }
+        })
+        // If sync_spec.device_id is set, filter out buckets not from that device
+        .filter(|tup| {
+            let bucket = &tup.1;
+            if let Some(device_id) = &sync_spec.device_id {
+                if let Some(bucket_device_id) = bucket.data.get("device_id") {
+                    bucket_device_id == device_id
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        })
         .map(|tup| {
-            // TODO: Refuse to sync buckets without hostname/device ID set, or if set to 'unknown'
+            // Set hostname to device ID if hostname is 'unknown'
             if tup.1.hostname == "unknown" {
                 warn!(" ! Bucket hostname/device ID was invalid, setting to device ID/hostname");
                 tup.1.hostname = src_did.unwrap().to_string();

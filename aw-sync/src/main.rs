@@ -14,7 +14,11 @@ extern crate serde;
 extern crate serde_json;
 
 use std::error::Error;
+use std::fs;
 use std::path::Path;
+
+use dirs::home_dir;
+use walkdir::WalkDir;
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use clap::{Parser, Subcommand};
@@ -42,13 +46,15 @@ struct Opts {
     #[clap(long)]
     testing: bool,
     /// Path to sync directory.
-    /// If not specified, exit.
+    /// If not specified, defaults to ~/ActivityWatchSync
     #[clap(long)]
-    sync_dir: String,
+    sync_dir: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// No subcommand, sync all hosts.
+    SyncFull {},
     /// Sync subcommand.
     ///
     /// Pulls remote buckets then pushes local buckets.
@@ -82,13 +88,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     aw_server::logging::setup_logger(true).expect("Failed to setup logging");
 
-    let sync_directory = if opts.sync_dir.is_empty() {
-        println!("No sync directory specified, exiting...");
-        std::process::exit(1);
-    } else {
-        Path::new(&opts.sync_dir)
-    };
-    info!("Using sync dir: {}", sync_directory.display());
+    let sync_dir_default = home_dir()
+        .expect("Failed to get home directory")
+        .join("ActivityWatchSync");
+    let sync_dir = opts
+        .sync_dir
+        .unwrap_or(sync_dir_default.to_str().unwrap().to_string());
+    let sync_dir = Path::new(&sync_dir);
+    info!("Using sync dir: {}", sync_dir.display());
 
     let port = if opts.testing && opts.port == DEFAULT_PORT {
         "5666"
@@ -99,6 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let client = AwClient::new(opts.host.as_str(), port, "aw-sync");
 
     match &opts.command {
+        Commands::SyncFull {} => sync_all_hosts(&client, &sync_dir)?,
         // Perform two-way sync
         Commands::Sync {
             start_date,
@@ -122,9 +130,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|b| b.split(',').map(|s| s.to_string()).collect());
 
             let sync_spec = sync::SyncSpec {
-                path: sync_directory.to_path_buf(),
+                path: sync_dir.to_path_buf(),
                 buckets: buckets_vec,
                 start,
+                device_id: None,
             };
 
             let mode_enum = match mode.as_str() {
@@ -134,17 +143,46 @@ fn main() -> Result<(), Box<dyn Error>> {
                 _ => panic!("Invalid mode"),
             };
 
-            sync::sync_run(client, &sync_spec, mode_enum)
+            sync::sync_run(&client, &sync_spec, mode_enum)?
         }
 
         // List all buckets
-        Commands::List {} => sync::list_buckets(&client, sync_directory),
-    }?;
+        Commands::List {} => sync::list_buckets(&client, sync_dir)?,
+    };
 
     // Needed to give the datastores some time to commit before program is shut down.
     // 100ms isn't actually needed, seemed to work fine with as little as 10ms, but I'd rather give
     // it some wiggleroom.
     std::thread::sleep(std::time::Duration::from_millis(100));
+
+    Ok(())
+}
+
+fn sync_all_hosts(client: &AwClient, sync_dir: &Path) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(sync_dir)? {
+        let entry_path = entry?.path();
+        if entry_path.is_dir() {
+            let device_id = entry_path.file_name().unwrap().to_str().unwrap();
+            let sync_dir = entry_path.clone();
+
+            sync_host(client, &sync_dir, device_id)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sync_host(client: &AwClient, sync_dir: &Path, device_id: &str) -> Result<(), Box<dyn Error>> {
+    let sync_spec = sync::SyncSpec {
+        path: sync_dir.to_path_buf(),
+        // Leave buckets as None to sync all buckets
+        buckets: None,
+        // Leave start as None to start from beginning
+        start: None,
+        device_id: Some(device_id.to_string()),
+    };
+
+    sync::sync_run(client, &sync_spec, sync::SyncMode::Both)?;
 
     Ok(())
 }

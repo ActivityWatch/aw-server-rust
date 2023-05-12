@@ -171,7 +171,7 @@ impl DatastoreWorker {
                     Ok((req, res_sender)) => (req, res_sender),
                     Err(_) => {
                         // All references to responder is gone, quit
-                        info!("DB worker quitting");
+                        debug!("DB worker quitting");
                         self.quit = true;
                         break;
                     }
@@ -205,7 +205,7 @@ impl DatastoreWorker {
                 break;
             };
         }
-        info!("DB Worker thread finished");
+        debug!("DB Worker thread finished");
     }
 
     fn handle_request(

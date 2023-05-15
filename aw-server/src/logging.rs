@@ -5,7 +5,7 @@ use fern::colors::{Color, ColoredLevelConfig};
 
 use crate::dirs;
 
-pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
+pub fn setup_logger(testing: bool, verbose: bool) -> Result<(), fern::InitError> {
     let mut logfile_path: PathBuf =
         dirs::get_log_dir().expect("Unable to get log dir to store logs in");
     fs::create_dir_all(logfile_path.clone()).expect("Unable to create folder for logs");
@@ -27,24 +27,22 @@ pub fn setup_logger(testing: bool) -> Result<(), fern::InitError> {
         .warn(Color::Yellow)
         .error(Color::Red);
 
-    let default_log_level = if testing {
+    let default_log_level = if testing || verbose {
         log::LevelFilter::Debug
     } else {
         log::LevelFilter::Info
     };
 
-    let log_level = match std::env::var("LOG_LEVEL")
-        .unwrap_or("info".to_string())
-        .to_lowercase()
-        .as_str()
-    {
-        "trace" => log::LevelFilter::Trace,
-        "debug" => log::LevelFilter::Debug,
-        "info" => log::LevelFilter::Info,
-        "warn" => log::LevelFilter::Warn,
-        "error" => log::LevelFilter::Error,
-        _ => default_log_level,
-    };
+    let log_level = std::env::var("LOG_LEVEL").map_or(default_log_level, |level| {
+        match level.to_lowercase().as_str() {
+            "trace" => log::LevelFilter::Trace,
+            "debug" => log::LevelFilter::Debug,
+            "info" => log::LevelFilter::Info,
+            "warn" => log::LevelFilter::Warn,
+            "error" => log::LevelFilter::Error,
+            _ => default_log_level,
+        }
+    });
 
     let mut dispatch = fern::Dispatch::new().level(log_level);
     // Set some Rocket messages to debug level
@@ -95,6 +93,6 @@ mod tests {
     #[ignore]
     #[test]
     fn test_setup_logger() {
-        setup_logger(true).unwrap();
+        setup_logger(true, true).unwrap();
     }
 }

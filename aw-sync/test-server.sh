@@ -10,4 +10,4 @@ mkdir -p $DBPATH
 
 # Set up an isolated ActivityWatch instance
 pushd ..
-cargo run --bin aw-server -- --testing --port $PORT --dbpath $DBPATH/data.db --no-legacy-import
+cargo run --bin aw-server -- --testing --port $PORT --dbpath $DBPATH/data.db --no-legacy-import --verbose

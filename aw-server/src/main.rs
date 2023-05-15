@@ -22,6 +22,10 @@ struct Opts {
     #[clap(long)]
     testing: bool,
 
+    /// Verbose output
+    #[clap(long)]
+    verbose: bool,
+
     /// Address to listen to
     #[clap(long)]
     host: Option<String>,
@@ -65,7 +69,7 @@ async fn main() -> Result<(), rocket::Error> {
         testing = true;
     }
 
-    logging::setup_logger(testing).expect("Failed to setup logging");
+    logging::setup_logger(testing, opts.verbose).expect("Failed to setup logging");
 
     if testing {
         info!("Running server in Testing mode");

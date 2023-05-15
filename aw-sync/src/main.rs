@@ -36,16 +36,24 @@ struct Opts {
     /// Host of instance to connect to.
     #[clap(long, default_value = "127.0.0.1")]
     host: String,
+
     /// Port of instance to connect to.
     #[clap(long, default_value = DEFAULT_PORT)]
     port: String,
+
     /// Convenience option for using the default testing host and port.
     #[clap(long)]
     testing: bool,
+
+    /// Enable debug logging.
+    #[clap(long)]
+    verbose: bool,
+
     /// Full path to sync directory.
     /// If not specified, exit.
     #[clap(long)]
     sync_dir: String,
+
     /// Full path to sync db file
     /// Useful for syncing buckets from a specific db file in the sync directory.
     /// Must be a valid absolute path to a file in the sync directory.
@@ -83,10 +91,11 @@ enum Commands {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let opts: Opts = Opts::parse();
+    let verbose = opts.verbose;
 
     info!("Started aw-sync...");
 
-    aw_server::logging::setup_logger(true).expect("Failed to setup logging");
+    aw_server::logging::setup_logger(true, verbose).expect("Failed to setup logging");
 
     let sync_directory = if opts.sync_dir.is_empty() {
         println!("No sync directory specified, exiting...");

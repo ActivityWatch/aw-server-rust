@@ -98,7 +98,9 @@ jobs:
     # Note: If you need to combine the coverage info of multiple
     # feature sets, you need a `.tarpaulin.toml` config file, see
     # the link above for those docs.
-    - uses: actions-rs/tarpaulin@v0.1
+    # NOTE: actions-rs is unmaintained, using fork with fix for update to node 16
+    #       https://github.com/actions-rs/tarpaulin/pull/22
+    - uses: FreeMasen/tarpaulin-action@9f7e03f06fea8f374c85a95c2ecff6a4d5805845
       with:
         version: "0.22.0"  # not latest, due to error/bug in action (after release artifacts changed name?)
 

@@ -110,10 +110,10 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
     }
 
     // Close open database connections
-    //for ds_from in &ds_remotes {
-    //    ds_from.close();
-    //}
-    //ds_localremote.close();
+    for ds_from in &ds_remotes {
+        ds_from.close();
+    }
+    ds_localremote.close();
 
     // Dropping also works to close the database connections, weirdly enough.
     // Probably because once the database is dropped, the thread will stop,

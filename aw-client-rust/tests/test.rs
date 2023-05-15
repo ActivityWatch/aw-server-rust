@@ -51,7 +51,7 @@ mod test {
         let shutdown_handler = server.shutdown();
 
         thread::spawn(move || {
-            block_on(server.launch()).unwrap();
+            let launch = block_on(server.launch()).unwrap();
         });
 
         shutdown_handler

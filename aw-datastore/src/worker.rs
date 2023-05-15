@@ -53,8 +53,6 @@ pub enum Response {
     Count(i64),
     KeyValue(KeyValue),
     StringVec(Vec<String>),
-    // Used to indicate that no response should occur at all (not even an empty one)
-    NoResponse(),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -169,20 +167,16 @@ impl DatastoreWorker {
             loop {
                 let (request, response_sender) = match self.responder.poll() {
                     Ok((req, res_sender)) => (req, res_sender),
-                    Err(_) => {
+                    Err(err) => {
                         // All references to responder is gone, quit
-                        debug!("DB worker quitting");
+                        error!("DB worker quitting, error: {err:?}");
                         self.quit = true;
                         break;
                     }
                 };
                 let response = self.handle_request(request, &mut ds, &tx);
-                match response {
-                    // The NoResponse is used by commands like close(), which should
-                    // not be responded to, as the requester might have disappeared.
-                    Ok(Response::NoResponse()) => (),
-                    _ => response_sender.respond(response),
-                }
+                response_sender.respond(response);
+
                 let now: DateTime<Utc> = Utc::now();
                 let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
                 if self.commit
@@ -205,7 +199,7 @@ impl DatastoreWorker {
                 break;
             };
         }
-        debug!("DB Worker thread finished");
+        info!("DB Worker thread finished");
     }
 
     fn handle_request(
@@ -299,7 +293,7 @@ impl DatastoreWorker {
             },
             Command::Close() => {
                 self.quit = true;
-                Ok(Response::NoResponse())
+                Ok(Response::Empty())
             }
         }
     }
@@ -521,9 +515,17 @@ impl Datastore {
         }
     }
 
-    // TODO: Should this block until worker has stopped?
+    // Should block until worker has stopped
     pub fn close(&self) {
         info!("Sending close request to database");
-        self.requester.request(Command::Close()).unwrap();
+        let receiver = self.requester.request(Command::Close()).unwrap();
+
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Response::Empty() => (),
+                _ => panic!("Invalid response"),
+            },
+            Err(e) => panic!("Error closing database: {:?}", e),
+        }
     }
 }

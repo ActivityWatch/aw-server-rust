@@ -2,6 +2,7 @@ use std::ffi::OsStr as FfiOsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+pub use asset_resolver::AssetResolver;
 use gethostname::gethostname;
 use rocket::fs::FileServer;
 use rocket::http::ContentType;
@@ -12,10 +13,6 @@ use crate::config::AWConfig;
 
 use aw_datastore::Datastore;
 use aw_models::Info;
-
-pub trait AssetResolver: Send + Sync {
-    fn resolve(&self, file_path: &str) -> Option<Vec<u8>>;
-}
 
 pub struct ServerState {
     pub datastore: Mutex<Datastore>,

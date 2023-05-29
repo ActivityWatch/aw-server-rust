@@ -24,7 +24,7 @@ mod api_tests {
     fn setup_testserver() -> rocket::Rocket<rocket::Build> {
         let state = endpoints::ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
-            asset_resolver: Box::new(aw_server::ProjectAssetResolver),
+            asset_resolver: Box::new(asset_resolver::ProjectAssetResolver),
             device_id: "test_id".to_string(),
         };
         let aw_config = config::AWConfig::default();

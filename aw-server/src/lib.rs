@@ -38,14 +38,3 @@ extern crate aw_datastore;
 extern crate aw_models;
 extern crate aw_query;
 extern crate aw_transform;
-
-use rust_embed::RustEmbed;
-#[derive(RustEmbed)]
-#[folder = "../aw-webui/dist/"]
-pub struct ProjectAssetResolver;
-
-impl endpoints::AssetResolver for ProjectAssetResolver {
-    fn resolve(&self, file_path: &str) -> Option<Vec<u8>> {
-        Some(ProjectAssetResolver::get(file_path)?.data.to_vec())
-    }
-}

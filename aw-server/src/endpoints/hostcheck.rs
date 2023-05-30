@@ -125,7 +125,7 @@ mod tests {
     fn setup_testserver(address: String) -> Rocket<rocket::Build> {
         let state = endpoints::ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
-            asset_resolver: Box::new(asset_resolver::ProjectAssetResolver),
+            asset_resolver: endpoints::embed_asset_resolver!("../../aw-webui/dist/"),
             device_id: "test_id".to_string(),
         };
         let mut aw_config = AWConfig::default();

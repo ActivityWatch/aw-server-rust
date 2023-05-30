@@ -1,8 +1,7 @@
-use std::ffi::OsStr as FfiOsStr;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub use asset_resolver::AssetResolver;
 use gethostname::gethostname;
 use rocket::fs::FileServer;
 use rocket::http::ContentType;
@@ -13,6 +12,30 @@ use crate::config::AWConfig;
 
 use aw_datastore::Datastore;
 use aw_models::Info;
+
+pub trait AssetResolver: Send + Sync {
+    fn resolve(&self, file_path: &str) -> Option<Vec<u8>>;
+}
+
+#[macro_export]
+macro_rules! embed_asset_resolver {
+    ($path:literal) => {{
+        use rust_embed::RustEmbed;
+
+        #[derive(RustEmbed)]
+        #[folder = $path]
+        pub struct __ProjectAssetResolver;
+
+        impl $crate::endpoints::AssetResolver for __ProjectAssetResolver {
+            fn resolve(&self, file_path: &str) -> Option<Vec<u8>> {
+                Some(__ProjectAssetResolver::get(file_path)?.data.to_vec())
+            }
+        }
+
+        Box::new(__ProjectAssetResolver)
+    }};
+}
+pub use embed_asset_resolver;
 
 pub struct ServerState {
     pub datastore: Mutex<Datastore>,
@@ -81,7 +104,7 @@ fn get_file(file: PathBuf, state: &State<ServerState>) -> Option<(ContentType, V
 
     let content_type = file
         .extension()
-        .and_then(FfiOsStr::to_str)
+        .and_then(OsStr::to_str)
         .and_then(ContentType::from_extension)
         .unwrap_or(ContentType::Bytes);
 

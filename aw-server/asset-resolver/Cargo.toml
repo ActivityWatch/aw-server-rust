@@ -1,7 +1,0 @@
-[package]
-name = "asset_resolver"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-rust-embed = { version = "6.6.1", features = ["rocket"] }

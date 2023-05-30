@@ -111,13 +111,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asset_resolver"
-version = "0.1.0"
-dependencies = [
- "rust-embed",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -238,7 +231,6 @@ version = "0.12.1"
 dependencies = [
  "android_logger",
  "appdirs",
- "asset_resolver",
  "aw-datastore",
  "aw-models",
  "aw-query",
@@ -257,6 +249,7 @@ dependencies = [
  "openssl-sys",
  "rocket",
  "rocket_cors",
+ "rust-embed",
  "serde",
  "serde_json",
  "toml 0.7.3",
@@ -2054,7 +2047,6 @@ version = "6.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b68543d5527e158213414a92832d2aab11a84d2571a5eb021ebe22c43aab066"
 dependencies = [
- "rocket",
  "rust-embed-impl",
  "rust-embed-utils",
  "walkdir",

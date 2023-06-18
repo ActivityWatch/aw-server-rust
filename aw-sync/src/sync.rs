@@ -13,7 +13,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aw_client_rust::AwClient;
+use aw_client_rust::blocking::AwClient;
 use chrono::{DateTime, Utc};
 
 use aw_datastore::{Datastore, DatastoreError};

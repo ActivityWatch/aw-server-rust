@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 
-use aw_client_rust::AwClient;
+use aw_client_rust::blocking::AwClient;
 
 mod accessmethod;
 mod sync;

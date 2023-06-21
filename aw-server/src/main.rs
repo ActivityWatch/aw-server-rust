@@ -123,10 +123,7 @@ async fn main() -> Result<(), rocket::Error> {
     };
     info!("Using DB at path {:?}", db_path);
 
-    let asset_path = match opts.webpath {
-        Some(webpath) => PathBuf::from(webpath),
-        None => dirs::get_asset_path(),
-    };
+    let asset_path = opts.webpath.map(|webpath| PathBuf::from(webpath));
     info!("Using aw-webui assets at path {:?}", asset_path);
 
     // Only use legacy import if opts.dbpath is not set
@@ -145,7 +142,7 @@ async fn main() -> Result<(), rocket::Error> {
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
         datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
-        asset_resolver: endpoints::embed_asset_resolver!("../../aw-webui/dist/"),
+        asset_resolver: endpoints::embed_asset_resolver!("../aw-webui/dist/", asset_path),
         device_id,
     };
 

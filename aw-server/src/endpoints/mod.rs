@@ -12,29 +12,41 @@ use crate::config::AWConfig;
 
 use aw_datastore::Datastore;
 use aw_models::Info;
-
 pub trait AssetResolver: Send + Sync {
     fn resolve(&self, file_path: &str) -> Option<Vec<u8>>;
 }
 
 #[macro_export]
 macro_rules! embed_asset_resolver {
-    ($path:literal) => {{
+    ($static_path:literal, $dynamic_path:expr) => {{
         use rust_embed::RustEmbed;
 
         #[derive(RustEmbed)]
-        #[folder = $path]
-        pub struct __ProjectAssetResolver;
+        #[folder = $static_path]
+        pub struct __EmbeddedAssets;
+
+        pub struct __ProjectAssetResolver {
+            asset_path: Option<std::path::PathBuf>,
+        }
 
         impl $crate::endpoints::AssetResolver for __ProjectAssetResolver {
             fn resolve(&self, file_path: &str) -> Option<Vec<u8>> {
-                Some(__ProjectAssetResolver::get(file_path)?.data.to_vec())
+                if let Some(asset_path) = &self.asset_path {
+                    let content = std::fs::read(asset_path);
+                    if let Ok(data) = content {
+                        return Some(data);
+                    }
+                }
+                Some(__EmbeddedAssets::get(file_path)?.data.to_vec())
             }
         }
 
-        Box::new(__ProjectAssetResolver)
+        Box::new(__ProjectAssetResolver {
+            asset_path: $dynamic_path,
+        })
     }};
 }
+
 pub use embed_asset_resolver;
 
 pub struct ServerState {

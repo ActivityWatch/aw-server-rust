@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use gethostname::gethostname;
 use rocket::serde::json::Json;
 
 use chrono::DateTime;
@@ -39,6 +40,10 @@ pub fn bucket_get(
     }
 }
 
+/// Create a new bucket
+///
+/// If hostname is "!local", the hostname and device_id will be set from the server info.
+/// This is useful for watchers which are known/assumed to run locally but might not know their hostname (like aw-watcher-web).
 #[post("/<bucket_id>", data = "<message>", format = "application/json")]
 pub fn bucket_new(
     bucket_id: String,
@@ -48,6 +53,14 @@ pub fn bucket_new(
     let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
         bucket.id = bucket_id;
+    }
+    if bucket.hostname == "!local" {
+        bucket.hostname = gethostname()
+            .into_string()
+            .unwrap_or_else(|_| "unknown".to_string());
+        bucket
+            .data
+            .insert("device_id".to_string(), state.device_id.clone().into());
     }
     let datastore = endpoints_get_lock!(state.datastore);
     let ret = datastore.create_bucket(&bucket);

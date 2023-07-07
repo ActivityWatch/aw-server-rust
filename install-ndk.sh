@@ -7,9 +7,11 @@ set -e;
 script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 project_path="$(readlink -f "$script_dir/.")"
 
+ndk_rev=r25c
+
 if [ -z "$ANDROID_NDK_HOME" ]; then
     echo 'ANDROID_NDK_HOME not set, downloading NDK...';
-    wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-r20-linux-x86_64.zip;
+    wget --no-verbose -O android-ndk.zip https://dl.google.com/android/repository/android-ndk-${ndk_rev}-linux.zip;
     unzip -q -d NDK android-ndk.zip;
     ls NDK;
     mv NDK/*/* NDK/;

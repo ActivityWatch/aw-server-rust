@@ -94,6 +94,10 @@ ifeq ($(SKIP_WEBUI),true)
 else
 	cp -rf aw-webui/dist target/package/static
 endif
+	# Copy everything into `dist/aw-server-rust`
+	mkdir -p dist
+	rm -rf dist/aw-server-rust
+	cp -rf target/package dist/aw-server-rust
 
 install:
 	# Install aw-server executable

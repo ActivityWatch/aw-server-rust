@@ -13,7 +13,7 @@ Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch
 NOTE: Basic usage not quite ready yet, see the below testing sections for MVP usage.
 
 ```
-cargo run --bin aw-sync-rust -- --port 5666 --help
+cargo +nightly run --bin aw-sync -- --port 5666 --help
 ```
 
 ## Running with real data on a testing instance

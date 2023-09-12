@@ -43,7 +43,7 @@ aw-query = { path = "../aw-query" }
 jemallocator = "0.5.0"
 
 [target.'cfg(target_os="android")'.dependencies]
-jni = { version = "0.20", default-features = false }
+jni = { version = "0.21", default-features = false }
 libc = "0.2"
 android_logger = "0.13"
 openssl-sys = { version = "0.9.82", features = ["vendored"]}

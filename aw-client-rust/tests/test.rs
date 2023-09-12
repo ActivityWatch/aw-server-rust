@@ -8,7 +8,7 @@ extern crate tokio_test;
 
 #[cfg(test)]
 mod test {
-    use aw_client_rust::AwClient;
+    use aw_client_rust::blocking::AwClient;
     use aw_client_rust::Event;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::Map;
@@ -51,7 +51,7 @@ mod test {
         let shutdown_handler = server.shutdown();
 
         thread::spawn(move || {
-            let launch = block_on(server.launch()).unwrap();
+            let _ = block_on(server.launch()).unwrap();
         });
 
         shutdown_handler

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use aw_client_rust::AwClient;
+use aw_client_rust::blocking::AwClient;
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
 

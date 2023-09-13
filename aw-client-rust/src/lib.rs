@@ -3,6 +3,9 @@ extern crate chrono;
 extern crate gethostname;
 extern crate reqwest;
 extern crate serde_json;
+extern crate tokio;
+
+pub mod blocking;
 
 use std::collections::HashMap;
 use std::vec::Vec;
@@ -13,7 +16,7 @@ use serde_json::Map;
 pub use aw_models::{Bucket, BucketMetadata, Event};
 
 pub struct AwClient {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
     pub baseurl: String,
     pub name: String,
     pub hostname: String,
@@ -28,7 +31,7 @@ impl std::fmt::Debug for AwClient {
 impl AwClient {
     pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
         let baseurl = format!("http://{ip}:{port}");
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap();
@@ -41,24 +44,31 @@ impl AwClient {
         }
     }
 
-    pub fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
+    pub async fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        let bucket = self.client.get(url).send()?.error_for_status()?.json()?;
+        let bucket = self
+            .client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         Ok(bucket)
     }
 
-    pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, reqwest::Error> {
+    pub async fn get_buckets(&self) -> Result<HashMap<String, Bucket>, reqwest::Error> {
         let url = format!("{}/api/0/buckets/", self.baseurl);
-        self.client.get(url).send()?.json()
+        self.client.get(url).send().await?.json().await
     }
 
-    pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), reqwest::Error> {
+    pub async fn create_bucket(&self, bucket: &Bucket) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucket.id);
-        self.client.post(url).json(bucket).send()?;
+        self.client.post(url).json(bucket).send().await?;
         Ok(())
     }
 
-    pub fn create_bucket_simple(
+    pub async fn create_bucket_simple(
         &self,
         bucketname: &str,
         buckettype: &str,
@@ -75,16 +85,16 @@ impl AwClient {
             created: None,
             last_updated: None,
         };
-        self.create_bucket(&bucket)
+        self.create_bucket(&bucket).await
     }
 
-    pub fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
+    pub async fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
-        self.client.delete(url).send()?;
+        self.client.delete(url).send().await?;
         Ok(())
     }
 
-    pub fn get_events(
+    pub async fn get_events(
         &self,
         bucketname: &str,
         start: Option<DateTime<Utc>>,
@@ -109,27 +119,31 @@ impl AwClient {
             url.query_pairs_mut()
                 .append_pair("limit", s.to_string().as_str());
         };
-        self.client.get(url).send()?.json()
+        self.client.get(url).send().await?.json().await
     }
 
-    pub fn insert_event(&self, bucketname: &str, event: &Event) -> Result<(), reqwest::Error> {
+    pub async fn insert_event(
+        &self,
+        bucketname: &str,
+        event: &Event,
+    ) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
         let eventlist = vec![event.clone()];
-        self.client.post(url).json(&eventlist).send()?;
+        self.client.post(url).json(&eventlist).send().await?;
         Ok(())
     }
 
-    pub fn insert_events(
+    pub async fn insert_events(
         &self,
         bucketname: &str,
         events: Vec<Event>,
     ) -> Result<(), reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events", self.baseurl, bucketname);
-        self.client.post(url).json(&events).send()?;
+        self.client.post(url).json(&events).send().await?;
         Ok(())
     }
 
-    pub fn heartbeat(
+    pub async fn heartbeat(
         &self,
         bucketname: &str,
         event: &Event,
@@ -139,22 +153,33 @@ impl AwClient {
             "{}/api/0/buckets/{}/heartbeat?pulsetime={}",
             self.baseurl, bucketname, pulsetime
         );
-        self.client.post(url).json(&event).send()?;
+        self.client.post(url).json(&event).send().await?;
         Ok(())
     }
 
-    pub fn delete_event(&self, bucketname: &str, event_id: i64) -> Result<(), reqwest::Error> {
+    pub async fn delete_event(
+        &self,
+        bucketname: &str,
+        event_id: i64,
+    ) -> Result<(), reqwest::Error> {
         let url = format!(
             "{}/api/0/buckets/{}/events/{}",
             self.baseurl, bucketname, event_id
         );
-        self.client.delete(url).send()?;
+        self.client.delete(url).send().await?;
         Ok(())
     }
 
-    pub fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
+    pub async fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}/events/count", self.baseurl, bucketname);
-        let res = self.client.get(url).send()?.error_for_status()?.text()?;
+        let res = self
+            .client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
         let count: i64 = match res.trim().parse() {
             Ok(count) => count,
             Err(err) => panic!("could not parse get_event_count response: {err:?}"),
@@ -162,8 +187,8 @@ impl AwClient {
         Ok(count)
     }
 
-    pub fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {
+    pub async fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {
         let url = format!("{}/api/0/info", self.baseurl);
-        self.client.get(url).send()?.json()
+        self.client.get(url).send().await?.json().await
     }
 }

@@ -8,3 +8,4 @@ members = [
     "aw-sync",
     "aw-query",
 ]
+resolver = "2"

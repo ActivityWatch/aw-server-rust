@@ -8,7 +8,7 @@ extern crate tokio_test;
 
 #[cfg(test)]
 mod test {
-    use aw_client_rust::AwClient;
+    use aw_client_rust::blocking::AwClient;
     use aw_client_rust::Event;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::Map;

@@ -29,7 +29,7 @@ impl AssetResolver {
 
     fn resolve(&self, file_path: &str) -> Option<Vec<u8>> {
         if let Some(asset_path) = &self.asset_path {
-            let content = std::fs::read(asset_path);
+            let content = std::fs::read(asset_path.join(file_path));
             if let Ok(data) = content {
                 return Some(data);
             }
@@ -181,4 +181,24 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
         rocket = rocket.mount(&format!("/pages/{name}"), FileServer::from(dir));
     }
     rocket
+}
+
+mod tests {
+    #[test]
+    fn test_filesystem_resolver() {
+        let resolver = super::AssetResolver::new(Some(".".into()));
+
+        let content = resolver.resolve("Cargo.toml").unwrap();
+
+        assert!(String::from_utf8(content).unwrap().contains("aw-server"));
+    }
+
+    #[test]
+    fn test_resolver_without_asset() {
+        let resolver = super::AssetResolver::new(Some(".".into()));
+
+        let content = resolver.resolve("Cargo.json");
+
+        assert!(content.is_none());
+    }
 }

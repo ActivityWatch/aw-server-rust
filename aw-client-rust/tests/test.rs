@@ -40,16 +40,9 @@ mod test {
         use aw_server::endpoints::AssetResolver;
         use aw_server::endpoints::ServerState;
 
-        struct TestAssetResolver;
-        impl AssetResolver for TestAssetResolver {
-            fn resolve(&self, _: &str) -> Option<Vec<u8>> {
-                panic!("Webui cannot be used")
-            }
-        }
-
         let state = ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
-            asset_resolver: Box::new(TestAssetResolver),
+            asset_resolver: AssetResolver::new(None),
             device_id: "test_id".to_string(),
         };
         let mut aw_config = aw_server::config::AWConfig::default();

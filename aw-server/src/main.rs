@@ -142,7 +142,7 @@ async fn main() -> Result<(), rocket::Error> {
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
         datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
-        asset_resolver: endpoints::ProjectAssetResolver::new_boxed(asset_path),
+        asset_resolver: endpoints::AssetResolver::new(asset_path),
         device_id,
     };
 

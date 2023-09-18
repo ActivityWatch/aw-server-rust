@@ -14,25 +14,19 @@ use crate::config::AWConfig;
 use aw_datastore::Datastore;
 use aw_models::Info;
 
-pub trait AssetResolver: Send + Sync {
-    fn resolve(&self, file_path: &str) -> Option<Vec<u8>>;
-}
-
 #[derive(RustEmbed)]
 #[folder = "$AW_WEBUI_DIR"]
 struct EmbeddedAssets;
 
-pub struct ProjectAssetResolver {
-    asset_path: Option<std::path::PathBuf>,
+pub struct AssetResolver {
+    asset_path: Option<PathBuf>,
 }
 
-impl ProjectAssetResolver {
-    pub fn new_boxed(asset_path: Option<std::path::PathBuf>) -> Box<Self> {
-        Box::new(Self { asset_path })
+impl AssetResolver {
+    pub fn new(asset_path: Option<PathBuf>) -> Self {
+        Self { asset_path }
     }
-}
 
-impl AssetResolver for ProjectAssetResolver {
     fn resolve(&self, file_path: &str) -> Option<Vec<u8>> {
         if let Some(asset_path) = &self.asset_path {
             let content = std::fs::read(asset_path);
@@ -46,7 +40,7 @@ impl AssetResolver for ProjectAssetResolver {
 
 pub struct ServerState {
     pub datastore: Mutex<Datastore>,
-    pub asset_resolver: Box<dyn AssetResolver>,
+    pub asset_resolver: AssetResolver,
     pub device_id: String,
 }
 

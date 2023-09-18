@@ -1,3 +1,4 @@
+use rust_embed::RustEmbed;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -12,42 +13,36 @@ use crate::config::AWConfig;
 
 use aw_datastore::Datastore;
 use aw_models::Info;
+
 pub trait AssetResolver: Send + Sync {
     fn resolve(&self, file_path: &str) -> Option<Vec<u8>>;
 }
 
-#[macro_export]
-macro_rules! embed_asset_resolver {
-    ($static_path:literal, $dynamic_path:expr) => {{
-        use rust_embed::RustEmbed;
+#[derive(RustEmbed)]
+#[folder = "$AW_WEBUI_DIR"]
+struct EmbeddedAssets;
 
-        #[derive(RustEmbed)]
-        #[folder = $static_path]
-        pub struct __EmbeddedAssets;
-
-        pub struct __ProjectAssetResolver {
-            asset_path: Option<std::path::PathBuf>,
-        }
-
-        impl $crate::endpoints::AssetResolver for __ProjectAssetResolver {
-            fn resolve(&self, file_path: &str) -> Option<Vec<u8>> {
-                if let Some(asset_path) = &self.asset_path {
-                    let content = std::fs::read(asset_path);
-                    if let Ok(data) = content {
-                        return Some(data);
-                    }
-                }
-                Some(__EmbeddedAssets::get(file_path)?.data.to_vec())
-            }
-        }
-
-        Box::new(__ProjectAssetResolver {
-            asset_path: $dynamic_path,
-        })
-    }};
+pub struct ProjectAssetResolver {
+    asset_path: Option<std::path::PathBuf>,
 }
 
-pub use embed_asset_resolver;
+impl ProjectAssetResolver {
+    pub fn new_boxed(asset_path: Option<std::path::PathBuf>) -> Box<Self> {
+        Box::new(Self { asset_path })
+    }
+}
+
+impl AssetResolver for ProjectAssetResolver {
+    fn resolve(&self, file_path: &str) -> Option<Vec<u8>> {
+        if let Some(asset_path) = &self.asset_path {
+            let content = std::fs::read(asset_path);
+            if let Ok(data) = content {
+                return Some(data);
+            }
+        }
+        Some(EmbeddedAssets::get(file_path)?.data.to_vec())
+    }
+}
 
 pub struct ServerState {
     pub datastore: Mutex<Datastore>,

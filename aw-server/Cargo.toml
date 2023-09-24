@@ -14,7 +14,7 @@ name = "aw-server"
 path = "src/main.rs"
 
 [dependencies]
-rocket = { version = "0.5.0-rc.2", features = ["json"] }
+rocket = { version = "0.5.0-rc.3", features = ["json"] }
 rocket_cors = { version = "0.6.0-alpha2" }
 multipart = { version = "0.18", default-features = false, features = ["server"] }
 serde = { version = "1.0", features = ["derive"] }

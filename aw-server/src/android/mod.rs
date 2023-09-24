@@ -119,10 +119,7 @@ pub mod android {
                 asset_resolver: endpoints::AssetResolver::new(None),
                 device_id: device_id::get_device_id(),
             };
-            info!(
-                "Using server_state:: device_id: {}",
-                server_state.device_id
-            );
+            info!("Using server_state:: device_id: {}", server_state.device_id);
 
             let mut server_config: AWConfig = AWConfig::default();
             server_config.port = 5600;

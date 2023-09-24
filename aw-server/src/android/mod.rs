@@ -98,22 +98,13 @@ pub mod android {
         string_to_jstring(&env, obj.to_string())
     }
 
-    lazy_static! {
-        static ref ASSET_PATH: Mutex<String> = Mutex::new(String::new());
-    }
-
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_startServer(
         env: JNIEnv,
         _: JClass,
-        java_asset_path: JString,
     ) {
         info!("Starting server...");
-
-        *ASSET_PATH.lock().unwrap() = jstring_to_string(&env, java_asset_path);
-
         start_server();
-
         info!("Server exited");
     }
 
@@ -125,12 +116,11 @@ pub mod android {
         unsafe {
             let server_state: ServerState = endpoints::ServerState {
                 datastore: Mutex::new(openDatastore()),
-                asset_path: PathBuf::from(ASSET_PATH.lock().unwrap().to_owned()),
+                asset_resolver: endpoints::AssetResolver::new(None),
                 device_id: device_id::get_device_id(),
             };
             info!(
-                "Using server_state:: asset dir: {}; device_id: {}",
-                server_state.asset_path.display(),
+                "Using server_state:: device_id: {}",
                 server_state.device_id
             );
 

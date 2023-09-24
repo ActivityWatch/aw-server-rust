@@ -114,7 +114,6 @@ impl Fairing for HostCheck {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::Mutex;
 
     use rocket::http::{ContentType, Header, Status};
@@ -126,7 +125,7 @@ mod tests {
     fn setup_testserver(address: String) -> Rocket<rocket::Build> {
         let state = endpoints::ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
-            asset_path: PathBuf::from("aw-webui/dist"),
+            asset_resolver: endpoints::AssetResolver::new(None),
             device_id: "test_id".to_string(),
         };
         let mut aw_config = AWConfig::default();

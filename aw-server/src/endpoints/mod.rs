@@ -1,9 +1,11 @@
-use std::path::PathBuf;
+use rust_embed::RustEmbed;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use gethostname::gethostname;
 use rocket::fs::FileServer;
-use rocket::fs::NamedFile;
+use rocket::http::ContentType;
 use rocket::serde::json::Json;
 use rocket::State;
 
@@ -12,9 +14,33 @@ use crate::config::AWConfig;
 use aw_datastore::Datastore;
 use aw_models::Info;
 
+#[derive(RustEmbed)]
+#[folder = "$AW_WEBUI_DIR"]
+struct EmbeddedAssets;
+
+pub struct AssetResolver {
+    asset_path: Option<PathBuf>,
+}
+
+impl AssetResolver {
+    pub fn new(asset_path: Option<PathBuf>) -> Self {
+        Self { asset_path }
+    }
+
+    fn resolve(&self, file_path: &str) -> Option<Vec<u8>> {
+        if let Some(asset_path) = &self.asset_path {
+            let content = std::fs::read(asset_path.join(file_path));
+            if let Ok(data) = content {
+                return Some(data);
+            }
+        }
+        Some(EmbeddedAssets::get(file_path)?.data.to_vec())
+    }
+}
+
 pub struct ServerState {
     pub datastore: Mutex<Datastore>,
-    pub asset_path: PathBuf,
+    pub asset_resolver: AssetResolver,
     pub device_id: String,
 }
 
@@ -31,45 +57,33 @@ mod settings;
 pub use util::HttpErrorJson;
 
 #[get("/")]
-async fn root_index(state: &State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("index.html"))
-        .await
-        .ok()
+fn root_index(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    get_file("index.html".into(), state)
 }
 
 #[get("/css/<file..>")]
-async fn root_css(file: PathBuf, state: &State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("css").join(file))
-        .await
-        .ok()
+fn root_css(file: PathBuf, state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    get_file(Path::new("css").join(file), state)
 }
 
 #[get("/fonts/<file..>")]
-async fn root_fonts(file: PathBuf, state: &State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("fonts").join(file))
-        .await
-        .ok()
+fn root_fonts(file: PathBuf, state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    get_file(Path::new("fonts").join(file), state)
 }
 
 #[get("/js/<file..>")]
-async fn root_js(file: PathBuf, state: &State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("js").join(file))
-        .await
-        .ok()
+fn root_js(file: PathBuf, state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    get_file(Path::new("js").join(file), state)
 }
 
 #[get("/static/<file..>")]
-async fn root_static(file: PathBuf, state: &State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("static").join(file))
-        .await
-        .ok()
+fn root_static(file: PathBuf, state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    get_file(Path::new("static").join(file), state)
 }
 
 #[get("/favicon.ico")]
-async fn root_favicon(state: &State<ServerState>) -> Option<NamedFile> {
-    NamedFile::open(state.asset_path.join("favicon.ico"))
-        .await
-        .ok()
+fn root_favicon(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    get_file("favicon.ico".into(), state)
 }
 
 #[get("/")]
@@ -84,6 +98,18 @@ fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Inf
         testing: config.testing,
         device_id: state.device_id.clone(),
     })
+}
+
+fn get_file(file: PathBuf, state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    let asset = state.asset_resolver.resolve(&file.display().to_string())?;
+
+    let content_type = file
+        .extension()
+        .and_then(OsStr::to_str)
+        .and_then(ContentType::from_extension)
+        .unwrap_or(ContentType::Bytes);
+
+    Some((content_type, asset))
 }
 
 pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rocket<rocket::Build> {
@@ -155,4 +181,24 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
         rocket = rocket.mount(&format!("/pages/{name}"), FileServer::from(dir));
     }
     rocket
+}
+
+mod tests {
+    #[test]
+    fn test_filesystem_resolver() {
+        let resolver = super::AssetResolver::new(Some(".".into()));
+
+        let content = resolver.resolve("Cargo.toml").unwrap();
+
+        assert!(String::from_utf8(content).unwrap().contains("aw-server"));
+    }
+
+    #[test]
+    fn test_resolver_without_asset() {
+        let resolver = super::AssetResolver::new(Some(".".into()));
+
+        let content = resolver.resolve("Cargo.json");
+
+        assert!(content.is_none());
+    }
 }

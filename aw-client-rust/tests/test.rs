@@ -12,7 +12,6 @@ mod test {
     use aw_client_rust::Event;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::Map;
-    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::thread;
     use tokio_test::block_on;
@@ -38,10 +37,12 @@ mod test {
     }
 
     fn setup_testserver() -> rocket::Shutdown {
+        use aw_server::endpoints::AssetResolver;
         use aw_server::endpoints::ServerState;
+
         let state = ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
-            asset_path: PathBuf::from("."), // webui won't be used, so it's invalidly set
+            asset_resolver: AssetResolver::new(None),
             device_id: "test_id".to_string(),
         };
         let mut aw_config = aw_server::config::AWConfig::default();

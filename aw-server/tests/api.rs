@@ -8,7 +8,6 @@ extern crate aw_server;
 #[cfg(test)]
 mod api_tests {
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use std::sync::Mutex;
 
     use chrono::{DateTime, Utc};
@@ -25,7 +24,7 @@ mod api_tests {
     fn setup_testserver() -> rocket::Rocket<rocket::Build> {
         let state = endpoints::ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
-            asset_path: PathBuf::from("aw-webui/dist"),
+            asset_resolver: endpoints::AssetResolver::new(None),
             device_id: "test_id".to_string(),
         };
         let aw_config = config::AWConfig::default();

@@ -3,6 +3,14 @@
 set -e
 platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
+# if args, use them to select targets (x86_64, arm64, etc)
+if [ $# -gt 0 ]; then
+    targets="$@"
+else
+    # otherwise, default to all targets
+    targets="arm64 x86_64 x86 arm"
+fi
+
 ORIG_PATH="$PATH"
 ORIG_RUSTFLAGS="$RUSTFLAGS"
 
@@ -39,9 +47,12 @@ for archtargetstr in \
     target=$(echo $archtargetstr | cut -d " " -f 2)
     target_underscore=$(echo $target | sed 's/-/_/g')
 
-
     echo ARCH $arch
     echo TARGET $target
+    if ! echo "$targets" | grep -q "$arch"; then
+        echo "Skipping $arch..."
+        continue
+    fi
 
     NDK_ARCH_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$platform-x86_64/bin"
     if [ ! -d "$NDK_ARCH_DIR" ]; then

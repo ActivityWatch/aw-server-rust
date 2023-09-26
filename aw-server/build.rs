@@ -3,7 +3,8 @@ use std::error::Error;
 fn main() -> Result<(), Box<dyn Error>> {
     // if aw-webui/dist does not exist or is empty, print a warning
     let path = std::path::Path::new("../aw-webui/dist");
-    if !path.exists() || path.read_dir()?.next().is_none() {
+    let path_index = path.join("index.html");
+    if !path_index.exists() {
         println!("cargo:warning=`./aw-webui/dist` is not built, compiling without webui");
     }
 

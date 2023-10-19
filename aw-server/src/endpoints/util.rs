@@ -69,9 +69,9 @@ impl<'r> Responder<'r, 'static> for BucketsExportRocket {
 
 use aw_datastore::DatastoreError;
 
-impl Into<HttpErrorJson> for DatastoreError {
-    fn into(self) -> HttpErrorJson {
-        match self {
+impl From<DatastoreError> for HttpErrorJson {
+    fn from(val: DatastoreError) -> Self {
+        match val {
             DatastoreError::NoSuchBucket(bucket_id) => HttpErrorJson::new(
                 Status::NotFound,
                 format!("The requested bucket '{bucket_id}' does not exist"),

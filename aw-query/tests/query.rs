@@ -104,7 +104,7 @@ mod query_tests {
 
         let code = String::from("True;False;a=True;return True;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
-            aw_query::DataType::Bool(b) => assert_eq!(b, true),
+            aw_query::DataType::Bool(b) => assert!(b),
             ref data => panic!("Wrong datatype, {data:?}"),
         };
     }
@@ -129,42 +129,42 @@ mod query_tests {
         // number comparison true
         let code = String::from("return 1==1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
-            aw_query::DataType::Bool(b) => assert_eq!(b, true),
+            aw_query::DataType::Bool(b) => assert!(b),
             ref data => panic!("Wrong datatype, {data:?}"),
         };
 
         // number comparison false
         let code = String::from("return  2==1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
-            aw_query::DataType::Bool(b) => assert_eq!(b, false),
+            aw_query::DataType::Bool(b) => assert!(!b),
             ref data => panic!("Wrong datatype, {data:?}"),
         };
 
         // string comparison true
         let code = String::from(r#"return  "a"=="a";"#);
         match aw_query::query(&code, &interval, &ds).unwrap() {
-            aw_query::DataType::Bool(b) => assert_eq!(b, true),
+            aw_query::DataType::Bool(b) => assert!(b),
             ref data => panic!("Wrong datatype, {data:?}"),
         };
 
         // string comparison false
         let code = String::from(r#"return  "a"=="b";"#);
         match aw_query::query(&code, &interval, &ds).unwrap() {
-            aw_query::DataType::Bool(b) => assert_eq!(b, false),
+            aw_query::DataType::Bool(b) => assert!(!b),
             ref data => panic!("Wrong datatype, {data:?}"),
         };
 
         // bool comparison true
         let code = String::from("return  True==True;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
-            aw_query::DataType::Bool(b) => assert_eq!(b, true),
+            aw_query::DataType::Bool(b) => assert!(b),
             ref data => panic!("Wrong datatype, {data:?}"),
         };
 
         // bool comparison false
         let code = String::from("return  False==True;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
-            aw_query::DataType::Bool(b) => assert_eq!(b, false),
+            aw_query::DataType::Bool(b) => assert!(!b),
             ref data => panic!("Wrong datatype, {data:?}"),
         };
 

@@ -137,12 +137,12 @@ fn test_rule() {
     let rule_from_regex = Rule::from(Regex::new("test").unwrap());
     let rule_from_new = Rule::Regex(RegexRule::new("test", false).unwrap());
     let rule_none = Rule::None;
-    assert_eq!(rule_from_regex.matches(&e_match), true);
-    assert_eq!(rule_from_new.matches(&e_match), true);
-    assert_eq!(rule_from_regex.matches(&e_no_match), false);
-    assert_eq!(rule_from_new.matches(&e_no_match), false);
+    assert!(rule_from_regex.matches(&e_match));
+    assert!(rule_from_new.matches(&e_match));
+    assert!(!rule_from_regex.matches(&e_no_match));
+    assert!(!rule_from_new.matches(&e_no_match));
 
-    assert_eq!(rule_none.matches(&e_match), false);
+    assert!(!rule_none.matches(&e_match));
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn test_rule_lookahead() {
         .insert("test".into(), serde_json::json!("testing lookahead"));
 
     let rule_from_regex = Rule::from(Regex::new("testing (?!lookahead)").unwrap());
-    assert_eq!(rule_from_regex.matches(&e_match), false);
+    assert!(!rule_from_regex.matches(&e_match));
 }
 
 #[test]

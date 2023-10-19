@@ -548,7 +548,8 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
         let deserialized: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
-        let expected: Value = serde_json::from_str(r#"{"test_key_2":"test_value","test_key":"test_value"}"#).unwrap();
+        let expected: Value =
+            serde_json::from_str(r#"{"test_key_2":"test_value","test_key":"test_value"}"#).unwrap();
         assert_eq!(deserialized, expected);
     }
 
@@ -600,10 +601,7 @@ mod api_tests {
         // Test dict
         let key = "test_key_dict";
         let value = json!({"key": "value", "another_key": "another value"});
-        let response_status = set_setting_request(
-            &client,
-            key, &value
-        );
+        let response_status = set_setting_request(&client, key, &value);
         assert_eq!(response_status, rocket::http::Status::Created);
 
         let res = client

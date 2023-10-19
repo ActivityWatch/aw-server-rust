@@ -51,7 +51,7 @@ pub enum Response {
     EventList(Vec<Event>),
     Count(i64),
     KeyValue(String),
-    KeyValues(HashMap<String, String>)
+    KeyValues(HashMap<String, String>),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -277,7 +277,7 @@ impl DatastoreWorker {
             Command::GetKeyValues(pattern) => match ds.get_key_values(tx, pattern.as_str()) {
                 Ok(result) => Ok(Response::KeyValues(result)),
                 Err(e) => Err(e),
-            }
+            },
             Command::SetKeyValue(key, data) => match ds.insert_key_value(tx, &key, &data) {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),

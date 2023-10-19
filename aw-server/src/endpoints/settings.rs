@@ -36,10 +36,13 @@ pub fn settings_get(
             // strip 'settings.' prefix from keys
             let mut map: HashMap<String, serde_json::Value> = HashMap::new();
             for (key, value) in settings.iter() {
-                map.insert(key.strip_prefix("settings.").unwrap_or(key).to_string(), serde_json::from_str(value.clone().as_str()).unwrap());
+                map.insert(
+                    key.strip_prefix("settings.").unwrap_or(key).to_string(),
+                    serde_json::from_str(value.clone().as_str()).unwrap(),
+                );
             }
             Ok(Json(map))
-        },
+        }
         Err(err) => Err(err),
     }
 }

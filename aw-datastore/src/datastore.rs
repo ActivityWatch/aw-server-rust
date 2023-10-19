@@ -909,9 +909,7 @@ impl DatastoreInstance {
             }
         };
 
-        match stmt.query_row([key], |row| {
-            Ok(row.get(1)?)
-        }) {
+        match stmt.query_row([key], |row| Ok(row.get(1)?)) {
             Ok(result) => Ok(result),
             Err(err) => match err {
                 rusqlite::Error::QueryReturnedNoRows => {

@@ -12,7 +12,6 @@ use serde_json::value::Value;
 use aw_models::Bucket;
 use aw_models::BucketMetadata;
 use aw_models::Event;
-use aw_models::KeyValue;
 
 use rusqlite::params;
 use rusqlite::types::ToSql;
@@ -897,7 +896,7 @@ impl DatastoreInstance {
         Ok(())
     }
 
-    pub fn get_key_value(&self, conn: &Connection, key: &str) -> Result<KeyValue, DatastoreError> {
+    pub fn get_key_value(&self, conn: &Connection, key: &str) -> Result<String, DatastoreError> {
         let mut stmt = match conn.prepare(
             "
                 SELECT * FROM key_value WHERE KEY = ?1",
@@ -911,10 +910,7 @@ impl DatastoreInstance {
         };
 
         match stmt.query_row([key], |row| {
-            Ok(KeyValue {
-                key: row.get(0)?,
-                value: row.get(1)?,
-            })
+            Ok(row.get(1)?)
         }) {
             Ok(result) => Ok(result),
             Err(err) => match err {

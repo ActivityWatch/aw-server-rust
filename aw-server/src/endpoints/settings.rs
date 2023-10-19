@@ -1,5 +1,4 @@
 use crate::endpoints::ServerState;
-use aw_query::query;
 use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
@@ -54,7 +53,7 @@ pub fn setting_get(
     let datastore = endpoints_get_lock!(state.datastore);
 
     match datastore.get_key_value(&setting_key) {
-        Ok(kv) => Ok(Json(kv.value)),
+        Ok(value) => Ok(Json(serde_json::from_str(&value).unwrap())),
         Err(err) => Err(err.into()),
     }
 }

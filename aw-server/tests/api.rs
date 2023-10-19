@@ -11,14 +11,12 @@ mod api_tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use chrono::{DateTime, Utc};
     use rocket::http::{ContentType, Header, Status};
     use serde_json::{json, Value};
 
     use aw_server::config;
     use aw_server::endpoints;
 
-    use aw_models::KeyValue;
     use aw_models::{Bucket, BucketsExport};
     use rocket::local::blocking::Client;
 

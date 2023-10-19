@@ -12,7 +12,6 @@ pub struct Key {
 pub struct KeyValue {
     pub key: String,
     pub value: Value,
-    pub timestamp: Option<DateTime<Utc>>,
 }
 
 impl KeyValue {
@@ -24,7 +23,6 @@ impl KeyValue {
         KeyValue {
             key: key.into(),
             value: value.into(),
-            timestamp: Some(timestamp),
         }
     }
 }

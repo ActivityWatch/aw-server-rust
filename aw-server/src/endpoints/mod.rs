@@ -139,9 +139,9 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             "/api/0/settings",
             routes![
                 settings::setting_get,
-                settings::settings_list_get,
                 settings::setting_set,
-                settings::setting_delete
+                settings::setting_delete,
+                settings::settings_get,
             ],
         )
         .mount("/", rocket_cors::catch_all_options_routes());

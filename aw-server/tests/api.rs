@@ -480,40 +480,15 @@ mod api_tests {
         assert_eq!(res.into_string().unwrap(), r#"{"message":"EmptyQuery"}"#);
     }
 
-    fn set_setting_request(client: &Client, key: &str, value: Value) -> Status {
-        let body = serde_json::to_string(&KeyValue {
-            key: key.to_string(),
-            value,
-            timestamp: None,
-        })
-        .unwrap();
+    fn set_setting_request(client: &Client, key: &str, value: &Value) -> Status {
+        let body = serde_json::to_string(value).unwrap();
         let res = client
-            .post("/api/0/settings/")
+            .post(format!("/api/0/settings/{}", key))
             .header(ContentType::JSON)
             .header(Header::new("Host", "127.0.0.1:5600"))
             .body(body)
             .dispatch();
         res.status()
-    }
-
-    /// Asserts that 2 KeyValues are otherwise equal and first keyvalues timestamp is within
-    /// or equal with timestamp and second.timestamp
-    fn _equal_and_timestamp_in_range(before: DateTime<Utc>, first: KeyValue, second: KeyValue) {
-        assert_eq!(first.key, second.key);
-        assert_eq!(first.value, second.value);
-        // Compare with second, not millisecond accuracy
-        assert!(
-            first.timestamp.unwrap().timestamp() >= before.timestamp(),
-            "{} wasn't after {}",
-            first.timestamp.unwrap().timestamp(),
-            before.timestamp()
-        );
-        assert!(
-            first.timestamp < second.timestamp,
-            "{} wasn't before {}",
-            first.timestamp.unwrap(),
-            second.timestamp.unwrap()
-        );
     }
 
     #[test]
@@ -522,7 +497,9 @@ mod api_tests {
         let client = Client::untracked(server).expect("valid instance");
 
         // Test getting not found (getting nonexistent key)
-        let res = set_setting_request(&client, "thisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongk", json!(""));
+        let key = "thisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongkthisisaverylongk";
+        let value = json!("test_value");
+        let res = set_setting_request(&client, key, &value);
         assert_eq!(res, rocket::http::Status::BadRequest);
     }
 
@@ -532,7 +509,9 @@ mod api_tests {
         let client = Client::untracked(server).expect("valid instance");
 
         // Test value creation
-        let response_status = set_setting_request(&client, "test_key", json!("test_value"));
+        let key = "test_key";
+        let value = json!("test_value");
+        let response_status = set_setting_request(&client, key, &value);
         assert_eq!(response_status, rocket::http::Status::Created);
     }
 
@@ -542,86 +521,90 @@ mod api_tests {
         let client = Client::untracked(server).expect("valid instance");
 
         // Test getting not found (getting nonexistent key)
+        let key = "non_existent_key";
         let res = client
-            .get("/api/0/settings/non_existent_key")
+            .get(format!("/api/0/settings/{}", key))
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::NotFound);
     }
 
     #[test]
-    fn settings_list_get() {
+    fn test_get_settings() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");
 
-        let response1_status = set_setting_request(&client, "test_key", json!(""));
+        let key1 = "test_key";
+        let key2 = "test_key_2";
+        let value = json!("test_value");
+        let response1_status = set_setting_request(&client, key1, &value);
         assert_eq!(response1_status, rocket::http::Status::Created);
-        let response2_status = set_setting_request(&client, "test_key_2", json!(""));
+        let response2_status = set_setting_request(&client, key2, &value);
         assert_eq!(response2_status, rocket::http::Status::Created);
 
         let res = client
-            .get("/api/0/settings/")
+            .get("/api/0/settings")
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
 
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        assert_eq!(
-            res.into_string().unwrap(),
-            r#"[{"key":"settings.test_key"},{"key":"settings.test_key_2"}]"#
-        );
+
+        let deserialized: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        let expected: Value = serde_json::from_str(r#"{"test_key_2":"test_value","test_key":"test_value"}"#).unwrap();
+        assert_eq!(deserialized, expected);
     }
 
     #[test]
-    fn test_getting_setting() {
+    fn test_get_setting() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");
 
-        let timestamp = Utc::now();
-        let response_status = set_setting_request(&client, "test_key", json!("test_value"));
+        let key = "test_key";
+        let value = json!("test_value");
+        let response_status = set_setting_request(&client, key, &value);
         assert_eq!(response_status, rocket::http::Status::Created);
 
         // Test getting
         let res = client
-            .get("/api/0/settings/test_key")
+            .get(format!("/api/0/settings/{}", key))
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        let deserialized: KeyValue = serde_json::from_str(&res.into_string().unwrap()).unwrap();
-        _equal_and_timestamp_in_range(
-            timestamp,
-            deserialized,
-            KeyValue::new("settings.test_key", "test_value", Utc::now()),
-        );
+        let deserialized: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(deserialized, value);
     }
 
     #[test]
-    fn test_getting_setting_multiple_types() {
+    fn test_get_setting_list() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");
 
-        let timestamp = Utc::now();
-
         // Test array
-        let response_status = set_setting_request(&client, "test_key_array", json!("[1,2,3]"));
+        let key = "test_key_array";
+        let value = json!([1, 2, 3]);
+        let response_status = set_setting_request(&client, key, &value);
         assert_eq!(response_status, rocket::http::Status::Created);
 
         let res = client
-            .get("/api/0/settings/test_key_array")
+            .get(format!("/api/0/settings/{}", key))
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        let deserialized: KeyValue = serde_json::from_str(&res.into_string().unwrap()).unwrap();
-        _equal_and_timestamp_in_range(
-            timestamp,
-            deserialized,
-            KeyValue::new("settings.test_key_array", "[1,2,3]", Utc::now()),
-        );
+        let deserialized: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(deserialized, value);
+    }
+
+    #[test]
+    fn test_get_setting_dict() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
 
         // Test dict
+        let key = "test_key_dict";
+        let value = json!({"key": "value", "another_key": "another value"});
         let response_status = set_setting_request(
             &client,
-            "test_key_dict",
-            json!("{key: 'value', another_key: 'another value'}"),
+            key, &value
         );
         assert_eq!(response_status, rocket::http::Status::Created);
 
@@ -630,42 +613,30 @@ mod api_tests {
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        let deserialized: KeyValue = serde_json::from_str(&res.into_string().unwrap()).unwrap();
-        _equal_and_timestamp_in_range(
-            timestamp,
-            deserialized,
-            KeyValue::new(
-                "settings.test_key_dict",
-                "{key: 'value', another_key: 'another value'}",
-                Utc::now(),
-            ),
-        );
+        let deserialized: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(deserialized, value);
     }
 
     #[test]
-    fn test_updating_setting() {
+    fn test_set_setting() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");
 
-        let timestamp = Utc::now();
-        let post_1_status = set_setting_request(&client, "test_key", json!("test_value"));
+        let key = "test_key";
+        let value1 = json!("test_value");
+        let value2 = json!("changed_test_value");
+        let post_1_status = set_setting_request(&client, key, &value1);
         assert_eq!(post_1_status, rocket::http::Status::Created);
 
         let res = client
-            .get("/api/0/settings/test_key")
+            .get(format!("/api/0/settings/{}", key))
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
-        let deserialized: KeyValue = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        let deserialized: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(deserialized, value1);
 
-        _equal_and_timestamp_in_range(
-            timestamp,
-            deserialized,
-            KeyValue::new("settings.test_key", "test_value", Utc::now()),
-        );
-
-        let timestamp_2 = Utc::now();
-        let post_2_status = set_setting_request(&client, "test_key", json!("changed_test_value"));
+        let post_2_status = set_setting_request(&client, key, &value2);
         assert_eq!(post_2_status, rocket::http::Status::Created);
 
         let res = client
@@ -674,20 +645,17 @@ mod api_tests {
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
 
-        let new_deserialized: KeyValue = serde_json::from_str(&res.into_string().unwrap()).unwrap();
-        _equal_and_timestamp_in_range(
-            timestamp_2,
-            new_deserialized,
-            KeyValue::new("settings.test_key", "changed_test_value", Utc::now()),
-        );
+        let new_deserialized: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(new_deserialized, value2);
     }
 
     #[test]
-    fn test_deleting_setting() {
+    fn test_delete_setting() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");
 
-        let response_status = set_setting_request(&client, "test_key", json!(""));
+        let value = json!("test_value");
+        let response_status = set_setting_request(&client, "test_key", &value);
         assert_eq!(response_status, rocket::http::Status::Created);
 
         // Test deleting

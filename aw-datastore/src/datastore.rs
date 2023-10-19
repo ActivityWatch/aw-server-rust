@@ -914,10 +914,6 @@ impl DatastoreInstance {
             Ok(KeyValue {
                 key: row.get(0)?,
                 value: row.get(1)?,
-                timestamp: Some(DateTime::from_utc(
-                    NaiveDateTime::from_timestamp_opt(row.get(2)?, 0).unwrap(),
-                    Utc,
-                )),
             })
         }) {
             Ok(result) => Ok(result),
@@ -932,12 +928,12 @@ impl DatastoreInstance {
         }
     }
 
-    pub fn get_keys_starting(
+    pub fn get_key_values(
         &self,
         conn: &Connection,
         pattern: &str,
-    ) -> Result<Vec<String>, DatastoreError> {
-        let mut stmt = match conn.prepare("SELECT key FROM key_value WHERE key LIKE ?") {
+    ) -> Result<HashMap<String, String>, DatastoreError> {
+        let mut stmt = match conn.prepare("SELECT key, value FROM key_value WHERE key LIKE ?") {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -946,25 +942,30 @@ impl DatastoreInstance {
             }
         };
 
-        let mut output = Vec::<String>::new();
+        let mut output = HashMap::<String, String>::new();
         // Rusqlite's get wants index and item type as parameters.
-        let result = stmt.query_map([pattern], |row| row.get::<usize, String>(0));
+        let result = stmt.query_map([pattern], |row| {
+            Ok((row.get::<usize, String>(0)?, row.get::<usize, String>(1)?))
+        });
         match result {
-            Ok(keys) => {
-                for row in keys {
+            Ok(settings) => {
+                for row in settings {
                     // Unwrap to String or panic on SQL row if type is invalid. Can't happen with a
                     // properly initialized table.
-                    output.push(row.unwrap());
+                    let (key, value) = row.unwrap();
+                    // Only return keys starting with "settings.".
+                    if !key.starts_with("settings.") {
+                        continue;
+                    }
+                    output.insert(key, value);
                 }
                 Ok(output)
             }
             Err(err) => match err {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    Err(DatastoreError::NoSuchKey(pattern.to_string()))
-                }
-                _ => Err(DatastoreError::InternalError(format!(
-                    "Failed to get key_value rows starting with pattern {pattern}"
-                ))),
+                rusqlite::Error::QueryReturnedNoRows => Ok(output),
+                _ => Err(DatastoreError::InternalError(
+                    "Failed to get settings".to_string(),
+                )),
             },
         }
     }

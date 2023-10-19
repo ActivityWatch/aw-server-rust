@@ -52,7 +52,7 @@ pub enum Response {
     EventList(Vec<Event>),
     Count(i64),
     KeyValue(KeyValue),
-    StringVec(Vec<String>),
+    KeyValues(HashMap<String, String>)
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -74,9 +74,9 @@ pub enum Command {
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
     DeleteEventsById(String, Vec<i64>),
     ForceCommit(),
-    InsertKeyValue(String, String),
+    GetKeyValues(String),
     GetKeyValue(String),
-    GetKeysStarting(String),
+    SetKeyValue(String, String),
     DeleteKeyValue(String),
     Close(),
 }
@@ -275,16 +275,16 @@ impl DatastoreWorker {
                 self.commit = true;
                 Ok(Response::Empty())
             }
-            Command::InsertKeyValue(key, data) => match ds.insert_key_value(tx, &key, &data) {
+            Command::GetKeyValues(pattern) => match ds.get_key_values(tx, pattern.as_str()) {
+                Ok(result) => Ok(Response::KeyValues(result)),
+                Err(e) => Err(e),
+            }
+            Command::SetKeyValue(key, data) => match ds.insert_key_value(tx, &key, &data) {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
             },
             Command::GetKeyValue(key) => match ds.get_key_value(tx, &key) {
                 Ok(result) => Ok(Response::KeyValue(result)),
-                Err(e) => Err(e),
-            },
-            Command::GetKeysStarting(pattern) => match ds.get_keys_starting(tx, &pattern) {
-                Ok(result) => Ok(Response::StringVec(result)),
                 Err(e) => Err(e),
             },
             Command::DeleteKeyValue(key) => match ds.delete_key_value(tx, &key) {
@@ -475,8 +475,34 @@ impl Datastore {
         }
     }
 
-    pub fn insert_key_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
-        let cmd = Command::InsertKeyValue(key.to_string(), data.to_string());
+    pub fn get_key_values(&self, pattern: &str) -> Result<HashMap<String, String>, DatastoreError> {
+        let cmd = Command::GetKeyValues(pattern.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Response::KeyValues(value) => Ok(value),
+                _ => panic!("Invalid response"),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn get_key_value(&self, key: &str) -> Result<KeyValue, DatastoreError> {
+        let cmd = Command::GetKeyValue(key.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Response::KeyValue(kv) => Ok(kv),
+                _ => panic!("Invalid response"),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn set_key_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
+        let cmd = Command::SetKeyValue(key.to_string(), data.to_string());
         let receiver = self.requester.request(cmd).unwrap();
 
         _unwrap_response(receiver)
@@ -487,32 +513,6 @@ impl Datastore {
         let receiver = self.requester.request(cmd).unwrap();
 
         _unwrap_response(receiver)
-    }
-
-    pub fn get_key_value(&self, key: &str) -> Result<KeyValue, DatastoreError> {
-        let cmd = Command::GetKeyValue(key.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::KeyValue(value) => Ok(value),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn get_keys_starting(&self, pattern: &str) -> Result<Vec<String>, DatastoreError> {
-        let cmd = Command::GetKeysStarting(pattern.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::StringVec(value) => Ok(value),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
-        }
     }
 
     // Should block until worker has stopped

@@ -169,7 +169,7 @@ mod datastore_tests {
 
         // Get all events
         let fetched_events_all = ds.get_events(&bucket.id, None, None, None).unwrap();
-        let expected_fetched_events = vec![&e2, &e1];
+        let expected_fetched_events = [&e2, &e1];
         assert_eq!(fetched_events_all.len(), 2);
         for i in 0..fetched_events_all.len() {
             let expected = &expected_fetched_events[i];
@@ -268,7 +268,7 @@ mod datastore_tests {
 
         // Get all events
         let fetched_events_all = ds.get_events(&bucket.id, None, None, None).unwrap();
-        let expected_fetched_events = vec![&e2, &e1];
+        let expected_fetched_events = [&e2, &e1];
         assert_eq!(fetched_events_all.len(), 2);
         for i in 0..fetched_events_all.len() {
             let expected = &expected_fetched_events[i];
@@ -286,7 +286,7 @@ mod datastore_tests {
 
         // Get all events
         let fetched_events_all = ds.get_events(&bucket.id, None, None, None).unwrap();
-        let expected_fetched_events = vec![e2];
+        let expected_fetched_events = [e2];
         assert_eq!(fetched_events_all.len(), 1);
         for i in 0..fetched_events_all.len() {
             let expected = &expected_fetched_events[i];

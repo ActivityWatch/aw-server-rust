@@ -2,10 +2,10 @@ use crate::endpoints::ServerState;
 use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
+use std::collections::HashMap;
 use std::sync::MutexGuard;
 
 use aw_datastore::Datastore;
-use aw_models::{Key, KeyValue};
 
 use crate::endpoints::HttpErrorJson;
 
@@ -21,51 +21,68 @@ fn parse_key(key: String) -> Result<String, HttpErrorJson> {
     }
 }
 
-#[post("/", data = "<message>", format = "application/json")]
-pub fn setting_set(
-    state: &State<ServerState>,
-    message: Json<KeyValue>,
-) -> Result<Status, HttpErrorJson> {
-    let data = message.into_inner();
-
-    let setting_key = parse_key(data.key)?;
-
-    let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
-    let result = datastore.insert_key_value(&setting_key, &data.value.to_string());
-
-    match result {
-        Ok(_) => Ok(Status::Created),
-        Err(err) => Err(err.into()),
-    }
-}
-
 #[get("/")]
-pub fn settings_list_get(state: &State<ServerState>) -> Result<Json<Vec<Key>>, HttpErrorJson> {
+pub fn settings_get(
+    state: &State<ServerState>,
+) -> Result<Json<HashMap<String, serde_json::Value>>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
-    let queryresults = match datastore.get_keys_starting("settings.%") {
+    let queryresults = match datastore.get_key_values("settings.%") {
         Ok(result) => Ok(result),
         Err(err) => Err(err.into()),
     };
 
-    let mut output = Vec::<Key>::new();
-    for i in queryresults? {
-        output.push(Key { key: i });
+    match queryresults {
+        Ok(settings) => {
+            // strip 'settings.' prefix from keys
+            let mut map: HashMap<String, serde_json::Value> = HashMap::new();
+            for (key, value) in settings.iter() {
+                map.insert(
+                    key.strip_prefix("settings.").unwrap_or(key).to_string(),
+                    serde_json::from_str(value.clone().as_str()).unwrap(),
+                );
+            }
+            Ok(Json(map))
+        }
+        Err(err) => Err(err),
     }
-
-    Ok(Json(output))
 }
 
 #[get("/<key>")]
 pub fn setting_get(
     state: &State<ServerState>,
     key: String,
-) -> Result<Json<KeyValue>, HttpErrorJson> {
+) -> Result<Json<serde_json::Value>, HttpErrorJson> {
     let setting_key = parse_key(key)?;
-
     let datastore = endpoints_get_lock!(state.datastore);
 
     match datastore.get_key_value(&setting_key) {
-        Ok(result) => Ok(Json(result)),
+        Ok(value) => Ok(Json(serde_json::from_str(&value).unwrap())),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[post("/<key>", data = "<value>", format = "application/json")]
+pub fn setting_set(
+    state: &State<ServerState>,
+    key: String,
+    value: Json<serde_json::Value>,
+) -> Result<Status, HttpErrorJson> {
+    let setting_key = parse_key(key)?;
+    let value_str = match serde_json::to_string(&value.0) {
+        Ok(value) => value,
+        Err(err) => {
+            return Err(HttpErrorJson::new(
+                Status::BadRequest,
+                format!("Invalid JSON: {}", err),
+            ))
+        }
+    };
+
+    let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
+    let result = datastore.set_key_value(&setting_key, &value_str);
+
+    match result {
+        Ok(_) => Ok(Status::Created),
         Err(err) => Err(err.into()),
     }
 }

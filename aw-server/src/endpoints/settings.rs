@@ -5,7 +5,7 @@ use rocket::State;
 use std::collections::HashMap;
 use std::sync::MutexGuard;
 
-use aw_datastore::Datastore;
+use aw_datastore::{Datastore, DatastoreError};
 
 use crate::endpoints::HttpErrorJson;
 
@@ -57,6 +57,7 @@ pub fn setting_get(
 
     match datastore.get_key_value(&setting_key) {
         Ok(value) => Ok(Json(serde_json::from_str(&value).unwrap())),
+        Err(DatastoreError::NoSuchKey(_)) => Ok(Json(serde_json::from_str("null").unwrap())),
         Err(err) => Err(err.into()),
     }
 }

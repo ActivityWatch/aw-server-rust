@@ -513,7 +513,7 @@ mod api_tests {
     }
 
     #[test]
-    fn test_getting_not_found_value() {
+    fn test_get_unset_setting() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");
 
@@ -523,7 +523,8 @@ mod api_tests {
             .get(format!("/api/0/settings/{}", key))
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
-        assert_eq!(res.status(), rocket::http::Status::NotFound);
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.into_string().unwrap(), "null")
     }
 
     #[test]
@@ -664,7 +665,8 @@ mod api_tests {
             .get("/api/0/settings/test_key")
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
-        assert_eq!(res.status(), rocket::http::Status::NotFound);
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.into_string().unwrap(), "null");
     }
 
     #[test]

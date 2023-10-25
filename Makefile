@@ -84,28 +84,21 @@ package:
 	# Clean and prepare target/package folder
 	rm -rf target/package
 	mkdir -p target/package
-	# Copy binary
+	# Copy binaries
 	cp target/$(targetdir)/aw-server target/package/aw-server-rust
+	cp target/$(targetdir)/aw-sync target/package/aw-sync
 	# Copy service file
 	cp -f aw-server.service target/package/aw-server.service
-	# Copy webui assets
-ifeq ($(SKIP_WEBUI),true)
-	@echo "Skipping packaging webui"
-else
-	cp -rf aw-webui/dist target/package/static
-endif
 	# Copy everything into `dist/aw-server-rust`
 	mkdir -p dist
 	rm -rf dist/aw-server-rust
 	cp -rf target/package dist/aw-server-rust
 
 install:
-	# Install aw-server executable
+	# Install aw-server and aw-sync executables
 	mkdir -p $(DESTDIR)$(PREFIX)/bin/
 	install -m 755 target/$(targetdir)/aw-server $(DESTDIR)$(PREFIX)/bin/aw-server
-	# Install static web-ui files
-	mkdir -p $(DESTDIR)$(PREFIX)/share/aw-server/static
-	cp -rf aw-webui/dist/* $(DESTDIR)$(PREFIX)/share/aw-server/static
+	install -m 755 target/$(targetdir)/aw-sync $(DESTDIR)$(PREFIX)/bin/aw-sync
 	# Install systemd user service
 	mkdir -p $(DESTDIR)$(PREFIX)/lib/systemd/user
 	install -m 644 aw-server.service $(DESTDIR)$(PREFIX)/lib/systemd/user/aw-server.service

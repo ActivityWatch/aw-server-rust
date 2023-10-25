@@ -1,7 +1,7 @@
 .PHONY: all aw-server aw-webui build install package set-version test test-coverage test-coverage-tarpaulin test-coverage-grcov coverage coverage-html coverage-lcov
 
 all: build
-build: aw-server aw-webui
+build: aw-server
 
 DESTDIR :=
 ifeq ($(SUDO_USER),)
@@ -20,7 +20,7 @@ else
 	targetdir := release
 endif
 
-aw-server: set-version
+aw-server: set-version aw-webui
 	cargo build $(cargoflag) --bin aw-server
 
 aw-webui:

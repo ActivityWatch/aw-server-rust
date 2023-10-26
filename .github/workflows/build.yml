@@ -17,13 +17,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Set up Rust nightly
+    - name: Set up Rust
       id: toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: nightly
-        override: true
+      uses: dtolnay/rust-toolchain@stable
     - name: Cache cargo build
       uses: actions/cache@v3
       if: runner.os != 'macOS'  # cache doesn't seem to behave nicely on macOS, see: https://github.com/ActivityWatch/aw-server-rust/issues/180
@@ -31,10 +27,10 @@ jobs:
         cache-name: cargo-build-target
       with:
         path: target
-        # key needs to contain rustc_hash due to https://github.com/ActivityWatch/aw-server-rust/issues/180
-        key: ${{ runner.os }}-${{ env.cache-name }}-${{ steps.toolchain.outputs.rustc_hash }}-${{ hashFiles('**/Cargo.lock') }}
+        # key needs to contain cachekey due to https://github.com/ActivityWatch/aw-server-rust/issues/180
+        key: ${{ runner.os }}-${{ env.cache-name }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-${{ env.cache-name }}-${{ steps.toolchain.outputs.rustc_hash }}-
+          ${{ runner.os }}-${{ env.cache-name }}-${{ steps.toolchain.outputs.cachekey }}-
     - name: Build
       run: cargo build --workspace --verbose
     - name: Run tests
@@ -54,12 +50,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - name: Set up Rust nightly
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: nightly
-        override: true
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
     - name: Cache cargo build
       uses: actions/cache@v3
       env:
@@ -88,12 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - name: Set up Rust nightly
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: nightly
-        override: true
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
 
     # Note: If you need to combine the coverage info of multiple
     # feature sets, you need a `.tarpaulin.toml` config file, see

@@ -1,9 +1,4 @@
-#![feature(test)]
-extern crate test;
-
-extern crate aw_datastore;
-extern crate aw_models;
-extern crate aw_query;
+use criterion::{criterion_group, criterion_main};
 
 // TODO: Move me to an appropriate place
 #[macro_export]
@@ -22,9 +17,8 @@ macro_rules! json_map {
 
 #[cfg(test)]
 mod query_benchmarks {
-    use test::Bencher;
-
     use chrono::Duration;
+    use criterion::Criterion;
     use serde_json::json;
     use serde_json::Map;
     use serde_json::Value;
@@ -76,34 +70,43 @@ mod query_benchmarks {
         ds.insert_events(bucketname, &event_list).unwrap();
     }
 
-    #[bench]
-    fn bench_assign(b: &mut Bencher) {
+    pub fn bench_assign(c: &mut Criterion) {
         let ds = setup_datastore();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
-        b.iter(|| {
-            let code = String::from("return a=1;");
-            match aw_query::query(&code, &interval, &ds).unwrap() {
-                aw_query::DataType::None() => (),
-                ref data => panic!("Wrong datatype, {data:?}"),
-            };
+        c.bench_function("bench assign", |b| {
+            b.iter(|| {
+                let code = String::from("return a=1;");
+                match aw_query::query(&code, &interval, &ds).unwrap() {
+                    aw_query::DataType::None() => (),
+                    ref data => panic!("Wrong datatype, {data:?}"),
+                };
+            })
         });
     }
 
-    #[bench]
-    fn bench_many_events(b: &mut Bencher) {
+    pub fn bench_many_events(c: &mut Criterion) {
         let ds = setup_datastore();
         create_bucket(&ds, BUCKETNAME.to_string());
         insert_events(&ds, BUCKETNAME, 5000);
 
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
-        b.iter(|| {
-            let code = String::from(
-                "
+        c.bench_function("bench many events", |b| {
+            b.iter(|| {
+                let code = String::from(
+                    "
                 events = query_bucket(\"testbucket\");
                 return events;
                 ",
-            );
-            aw_query::query(&code, &interval, &ds).unwrap();
+                );
+                aw_query::query(&code, &interval, &ds).unwrap();
+            })
         });
     }
 }
+
+criterion_group!(
+    benches,
+    query_benchmarks::bench_assign,
+    query_benchmarks::bench_many_events
+);
+criterion_main!(benches);

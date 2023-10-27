@@ -1,4 +1,3 @@
-use aw_transform::filter_period_intersect;
 use chrono::Duration;
 use criterion::{criterion_group, criterion_main, Criterion};
 use serde_json::json;
@@ -6,6 +5,7 @@ use serde_json::Map;
 use serde_json::Value;
 
 use aw_models::Event;
+use aw_transform::*;
 
 // TODO: Move me to an appropriate place
 #[macro_export]

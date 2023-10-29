@@ -28,6 +28,7 @@ pub enum SyncMode {
     Both,
 }
 
+#[derive(Debug)]
 pub struct SyncSpec {
     /// Path of sync folder
     pub path: PathBuf,

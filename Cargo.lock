@@ -273,16 +273,20 @@ dependencies = [
 name = "aw-sync"
 version = "0.1.0"
 dependencies = [
+ "appdirs",
  "aw-client-rust",
  "aw-datastore",
  "aw-models",
  "aw-server",
  "chrono",
  "clap",
+ "dirs 3.0.2",
+ "gethostname",
  "log",
  "reqwest",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -621,6 +625,15 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+]
+
+[[package]]
+name = "dirs"
+version = "3.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30baa043103c9d0c2a57cf537cc2f35623889dc0d405e6c3cccfadbc81c71309"
+dependencies = [
+ "dirs-sys",
 ]
 
 [[package]]
@@ -2153,7 +2166,7 @@ version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ccc8076840c4da029af4f87e4e8daeb0fca6b87bbb02e10cb60b791450e11e4"
 dependencies = [
- "dirs",
+ "dirs 4.0.0",
 ]
 
 [[package]]

@@ -38,7 +38,7 @@ function sync_host() {
         BUCKETS="aw-watcher-window_$host,aw-watcher-afk_$host"
 
         echo "Syncing $db to $host"
-        cargo run --bin aw-sync -- $AWSYNCPARAMS sync --mode pull --buckets $BUCKETS
+        cargo run --bin aw-sync -- $AWSYNCPARAMS sync-advanced --mode pull --buckets $BUCKETS
         # TODO: If there are no buckets from the expected host, emit a warning at the end.
         #       (push-script should not have created them to begin with)
     done

@@ -23,7 +23,10 @@ use clap::{Parser, Subcommand};
 use aw_client_rust::blocking::AwClient;
 
 mod accessmethod;
+mod dirs;
 mod sync;
+mod sync_wrapper;
+mod util;
 
 const DEFAULT_PORT: &str = "5600";
 
@@ -63,13 +66,22 @@ struct Opts {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Sync subcommand.
+    /// Sync subcommand (basic)
+    ///
+    /// Pulls remote buckets then pushes local buckets.
+    Sync {
+        /// Host to pull from, optional. Set to "all" to pull from all hosts.
+        #[clap(long)]
+        host: Option<String>,
+    },
+
+    /// Sync subcommand (advanced)
     ///
     /// Pulls remote buckets then pushes local buckets.
     /// First pulls remote buckets in the sync directory to the local aw-server.
     /// Then pushes local buckets from the aw-server to the local sync directory.
     #[clap(arg_required_else_help = true)]
-    Sync {
+    SyncAdvanced {
         /// Date to start syncing from.
         /// If not specified, start from beginning.
         /// NOTE: might be unstable, as count cannot be used to verify integrity of sync.
@@ -118,8 +130,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     let client = AwClient::new(opts.host.as_str(), port, "aw-sync");
 
     match &opts.command {
+        // Perform basic sync
+        Commands::Sync { host } => {
+            // Pull
+            match host {
+                // if host is "all", pull from all hosts
+                Some(host) if host == "all" => {
+                    info!("Pulling from all hosts");
+                    sync_wrapper::pull_all(opts.testing)?;
+                }
+                _ => {
+                    // TODO: make configurable
+                    let hosts = ["erb-main2-arch", "erb-m2.localdomain"];
+                    for host in hosts.iter() {
+                        info!("Pulling from host: {}", host);
+                        sync_wrapper::pull(host, opts.testing)?;
+                    }
+                }
+            }
+
+            // Push
+            info!("Pushing local data");
+            sync_wrapper::push(opts.testing)?;
+            Ok(())
+        }
         // Perform two-way sync
-        Commands::Sync {
+        Commands::SyncAdvanced {
             start_date,
             buckets,
             mode,

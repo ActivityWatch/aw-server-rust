@@ -28,4 +28,4 @@ SYNCDIR="$HOME/ActivityWatchSync/$HOSTNAME"
 AWSYNCPARAMS="--port $PORT --sync-dir $SYNCDIR"
 
 # NOTE: Only sync window and AFK buckets, for now
-cargo run --bin aw-sync --release -- $AWSYNCPARAMS sync --mode push --buckets aw-watcher-window_$HOSTNAME,aw-watcher-afk_$HOSTNAME
+cargo run --bin aw-sync --release -- $AWSYNCPARAMS sync-advanced --mode push --buckets aw-watcher-window_$HOSTNAME,aw-watcher-afk_$HOSTNAME

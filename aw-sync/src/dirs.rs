@@ -3,6 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 
 // TODO: This could be refactored to share logic with aw-server/src/dirs.rs
+// TODO: add proper config support
+#[allow(dead_code)]
 pub fn get_config_dir() -> Result<PathBuf, ()> {
     let mut dir = appdirs::user_config_dir(Some("activitywatch"), None, false)?;
     dir.push("aw-sync");

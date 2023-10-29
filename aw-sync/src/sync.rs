@@ -129,7 +129,9 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
 }
 
 #[allow(dead_code)]
-pub fn list_buckets(client: &AwClient, sync_directory: &Path) -> Result<(), String> {
+pub fn list_buckets(client: &AwClient) -> Result<(), String> {
+    let sync_directory = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
+    let sync_directory = sync_directory.as_path();
     let info = client.get_info().map_err(|e| e.to_string())?;
 
     // FIXME: Incorrect device_id assumption?

@@ -4,11 +4,10 @@ use std::fs;
 use std::net::TcpStream;
 
 use crate::sync::{sync_run, SyncMode, SyncSpec};
-use crate::util::{get_hostname, get_remotes, get_server_port};
 use aw_client_rust::blocking::AwClient;
 
 pub fn pull_all(testing: bool) -> Result<(), Box<dyn Error>> {
-    let hostnames = get_remotes()?;
+    let hostnames = crate::util::get_remotes()?;
     for host in hostnames {
         pull(&host, testing)?
     }
@@ -19,7 +18,7 @@ pub fn pull(host: &str, testing: bool) -> Result<(), Box<dyn Error>> {
     info!("Pulling data from sync server {}", host);
 
     // Port of the main server
-    let port = get_server_port(testing)?;
+    let port = crate::util::get_server_port(testing)?;
 
     // Check if server is running
     if TcpStream::connect(("localhost", port)).is_err() {
@@ -78,8 +77,8 @@ pub fn pull(host: &str, testing: bool) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn push(testing: bool) -> Result<(), Box<dyn Error>> {
-    let hostname = get_hostname()?;
-    let port = get_server_port(testing)?.to_string();
+    let hostname = crate::util::get_hostname()?;
+    let port = crate::util::get_server_port(testing)?.to_string();
 
     let sync_dir = crate::dirs::get_sync_dir()
         .map_err(|_| "Could not get sync dir")?

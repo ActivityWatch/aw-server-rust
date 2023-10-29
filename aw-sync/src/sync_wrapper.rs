@@ -81,10 +81,8 @@ pub fn push(testing: bool) -> Result<(), Box<dyn Error>> {
     let hostname = get_hostname()?;
     let port = get_server_port(testing)?.to_string();
 
-    // TODO: Make this configurable
-    let sync_dir = dirs::home_dir()
-        .unwrap()
-        .join("ActivityWatchSync")
+    let sync_dir = crate::dirs::get_sync_dir()
+        .map_err(|_| "Could not get sync dir")?
         .join(&hostname);
 
     let client = AwClient::new("localhost", port.as_str(), "aw-sync");

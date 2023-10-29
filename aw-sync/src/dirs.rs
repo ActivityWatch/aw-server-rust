@@ -11,18 +11,15 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
 }
 
 pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
-    home_dir()
-        .map(|dir| {
-            dir.join(".config/activitywatch/aw-server-rust")
-                .join(if testing {
-                    "config-testing.toml"
-                } else {
-                    "config.toml"
-                })
-        })
-        .ok_or(())
+    let dir = aw_server::dirs::get_config_dir()?;
+    Ok(dir.join(if testing {
+        "config-testing.toml"
+    } else {
+        "config.toml"
+    }))
 }
 
 pub fn get_sync_dir() -> Result<PathBuf, ()> {
+    // TODO: make this configurable
     home_dir().map(|p| p.join("ActivityWatchSync")).ok_or(())
 }

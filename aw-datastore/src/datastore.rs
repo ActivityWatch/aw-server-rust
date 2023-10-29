@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::NaiveDateTime;
+use chrono::TimeZone;
 use chrono::Utc;
 
 use rusqlite::Connection;
@@ -232,9 +233,9 @@ impl DatastoreInstance {
                 Some(starttime_ns) => {
                     let seconds: i64 = starttime_ns / 1_000_000_000;
                     let subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
-                    Some(DateTime::<Utc>::from_utc(
-                        NaiveDateTime::from_timestamp_opt(seconds, subnanos).unwrap(),
-                        Utc,
+                    Some(TimeZone::from_utc_datetime(
+                        &Utc,
+                        &NaiveDateTime::from_timestamp_opt(seconds, subnanos).unwrap(),
                     ))
                 }
                 None => None,
@@ -245,9 +246,9 @@ impl DatastoreInstance {
                 Some(endtime_ns) => {
                     let seconds: i64 = endtime_ns / 1_000_000_000;
                     let subnanos: u32 = (endtime_ns % 1_000_000_000) as u32;
-                    Some(DateTime::<Utc>::from_utc(
-                        NaiveDateTime::from_timestamp_opt(seconds, subnanos).unwrap(),
-                        Utc,
+                    Some(TimeZone::from_utc_datetime(
+                        &Utc,
+                        &NaiveDateTime::from_timestamp_opt(seconds, subnanos).unwrap(),
                     ))
                 }
                 None => None,
@@ -450,7 +451,7 @@ impl DatastoreInstance {
             }
         };
         for event in &mut events {
-            let starttime_nanos = event.timestamp.timestamp_nanos();
+            let starttime_nanos = event.timestamp.timestamp_nanos_opt().unwrap();
             let duration_nanos = match event.duration.num_nanoseconds() {
                 Some(nanos) => nanos,
                 None => {
@@ -577,7 +578,7 @@ impl DatastoreInstance {
                 )))
             }
         };
-        let starttime_nanos = event.timestamp.timestamp_nanos();
+        let starttime_nanos = event.timestamp.timestamp_nanos_opt().unwrap();
         let duration_nanos = match event.duration.num_nanoseconds() {
             Some(nanos) => nanos,
             None => {
@@ -688,9 +689,9 @@ impl DatastoreInstance {
 
             Ok(Event {
                 id: Some(id),
-                timestamp: DateTime::<Utc>::from_utc(
-                    NaiveDateTime::from_timestamp_opt(time_seconds, time_subnanos).unwrap(),
-                    Utc,
+                timestamp: TimeZone::from_utc_datetime(
+                    &Utc,
+                    &NaiveDateTime::from_timestamp_opt(time_seconds, time_subnanos).unwrap(),
                 ),
                 duration: Duration::nanoseconds(duration_ns),
                 data,
@@ -720,11 +721,11 @@ impl DatastoreInstance {
         let mut list = Vec::new();
 
         let starttime_filter_ns: i64 = match starttime_opt {
-            Some(dt) => dt.timestamp_nanos(),
+            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
             None => 0,
         };
         let endtime_filter_ns: i64 = match endtime_opt {
-            Some(dt) => dt.timestamp_nanos(),
+            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
             None => std::i64::MAX,
         };
         if starttime_filter_ns > endtime_filter_ns {
@@ -783,9 +784,9 @@ impl DatastoreInstance {
 
                 Ok(Event {
                     id: Some(id),
-                    timestamp: DateTime::<Utc>::from_utc(
-                        NaiveDateTime::from_timestamp_opt(time_seconds, time_subnanos).unwrap(),
-                        Utc,
+                    timestamp: TimeZone::from_utc_datetime(
+                        &Utc,
+                        &NaiveDateTime::from_timestamp_opt(time_seconds, time_subnanos).unwrap(),
                     ),
                     duration: Duration::nanoseconds(duration_ns),
                     data,
@@ -819,11 +820,11 @@ impl DatastoreInstance {
         let bucket = self.get_bucket(bucket_id)?;
 
         let starttime_filter_ns: i64 = match starttime_opt {
-            Some(dt) => dt.timestamp_nanos(),
+            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
             None => 0,
         };
         let endtime_filter_ns: i64 = match endtime_opt {
-            Some(dt) => dt.timestamp_nanos(),
+            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
             None => std::i64::MAX,
         };
         if starttime_filter_ns >= endtime_filter_ns {

@@ -55,7 +55,7 @@ impl Default for SyncSpec {
 }
 
 /// Performs a single sync pass
-pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
+pub fn sync_run(client: &AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
     let info = client.get_info().map_err(|e| e.to_string())?;
 
     // FIXME: Here it is assumed that the device_id for the local server is the one used by
@@ -100,14 +100,14 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
     if mode == SyncMode::Pull || mode == SyncMode::Both {
         info!("Pulling...");
         for ds_from in &ds_remotes {
-            sync_datastores(ds_from, &client, false, None, sync_spec);
+            sync_datastores(ds_from, client, false, None, sync_spec);
         }
     }
 
     // Push local server buckets to sync folder
     if mode == SyncMode::Push || mode == SyncMode::Both {
         info!("Pushing...");
-        sync_datastores(&client, &ds_localremote, true, Some(device_id), sync_spec);
+        sync_datastores(client, &ds_localremote, true, Some(device_id), sync_spec);
     }
 
     // Close open database connections

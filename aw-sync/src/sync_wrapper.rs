@@ -6,23 +6,20 @@ use std::net::TcpStream;
 use crate::sync::{sync_run, SyncMode, SyncSpec};
 use aw_client_rust::blocking::AwClient;
 
-pub fn pull_all(testing: bool) -> Result<(), Box<dyn Error>> {
+pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
     let hostnames = crate::util::get_remotes()?;
     for host in hostnames {
-        pull(&host, testing)?
+        pull(&host, client)?
     }
     Ok(())
 }
 
-pub fn pull(host: &str, testing: bool) -> Result<(), Box<dyn Error>> {
+pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
     info!("Pulling data from sync server {}", host);
 
-    // Port of the main server
-    let port = crate::util::get_server_port(testing)?;
-
     // Check if server is running
-    if TcpStream::connect(("localhost", port)).is_err() {
-        return Err(format!("Local server {}:{} not running", host, port).into());
+    if TcpStream::connect(client.baseurl.clone()).is_err() {
+        return Err(format!("Local server {} not running", &client.baseurl).into());
     }
 
     // Path to the sync folder
@@ -59,7 +56,6 @@ pub fn pull(host: &str, testing: bool) -> Result<(), Box<dyn Error>> {
     }
 
     for db in dbs {
-        let client = AwClient::new("localhost", port.to_string().as_str(), "aw-sync");
         let sync_spec = SyncSpec {
             path: sync_dir.clone(),
             path_db: Some(db.path().clone()),
@@ -76,15 +72,12 @@ pub fn pull(host: &str, testing: bool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub fn push(testing: bool) -> Result<(), Box<dyn Error>> {
+pub fn push(client: &AwClient) -> Result<(), Box<dyn Error>> {
     let hostname = crate::util::get_hostname()?;
-    let port = crate::util::get_server_port(testing)?.to_string();
-
     let sync_dir = crate::dirs::get_sync_dir()
         .map_err(|_| "Could not get sync dir")?
         .join(&hostname);
 
-    let client = AwClient::new("localhost", port.as_str(), "aw-sync");
     let sync_spec = SyncSpec {
         path: sync_dir,
         path_db: None,

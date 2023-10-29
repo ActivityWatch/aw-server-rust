@@ -28,8 +28,6 @@ mod sync;
 mod sync_wrapper;
 mod util;
 
-const DEFAULT_PORT: &str = "5600";
-
 #[derive(Parser)]
 #[clap(version = "0.1", author = "Erik Bjäreholt")]
 struct Opts {
@@ -41,8 +39,8 @@ struct Opts {
     host: String,
 
     /// Port of instance to connect to.
-    #[clap(long, default_value = DEFAULT_PORT)]
-    port: String,
+    #[clap(long)]
+    port: Option<String>,
 
     /// Convenience option for using the default testing host and port.
     #[clap(long)]
@@ -59,7 +57,7 @@ enum Commands {
     ///
     /// Pulls remote buckets then pushes local buckets.
     Sync {
-        /// Host to pull from, optional. Set to "all" to pull from all hosts.
+        /// Host(s) to pull from, comma separated. Will pull from all hosts if not specified.
         #[clap(long)]
         host: Option<String>,
     },
@@ -111,37 +109,33 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     aw_server::logging::setup_logger(true, verbose).expect("Failed to setup logging");
 
-    let port = if opts.testing && opts.port == DEFAULT_PORT {
-        "5666"
-    } else {
-        &opts.port
-    };
+    let port = opts
+        .port
+        .or_else(|| Some(crate::util::get_server_port(opts.testing).ok()?.to_string()))
+        .unwrap();
 
-    let client = AwClient::new(opts.host.as_str(), port, "aw-sync");
+    let client = AwClient::new(opts.host.as_str(), port.as_str(), "aw-sync");
 
     match &opts.command {
         // Perform basic sync
         Commands::Sync { host } => {
             // Pull
             match host {
-                // if host is "all", pull from all hosts
-                Some(host) if host == "all" => {
-                    info!("Pulling from all hosts");
-                    sync_wrapper::pull_all(opts.testing)?;
-                }
-                _ => {
-                    // TODO: make configurable
-                    let hosts = ["erb-main2-arch", "erb-m2.localdomain"];
+                Some(host) => {
+                    let hosts: Vec<&str> = host.split(',').collect();
                     for host in hosts.iter() {
                         info!("Pulling from host: {}", host);
-                        sync_wrapper::pull(host, opts.testing)?;
+                        sync_wrapper::pull(host, &client)?;
                     }
+                }
+                None => {
+                    sync_wrapper::pull_all(&client)?;
                 }
             }
 
             // Push
             info!("Pushing local data");
-            sync_wrapper::push(opts.testing)?;
+            sync_wrapper::push(&client)?;
             Ok(())
         }
         // Perform two-way sync
@@ -205,7 +199,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 _ => panic!("Invalid mode"),
             };
 
-            sync::sync_run(client, &sync_spec, mode_enum)
+            sync::sync_run(&client, &sync_spec, mode_enum)
         }
 
         // List all buckets

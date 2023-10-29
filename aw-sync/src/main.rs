@@ -107,7 +107,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Started aw-sync...");
 
-    aw_server::logging::setup_logger(true, verbose).expect("Failed to setup logging");
+    aw_server::logging::setup_logger("aw-sync", opts.testing, verbose)
+        .expect("Failed to setup logging");
 
     let port = opts
         .port
@@ -129,6 +130,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 None => {
+                    info!("Pulling from all hosts");
                     sync_wrapper::pull_all(&client)?;
                 }
             }
@@ -147,7 +149,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sync_db,
         } => {
             let sync_directory = if sync_dir.is_empty() {
-                println!("No sync directory specified, exiting...");
+                error!("No sync directory specified, exiting...");
                 std::process::exit(1);
             } else {
                 Path::new(&sync_dir)

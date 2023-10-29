@@ -53,15 +53,15 @@ pub fn get_cache_dir() -> Result<PathBuf, ()> {
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn get_log_dir() -> Result<PathBuf, ()> {
+pub fn get_log_dir(module: &str) -> Result<PathBuf, ()> {
     let mut dir = appdirs::user_log_dir(Some("activitywatch"), None)?;
-    dir.push("aw-server-rust");
+    dir.push(module);
     fs::create_dir_all(dir.clone()).expect("Unable to create log dir");
     Ok(dir)
 }
 
 #[cfg(target_os = "android")]
-pub fn get_log_dir() -> Result<PathBuf, ()> {
+pub fn get_log_dir(module: &str) -> Result<PathBuf, ()> {
     panic!("not implemented on Android");
 }
 
@@ -87,7 +87,7 @@ fn test_get_dirs() {
     set_android_data_dir("/test");
 
     get_cache_dir().unwrap();
-    get_log_dir().unwrap();
+    get_log_dir("aw-server-rust").unwrap();
     db_path(true).unwrap();
     db_path(false).unwrap();
 }

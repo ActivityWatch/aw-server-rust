@@ -15,10 +15,13 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
-    info!("Pulling data from sync server {}", host);
-
     // Check if server is running
-    if TcpStream::connect(client.baseurl.clone()).is_err() {
+    let parts: Vec<&str> = client.baseurl.split("://").collect();
+    let host_parts: Vec<&str> = parts[1].split(':').collect();
+    let addr = host_parts[0];
+    let port = host_parts[1].parse::<u16>().unwrap();
+
+    if TcpStream::connect((addr, port)).is_err() {
         return Err(format!("Local server {} not running", &client.baseurl).into());
     }
 
@@ -41,14 +44,21 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
 
     // filter out dbs that are smaller than 50kB (workaround for trying to sync empty database
     // files that are spuriously created somewhere)
-    let dbs = dbs
+    let mut dbs = dbs
         .into_iter()
         .filter(|entry| entry.metadata().map(|m| m.len() > 50_000).unwrap_or(false))
         .collect::<Vec<_>>();
 
-    // if more than one db, error
+    // if more than one db, warn and use the largest one
     if dbs.len() > 1 {
-        return Err("More than one db found in sync folder".into());
+        warn!(
+            "More than one db found in sync folder for host, choosing largest db {:?}",
+            dbs
+        );
+        dbs = vec![dbs
+            .into_iter()
+            .max_by_key(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
+            .unwrap()];
     }
     // if no db, error
     if dbs.is_empty() {
@@ -65,7 +75,6 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
             ]),
             start: None,
         };
-        info!("Pulling data with spec {:?}", sync_spec);
         sync_run(client, &sync_spec, SyncMode::Pull)?;
     }
 

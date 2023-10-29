@@ -14,3 +14,10 @@ fancy-regex = "0.11.0"
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 aw-models = { path = "../aw-models" }
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "bench"
+harness = false

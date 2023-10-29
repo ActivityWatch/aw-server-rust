@@ -1,14 +1,8 @@
-#![feature(test)]
-extern crate aw_models;
-extern crate aw_transform;
-extern crate serde_json;
-extern crate test;
-
 use chrono::Duration;
+use criterion::{criterion_group, criterion_main, Criterion};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
-use test::Bencher;
 
 use aw_models::Event;
 use aw_transform::*;
@@ -46,11 +40,15 @@ fn create_events(num_events: i64) -> Vec<Event> {
     event_list
 }
 
-#[bench]
-fn bench_filter_period_intersect(b: &mut Bencher) {
+fn bench_filter_period_intersect(c: &mut Criterion) {
     let events2 = create_events(1000);
-    b.iter(|| {
-        let events1 = create_events(1000);
-        filter_period_intersect(&events1, &events2);
+    c.bench_function("1000 events", |b| {
+        b.iter(|| {
+            let events1 = create_events(1000);
+            filter_period_intersect(&events1, &events2);
+        })
     });
 }
+
+criterion_group!(benches, bench_filter_period_intersect);
+criterion_main!(benches);

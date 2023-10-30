@@ -7,10 +7,6 @@ aw-server-rust
 
 A reimplementation of aw-server in Rust.
 
-Caveats:
-
- - Lots of TODO and FIXME comments
-
 Features missing compared to the Python implementation of aw-server:
 
  - API explorer (Swagger/OpenAPI)

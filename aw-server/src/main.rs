@@ -70,7 +70,8 @@ async fn main() -> Result<(), rocket::Error> {
         testing = true;
     }
 
-    logging::setup_logger(testing, opts.verbose).expect("Failed to setup logging");
+    logging::setup_logger("aw-server-rust", testing, opts.verbose)
+        .expect("Failed to setup logging");
 
     if testing {
         info!("Running server in Testing mode");

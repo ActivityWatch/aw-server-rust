@@ -25,7 +25,8 @@ else
 fi
 
 SYNCDIR="$HOME/ActivityWatchSync/$HOSTNAME"
-AWSYNCPARAMS="--port $PORT --sync-dir $SYNCDIR"
+AWSYNC_ARGS="--port $PORT"
+AWSYNC_ARGS_ADV="--sync-dir $SYNCDIR"
 
 # NOTE: Only sync window and AFK buckets, for now
-cargo run --bin aw-sync --release -- $AWSYNCPARAMS sync --mode push --buckets aw-watcher-window_$HOSTNAME,aw-watcher-afk_$HOSTNAME
+cargo run --bin aw-sync --release -- $AWSYNC_ARGS sync-advanced $AWSYNC_ARGS_ADV --mode push --buckets aw-watcher-window_$HOSTNAME,aw-watcher-afk_$HOSTNAME

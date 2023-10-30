@@ -23,9 +23,10 @@ use clap::{Parser, Subcommand};
 use aw_client_rust::blocking::AwClient;
 
 mod accessmethod;
+mod dirs;
 mod sync;
-
-const DEFAULT_PORT: &str = "5600";
+mod sync_wrapper;
+mod util;
 
 #[derive(Parser)]
 #[clap(version = "0.1", author = "Erik Bjäreholt")]
@@ -38,8 +39,8 @@ struct Opts {
     host: String,
 
     /// Port of instance to connect to.
-    #[clap(long, default_value = DEFAULT_PORT)]
-    port: String,
+    #[clap(long)]
+    port: Option<String>,
 
     /// Convenience option for using the default testing host and port.
     #[clap(long)]
@@ -48,42 +49,53 @@ struct Opts {
     /// Enable debug logging.
     #[clap(long)]
     verbose: bool,
-
-    /// Full path to sync directory.
-    /// If not specified, exit.
-    #[clap(long)]
-    sync_dir: String,
-
-    /// Full path to sync db file
-    /// Useful for syncing buckets from a specific db file in the sync directory.
-    /// Must be a valid absolute path to a file in the sync directory.
-    #[clap(long)]
-    sync_db: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Sync subcommand.
+    /// Sync subcommand (basic)
+    ///
+    /// Pulls remote buckets then pushes local buckets.
+    Sync {
+        /// Host(s) to pull from, comma separated. Will pull from all hosts if not specified.
+        #[clap(long)]
+        host: Option<String>,
+    },
+
+    /// Sync subcommand (advanced)
     ///
     /// Pulls remote buckets then pushes local buckets.
     /// First pulls remote buckets in the sync directory to the local aw-server.
     /// Then pushes local buckets from the aw-server to the local sync directory.
     #[clap(arg_required_else_help = true)]
-    Sync {
+    SyncAdvanced {
         /// Date to start syncing from.
         /// If not specified, start from beginning.
         /// NOTE: might be unstable, as count cannot be used to verify integrity of sync.
         /// Format: YYYY-MM-DD
         #[clap(long)]
         start_date: Option<String>,
+
         /// Specify buckets to sync using a comma-separated list.
         /// If not specified, all buckets will be synced.
         #[clap(long)]
         buckets: Option<String>,
+
         /// Mode to sync in. Can be "push", "pull", or "both".
         /// Defaults to "both".
         #[clap(long, default_value = "both")]
         mode: String,
+
+        /// Full path to sync directory.
+        /// If not specified, exit.
+        #[clap(long)]
+        sync_dir: String,
+
+        /// Full path to sync db file
+        /// Useful for syncing buckets from a specific db file in the sync directory.
+        /// Must be a valid absolute path to a file in the sync directory.
+        #[clap(long)]
+        sync_db: Option<String>,
     },
     /// List buckets and their sync status.
     List {},
@@ -95,35 +107,59 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Started aw-sync...");
 
-    aw_server::logging::setup_logger(true, verbose).expect("Failed to setup logging");
+    aw_server::logging::setup_logger("aw-sync", opts.testing, verbose)
+        .expect("Failed to setup logging");
 
-    let sync_directory = if opts.sync_dir.is_empty() {
-        println!("No sync directory specified, exiting...");
-        std::process::exit(1);
-    } else {
-        Path::new(&opts.sync_dir)
-    };
-    info!("Using sync dir: {}", sync_directory.display());
+    let port = opts
+        .port
+        .or_else(|| Some(crate::util::get_server_port(opts.testing).ok()?.to_string()))
+        .unwrap();
 
-    if let Some(sync_db) = &opts.sync_db {
-        info!("Using sync db: {}", sync_db);
-    }
-
-    let port = if opts.testing && opts.port == DEFAULT_PORT {
-        "5666"
-    } else {
-        &opts.port
-    };
-
-    let client = AwClient::new(opts.host.as_str(), port, "aw-sync");
+    let client = AwClient::new(opts.host.as_str(), port.as_str(), "aw-sync");
 
     match &opts.command {
+        // Perform basic sync
+        Commands::Sync { host } => {
+            // Pull
+            match host {
+                Some(host) => {
+                    let hosts: Vec<&str> = host.split(',').collect();
+                    for host in hosts.iter() {
+                        info!("Pulling from host: {}", host);
+                        sync_wrapper::pull(host, &client)?;
+                    }
+                }
+                None => {
+                    info!("Pulling from all hosts");
+                    sync_wrapper::pull_all(&client)?;
+                }
+            }
+
+            // Push
+            info!("Pushing local data");
+            sync_wrapper::push(&client)?;
+            Ok(())
+        }
         // Perform two-way sync
-        Commands::Sync {
+        Commands::SyncAdvanced {
             start_date,
             buckets,
             mode,
+            sync_dir,
+            sync_db,
         } => {
+            let sync_directory = if sync_dir.is_empty() {
+                error!("No sync directory specified, exiting...");
+                std::process::exit(1);
+            } else {
+                Path::new(&sync_dir)
+            };
+            info!("Using sync dir: {}", sync_directory.display());
+
+            if let Some(sync_db) = &sync_db {
+                info!("Using sync db: {}", sync_db);
+            }
+
             let start: Option<DateTime<Utc>> = start_date.as_ref().map(|date| {
                 println!("{}", date.clone());
                 chrono::NaiveDate::parse_from_str(&date.clone(), "%Y-%m-%d")
@@ -140,7 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .map(|b| b.split(',').map(|s| s.to_string()).collect());
 
-            let sync_db: Option<PathBuf> = opts.sync_db.as_ref().map(|db| {
+            let sync_db: Option<PathBuf> = sync_db.as_ref().map(|db| {
                 let db_path = Path::new(db);
                 if !db_path.is_absolute() {
                     panic!("Sync db path must be absolute");
@@ -165,11 +201,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 _ => panic!("Invalid mode"),
             };
 
-            sync::sync_run(client, &sync_spec, mode_enum)
+            sync::sync_run(&client, &sync_spec, mode_enum)
         }
 
         // List all buckets
-        Commands::List {} => sync::list_buckets(&client, sync_directory),
+        Commands::List {} => sync::list_buckets(&client),
     }?;
 
     // Needed to give the datastores some time to commit before program is shut down.

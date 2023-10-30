@@ -9,7 +9,6 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +27,7 @@ pub enum SyncMode {
     Both,
 }
 
+#[derive(Debug)]
 pub struct SyncSpec {
     /// Path of sync folder
     pub path: PathBuf,
@@ -54,7 +54,7 @@ impl Default for SyncSpec {
 }
 
 /// Performs a single sync pass
-pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
+pub fn sync_run(client: &AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
     let info = client.get_info().map_err(|e| e.to_string())?;
 
     // FIXME: Here it is assumed that the device_id for the local server is the one used by
@@ -64,7 +64,7 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
 
     // FIXME: Bad device_id assumption?
     let ds_localremote = setup_local_remote(sync_spec.path.as_path(), device_id)?;
-    let remote_dbfiles = find_remotes_nonlocal(
+    let remote_dbfiles = crate::util::find_remotes_nonlocal(
         sync_spec.path.as_path(),
         device_id,
         sync_spec.path_db.as_ref(),
@@ -99,14 +99,14 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
     if mode == SyncMode::Pull || mode == SyncMode::Both {
         info!("Pulling...");
         for ds_from in &ds_remotes {
-            sync_datastores(ds_from, &client, false, None, sync_spec);
+            sync_datastores(ds_from, client, false, None, sync_spec);
         }
     }
 
     // Push local server buckets to sync folder
     if mode == SyncMode::Push || mode == SyncMode::Both {
         info!("Pushing...");
-        sync_datastores(&client, &ds_localremote, true, Some(device_id), sync_spec);
+        sync_datastores(client, &ds_localremote, true, Some(device_id), sync_spec);
     }
 
     // Close open database connections
@@ -128,14 +128,16 @@ pub fn sync_run(client: AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resul
 }
 
 #[allow(dead_code)]
-pub fn list_buckets(client: &AwClient, sync_directory: &Path) -> Result<(), String> {
+pub fn list_buckets(client: &AwClient) -> Result<(), String> {
+    let sync_directory = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
+    let sync_directory = sync_directory.as_path();
     let info = client.get_info().map_err(|e| e.to_string())?;
 
     // FIXME: Incorrect device_id assumption?
     let device_id = info.device_id.as_str();
     let ds_localremote = setup_local_remote(sync_directory, device_id)?;
 
-    let remote_dbfiles = find_remotes_nonlocal(sync_directory, device_id, None);
+    let remote_dbfiles = crate::util::find_remotes_nonlocal(sync_directory, device_id, None);
     info!("Found remotes: {:?}", remote_dbfiles);
 
     // TODO: Check for compatible remote db version before opening
@@ -170,47 +172,6 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, String>
 
     let ds_localremote = create_datastore(&dbfile);
     Ok(ds_localremote)
-}
-
-/// Returns a list of all remote dbs
-fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let dbs = fs::read_dir(sync_directory)?
-        .map(|res| res.ok().unwrap().path())
-        .filter(|p| p.is_dir())
-        .flat_map(|d| fs::read_dir(d).unwrap())
-        .map(|res| res.ok().unwrap().path())
-        .filter(|path| path.extension().unwrap_or_else(|| OsStr::new("")) == "db")
-        .collect();
-    Ok(dbs)
-}
-
-/// Returns a list of all remotes, excluding local ones
-fn find_remotes_nonlocal(
-    sync_directory: &Path,
-    device_id: &str,
-    sync_db: Option<&PathBuf>,
-) -> Vec<PathBuf> {
-    let remotes_all = find_remotes(sync_directory).unwrap();
-    remotes_all
-        .into_iter()
-        // Filter out own remote
-        .filter(|path| {
-            !(path
-                .clone()
-                .into_os_string()
-                .into_string()
-                .unwrap()
-                .contains(device_id))
-        })
-        // If sync_db is Some, return only remotes in that path
-        .filter(|path| {
-            if let Some(sync_db) = sync_db {
-                path.starts_with(sync_db)
-            } else {
-                true
-            }
-        })
-        .collect()
 }
 
 pub fn create_datastore(path: &Path) -> Datastore {

@@ -34,7 +34,8 @@ pub fn filter_period_intersect(events: Vec<Event>, filter_events: Vec<Event>) ->
     loop {
         let event_endtime = cur_event.calculate_endtime();
         let filter_endtime = cur_filter_event.calculate_endtime();
-        if cur_event.duration == Duration::seconds(0) || event_endtime <= cur_filter_event.timestamp {
+        if cur_event.duration == Duration::seconds(0) || event_endtime <= cur_filter_event.timestamp
+        {
             match events_iter.next() {
                 Some(e) => {
                     cur_event = e;
@@ -57,7 +58,7 @@ pub fn filter_period_intersect(events: Vec<Event>, filter_events: Vec<Event>) ->
         e.timestamp = std::cmp::max(e.timestamp, cur_filter_event.timestamp);
         let endtime = std::cmp::min(event_endtime, filter_endtime);
         e.duration = endtime - e.timestamp;
-        
+
         // trim current event
         let old_timestamp = cur_event.timestamp;
         cur_event.timestamp = e.timestamp + e.duration;
@@ -104,7 +105,8 @@ mod tests {
             data: json_map! {"test": json!(1)},
         };
 
-        let filtered_events = filter_period_intersect(vec![e1, e2, e3, e4, e5], vec![filter_event.clone()]);
+        let filtered_events =
+            filter_period_intersect(vec![e1, e2, e3, e4, e5], vec![filter_event.clone()]);
         assert_eq!(filtered_events.len(), 3);
         assert_eq!(filtered_events[0].duration, Duration::milliseconds(500));
         assert_eq!(filtered_events[1].duration, Duration::milliseconds(1000));

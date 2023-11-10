@@ -32,7 +32,6 @@ pub fn filter_period_intersect(events: Vec<Event>, filter_events: Vec<Event>) ->
     let mut cur_filter_event = filter_events_iter.next().unwrap();
 
     loop {
-        // TODO: what about duration = 0?
         let event_endtime = cur_event.calculate_endtime();
         let filter_endtime = cur_filter_event.calculate_endtime();
         if cur_event.duration == Duration::seconds(0) || event_endtime <= cur_filter_event.timestamp {

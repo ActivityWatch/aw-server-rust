@@ -506,7 +506,7 @@ mod qfunctions {
         let events: Vec<Event> = (&args[0]).try_into()?;
         let filter_events: Vec<Event> = (&args[1]).try_into()?;
 
-        let mut filtered_events = aw_transform::filter_period_intersect(&events, &filter_events);
+        let mut filtered_events = aw_transform::filter_period_intersect(events, filter_events);
         let mut filtered_tagged_events = Vec::new();
         for event in filtered_events.drain(..) {
             filtered_tagged_events.push(DataType::Event(event));

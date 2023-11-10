@@ -45,7 +45,7 @@ fn bench_filter_period_intersect(c: &mut Criterion) {
     c.bench_function("1000 events", |b| {
         b.iter(|| {
             let events1 = create_events(1000);
-            filter_period_intersect(&events1, &events2);
+            filter_period_intersect(events1, events2.clone());
         })
     });
 }

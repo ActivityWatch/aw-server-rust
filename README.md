@@ -13,12 +13,6 @@ Features missing compared to the Python implementation of aw-server:
 
 ### How to compile
 
-Install rust nightly with `rustup`:
-
-```sh
-rustup default nightly
-```
-
 Build with `cargo`:
 
 ```sh

@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|a| Ok(a))
         .unwrap_or_else(||util::get_server_port(opts.testing))?;
 
-    let baseurl = reqwest::Url::parse(&format!("https://{}:{}", opts.host, port))?;
+    let baseurl = reqwest::Url::parse(&format!("http://{}:{}", opts.host, port))?;
 
     let hostname = util::get_hostname()?;
 

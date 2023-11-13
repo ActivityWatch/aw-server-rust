@@ -67,7 +67,8 @@ fn contains_subdir_with_db_file(dir: &std::path::Path) -> bool {
 /// Only returns folders that match ./{host}/{device_id}/*.db
 // TODO: share logic with find_remotes and find_remotes_nonlocal
 pub fn get_remotes() -> Result<Vec<String>, Box<dyn Error>> {
-    let sync_root_dir = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
+    let sync_root_dir = crate::dirs::get_sync_dir()?;
+    fs::create_dir_all(&sync_root_dir)?;
     let hostnames = fs::read_dir(sync_root_dir)?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().is_dir() && contains_subdir_with_db_file(&entry.path()))

@@ -15,13 +15,13 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
-    // Check if server is running
-    let parts: Vec<&str> = client.baseurl.split("://").collect();
-    let host_parts: Vec<&str> = parts[1].split(':').collect();
-    let addr = host_parts[0];
-    let port = host_parts[1].parse::<u16>().unwrap();
+    
 
-    if TcpStream::connect((addr, port)).is_err() {
+    let socket_addrs = client.baseurl.socket_addrs(||None)?;
+    let socket_addr = socket_addrs.get(0).ok_or("Unable to resolve baseurl into socket address")?;
+
+    // Check if server is running
+    if TcpStream::connect(socket_addr).is_err() {
         return Err(format!("Local server {} not running", &client.baseurl).into());
     }
 
@@ -44,7 +44,7 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
 
     // filter out dbs that are smaller than 50kB (workaround for trying to sync empty database
     // files that are spuriously created somewhere)
-    let mut dbs = dbs
+    let dbs = dbs
         .into_iter()
         .filter(|entry| entry.metadata().map(|m| m.len() > 50_000).unwrap_or(false))
         .collect::<Vec<_>>();
@@ -55,28 +55,23 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
             "More than one db found in sync folder for host, choosing largest db {:?}",
             dbs
         );
-        dbs = vec![dbs
-            .into_iter()
-            .max_by_key(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
-            .unwrap()];
-    }
-    // if no db, error
-    if dbs.is_empty() {
-        return Err(format!("No db found in sync folder {:?}", sync_dir).into());
     }
 
-    for db in dbs {
-        let sync_spec = SyncSpec {
-            path: sync_dir.clone(),
-            path_db: Some(db.path().clone()),
-            buckets: Some(vec![
-                format!("aw-watcher-window_{}", host),
-                format!("aw-watcher-afk_{}", host),
-            ]),
-            start: None,
-        };
-        sync_run(client, &sync_spec, SyncMode::Pull)?;
-    }
+    let db = dbs
+            .into_iter()
+            .max_by_key(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
+            .ok_or_else(||format!("No db found in sync folder {:?}", sync_dir))?;
+    
+    let sync_spec = SyncSpec {
+        path: sync_dir.clone(),
+        path_db: Some(db.path().clone()),
+        buckets: Some(vec![
+            format!("aw-watcher-window_{}", host),
+            format!("aw-watcher-afk_{}", host),
+        ]),
+        start: None,
+    };
+    sync_run(client, &sync_spec, SyncMode::Pull)?;
 
     Ok(())
 }

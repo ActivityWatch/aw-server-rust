@@ -17,7 +17,7 @@ pub use aw_models::{Bucket, BucketMetadata, Event};
 
 pub struct AwClient {
     client: reqwest::Client,
-    pub baseurl: String,
+    pub baseurl: reqwest::Url,
     pub name: String,
     pub hostname: String,
 }
@@ -29,13 +29,11 @@ impl std::fmt::Debug for AwClient {
 }
 
 impl AwClient {
-    pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
-        let baseurl = format!("http://{ip}:{port}");
+    pub fn new(baseurl: reqwest::Url, name: &str, hostname: String) -> AwClient {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap();
-        let hostname = gethostname::gethostname().into_string().unwrap();
         AwClient {
             client,
             baseurl,
@@ -47,7 +45,7 @@ impl AwClient {
     pub async fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
         let bucket = self
-            .client
+            .client            
             .get(url)
             .send()
             .await?

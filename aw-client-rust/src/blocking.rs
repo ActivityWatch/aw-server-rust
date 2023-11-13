@@ -10,7 +10,7 @@ use super::AwClient as AsyncAwClient;
 
 pub struct AwClient {
     client: AsyncAwClient,
-    pub baseurl: String,
+    pub baseurl: reqwest::Url,
     pub name: String,
     pub hostname: String,
 }
@@ -38,8 +38,8 @@ macro_rules! proxy_method
 }
 
 impl AwClient {
-    pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
-        let async_client = AsyncAwClient::new(ip, port, name);
+    pub fn new(baseurl: reqwest::Url, name: &str, hostname: String) -> AwClient {
+        let async_client = AsyncAwClient::new(baseurl, name, hostname);
 
         AwClient {
             baseurl: async_client.baseurl.clone(),

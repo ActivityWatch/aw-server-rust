@@ -60,10 +60,9 @@ mod test {
 
     #[test]
     fn test_full() {
-        let ip = "127.0.0.1";
-        let port: String = PORT.to_string();
         let clientname = "aw-client-rust-test";
-        let client: AwClient = AwClient::new(ip, &port, clientname);
+        let url = reqwest::Url::parse(format!("https://127.0.0.1:{}", PORT).as_str()).unwrap();
+        let client: AwClient = AwClient::new(url, clientname, gethostname::gethostname().to_str().unwrap().to_string());
 
         let shutdown_handler = setup_testserver();
 

@@ -61,8 +61,8 @@ mod test {
     #[test]
     fn test_full() {
         let clientname = "aw-client-rust-test";
-        let url = reqwest::Url::parse(format!("http://127.0.0.1:{}", PORT).as_str()).unwrap();
-        let client: AwClient = AwClient::new(url, clientname, gethostname::gethostname().to_str().unwrap().to_string());
+        
+        let client: AwClient = AwClient::new("127.0.0.1", PORT, clientname).expect("Client creation failed");
 
         let shutdown_handler = setup_testserver();
 

@@ -6,13 +6,6 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub fn get_hostname() -> Result<String, Box<dyn Error>> {
-    let hostname = gethostname::gethostname()
-        .into_string()
-        .map_err(|_| "Failed to convert hostname to string")?;
-    Ok(hostname)
-}
-
 /// Returns the port of the local aw-server instance
 pub fn get_server_port(testing: bool) -> Result<u16, Box<dyn Error>> {
     // TODO: get aw-server config more reliably

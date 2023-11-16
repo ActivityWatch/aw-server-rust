@@ -7,7 +7,7 @@ extern crate tokio;
 
 pub mod blocking;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, error::Error};
 use std::vec::Vec;
 
 use chrono::{DateTime, Utc};
@@ -28,18 +28,26 @@ impl std::fmt::Debug for AwClient {
     }
 }
 
+fn get_hostname() -> String {
+     return gethostname::gethostname()
+        .to_string_lossy()
+        .to_string();
+}
+
 impl AwClient {
-    pub fn new(baseurl: reqwest::Url, name: &str, hostname: String) -> AwClient {
+    pub fn new(host: &str, port: u16, name: &str) -> Result<AwClient, Box<dyn Error>> {
+        let baseurl = reqwest::Url::parse(&format!("http://{}:{}", host, port))?;
+        let hostname = get_hostname();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap();
-        AwClient {
+            .build()?;
+
+        Ok(AwClient {
             client,
             baseurl,
             name: name.to_string(),
             hostname,
-        }
+        })
     }
 
     pub async fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {

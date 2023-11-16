@@ -126,11 +126,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|a| Ok(a))
         .unwrap_or_else(||util::get_server_port(opts.testing))?;
 
-    let baseurl = reqwest::Url::parse(&format!("http://{}:{}", opts.host, port))?;
-
-    let hostname = util::get_hostname()?;
-
-    let client = AwClient::new(baseurl, "aw-sync", hostname);
+    let client = AwClient::new(&opts.host, port, "aw-sync")?;
 
     match opts.command {
         // Perform basic sync

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, error::Error};
 use std::future::Future;
 use std::vec::Vec;
 
@@ -38,15 +38,15 @@ macro_rules! proxy_method
 }
 
 impl AwClient {
-    pub fn new(baseurl: reqwest::Url, name: &str, hostname: String) -> AwClient {
-        let async_client = AsyncAwClient::new(baseurl, name, hostname);
+    pub fn new(host: &str, port: u16, name: &str) -> Result<AwClient, Box<dyn Error>> {
+        let async_client = AsyncAwClient::new(host, port, name)?;
 
-        AwClient {
+        Ok(AwClient {
             baseurl: async_client.baseurl.clone(),
             name: async_client.name.clone(),
             hostname: async_client.hostname.clone(),
             client: async_client,
-        }
+        })
     }
 
     proxy_method!(get_bucket, Bucket, bucketname: &str);

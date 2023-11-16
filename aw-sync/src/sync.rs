@@ -22,8 +22,7 @@ use clap::ValueEnum;
 
 use crate::accessmethod::AccessMethod;
 
-#[derive(PartialEq, Eq, Copy, Clone)]
-#[derive(ValueEnum)]
+#[derive(PartialEq, Eq, Copy, Clone, ValueEnum)]
 pub enum SyncMode {
     Push,
     Pull,
@@ -57,7 +56,11 @@ impl Default for SyncSpec {
 }
 
 /// Performs a single sync pass
-pub fn sync_run(client: &AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), Box<dyn Error>> {
+pub fn sync_run(
+    client: &AwClient,
+    sync_spec: &SyncSpec,
+    mode: SyncMode,
+) -> Result<(), Box<dyn Error>> {
     let info = client.get_info()?;
 
     // FIXME: Here it is assumed that the device_id for the local server is the one used by

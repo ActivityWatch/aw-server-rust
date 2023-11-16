@@ -100,16 +100,12 @@ enum Commands {
     List {},
 }
 
-fn parse_start_date(arg: &str) -> Result<DateTime<Utc>, chrono::ParseError>
-{
+fn parse_start_date(arg: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
     chrono::NaiveDate::parse_from_str(arg, "%Y-%m-%d")
-        .map(|nd| {
-            nd.and_time(chrono::NaiveTime::MIN).and_utc()
-        })
+        .map(|nd| nd.and_time(chrono::NaiveTime::MIN).and_utc())
 }
 
-fn parse_list(arg: &str) -> Result<Vec<String>, clap::Error>
-{
+fn parse_list(arg: &str) -> Result<Vec<String>, clap::Error> {
     Ok(arg.split(',').map(|s| s.to_string()).collect())
 }
 
@@ -124,7 +120,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let port = opts
         .port
         .map(|a| Ok(a))
-        .unwrap_or_else(||util::get_server_port(opts.testing))?;
+        .unwrap_or_else(|| util::get_server_port(opts.testing))?;
 
     let client = AwClient::new(&opts.host, port, "aw-sync")?;
 
@@ -157,7 +153,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             sync_dir,
             sync_db,
         } => {
-
             if !sync_dir.is_absolute() {
                 Err("Sync dir must be absolute")?
             }

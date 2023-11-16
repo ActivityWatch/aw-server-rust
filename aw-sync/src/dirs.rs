@@ -7,7 +7,8 @@ use std::path::PathBuf;
 // TODO: add proper config support
 #[allow(dead_code)]
 pub fn get_config_dir() -> Result<PathBuf, Box<dyn Error>> {
-    let mut dir = appdirs::user_config_dir(Some("activitywatch"), None, false).map_err(|_|"Unable to read user config dir")?;
+    let mut dir = appdirs::user_config_dir(Some("activitywatch"), None, false)
+        .map_err(|_| "Unable to read user config dir")?;
     dir.push("aw-sync");
     fs::create_dir_all(dir.clone())?;
     Ok(dir)

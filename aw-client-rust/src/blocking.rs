@@ -1,6 +1,6 @@
-use std::{collections::HashMap, error::Error};
 use std::future::Future;
 use std::vec::Vec;
+use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};
 

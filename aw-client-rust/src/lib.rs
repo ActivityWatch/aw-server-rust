@@ -7,8 +7,8 @@ extern crate tokio;
 
 pub mod blocking;
 
-use std::{collections::HashMap, error::Error};
 use std::vec::Vec;
+use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};
 use serde_json::Map;
@@ -29,9 +29,7 @@ impl std::fmt::Debug for AwClient {
 }
 
 fn get_hostname() -> String {
-     return gethostname::gethostname()
-        .to_string_lossy()
-        .to_string();
+    return gethostname::gethostname().to_string_lossy().to_string();
 }
 
 impl AwClient {
@@ -53,7 +51,7 @@ impl AwClient {
     pub async fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
         let bucket = self
-            .client            
+            .client
             .get(url)
             .send()
             .await?

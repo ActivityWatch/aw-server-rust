@@ -15,10 +15,10 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
-    
-
-    let socket_addrs = client.baseurl.socket_addrs(||None)?;
-    let socket_addr = socket_addrs.get(0).ok_or("Unable to resolve baseurl into socket address")?;
+    let socket_addrs = client.baseurl.socket_addrs(|| None)?;
+    let socket_addr = socket_addrs
+        .get(0)
+        .ok_or("Unable to resolve baseurl into socket address")?;
 
     // Check if server is running
     if TcpStream::connect(socket_addr).is_err() {
@@ -58,10 +58,10 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
     }
 
     let db = dbs
-            .into_iter()
-            .max_by_key(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
-            .ok_or_else(||format!("No db found in sync folder {:?}", sync_dir))?;
-    
+        .into_iter()
+        .max_by_key(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
+        .ok_or_else(|| format!("No db found in sync folder {:?}", sync_dir))?;
+
     let sync_spec = SyncSpec {
         path: sync_dir.clone(),
         path_db: Some(db.path().clone()),

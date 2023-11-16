@@ -61,8 +61,9 @@ mod test {
     #[test]
     fn test_full() {
         let clientname = "aw-client-rust-test";
-        
-        let client: AwClient = AwClient::new("127.0.0.1", PORT, clientname).expect("Client creation failed");
+
+        let client: AwClient =
+            AwClient::new("127.0.0.1", PORT, clientname).expect("Client creation failed");
 
         let shutdown_handler = setup_testserver();
 

@@ -49,7 +49,7 @@ fn test_bucket() {
         id: "id".to_string(),
         _type: "type".to_string(),
         client: "client".to_string(),
-        hostname: "hostname".to_string(),
+        hostname: "hostname".into(),
         created: None,
         data: json_map! {},
         metadata: BucketMetadata::default(),

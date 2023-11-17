@@ -9,6 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
+use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,10 +18,11 @@ use chrono::{DateTime, Utc};
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Bucket, Event};
+use clap::ValueEnum;
 
 use crate::accessmethod::AccessMethod;
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Copy, Clone, ValueEnum)]
 pub enum SyncMode {
     Push,
     Pull,
@@ -54,8 +56,12 @@ impl Default for SyncSpec {
 }
 
 /// Performs a single sync pass
-pub fn sync_run(client: &AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Result<(), String> {
-    let info = client.get_info().map_err(|e| e.to_string())?;
+pub fn sync_run(
+    client: &AwClient,
+    sync_spec: &SyncSpec,
+    mode: SyncMode,
+) -> Result<(), Box<dyn Error>> {
+    let info = client.get_info()?;
 
     // FIXME: Here it is assumed that the device_id for the local server is the one used by
     // aw-server-rust, which is not necessarily true (aw-server-python has seperate device_id).
@@ -128,10 +134,10 @@ pub fn sync_run(client: &AwClient, sync_spec: &SyncSpec, mode: SyncMode) -> Resu
 }
 
 #[allow(dead_code)]
-pub fn list_buckets(client: &AwClient) -> Result<(), String> {
+pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
     let sync_directory = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
     let sync_directory = sync_directory.as_path();
-    let info = client.get_info().map_err(|e| e.to_string())?;
+    let info = client.get_info()?;
 
     // FIXME: Incorrect device_id assumption?
     let device_id = info.device_id.as_str();
@@ -156,12 +162,12 @@ pub fn list_buckets(client: &AwClient) -> Result<(), String> {
     Ok(())
 }
 
-fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, String> {
+fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn Error>> {
     // FIXME: Don't run twice if already exists
-    fs::create_dir_all(path).unwrap();
+    fs::create_dir_all(path)?;
 
     let remotedir = path.join(device_id);
-    fs::create_dir_all(&remotedir).unwrap();
+    fs::create_dir_all(&remotedir)?;
 
     let dbfile = remotedir.join("test.db");
 

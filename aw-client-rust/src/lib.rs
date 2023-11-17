@@ -7,8 +7,8 @@ extern crate tokio;
 
 pub mod blocking;
 
-use std::collections::HashMap;
 use std::vec::Vec;
+use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};
 use serde_json::Map;
@@ -17,7 +17,7 @@ pub use aw_models::{Bucket, BucketMetadata, Event};
 
 pub struct AwClient {
     client: reqwest::Client,
-    pub baseurl: String,
+    pub baseurl: reqwest::Url,
     pub name: String,
     pub hostname: String,
 }
@@ -28,20 +28,24 @@ impl std::fmt::Debug for AwClient {
     }
 }
 
+fn get_hostname() -> String {
+    return gethostname::gethostname().to_string_lossy().to_string();
+}
+
 impl AwClient {
-    pub fn new(ip: &str, port: &str, name: &str) -> AwClient {
-        let baseurl = format!("http://{ip}:{port}");
+    pub fn new(host: &str, port: u16, name: &str) -> Result<AwClient, Box<dyn Error>> {
+        let baseurl = reqwest::Url::parse(&format!("http://{}:{}", host, port))?;
+        let hostname = get_hostname();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap();
-        let hostname = gethostname::gethostname().into_string().unwrap();
-        AwClient {
+            .build()?;
+
+        Ok(AwClient {
             client,
             baseurl,
             name: name.to_string(),
             hostname,
-        }
+        })
     }
 
     pub async fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {

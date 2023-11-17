@@ -1,14 +1,16 @@
 use dirs::home_dir;
+use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 
 // TODO: This could be refactored to share logic with aw-server/src/dirs.rs
 // TODO: add proper config support
 #[allow(dead_code)]
-pub fn get_config_dir() -> Result<PathBuf, ()> {
-    let mut dir = appdirs::user_config_dir(Some("activitywatch"), None, false)?;
+pub fn get_config_dir() -> Result<PathBuf, Box<dyn Error>> {
+    let mut dir = appdirs::user_config_dir(Some("activitywatch"), None, false)
+        .map_err(|_| "Unable to read user config dir")?;
     dir.push("aw-sync");
-    fs::create_dir_all(dir.clone()).expect("Unable to create config dir");
+    fs::create_dir_all(dir.clone())?;
     Ok(dir)
 }
 
@@ -21,7 +23,8 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
     }))
 }
 
-pub fn get_sync_dir() -> Result<PathBuf, ()> {
+pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
     // TODO: make this configurable
-    home_dir().map(|p| p.join("ActivityWatchSync")).ok_or(())
+    let home_dir = home_dir().ok_or("Unable to read home_dir")?;
+    Ok(home_dir.join("ActivityWatchSync"))
 }

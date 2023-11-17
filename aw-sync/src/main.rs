@@ -14,10 +14,9 @@ extern crate serde;
 extern crate serde_json;
 
 use std::error::Error;
-use std::path::Path;
 use std::path::PathBuf;
 
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 
 use aw_client_rust::blocking::AwClient;
@@ -40,7 +39,7 @@ struct Opts {
 
     /// Port of instance to connect to.
     #[clap(long)]
-    port: Option<String>,
+    port: Option<u16>,
 
     /// Convenience option for using the default testing host and port.
     #[clap(long)]
@@ -58,8 +57,8 @@ enum Commands {
     /// Pulls remote buckets then pushes local buckets.
     Sync {
         /// Host(s) to pull from, comma separated. Will pull from all hosts if not specified.
-        #[clap(long)]
-        host: Option<String>,
+        #[clap(long, value_parser=parse_list)]
+        host: Option<Vec<String>>,
     },
 
     /// Sync subcommand (advanced)
@@ -73,32 +72,41 @@ enum Commands {
         /// If not specified, start from beginning.
         /// NOTE: might be unstable, as count cannot be used to verify integrity of sync.
         /// Format: YYYY-MM-DD
-        #[clap(long)]
-        start_date: Option<String>,
+        #[clap(long, value_parser=parse_start_date)]
+        start_date: Option<DateTime<Utc>>,
 
         /// Specify buckets to sync using a comma-separated list.
         /// If not specified, all buckets will be synced.
-        #[clap(long)]
-        buckets: Option<String>,
+        #[clap(long, value_parser=parse_list)]
+        buckets: Option<Vec<String>>,
 
         /// Mode to sync in. Can be "push", "pull", or "both".
         /// Defaults to "both".
         #[clap(long, default_value = "both")]
-        mode: String,
+        mode: sync::SyncMode,
 
         /// Full path to sync directory.
         /// If not specified, exit.
         #[clap(long)]
-        sync_dir: String,
+        sync_dir: PathBuf,
 
         /// Full path to sync db file
         /// Useful for syncing buckets from a specific db file in the sync directory.
         /// Must be a valid absolute path to a file in the sync directory.
         #[clap(long)]
-        sync_db: Option<String>,
+        sync_db: Option<PathBuf>,
     },
     /// List buckets and their sync status.
     List {},
+}
+
+fn parse_start_date(arg: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
+    chrono::NaiveDate::parse_from_str(arg, "%Y-%m-%d")
+        .map(|nd| nd.and_time(chrono::NaiveTime::MIN).and_utc())
+}
+
+fn parse_list(arg: &str) -> Result<Vec<String>, clap::Error> {
+    Ok(arg.split(',').map(|s| s.to_string()).collect())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -107,23 +115,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Started aw-sync...");
 
-    aw_server::logging::setup_logger("aw-sync", opts.testing, verbose)
-        .expect("Failed to setup logging");
+    aw_server::logging::setup_logger("aw-sync", opts.testing, verbose)?;
 
     let port = opts
         .port
-        .or_else(|| Some(crate::util::get_server_port(opts.testing).ok()?.to_string()))
-        .unwrap();
+        .map(|a| Ok(a))
+        .unwrap_or_else(|| util::get_server_port(opts.testing))?;
 
-    let client = AwClient::new(opts.host.as_str(), port.as_str(), "aw-sync");
+    let client = AwClient::new(&opts.host, port, "aw-sync")?;
 
-    match &opts.command {
+    match opts.command {
         // Perform basic sync
         Commands::Sync { host } => {
             // Pull
             match host {
-                Some(host) => {
-                    let hosts: Vec<&str> = host.split(',').collect();
+                Some(hosts) => {
                     for host in hosts.iter() {
                         info!("Pulling from host: {}", host);
                         sync_wrapper::pull(host, &client)?;
@@ -137,8 +143,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // Push
             info!("Pushing local data");
-            sync_wrapper::push(&client)?;
-            Ok(())
+            sync_wrapper::push(&client)
         }
         // Perform two-way sync
         Commands::SyncAdvanced {
@@ -148,60 +153,31 @@ fn main() -> Result<(), Box<dyn Error>> {
             sync_dir,
             sync_db,
         } => {
-            let sync_directory = if sync_dir.is_empty() {
-                error!("No sync directory specified, exiting...");
-                std::process::exit(1);
-            } else {
-                Path::new(&sync_dir)
-            };
-            info!("Using sync dir: {}", sync_directory.display());
-
-            if let Some(sync_db) = &sync_db {
-                info!("Using sync db: {}", sync_db);
+            if !sync_dir.is_absolute() {
+                Err("Sync dir must be absolute")?
             }
 
-            let start: Option<DateTime<Utc>> = start_date.as_ref().map(|date| {
-                println!("{}", date.clone());
-                chrono::NaiveDate::parse_from_str(&date.clone(), "%Y-%m-%d")
-                    .map(|nd| {
-                        Utc.with_ymd_and_hms(nd.year(), nd.month(), nd.day(), 0, 0, 0)
-                            .single()
-                            .unwrap()
-                    })
-                    .expect("Date was not on the format YYYY-MM-DD")
-            });
+            info!("Using sync dir: {}", &sync_dir.display());
 
-            // Parse comma-separated list
-            let buckets_vec: Option<Vec<String>> = buckets
-                .as_ref()
-                .map(|b| b.split(',').map(|s| s.to_string()).collect());
+            if let Some(db_path) = &sync_db {
+                info!("Using sync db: {}", &db_path.display());
 
-            let sync_db: Option<PathBuf> = sync_db.as_ref().map(|db| {
-                let db_path = Path::new(db);
                 if !db_path.is_absolute() {
-                    panic!("Sync db path must be absolute");
+                    Err("Sync db path must be absolute")?
                 }
-                if !db_path.starts_with(sync_directory) {
-                    panic!("Sync db path must be in sync directory");
+                if !db_path.starts_with(&sync_dir) {
+                    Err("Sync db path must be in sync directory")?
                 }
-                db_path.to_path_buf()
-            });
+            }
 
             let sync_spec = sync::SyncSpec {
-                path: sync_directory.to_path_buf(),
+                path: sync_dir,
                 path_db: sync_db,
-                buckets: buckets_vec,
-                start,
+                buckets,
+                start: start_date,
             };
 
-            let mode_enum = match mode.as_str() {
-                "push" => sync::SyncMode::Push,
-                "pull" => sync::SyncMode::Pull,
-                "both" => sync::SyncMode::Both,
-                _ => panic!("Invalid mode"),
-            };
-
-            sync::sync_run(&client, &sync_spec, mode_enum)
+            sync::sync_run(&client, &sync_spec, mode)
         }
 
         // List all buckets

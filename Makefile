@@ -1,7 +1,7 @@
 .PHONY: all aw-server aw-webui build install package set-version test test-coverage test-coverage-tarpaulin test-coverage-grcov coverage coverage-html coverage-lcov
 
 all: build
-build: aw-server
+build: aw-server aw-sync
 
 DESTDIR :=
 ifeq ($(SUDO_USER),)
@@ -22,6 +22,9 @@ endif
 
 aw-server: set-version aw-webui
 	cargo build $(cargoflag) --bin aw-server
+
+aw-sync: set-version
+	cargo build $(cargoflag) --bin aw-sync
 
 aw-webui:
 ifeq ($(SKIP_WEBUI),true) # Skip building webui if SKIP_WEBUI is true

@@ -52,6 +52,10 @@ struct Opts {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Daemon subcommand
+    /// Starts aw-sync as a daemon, which will sync every 5 minutes.
+    Daemon {},
+
     /// Sync subcommand (basic)
     ///
     /// Pulls remote buckets then pushes local buckets.
@@ -125,7 +129,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let client = AwClient::new(&opts.host, port, "aw-sync")?;
 
     // if opts.command is None, then we're using the default subcommand (Sync)
-    match opts.command.unwrap_or(Commands::Sync { host: None }) {
+    match opts.command.unwrap_or(Commands::Daemon {}) {
+        // Start daemon
+        Commands::Daemon {} => {
+            info!("Starting daemon...");
+            daemon(&client)?;
+        }
         // Perform basic sync
         Commands::Sync { host } => {
             // Pull
@@ -144,7 +153,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // Push
             info!("Pushing local data");
-            sync_wrapper::push(&client)
+            sync_wrapper::push(&client)?
         }
         // Perform two-way sync
         Commands::SyncAdvanced {
@@ -178,12 +187,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 start: start_date,
             };
 
-            sync::sync_run(&client, &sync_spec, mode)
+            sync::sync_run(&client, &sync_spec, mode)?
         }
 
         // List all buckets
-        Commands::List {} => sync::list_buckets(&client),
-    }?;
+        Commands::List {} => sync::list_buckets(&client)?,
+    }
 
     // Needed to give the datastores some time to commit before program is shut down.
     // 100ms isn't actually needed, seemed to work fine with as little as 10ms, but I'd rather give
@@ -191,4 +200,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     Ok(())
+}
+
+fn daemon(client: &AwClient) -> Result<(), Box<dyn Error>> {
+    loop {
+        info!("Pulling from all hosts");
+        sync_wrapper::pull_all(client)?;
+
+        info!("Pushing local data");
+        sync_wrapper::push(client)?;
+
+        info!("Sync pass done, sleeping for 5 minutes");
+
+        std::thread::sleep(std::time::Duration::from_secs(300));
+    }
 }

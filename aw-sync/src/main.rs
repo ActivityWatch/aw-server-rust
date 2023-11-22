@@ -31,7 +31,7 @@ mod util;
 #[clap(version = "0.1", author = "Erik Bjäreholt")]
 struct Opts {
     #[clap(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 
     /// Host of instance to connect to.
     #[clap(long, default_value = "127.0.0.1")]
@@ -124,7 +124,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let client = AwClient::new(&opts.host, port, "aw-sync")?;
 
-    match opts.command {
+    // if opts.command is None, then we're using the default subcommand (Sync)
+    match opts.command.unwrap_or(Commands::Sync { host: None }) {
         // Perform basic sync
         Commands::Sync { host } => {
             // Pull

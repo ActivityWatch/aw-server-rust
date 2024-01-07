@@ -24,7 +24,10 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
 }
 
 pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
-    // TODO: make this configurable
+    // if AW_SYNC_DIR is set, use that
+    if let Ok(dir) = std::env::var("AW_SYNC_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
     let home_dir = home_dir().ok_or("Unable to read home_dir")?;
     Ok(home_dir.join("ActivityWatchSync"))
 }

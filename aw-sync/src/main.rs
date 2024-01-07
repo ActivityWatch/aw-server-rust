@@ -45,6 +45,11 @@ struct Opts {
     #[clap(long)]
     testing: bool,
 
+    /// Full path to sync directory.
+    /// If not specified, use AW_SYNC_DIR env var, or default to ~/ActivityWatchSync
+    #[clap(long)]
+    sync_dir: Option<PathBuf>,
+
     /// Enable debug logging.
     #[clap(long)]
     verbose: bool,
@@ -89,11 +94,6 @@ enum Commands {
         #[clap(long, default_value = "both")]
         mode: sync::SyncMode,
 
-        /// Full path to sync directory.
-        /// If not specified, exit.
-        #[clap(long)]
-        sync_dir: PathBuf,
-
         /// Full path to sync db file
         /// Useful for syncing buckets from a specific db file in the sync directory.
         /// Must be a valid absolute path to a file in the sync directory.
@@ -120,6 +120,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("Started aw-sync...");
 
     aw_server::logging::setup_logger("aw-sync", opts.testing, verbose)?;
+
+    // if sync_dir, set env var
+    if let Some(sync_dir) = opts.sync_dir {
+        if !sync_dir.is_absolute() {
+            Err("Sync dir must be absolute")?
+        }
+
+        info!("Using sync dir: {}", &sync_dir.display());
+        std::env::set_var("AW_SYNC_DIR", sync_dir);
+    }
 
     let port = opts
         .port
@@ -160,15 +170,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             start_date,
             buckets,
             mode,
-            sync_dir,
             sync_db,
         } => {
-            if !sync_dir.is_absolute() {
-                Err("Sync dir must be absolute")?
-            }
-
-            info!("Using sync dir: {}", &sync_dir.display());
-
+            let sync_dir = dirs::get_sync_dir()?;
             if let Some(db_path) = &sync_db {
                 info!("Using sync db: {}", &db_path.display());
 

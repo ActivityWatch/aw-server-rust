@@ -12,15 +12,28 @@ Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch
 
 ## Usage
 
-This will start a daemon which both pulls and pushes events with the sync directory.
+This will start a daemon which pulls and pushes events with the sync directory (`~/ActivityWatchSync` by default) every 5 minutes:
+
+```sh
+aw-sync
+```
+
+For more options, see `aw-sync --help`.
+
+### Setting up sync
+
+Once you have aw-sync running, you need to set up syncing with the sync directory using your preferred syncing tool.
+
+The default sync directory is `~/ActivityWatchSync`, but you can change it using the `--sync-dir` option or by setting the `AW_SYNC_DIR` environment variable.
+
+### Running from source
+
+If you want to run it from source, in the root of the repository run:
 
 ```sh
 cargo run --bin aw-sync
 ```
-
 For more options, see `cargo run --bin aw-sync -- --help`.
-
----
 
 ## FAQ
 

@@ -3,20 +3,52 @@ aw-sync-rust
 
 Synchronization for ActivityWatch.
 
-Works by syncing local buckets with a special folder, which in turn should be synchronized by rsync/Syncthing/Dropbox/GDrive/whatever.
+Works by syncing local buckets with a special folder, which in turn should be synchronized by rsync/Syncthing/Dropbox/GDrive/etc.
+
+The latest beta versions of ActivityWatch ship with the `aw-sync` binary, but it's not enabled by default. You can start it from aw-qt or the command line, but due to the early state of development might not have the best UX. Please report issues and submit PRs!
 
 Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch/aw-server/pull/50
 
 
 ## Usage
 
-NOTE: Basic usage not quite ready yet, see the below testing sections for MVP usage.
+This will start a daemon which both pulls and pushes events with the sync directory.
 
-```
-cargo run --bin aw-sync -- sync
+```sh
+cargo run --bin aw-sync
 ```
 
-## Running with real data on a testing instance
+For more options, see `cargo run --bin aw-sync -- --help`.
+
+---
+
+## FAQ
+
+### When is it ready?
+
+It works today, but there is still testing and polishing to be done before it's "click and play".
+
+### Why do it this way?
+
+By essentially only offering a "sync with folder" feature, we give the user a lot of freedom to choose how to store and sync their data.
+
+We also avoid having to implement complex features such as conflict resolution, by enforcing that each device only writes to files in the sync folder they "own", and other devices may not modify them.
+
+### What are the limitations?
+
+- It only syncs afk and window buckets by default (since bucket IDs need to be unique)
+  - It will work a lot better once proper `hostname -> device ID` migration is complete.
+- It doesn't sync settings
+- It doesn't support Android, yet.
+- It mirrors events to all devices, 
+  - If you have a lot of devices you'll get a lot of duplicates, taking up a lot of space and potentially impacting performance.
+- It doesn't support modifying/deleting events, yet.
+
+---
+
+## Advanced usage
+
+### Syncing real data to a testing instance
 
 If you want to try sync, you can do so by following these steps.
 
@@ -46,14 +78,9 @@ We will use some helper scripts to do the following:
 
 In the end, You should get something like this: https://twitter.com/ErikBjare/status/1519399784234246147
 
+### Testing with fake data
 
-## Testing with fake data
-
-**Note:** this documents usage for testing, it is not yet ready for production usage.
-
-It assumes you're running a temporary aw-server instances.
-
-### Pushing to the sync directory
+#### Pushing to the sync directory
 
 First start the sending aw-server instance. For example: 
 
@@ -66,7 +93,7 @@ You can create some test data by opening `http://localhost:5667/#/stopwatch` and
 
 Then run `cargo run --bin aw-sync-rust -- --port 5667` to sync your instance's buckets with the target directory.
 
-### Pulling from the sync directory
+#### Pulling from the sync directory
 
 Now to sync things back from the sync directory into another instance. 
 
@@ -78,3 +105,4 @@ cargo run --bin aw-server -- --testing --port $PORT --dbpath test-$PORT.sqlite -
 ```
 
 Now run `cargo run --bin aw-sync-rust -- --port 5668` to pull buckets from the sync dir (retrieving events from the 5667 instance) and push buckets from the 5668 instance to the sync dir.
+

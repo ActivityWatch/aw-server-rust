@@ -21,7 +21,7 @@ jobs:
       id: toolchain
       uses: dtolnay/rust-toolchain@stable
     - name: Cache cargo build
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       if: runner.os != 'macOS'  # cache doesn't seem to behave nicely on macOS, see: https://github.com/ActivityWatch/aw-server-rust/issues/180
       env:
         cache-name: cargo-build-target
@@ -53,7 +53,7 @@ jobs:
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
     - name: Cache cargo build
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       env:
         cache-name: cargo-build-target-android
       with:
@@ -111,7 +111,7 @@ jobs:
   #      toolchain: nightly
   #      override: true
   #  - name: Cache cargo build
-  #    uses: actions/cache@v3
+  #    uses: actions/cache@v4
   #    env:
   #      cache-name: cargo-build-target-coverage
   #    with:

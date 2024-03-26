@@ -64,7 +64,7 @@ pub fn sync_run(
     let info = client.get_info()?;
 
     // FIXME: Here it is assumed that the device_id for the local server is the one used by
-    // aw-server-rust, which is not necessarily true (aw-server-python has seperate device_id).
+    // aw-server-rust, which is not necessarily true (aw-server-python has separate device_id).
     // Therefore, this may sometimes fail to pick up the correct local datastore.
     let device_id = info.device_id.as_str();
 

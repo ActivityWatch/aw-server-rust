@@ -7,5 +7,6 @@ members = [
     "aw-server",
     "aw-sync",
     "aw-query",
+    "aw-firebase-sync",
 ]
 resolver = "2"

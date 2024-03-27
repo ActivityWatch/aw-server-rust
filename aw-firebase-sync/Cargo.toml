@@ -1,0 +1,12 @@
+[package]
+name = "aw-firebase-sync"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+chrono = "0.4.35"
+tokio = { version = "1", features = ["full"] }
+aw-client-rust = { path = "../aw-client-rust" }
+aw-models = { path = "../aw-models" }

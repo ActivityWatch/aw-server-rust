@@ -29,13 +29,13 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let res = sort_by_timestamp(vec![e2.clone(), e1.clone()]);
@@ -47,13 +47,13 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(2),
+            duration: Duration::try_seconds(2).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let res = sort_by_duration(vec![e2.clone(), e1.clone()]);

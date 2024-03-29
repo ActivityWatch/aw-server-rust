@@ -63,7 +63,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let mut e2 = e1.clone();
@@ -74,7 +74,7 @@ mod tests {
 
         let res = chunk_events_by_key(vec![e1, e2, e3, e4], "test");
         assert_eq!(res.len(), 2);
-        assert_eq!(res[0].duration, Duration::seconds(2));
-        assert_eq!(res[1].duration, Duration::seconds(1));
+        assert_eq!(res[0].duration, Duration::try_seconds(2).unwrap());
+        assert_eq!(res[1].duration, Duration::try_seconds(1).unwrap());
     }
 }

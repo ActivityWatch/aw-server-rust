@@ -83,11 +83,11 @@ mod tests {
     #[test]
     fn test_split_event() {
         let now = Utc::now();
-        let td1h = Duration::hours(1);
+        let td1h = Duration::try_hours(1).unwrap();
         let e = Event {
             id: None,
             timestamp: now,
-            duration: Duration::hours(2),
+            duration: Duration::try_hours(2).unwrap(),
             data: serde_json::Map::new(),
         };
         let (e1, e2_opt) = split_event(&e, now + td1h);
@@ -101,7 +101,7 @@ mod tests {
         // Now a test which does not lead to a split
         let (e1, e2_opt) = split_event(&e, now);
         assert_eq!(e1.timestamp, now);
-        assert_eq!(e1.duration, Duration::hours(2));
+        assert_eq!(e1.duration, Duration::try_hours(2).unwrap());
         assert!(e2_opt.is_none());
     }
 
@@ -109,7 +109,7 @@ mod tests {
     fn test_union_no_overlap() {
         // A test without any actual overlap
         let now = Utc::now();
-        let td1h = Duration::hours(1);
+        let td1h = Duration::try_hours(1).unwrap();
         let e1 = Event::new(now, td1h, serde_json::Map::new());
         let e2 = Event::new(now + td1h, td1h, serde_json::Map::new());
         let events1 = vec![e1.clone()];
@@ -139,9 +139,9 @@ mod tests {
     fn test_union_no_overlap_with_overlap() {
         // A test where the events overlap
         let now = Utc::now();
-        let td1h = Duration::hours(1);
+        let td1h = Duration::try_hours(1).unwrap();
         let e1 = Event::new(now, td1h, serde_json::Map::new());
-        let e2 = Event::new(now, Duration::hours(2), serde_json::Map::new());
+        let e2 = Event::new(now, Duration::try_hours(1).unwrap(), serde_json::Map::new());
         let events1 = vec![e1];
         let events2 = vec![e2];
         let events_union = union_no_overlap(events1, events2);
@@ -154,7 +154,7 @@ mod tests {
 
         // Now test the case where e2 starts before e1
         let e1 = Event::new(now + td1h, td1h, serde_json::Map::new());
-        let e2 = Event::new(now, Duration::hours(2), serde_json::Map::new());
+        let e2 = Event::new(now, Duration::try_hours(2).unwrap(), serde_json::Map::new());
         let events1 = vec![e1];
         let events2 = vec![e2];
         let events_union = union_no_overlap(events1, events2);

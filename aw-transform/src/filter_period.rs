@@ -34,7 +34,7 @@ pub fn filter_period_intersect(events: Vec<Event>, filter_events: Vec<Event>) ->
     loop {
         let event_endtime = cur_event.calculate_endtime();
         let filter_endtime = cur_filter_event.calculate_endtime();
-        if cur_event.duration == Duration::seconds(0) || event_endtime <= cur_filter_event.timestamp
+        if cur_event.duration == Duration::try_seconds(0).unwrap() || event_endtime <= cur_filter_event.timestamp
         {
             match events_iter.next() {
                 Some(e) => {
@@ -86,7 +86,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let mut e2 = e1.clone();
@@ -101,16 +101,16 @@ mod tests {
         let filter_event = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:02.5Z").unwrap(),
-            duration: Duration::seconds(2),
+            duration: Duration::try_seconds(2).unwrap(),
             data: json_map! {"test": json!(1)},
         };
 
         let filtered_events =
             filter_period_intersect(vec![e1, e2, e3, e4, e5], vec![filter_event.clone()]);
         assert_eq!(filtered_events.len(), 3);
-        assert_eq!(filtered_events[0].duration, Duration::milliseconds(500));
-        assert_eq!(filtered_events[1].duration, Duration::milliseconds(1000));
-        assert_eq!(filtered_events[2].duration, Duration::milliseconds(500));
+        assert_eq!(filtered_events[0].duration, Duration::try_milliseconds(500).unwrap());
+        assert_eq!(filtered_events[1].duration, Duration::try_milliseconds(1000).unwrap());
+        assert_eq!(filtered_events[2].duration, Duration::try_milliseconds(500).unwrap());
 
         let dt: DateTime<Utc> = DateTime::from_str("2000-01-01T00:00:02.500Z").unwrap();
         assert_eq!(filtered_events[0].timestamp, dt);
@@ -123,36 +123,36 @@ mod tests {
         let e = Event {
             id: None,
             timestamp: timestamp_01s,
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let mut f2 = filter_event.clone();
         f2.timestamp = DateTime::from_str("2000-01-01T00:00:00Z").unwrap();
-        f2.duration = Duration::milliseconds(1500);
+        f2.duration = Duration::try_milliseconds(1500).unwrap();
         let res = filter_period_intersect(vec![e.clone()], vec![f2]);
         assert_eq!(res[0].timestamp, timestamp_01s);
-        assert_eq!(res[0].duration, Duration::milliseconds(500));
+        assert_eq!(res[0].duration, Duration::try_milliseconds(500).unwrap());
 
         let timestamp_01_5s = DateTime::from_str("2000-01-01T00:00:01.5Z").unwrap();
         let mut f3 = filter_event.clone();
         f3.timestamp = timestamp_01_5s;
-        f3.duration = Duration::milliseconds(1000);
+        f3.duration = Duration::try_milliseconds(1000).unwrap();
         let res = filter_period_intersect(vec![e.clone()], vec![f3]);
         assert_eq!(res[0].timestamp, timestamp_01_5s);
-        assert_eq!(res[0].duration, Duration::milliseconds(500));
+        assert_eq!(res[0].duration,Duration::try_milliseconds(500).unwrap() );
 
         let mut f4 = filter_event.clone();
         f4.timestamp = DateTime::from_str("2000-01-01T00:00:01.5Z").unwrap();
-        f4.duration = Duration::milliseconds(100);
+        f4.duration = Duration::try_milliseconds(100).unwrap();
         let res = filter_period_intersect(vec![e.clone()], vec![f4]);
         assert_eq!(res[0].timestamp, timestamp_01_5s);
-        assert_eq!(res[0].duration, Duration::milliseconds(100));
+        assert_eq!(res[0].duration, Duration::try_milliseconds(100).unwrap());
 
         let mut f5 = filter_event.clone();
         f5.timestamp = DateTime::from_str("2000-01-01T00:00:00Z").unwrap();
-        f5.duration = Duration::seconds(10);
+        f5.duration = Duration::try_seconds(10).unwrap();
         let res = filter_period_intersect(vec![e.clone()], vec![f5]);
         assert_eq!(res[0].timestamp, timestamp_01s);
-        assert_eq!(res[0].duration, Duration::milliseconds(1000));
+        assert_eq!(res[0].duration, Duration::try_milliseconds(1000).unwrap());
     }
 }

@@ -42,7 +42,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
     let mut retry_e: Option<Event> = None;
 
     // If negative gaps are smaller than this, prune them to become zero
-    let negative_gap_trim_thres = chrono::Duration::milliseconds(100);
+    let negative_gap_trim_thres = chrono::Duration::try_milliseconds(100).unwrap();
 
     let mut warned_negative_gap_safe = false;
     let mut warned_negative_gap_unsafe = false;
@@ -74,7 +74,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
 
         // We split the program flow into 2 parts: positive and negative gaps
         // First we check negative gaps (if events overlap)
-        if gap < chrono::Duration::seconds(0) {
+        if gap < chrono::Duration::try_seconds(0).unwrap() {
             // Python implementation:
             //
             // if gap < timedelta(0) and e1.data == e2.data:
@@ -129,7 +129,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
             //     warned_about_negative_gap_unsafe = True
 
             // Ensure that gap is actually non-negative here, at least in tests
-            debug_assert!(gap >= chrono::Duration::seconds(0));
+            debug_assert!(gap >= chrono::Duration::try_seconds(0).unwrap());
 
             // If data is the same, we should merge them.
             if e1.data == e2.data {
@@ -179,22 +179,22 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let e_expected = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(4),
+            duration: Duration::try_seconds(4).unwrap(),
             data: json_map! {"test": json!(1)},
         };
-        let res = flood(vec![e1, e2], Duration::seconds(5));
+        let res = flood(vec![e1, e2], Duration::try_seconds(5).unwrap());
         assert_eq!(1, res.len());
         assert_eq!(&res[0], &e_expected);
     }
@@ -205,28 +205,28 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(2)},
         };
         let e1_expected = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(2),
+            duration: Duration::try_seconds(2).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let e2_expected = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:02Z").unwrap(),
-            duration: Duration::seconds(2),
+            duration: Duration::try_seconds(2).unwrap(),
             data: json_map! {"test": json!(2)},
         };
-        let res = flood(vec![e1, e2], Duration::seconds(5));
+        let res = flood(vec![e1, e2], Duration::try_seconds(5).unwrap());
         assert_eq!(2, res.len());
         assert_eq!(&res[0], &e1_expected);
         assert_eq!(&res[1], &e2_expected);
@@ -238,22 +238,22 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(10),
+            duration: Duration::try_seconds(10).unwrap(),
             data: json_map! {"type": "a"},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:05Z").unwrap(),
-            duration: Duration::seconds(10),
+            duration: Duration::try_seconds(10).unwrap(),
             data: json_map! {"type": "a"},
         };
         let e1_expected = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(15),
+            duration: Duration::try_seconds(15).unwrap(),
             data: json_map! {"type": "a"},
         };
-        let res = flood(vec![e1, e2], Duration::seconds(5));
+        let res = flood(vec![e1, e2], Duration::try_seconds(5).unwrap());
         assert_eq!(1, res.len());
         assert_eq!(&res[0], &e1_expected);
     }
@@ -264,16 +264,16 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(10),
+            duration: Duration::try_seconds(10).unwrap(),
             data: json_map! {"type": "a"},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(5),
+            duration: Duration::try_seconds(5).unwrap(),
             data: json_map! {"type": "a"},
         };
-        let res = flood(vec![e1.clone(), e2], Duration::seconds(5));
+        let res = flood(vec![e1.clone(), e2], Duration::try_seconds(5).unwrap());
         assert_eq!(1, res.len());
         assert_eq!(&res[0], &e1);
     }
@@ -285,16 +285,16 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(10),
+            duration: Duration::try_seconds(10).unwrap(),
             data: json_map! {"type": "a"},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(5),
+            duration: Duration::try_seconds(5).unwrap(),
             data: json_map! {"type": "b"},
         };
-        let res = flood(vec![e1.clone(), e2.clone()], Duration::seconds(5));
+        let res = flood(vec![e1.clone(), e2.clone()], Duration::try_seconds(5).unwrap());
         assert_eq!(2, res.len());
         assert_eq!(&res[0], &e1);
         assert_eq!(&res[1], &e2);
@@ -309,30 +309,30 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"status": "afk"},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(5),
+            duration: Duration::try_seconds(5).unwrap(),
             data: json_map! {"status": "not-afk"},
         };
         let e3 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"status": "not-afk"},
         };
         let e4 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:06Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"status": "afk"},
         };
         let res = flood(
             vec![e1.clone(), e2.clone(), e3, e4.clone()],
-            Duration::seconds(5),
+            Duration::try_seconds(5).unwrap(),
         );
         assert_eq!(3, res.len());
         assert_eq!(&res[0], &e1);
@@ -350,36 +350,36 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"status": "afk"},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(5),
+            duration: Duration::try_seconds(5).unwrap(),
             data: json_map! {"status": "not-afk"},
         };
         let e3 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"status": "not-afk"},
         };
         let e4 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(10),
+            duration: Duration::try_seconds(10).unwrap(),
             data: json_map! {"status": "not-afk"},
         };
         let e5 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:11Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"status": "afk"},
         };
         let res = flood(
             vec![e1.clone(), e2, e3, e4.clone(), e5.clone()],
-            Duration::seconds(5),
+            Duration::try_seconds(5).unwrap(),
         );
         assert_eq!(3, res.len());
         assert_eq!(&res[0], &e1);

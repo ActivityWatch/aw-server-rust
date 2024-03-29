@@ -241,7 +241,7 @@ mod sync_tests {
             // Insert some testing events into the bucket
             let events: Vec<Event> = (0..3)
                 .map(|i| {
-                    let timestamp: DateTime<Utc> = Utc::now() + Duration::milliseconds(i * 10);
+                    let timestamp: DateTime<Utc> = Utc::now() + Duration::try_milliseconds(i * 10).unwrap();
                     let event_jsonstr = format!(
                         r#"{{
                             "timestamp": "{}",

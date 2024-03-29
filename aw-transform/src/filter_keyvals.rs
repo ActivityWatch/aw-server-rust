@@ -93,7 +93,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let mut e2 = e1.clone();
@@ -109,7 +109,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"key1": json!("value1")},
         };
         let mut e2 = e1.clone();
@@ -139,7 +139,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"key1": json!(100)},
         };
         let events = vec![e1.clone()];
@@ -153,7 +153,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let mut e2 = e1.clone();

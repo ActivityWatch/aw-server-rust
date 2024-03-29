@@ -31,8 +31,8 @@ fn create_events(num_events: i64) -> Vec<Event> {
     for i in 0..num_events {
         let e = Event {
             id: None,
-            timestamp: chrono::Utc::now() + Duration::seconds(i),
-            duration: Duration::seconds(10),
+            timestamp: chrono::Utc::now() + Duration::try_seconds(i).unwrap(),
+            duration: Duration::try_seconds(10).unwrap(),
             data: possible_data[i as usize % 20].clone(),
         };
         event_list.push(e);

@@ -79,7 +79,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
 
@@ -91,7 +91,7 @@ mod tests {
 
         let dt: DateTime<Utc> = DateTime::from_str("2000-01-01T00:00:01.000Z").unwrap();
         assert_eq!(e_result[0].timestamp, dt);
-        assert_eq!(e_result[0].duration, Duration::milliseconds(2000));
+        assert_eq!(e_result[0].duration, Duration::try_milliseconds(2000).unwrap());
     }
 
     /// Make sure nothing gets done when nothing to union (gaps present)
@@ -100,7 +100,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
 
@@ -116,7 +116,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
 
@@ -129,7 +129,7 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
 

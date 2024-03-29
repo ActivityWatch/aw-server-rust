@@ -74,20 +74,20 @@ mod tests {
         let event1 = Event {
             id: None,
             timestamp: now,
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let heartbeat1 = Event {
             id: None,
-            timestamp: now + Duration::seconds(2),
-            duration: Duration::seconds(1),
+            timestamp: now + Duration::try_seconds(2).unwrap(),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
 
         // Merge result
         let res_merge = heartbeat(&event1, &heartbeat1, 2.0).unwrap();
         assert_eq!(res_merge.timestamp, now);
-        assert_eq!(res_merge.duration, Duration::seconds(3));
+        assert_eq!(res_merge.duration, Duration::try_seconds(3).unwrap());
         assert_eq!(res_merge.data, event1.data);
 
         // No merge result
@@ -103,14 +103,14 @@ mod tests {
         let event = Event {
             id: None,
             timestamp: now,
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let long_pulse_event = Event {
             id: None,
             // note that no duration is sent, which is how aw-client works
-            duration: Duration::seconds(0),
-            timestamp: now + Duration::seconds(120),
+            duration: Duration::try_seconds(0).unwrap(),
+            timestamp: now + Duration::try_seconds(120).unwrap(),
             data: json_map! {"test": json!(1)},
         };
 
@@ -118,7 +118,7 @@ mod tests {
         let res_merge = heartbeat(&event, &long_pulse_event, 120.0).unwrap();
         assert_eq!(res_merge.timestamp, now);
         assert_eq!(res_merge.data, event.data);
-        assert_eq!(res_merge.duration, Duration::seconds(120));
+        assert_eq!(res_merge.duration, Duration::try_seconds(120).unwrap());
 
         // No merge result when pulsetime is less than the timestamp delta between heartbeats
         let res_no_merge = heartbeat(&event, &long_pulse_event, 60.0);
@@ -131,13 +131,13 @@ mod tests {
         let event = Event {
             id: None,
             timestamp: now,
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let heartbeat_same_data = Event {
             id: None,
             timestamp: now,
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
 
@@ -148,7 +148,7 @@ mod tests {
         let heartbeat_different_data = Event {
             id: None,
             timestamp: now,
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(2)},
         };
         // Data is different, should not merge
@@ -162,22 +162,22 @@ mod tests {
         let event = Event {
             id: None,
             timestamp: now,
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let heartbeat_same_data = Event {
             id: None,
             timestamp: now,
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
 
         // Should merge
         let res_merge = heartbeat(&event, &heartbeat_same_data, 1.0).unwrap();
-        assert_eq!(Duration::seconds(1), res_merge.duration);
+        assert_eq!(Duration::try_seconds(1).unwrap(), res_merge.duration);
 
         // Order shouldn't matter, should merge anyway
         let res_merge = heartbeat(&heartbeat_same_data, &event, 1.0).unwrap();
-        assert_eq!(Duration::seconds(1), res_merge.duration);
+        assert_eq!(Duration::try_seconds(1).unwrap(), res_merge.duration);
     }
 }

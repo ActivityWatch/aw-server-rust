@@ -77,7 +77,7 @@ mod datastore_tests {
             Some(created) => {
                 let now = Utc::now();
                 assert!(created <= now);
-                assert!(created > now - Duration::seconds(10));
+                assert!(created > now - Duration::try_seconds(10).unwrap());
             }
         };
 
@@ -102,7 +102,7 @@ mod datastore_tests {
             Some(created) => {
                 let now = Utc::now();
                 assert!(created <= now);
-                assert!(created > now - Duration::seconds(10));
+                assert!(created > now - Duration::try_seconds(10).unwrap());
             }
         };
 
@@ -129,7 +129,7 @@ mod datastore_tests {
         let e1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
@@ -157,7 +157,7 @@ mod datastore_tests {
         let e1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
@@ -224,7 +224,7 @@ mod datastore_tests {
         let e1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::seconds(100),
+            duration: Duration::try_seconds(100).unwrap(),
             data: json_map! {"key": json!("value")},
         };
 
@@ -232,8 +232,8 @@ mod datastore_tests {
         ds.insert_events(&bucket.id, &event_list).unwrap();
 
         info!("Get event that covers queried timeperiod");
-        let query_start = now + Duration::seconds(1);
-        let query_end = query_start + Duration::seconds(1);
+        let query_start = now + Duration::try_seconds(1).unwrap();
+        let query_end = query_start + Duration::try_seconds(1).unwrap();
         let fetched_events_limit = ds
             .get_events(&bucket.id, Some(query_start), Some(query_end), Some(1))
             .unwrap();
@@ -256,11 +256,11 @@ mod datastore_tests {
         let e1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
-        e2.timestamp += Duration::seconds(1);
+        e2.timestamp += Duration::try_seconds(1).unwrap();
 
         let event_list = [e1.clone(), e2.clone()];
 
@@ -308,7 +308,7 @@ mod datastore_tests {
         let e1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
@@ -334,14 +334,14 @@ mod datastore_tests {
         let e1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
-        e2.timestamp += Duration::seconds(1);
+        e2.timestamp += Duration::try_seconds(1).unwrap();
 
         let mut e_diff_data = e2.clone();
-        e_diff_data.timestamp += Duration::seconds(1);
+        e_diff_data.timestamp += Duration::try_seconds(1).unwrap();
         e_diff_data.data = json_map! {"key": json!("other value")};
 
         // First event
@@ -358,7 +358,7 @@ mod datastore_tests {
         let fetched_events = ds.get_events(&bucket.id, None, None, None).unwrap();
         assert_eq!(fetched_events.len(), 1);
         assert_eq!(fetched_events[0].timestamp, e1.timestamp);
-        assert_eq!(fetched_events[0].duration, Duration::seconds(1));
+        assert_eq!(fetched_events[0].duration, Duration::try_seconds(1).unwrap());
         assert_eq!(fetched_events[0].data, e1.data);
         assert_eq!(fetched_events[0].id, e1.id);
         let e2 = &fetched_events[0];
@@ -383,7 +383,7 @@ mod datastore_tests {
         let e = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"key": json!("value")},
         };
         let mut e1 = e.clone();
@@ -451,7 +451,7 @@ mod datastore_tests {
         let e1 = Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"key": json!("value")},
         };
         {

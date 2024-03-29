@@ -67,14 +67,14 @@ mod query_tests {
         let e1 = Event {
             id: None,
             timestamp: chrono::Utc::now(),
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: json_map! {"key": json!("value")},
         };
         let mut e2 = e1.clone();
         e2.timestamp = chrono::Utc::now();
         let mut e_replace = e2.clone();
         e_replace.data = json_map! {"key": json!("value2")};
-        e_replace.duration = Duration::seconds(2);
+        e_replace.duration = Duration::try_seconds(2).unwrap();
 
         let mut event_list = Vec::new();
         event_list.push(e1);

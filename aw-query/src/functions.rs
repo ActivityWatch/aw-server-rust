@@ -269,7 +269,7 @@ mod qfunctions {
         validate::args_length(&args, 1)?;
         let events: Vec<Event> = (&args[0]).try_into()?;
         // Run flood
-        let mut flooded_events = aw_transform::flood(events, chrono::Duration::seconds(5));
+        let mut flooded_events = aw_transform::flood(events, chrono::Duration::try_seconds(5).unwrap());
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {

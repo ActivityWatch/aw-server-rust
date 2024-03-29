@@ -60,14 +60,14 @@ impl Default for Event {
         Event {
             id: None,
             timestamp: Utc::now(),
-            duration: Duration::seconds(0),
+            duration: Duration::try_seconds(0).unwrap(),
             data: serde_json::Map::new(),
         }
     }
 }
 
 fn default_duration() -> Duration {
-    Duration::seconds(0)
+    Duration::try_seconds(0).unwrap()
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn test_event() {
     let e = Event {
         id: None,
         timestamp: Utc::now(),
-        duration: Duration::seconds(1),
+        duration: Duration::try_seconds(0).unwrap(),
         data: json_map! {"test": json!(1)},
     };
     debug!("event: {:?}", e);

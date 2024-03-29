@@ -177,7 +177,7 @@ impl DatastoreWorker {
                 response_sender.respond(response);
 
                 let now: DateTime<Utc> = Utc::now();
-                let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
+                let commit_interval_passed: bool = (now - last_commit_time) > Duration::try_seconds(15).unwrap();
                 if self.commit
                     || commit_interval_passed
                     || self.uncommitted_events > 100

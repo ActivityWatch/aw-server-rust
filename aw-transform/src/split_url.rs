@@ -81,7 +81,7 @@ mod tests {
         let mut e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"url": "http://www.google.com/path?query=1"},
         };
         split_url_event(&mut e1);

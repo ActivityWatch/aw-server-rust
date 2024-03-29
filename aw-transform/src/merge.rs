@@ -97,25 +97,25 @@ mod tests {
         let e1 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-            duration: Duration::seconds(1),
+            duration: Duration::try_seconds(1).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let e2 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
-            duration: Duration::seconds(3),
+            duration: Duration::try_seconds(3).unwrap(),
             data: json_map! {"test2": json!(3)},
         };
         let e3 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:02Z").unwrap(),
-            duration: Duration::seconds(7),
+            duration: Duration::try_seconds(7).unwrap(),
             data: json_map! {"test": json!(6)},
         };
         let e4 = Event {
             id: None,
             timestamp: DateTime::from_str("2000-01-01T00:00:03Z").unwrap(),
-            duration: Duration::seconds(9),
+            duration: Duration::try_seconds(9).unwrap(),
             data: json_map! {"test": json!(1)},
         };
         let in_events = vec![e1, e2, e3, e4];
@@ -126,13 +126,13 @@ mod tests {
             Event {
                 id: None,
                 timestamp: DateTime::from_str("2000-01-01T00:00:00Z").unwrap(),
-                duration: Duration::seconds(10),
+                duration: Duration::try_seconds(10).unwrap(),
                 data: json_map! {"test": json!(1)},
             },
             Event {
                 id: None,
                 timestamp: DateTime::from_str("2000-01-01T00:00:02Z").unwrap(),
-                duration: Duration::seconds(7),
+                duration: Duration::try_seconds(7).unwrap(),
                 data: json_map! {"test": json!(6)},
             },
         ];

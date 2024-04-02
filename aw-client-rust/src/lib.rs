@@ -11,7 +11,7 @@ use std::vec::Vec;
 use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};
-use serde_json::Map;
+use serde_json::{json, Map};
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
 
@@ -96,6 +96,32 @@ impl AwClient {
         let url = format!("{}/api/0/buckets/{}", self.baseurl, bucketname);
         self.client.delete(url).send().await?;
         Ok(())
+    }
+
+    pub async fn query(
+        &self,
+        query: &str,
+        timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+    ) -> Result<serde_json::Value, reqwest::Error> {
+        let url = reqwest::Url::parse(format!("{}/api/0/query", self.baseurl).as_str()).unwrap();
+
+        // Format timeperiods as ISO8601 strings, separated by /
+        let timeperiods_str: Vec<String> = timeperiods
+            .iter()
+            .map(|(start, stop)| (start.to_rfc3339(), stop.to_rfc3339()))
+            .map(|(start, stop)| format!("{}/{}", start, stop))
+            .collect();
+
+        self.client
+            .post(url)
+            .json(&json!({
+                "query": query,
+                "timeperiods": timeperiods_str,
+            }))
+            .send()
+            .await?
+            .json()
+            .await
     }
 
     pub async fn get_events(

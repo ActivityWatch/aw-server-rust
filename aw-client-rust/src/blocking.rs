@@ -62,6 +62,12 @@ impl AwClient {
         stop: Option<DateTime<Utc>>,
         limit: Option<u64>
     );
+    proxy_method!(
+        query,
+        serde_json::Value,
+        query: &str,
+        timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>
+    );
     proxy_method!(insert_event, (), bucketname: &str, event: &Event);
     proxy_method!(insert_events, (), bucketname: &str, events: Vec<Event>);
     proxy_method!(

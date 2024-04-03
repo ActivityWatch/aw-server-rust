@@ -10,3 +10,6 @@ chrono = "0.4.35"
 tokio = { version = "1", features = ["full"] }
 aw-client-rust = { path = "../aw-client-rust" }
 aw-models = { path = "../aw-models" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.70"
+reqwest = "0.11.4"

@@ -235,6 +235,9 @@ dependencies = [
  "aw-client-rust",
  "aw-models",
  "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

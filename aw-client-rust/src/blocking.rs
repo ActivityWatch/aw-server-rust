@@ -64,7 +64,7 @@ impl AwClient {
     );
     proxy_method!(
         query,
-        serde_json::Value,
+        Vec<serde_json::Value>,
         query: &str,
         timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>
     );

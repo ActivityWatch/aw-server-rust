@@ -102,7 +102,7 @@ impl AwClient {
         &self,
         query: &str,
         timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
-    ) -> Result<serde_json::Value, reqwest::Error> {
+    ) -> Result<Vec<serde_json::Value>, reqwest::Error> {
         let url = reqwest::Url::parse(format!("{}/api/0/query", self.baseurl).as_str()).unwrap();
 
         // Format timeperiods as ISO8601 strings, separated by /
@@ -112,6 +112,7 @@ impl AwClient {
             .map(|(start, stop)| format!("{}/{}", start, stop))
             .collect();
 
+        // Result is a sequence, one element per timeperiod
         self.client
             .post(url)
             .json(&json!({

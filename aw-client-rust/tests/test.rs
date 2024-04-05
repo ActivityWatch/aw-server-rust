@@ -110,6 +110,22 @@ mod test {
         println!("Events: {events:?}");
         assert!(events[0].duration == Duration::seconds(1));
 
+        // Query
+        let query = format!(
+            "events = query_bucket(\"{}\");
+RETURN = events;",
+            bucket.id
+        );
+        let start: DateTime<Utc> = DateTime::parse_from_rfc3339("1996-12-19T00:00:00-08:00")
+            .unwrap()
+            .into();
+        let end: DateTime<Utc> = DateTime::parse_from_rfc3339("2020-12-19T00:00:00-08:00")
+            .unwrap()
+            .into();
+        let timeperiods = (start, end);
+        let query_result = client.query(&query, vec![timeperiods]).unwrap();
+        println!("Query result: {query_result:?}");
+
         client
             .delete_event(&bucketname, events[0].id.unwrap())
             .unwrap();

@@ -115,7 +115,7 @@ impl AwClient {
         self.client
             .post(url)
             .json(&json!({
-                "query": query,
+                "query": query.split('\n').collect::<Vec<&str>>(),
                 "timeperiods": timeperiods_str,
             }))
             .send()

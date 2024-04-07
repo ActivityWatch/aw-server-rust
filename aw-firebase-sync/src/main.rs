@@ -1,6 +1,5 @@
-// use aw_models::{Query, TimeInterval};
 use reqwest;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 use aw_client_rust::AwClient;
 
@@ -10,18 +9,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let aw_client = AwClient::new("localhost", 5600, "test").unwrap();
 
     let start = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
-    let end = Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap();
+    let end = Utc.with_ymd_and_hms(2024, 4, 7, 0, 0, 0).unwrap();
+
+    let query = "window_events = query_bucket(find_bucket(\"aw-watcher-window_\"));
+    RETURN = window_events;";
     
-    let res = aw_client.get_events("aw-watcher-window_brayo",Some(start),Some(end), Some(50)).await.unwrap();
+    let timeperiods = vec!(
+        (start, end)
+    );
+    
+    let res = aw_client.query(&query, timeperiods).await.unwrap();
 
     let res_string = serde_json::to_string(&res).unwrap();
-    // println!("{:?}", res_string);
-    // Your Firebase callable function URL
-    let url = "https://us-central1-aw-mockup.cloudfunctions.net/storeDataREST";
+    // strip the leading and trailing '[' and ']'
+    let res_string = &res_string[1..res_string.len()-1];
+
+    // let url = "https://us-central1-aw-mockup.cloudfunctions.net/uploadData";
+    let url = "http://localhost:5001/aw-mockup/us-central1/uploadData";
 
     // Prepare the request body
     let payload = json!({
-        "apiKey": "fv3yShDm3VHuMjts1P7A+LcjvR66",
+        "apiKey": "Je_Q45pexF2Y17gioBIt_ePU.iH",
         "data": res_string
     });
 

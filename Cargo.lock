@@ -477,7 +477,6 @@ name = "chrono"
 version = "0.4.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a0d04d43504c61aa6c7531f1871dd0d418d91130162063b789da00fd7057a5e"
-
 dependencies = [
  "android-tzdata",
  "iana-time-zone",

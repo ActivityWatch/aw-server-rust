@@ -12,4 +12,5 @@ aw-client-rust = { path = "../aw-client-rust" }
 aw-models = { path = "../aw-models" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.70"
+serde_yaml = "0.8.18"
 reqwest = "0.11.4"

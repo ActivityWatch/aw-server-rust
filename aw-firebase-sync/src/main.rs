@@ -8,9 +8,7 @@ use std::io::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a new client
     let aw_client = AwClient::new("localhost", 5600, "aw-firebase-sync").unwrap();
-    // 7 days ago
     let start = Utc::now().date().and_hms_opt(0, 0, 0).unwrap() - chrono::Duration::days(6);
     let end = Utc::now().date().and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::days(1);
 
@@ -36,26 +34,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // strip the leading and trailing '[' and ']'
     let res_string = &res_string[1..res_string.len()-1];
 
-    // let url = "https://us-central1-aw-mockup.cloudfunctions.net/uploadData";
-    let url = "http://localhost:5001/aw-mockup/us-central1/uploadData";
+    let firebase_url = "https://us-central1-aw-mockup.cloudfunctions.net/uploadData";
+    // let firebase_url = "http://localhost:5001/aw-mockup/us-central1/uploadData";
 
-    // Prepare the request body
     let payload = json!({
         "apiKey": apikey,
         "data": res_string
     });
 
-    // Send the POST request
-    let http_client = reqwest::Client::new();
-    let response = http_client
-        .post(url)
+    let firebase_client = reqwest::Client::new();
+    let response = firebase_client
+        .post(firebase_url)
         .json(&payload)
         .send()
         .await?
         .json::<Value>()
         .await?;
 
-    // Handle the response
     println!("Response: {:?}", response);
 
     Ok(())

@@ -86,6 +86,21 @@ fn root_favicon(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
     get_file("favicon.ico".into(), state)
 }
 
+#[get("/dark.css")]
+fn root_dark(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    get_file("dark.css".into(), state)
+}
+
+#[get("/logo.png")]
+fn root_logo(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    get_file("logo.png".into(), state)
+}
+
+#[get("/manifest.json")]
+fn root_manifest(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
+    get_file("manifest.json".into(), state)
+}
+
 #[get("/")]
 fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Info> {
     #[allow(clippy::or_fun_call)]
@@ -136,6 +151,10 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 root_css,
                 root_js,
                 root_static,
+                // custom static files
+                root_dark,
+                root_logo,
+                root_manifest
             ],
         )
         .mount("/api/0/info", routes![server_info])

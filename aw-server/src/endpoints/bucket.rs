@@ -30,7 +30,7 @@ pub fn buckets_get(
 
 #[get("/<bucket_id>")]
 pub fn bucket_get(
-    bucket_id: String,
+    bucket_id: &str,
     state: &State<ServerState>,
 ) -> Result<Json<Bucket>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
@@ -46,13 +46,13 @@ pub fn bucket_get(
 /// This is useful for watchers which are known/assumed to run locally but might not know their hostname (like aw-watcher-web).
 #[post("/<bucket_id>", data = "<message>", format = "application/json")]
 pub fn bucket_new(
-    bucket_id: String,
+    bucket_id: &str,
     message: Json<Bucket>,
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
     let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
-        bucket.id = bucket_id;
+        bucket.id = bucket_id.to_string();
     }
     if bucket.hostname == "!local" {
         bucket.hostname = gethostname()
@@ -72,7 +72,7 @@ pub fn bucket_new(
 
 #[get("/<bucket_id>/events?<start>&<end>&<limit>")]
 pub fn bucket_events_get(
-    bucket_id: String,
+    bucket_id: &str,
     start: Option<String>,
     end: Option<String>,
     limit: Option<u64>,
@@ -104,7 +104,7 @@ pub fn bucket_events_get(
         None => None,
     };
     let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.get_events(&bucket_id, starttime, endtime, limit);
+    let res = datastore.get_events(bucket_id, starttime, endtime, limit);
     match res {
         Ok(events) => Ok(Json(events)),
         Err(err) => Err(err.into()),
@@ -115,13 +115,13 @@ pub fn bucket_events_get(
 // See: https://api.rocket.rs/master/rocket/struct.Route.html#resolving-collisions
 #[get("/<bucket_id>/events/<event_id>?<_unused..>")]
 pub fn bucket_events_get_single(
-    bucket_id: String,
+    bucket_id: &str,
     event_id: i64,
     _unused: Option<u64>,
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.get_event(&bucket_id, event_id);
+    let res = datastore.get_event(bucket_id, event_id);
     match res {
         Ok(events) => Ok(Json(events)),
         Err(err) => Err(err.into()),
@@ -130,12 +130,12 @@ pub fn bucket_events_get_single(
 
 #[post("/<bucket_id>/events", data = "<events>", format = "application/json")]
 pub fn bucket_events_create(
-    bucket_id: String,
+    bucket_id: &str,
     events: Json<Vec<Event>>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.insert_events(&bucket_id, &events);
+    let res = datastore.insert_events(bucket_id, &events);
     match res {
         Ok(events) => Ok(Json(events)),
         Err(err) => Err(err.into()),
@@ -148,14 +148,14 @@ pub fn bucket_events_create(
     format = "application/json"
 )]
 pub fn bucket_events_heartbeat(
-    bucket_id: String,
+    bucket_id: &str,
     heartbeat_json: Json<Event>,
     pulsetime: f64,
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let heartbeat = heartbeat_json.into_inner();
     let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.heartbeat(&bucket_id, heartbeat, pulsetime) {
+    match datastore.heartbeat(bucket_id, heartbeat, pulsetime) {
         Ok(e) => Ok(Json(e)),
         Err(err) => Err(err.into()),
     }
@@ -163,11 +163,11 @@ pub fn bucket_events_heartbeat(
 
 #[get("/<bucket_id>/events/count")]
 pub fn bucket_event_count(
-    bucket_id: String,
+    bucket_id: &str,
     state: &State<ServerState>,
 ) -> Result<Json<u64>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.get_event_count(&bucket_id, None, None);
+    let res = datastore.get_event_count(bucket_id, None, None);
     match res {
         Ok(eventcount) => Ok(Json(eventcount as u64)),
         Err(err) => Err(err.into()),
@@ -176,12 +176,12 @@ pub fn bucket_event_count(
 
 #[delete("/<bucket_id>/events/<event_id>")]
 pub fn bucket_events_delete_by_id(
-    bucket_id: String,
+    bucket_id: &str,
     event_id: i64,
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.delete_events_by_id(&bucket_id, vec![event_id]) {
+    match datastore.delete_events_by_id(bucket_id, vec![event_id]) {
         Ok(_) => Ok(()),
         Err(err) => Err(err.into()),
     }
@@ -189,31 +189,31 @@ pub fn bucket_events_delete_by_id(
 
 #[get("/<bucket_id>/export")]
 pub fn bucket_export(
-    bucket_id: String,
+    bucket_id: &str,
     state: &State<ServerState>,
 ) -> Result<BucketsExportRocket, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
     let mut export = BucketsExport {
         buckets: HashMap::new(),
     };
-    let mut bucket = match datastore.get_bucket(&bucket_id) {
+    let mut bucket = match datastore.get_bucket(bucket_id) {
         Ok(bucket) => bucket,
         Err(err) => return Err(err.into()),
     };
     /* TODO: Replace expect with http error */
     let events = datastore
-        .get_events(&bucket_id, None, None, None)
+        .get_events(bucket_id, None, None, None)
         .expect("Failed to get events for bucket");
     bucket.events = Some(TryVec::new(events));
-    export.buckets.insert(bucket_id, bucket);
+    export.buckets.insert(bucket_id.into(), bucket);
 
     Ok(export.into())
 }
 
 #[delete("/<bucket_id>")]
-pub fn bucket_delete(bucket_id: String, state: &State<ServerState>) -> Result<(), HttpErrorJson> {
+pub fn bucket_delete(bucket_id: &str, state: &State<ServerState>) -> Result<(), HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.delete_bucket(&bucket_id) {
+    match datastore.delete_bucket(bucket_id) {
         Ok(_) => Ok(()),
         Err(err) => Err(err.into()),
     }

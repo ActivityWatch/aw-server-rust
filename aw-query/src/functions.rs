@@ -116,9 +116,6 @@ pub fn fill_env(env: &mut VarEnv) {
 }
 
 mod qfunctions {
-    use std::convert::TryFrom;
-    use std::convert::TryInto;
-
     use aw_datastore::Datastore;
     use aw_models::Event;
     use aw_transform::classify::Rule;

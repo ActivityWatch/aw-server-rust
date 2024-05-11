@@ -2,8 +2,6 @@ use std::collections::HashMap;
 
 use chrono::DateTime;
 use chrono::Duration;
-use chrono::NaiveDateTime;
-use chrono::TimeZone;
 use chrono::Utc;
 
 use rusqlite::Connection;
@@ -233,10 +231,7 @@ impl DatastoreInstance {
                 Some(starttime_ns) => {
                     let seconds: i64 = starttime_ns / 1_000_000_000;
                     let subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
-                    Some(TimeZone::from_utc_datetime(
-                        &Utc,
-                        &NaiveDateTime::from_timestamp_opt(seconds, subnanos).unwrap(),
-                    ))
+                    Some(DateTime::from_timestamp(seconds, subnanos).unwrap())
                 }
                 None => None,
             };
@@ -246,10 +241,7 @@ impl DatastoreInstance {
                 Some(endtime_ns) => {
                     let seconds: i64 = endtime_ns / 1_000_000_000;
                     let subnanos: u32 = (endtime_ns % 1_000_000_000) as u32;
-                    Some(TimeZone::from_utc_datetime(
-                        &Utc,
-                        &NaiveDateTime::from_timestamp_opt(seconds, subnanos).unwrap(),
-                    ))
+                    Some(DateTime::from_timestamp(seconds, subnanos).unwrap())
                 }
                 None => None,
             };
@@ -689,10 +681,7 @@ impl DatastoreInstance {
 
             Ok(Event {
                 id: Some(id),
-                timestamp: TimeZone::from_utc_datetime(
-                    &Utc,
-                    &NaiveDateTime::from_timestamp_opt(time_seconds, time_subnanos).unwrap(),
-                ),
+                timestamp: DateTime::from_timestamp(time_seconds, time_subnanos).unwrap(),
                 duration: Duration::nanoseconds(duration_ns),
                 data,
             })
@@ -784,10 +773,7 @@ impl DatastoreInstance {
 
                 Ok(Event {
                     id: Some(id),
-                    timestamp: TimeZone::from_utc_datetime(
-                        &Utc,
-                        &NaiveDateTime::from_timestamp_opt(time_seconds, time_subnanos).unwrap(),
-                    ),
+                    timestamp: DateTime::from_timestamp(time_seconds, time_subnanos).unwrap(),
                     duration: Duration::nanoseconds(duration_ns),
                     data,
                 })

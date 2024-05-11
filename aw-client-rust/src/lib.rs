@@ -7,7 +7,6 @@ extern crate tokio;
 
 pub mod blocking;
 
-use std::vec::Vec;
 use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};

@@ -1,4 +1,3 @@
-use std::boxed::Box;
 use std::error::Error;
 use std::fs;
 use std::net::TcpStream;

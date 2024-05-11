@@ -282,10 +282,6 @@ pub fn sync_datastores(
         let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push);
         sync_one(ds_from, ds_to, bucket_from, bucket_to);
     }
-
-    // Close
-    ds_from.close();
-    ds_to.close();
 }
 
 /// Syncs a single bucket from one datastore to another

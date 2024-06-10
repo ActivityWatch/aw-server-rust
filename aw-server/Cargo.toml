@@ -16,7 +16,6 @@ path = "src/main.rs"
 [dependencies]
 rocket = { version = "0.5.0", features = ["json"] }
 rocket_cors = { version = "0.6.0" }
-multipart = { version = "0.18", default-features = false, features = ["server"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

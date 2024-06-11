@@ -22,7 +22,8 @@ use serde_json::value::Value;
 ///         }
 /// ```
 pub fn split_url_event(event: &mut Event) {
-    use rocket::http::uri::Absolute;
+    use url::Url;
+
     let uri_str = match event.data.get("url") {
         None => return,
         Some(val) => match val {
@@ -30,7 +31,7 @@ pub fn split_url_event(event: &mut Event) {
             _ => return,
         },
     };
-    let uri = match Absolute::parse(&uri_str) {
+    let uri = match Url::parse(&uri_str) {
         Ok(uri) => uri,
         Err(_) => return,
     };
@@ -40,8 +41,8 @@ pub fn split_url_event(event: &mut Event) {
         .data
         .insert("$protocol".to_string(), Value::String(protocol));
     // Domain
-    let domain = match uri.authority() {
-        Some(authority) => authority.host().trim_start_matches("www.").to_string(),
+    let domain = match uri.host_str() {
+        Some(domain) => domain.trim_start_matches("www.").to_string(),
         None => "".to_string(),
     };
     event

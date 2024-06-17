@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr};
+use std::str::FromStr;
 
 /// Transforms for classifying (tagging and categorizing) events.
 ///
@@ -10,7 +10,6 @@ pub enum Rule {
     None,
     Logical(LogicalRule),
     Regex(RegexRule),
-    KeyValue(KeyValueRule),
 }
 
 impl RuleTrait for Rule {
@@ -19,7 +18,6 @@ impl RuleTrait for Rule {
             Rule::None => false,
             Rule::Logical(rule) => rule.matches(event),
             Rule::Regex(rule) => rule.matches(event),
-            Rule::KeyValue(rule) => rule.matches(event),
         }
     }
 }
@@ -30,10 +28,15 @@ trait RuleTrait {
 
 pub struct RegexRule {
     regex: Regex,
+    field: Option<String>,
 }
 
 impl RegexRule {
-    pub fn new(regex_str: &str, ignore_case: bool) -> Result<RegexRule, fancy_regex::Error> {
+    pub fn new(
+        regex_str: &str,
+        ignore_case: bool,
+        field: Option<String>,
+    ) -> Result<RegexRule, fancy_regex::Error> {
         // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
         // so we need to prefix with `(?i)` to make it case insensitive.
         let regex = if ignore_case {
@@ -43,7 +46,7 @@ impl RegexRule {
             Regex::new(regex_str)?
         };
 
-        Ok(RegexRule { regex })
+        Ok(RegexRule { regex, field })
     }
 }
 
@@ -56,40 +59,19 @@ impl RuleTrait for RegexRule {
     fn matches(&self, event: &Event) -> bool {
         event
             .data
-            .values()
-            .filter(|val| val.is_string())
-            .any(|val| self.regex.is_match(val.as_str().unwrap()).unwrap())
+            .iter()
+            .filter(|(field, val)| {
+                self.field.as_ref().map(|v| &v == field).unwrap_or(true) && val.is_string()
+            })
+            .any(|(_, val)| self.regex.is_match(val.as_str().unwrap()).unwrap())
     }
 }
 
 impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
-        Rule::Regex(RegexRule { regex: re })
-    }
-}
-
-pub struct KeyValueRule {
-    rules: HashMap<String, Rule>,
-}
-
-impl KeyValueRule {
-    pub fn new(rules: HashMap<String, Rule>) -> Self {
-        Self { rules }
-    }
-}
-
-impl RuleTrait for KeyValueRule {
-    fn matches(&self, event: &Event) -> bool {
-        self.rules.iter().all(|(key, rule)| {
-            event
-                .data
-                .get(key)
-                .filter(|_| {
-                    let mut ev = event.clone();
-                    ev.data.retain(|k, _| k == key);
-                    rule.matches(&ev)
-                })
-                .is_some()
+        Rule::Regex(RegexRule {
+            regex: re,
+            field: None,
         })
     }
 }
@@ -206,7 +188,7 @@ fn test_rule() {
         .insert("nonono".into(), serde_json::json!("no match!"));
 
     let rule_from_regex = Rule::from(Regex::new("test").unwrap());
-    let rule_from_new = Rule::Regex(RegexRule::new("test", false).unwrap());
+    let rule_from_new = Rule::Regex(RegexRule::new("test", false, None).unwrap());
     let rule_none = Rule::None;
     assert!(rule_from_regex.matches(&e_match));
     assert!(rule_from_new.matches(&e_match));

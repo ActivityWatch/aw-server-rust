@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 /// Transforms for classifying (tagging and categorizing) events.
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
@@ -7,6 +9,7 @@ use fancy_regex::Regex;
 pub enum Rule {
     None,
     Regex(RegexRule),
+    KeyValue(KeyValueRule),
 }
 
 impl RuleTrait for Rule {
@@ -14,6 +17,7 @@ impl RuleTrait for Rule {
         match self {
             Rule::None => false,
             Rule::Regex(rule) => rule.matches(event),
+            Rule::KeyValue(rule) => rule.matches(event),
         }
     }
 }
@@ -59,6 +63,32 @@ impl RuleTrait for RegexRule {
 impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
         Rule::Regex(RegexRule { regex: re })
+    }
+}
+
+pub struct KeyValueRule {
+    rules: HashMap<String, Rule>,
+}
+
+impl KeyValueRule {
+    pub fn new(rules: HashMap<String, Rule>) -> Self {
+        Self { rules }
+    }
+}
+
+impl RuleTrait for KeyValueRule {
+    fn matches(&self, event: &Event) -> bool {
+        self.rules.iter().all(|(key, rule)| {
+            event
+                .data
+                .get(key)
+                .filter(|_| {
+                    let mut ev = event.clone();
+                    ev.data.retain(|k, _| k == key);
+                    rule.matches(&ev)
+                })
+                .is_some()
+        })
     }
 }
 

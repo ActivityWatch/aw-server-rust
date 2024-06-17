@@ -4,7 +4,7 @@ use std::fmt;
 use super::functions;
 use super::QueryError;
 use aw_models::Event;
-use aw_transform::classify::{RegexRule, Rule};
+use aw_transform::classify::{KeyValueRule, RegexRule, Rule};
 
 use serde::{Serialize, Serializer};
 use serde_json::value::Value;
@@ -297,50 +297,74 @@ impl TryFrom<&DataType> for Rule {
                 ))
             }
         };
-        if rtype == "none" {
-            Ok(Self::None)
-        } else if rtype == "regex" {
-            let regex_val = match obj.get("regex") {
-                Some(regex_val) => regex_val,
-                None => {
+
+        match rtype.as_str() {
+            "none" => Ok(Self::None),
+            "regex" => parse_regex_rule(obj),
+            "keyvalue" => {
+                let Some(rules) = obj.get("rules") else {
                     return Err(QueryError::InvalidFunctionParameters(
-                        "regex rule is missing the 'regex' field".to_string(),
-                    ))
-                }
-            };
-            let regex_str = match regex_val {
-                DataType::String(s) => s,
-                _ => {
-                    return Err(QueryError::InvalidFunctionParameters(
-                        "the regex field of the regex rule is not a string".to_string(),
-                    ))
-                }
-            };
-            let ignore_case_val = match obj.get("ignore_case") {
-                Some(case_val) => case_val,
-                None => &DataType::Bool(false),
-            };
-            let ignore_case = match ignore_case_val {
-                DataType::Bool(b) => b,
-                _ => {
-                    return Err(QueryError::InvalidFunctionParameters(
-                        "the ignore_case field of the regex rule is not a bool".to_string(),
-                    ))
-                }
-            };
-            let regex_rule = match RegexRule::new(regex_str, *ignore_case) {
-                Ok(regex_rule) => regex_rule,
-                Err(err) => {
-                    return Err(QueryError::RegexCompileError(format!(
-                        "Failed to compile regex string '{regex_str}': '{err:?}"
-                    )))
-                }
-            };
-            Ok(Self::Regex(regex_rule))
-        } else {
-            Err(QueryError::InvalidFunctionParameters(format!(
+                        "keyval rule is missing the 'rules' field".to_string(),
+                    ));
+                };
+
+                let rules = match rules {
+                    DataType::Dict(rules) => rules
+                        .iter()
+                        .map(|(k, v)| Rule::try_from(v).map(|v| (k.to_owned(), v)))
+                        .collect::<Result<HashMap<_, _>, _>>()?,
+                    _ => {
+                        return Err(QueryError::InvalidFunctionParameters(
+                            "the rules field of the keyval rule is not a dict".to_string(),
+                        ))
+                    }
+                };
+
+                Ok(Rule::KeyValue(KeyValueRule::new(rules)))
+            }
+            _ => Err(QueryError::InvalidFunctionParameters(format!(
                 "Unknown rule type '{rtype}'"
-            )))
+            ))),
         }
     }
+}
+
+fn parse_regex_rule(obj: &HashMap<String, DataType>) -> Result<Rule, QueryError> {
+    let regex_val = match obj.get("regex") {
+        Some(regex_val) => regex_val,
+        None => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "regex rule is missing the 'regex' field".to_string(),
+            ))
+        }
+    };
+    let regex_str = match regex_val {
+        DataType::String(s) => s,
+        _ => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "the regex field of the regex rule is not a string".to_string(),
+            ))
+        }
+    };
+    let ignore_case_val = match obj.get("ignore_case") {
+        Some(case_val) => case_val,
+        None => &DataType::Bool(false),
+    };
+    let ignore_case = match ignore_case_val {
+        DataType::Bool(b) => b,
+        _ => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "the ignore_case field of the regex rule is not a bool".to_string(),
+            ))
+        }
+    };
+    let regex_rule = match RegexRule::new(regex_str, *ignore_case) {
+        Ok(regex_rule) => regex_rule,
+        Err(err) => {
+            return Err(QueryError::RegexCompileError(format!(
+                "Failed to compile regex string '{regex_str}': '{err:?}"
+            )))
+        }
+    };
+    Ok(Rule::Regex(regex_rule))
 }

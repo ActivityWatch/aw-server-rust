@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
 /// Transforms for classifying (tagging and categorizing) events.
 ///
@@ -8,6 +8,7 @@ use fancy_regex::Regex;
 
 pub enum Rule {
     None,
+    Logical(LogicalRule),
     Regex(RegexRule),
     KeyValue(KeyValueRule),
 }
@@ -16,6 +17,7 @@ impl RuleTrait for Rule {
     fn matches(&self, event: &Event) -> bool {
         match self {
             Rule::None => false,
+            Rule::Logical(rule) => rule.matches(event),
             Rule::Regex(rule) => rule.matches(event),
             Rule::KeyValue(rule) => rule.matches(event),
         }
@@ -89,6 +91,45 @@ impl RuleTrait for KeyValueRule {
                 })
                 .is_some()
         })
+    }
+}
+
+pub enum LogicalOperator {
+    Or,
+    And,
+}
+
+impl FromStr for LogicalOperator {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "or" => Ok(Self::Or),
+            "and" => Ok(Self::And),
+            _ => Err(format!("Invalid logical operator: {}", s)),
+        }
+    }
+}
+
+pub struct LogicalRule {
+    rules: Vec<Rule>,
+    operator: LogicalOperator,
+}
+
+impl LogicalRule {
+    pub fn new(rules: Vec<Rule>, operator: LogicalOperator) -> Self {
+        Self { rules, operator }
+    }
+}
+
+impl RuleTrait for LogicalRule {
+    fn matches(&self, event: &Event) -> bool {
+        use LogicalOperator::{And, Or};
+
+        match self.operator {
+            Or => self.rules.iter().any(|rule| rule.matches(event)),
+            And => self.rules.iter().all(|rule| rule.matches(event)),
+        }
     }
 }
 

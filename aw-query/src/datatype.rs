@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr as _;
 
 use super::functions;
 use super::QueryError;
 use aw_models::Event;
-use aw_transform::classify::{KeyValueRule, RegexRule, Rule};
+use aw_transform::classify::{KeyValueRule, LogicalOperator, LogicalRule, RegexRule, Rule};
 
 use serde::{Serialize, Serializer};
 use serde_json::value::Value;
@@ -300,6 +301,32 @@ impl TryFrom<&DataType> for Rule {
 
         match rtype.as_str() {
             "none" => Ok(Self::None),
+            "or" | "and" => {
+                let Some(rules) = obj.get("rules") else {
+                    return Err(QueryError::InvalidFunctionParameters(format!(
+                        "{} rule is missing the 'rules' field",
+                        rtype
+                    )));
+                };
+
+                let rules = match rules {
+                    DataType::List(rules) => rules
+                        .iter()
+                        .map(Rule::try_from)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    _ => {
+                        return Err(QueryError::InvalidFunctionParameters(format!(
+                            "the rules field of the {} rule is not a list",
+                            rtype
+                        )))
+                    }
+                };
+
+                let operator = LogicalOperator::from_str(rtype)
+                    .map_err(QueryError::InvalidFunctionParameters)?;
+
+                Ok(Rule::Logical(LogicalRule::new(rules, operator)))
+            }
             "regex" => parse_regex_rule(obj),
             "keyvalue" => {
                 let Some(rules) = obj.get("rules") else {

@@ -37,19 +37,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .expect("Unable to read file");
-    let yaml: Value = serde_yaml::from_str(&contents).expect("Failed parsing yaml from config file");
-    let apikey = yaml["apikey"].as_str().expect("unable to get api key from config file");
+    let yaml: Value =
+        serde_yaml::from_str(&contents).expect("Failed parsing yaml from config file");
+    let apikey = yaml["apikey"]
+        .as_str()
+        .expect("unable to get api key from config file");
     if apikey == "your-api-key" || apikey == "" {
         panic!("Please set your API key in the config.yaml file");
     }
 
-    let query = "window_events = query_bucket(find_bucket(\"aw-watcher-window_\"));
-    RETURN = window_events;";
+
+    let query = "
+            events = flood(query_bucket(find_bucket(\"aw-watcher-window_\")));
+            not_afk = flood(query_bucket(find_bucket(\"aw-watcher-afk_\")));
+            not_afk = filter_keyvals(not_afk, \"status\", [\"not-afk\"]);
+            events = filter_period_intersect(events, not_afk);
+            events = categorize(events, [[[\"Work\"], {\"type\": \"regex\", \"regex\": \"aw|ActivityWatch\", \"ignore_case\": true}]]);
+            events = filter_keyvals(events, \"$category\", [[\"Work\"]]);
+            RETURN = events;
+        ";
 
     let timeperiods = vec![(start, end)];
 
     // TODO: handle errors
-    let res = aw_client.query(&query, timeperiods).await.unwrap(); 
+    let res = aw_client.query(&query, timeperiods).await.expect("Failed to query data");
 
     let res_string = serde_json::to_string(&res).unwrap();
     // strip the leading and trailing '[' and ']'

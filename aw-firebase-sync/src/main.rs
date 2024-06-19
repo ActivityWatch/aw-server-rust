@@ -6,10 +6,30 @@ use serde_json::{json, Value};
 use serde_yaml;
 use std::fs::{DirBuilder, File};
 use std::io::prelude::*;
+use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let aw_client = AwClient::new("localhost", 5600, "aw-firebase-sync").unwrap();
+
+    let args: Vec<String> = env::args().collect();
+    let mut port: u16 = 5600;
+    if args.len() > 1 {
+        for idx in 1..args.len() {
+            if args[idx] == "--port" {
+                port = args[idx + 1].parse().expect("Invalid port number");
+                break;
+            }
+            if args[idx] == "--testing" {
+                port = 5699;
+            }
+            if args[idx] == "--help" {
+                println!("Usage: aw-firebase-sync [--testing] [--port PORT] [--help]");
+                return Ok(());
+            }
+        }
+    }
+    let aw_client = AwClient::new("localhost", port, "aw-firebase-sync").unwrap();
+
     let start = Utc::now().date().and_hms_opt(0, 0, 0).unwrap() - chrono::Duration::days(6);
     let end = Utc::now().date().and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::days(1);
 
@@ -59,16 +79,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let timeperiods = vec![(start, end)];
 
-    let res = aw_client.query(&query, timeperiods).await.expect("Failed to query data");
+    let query_result = aw_client.query(&query, timeperiods).await.expect("Failed to query data");
 
-    let res_string = serde_json::to_string(&res[0]).unwrap();
+    let query_data = serde_json::to_string(&query_result[0]).unwrap();
 
     let firebase_url = "https://us-central1-aw-mockup.cloudfunctions.net/uploadData";
     // let firebase_url = "http://localhost:5001/aw-mockup/us-central1/uploadData";
 
     let payload = json!({
         "apiKey": apikey,
-        "data": res_string
+        "data": query_data
     });
 
     let firebase_client = reqwest::Client::new();

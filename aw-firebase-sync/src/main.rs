@@ -59,12 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let timeperiods = vec![(start, end)];
 
-    // TODO: handle errors
     let res = aw_client.query(&query, timeperiods).await.expect("Failed to query data");
 
-    let res_string = serde_json::to_string(&res).unwrap();
-    // strip the leading and trailing '[' and ']'
-    let res_string = &res_string[1..res_string.len() - 1];
+    let res_string = serde_json::to_string(&res[0]).unwrap();
 
     let firebase_url = "https://us-central1-aw-mockup.cloudfunctions.net/uploadData";
     // let firebase_url = "http://localhost:5001/aw-mockup/us-central1/uploadData";

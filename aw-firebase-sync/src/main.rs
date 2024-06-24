@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let aw_client = AwClient::new("localhost", port, "aw-firebase-sync").unwrap();
     #[allow(deprecated)]
-    let start = Utc::now().date().and_hms_opt(0, 0, 0).unwrap() - chrono::Duration::days(6);
+    let start = Utc::now().date().and_hms_opt(0, 0, 0).unwrap() - chrono::Duration::days(7);
     #[allow(deprecated)]
     let end = Utc::now().date().and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::days(1);
 
@@ -67,7 +67,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         panic!("Please set your API key in the config.yaml file");
     }
 
-
     let query = "
             events = flood(query_bucket(find_bucket(\"aw-watcher-window_\")));
             not_afk = flood(query_bucket(find_bucket(\"aw-watcher-afk_\")));
@@ -77,12 +76,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             events = filter_keyvals(events, \"$category\", [[\"Work\"]]);
             RETURN = events;
         ";
-
     let timeperiods = vec![(start, end)];
-
     let query_result = aw_client.query(&query, timeperiods).await.expect("Failed to query data");
-
-    let query_data = serde_json::to_string(&query_result[0]).unwrap();
+    let query_data = serde_json::to_string(&query_result[0]).expect("Failed to serialize query data");
 
     let firebase_url = "https://us-central1-aw-mockup.cloudfunctions.net/uploadData";
     // let firebase_url = "http://localhost:5001/aw-mockup/us-central1/uploadData";
@@ -100,8 +96,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .json::<Value>()
         .await?;
-
     println!("Response: {:?}", response);
-
     Ok(())
 }

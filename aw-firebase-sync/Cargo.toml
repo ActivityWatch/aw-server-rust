@@ -15,3 +15,5 @@ serde_json = "1.0.70"
 serde_yaml = "0.8.18"
 reqwest = { version = "0.12.4" , features = ["json"] }
 dirs = "5.0.1"
+tracing = "0.1.26"
+tracing-subscriber = "0.3.18"

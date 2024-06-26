@@ -4,13 +4,15 @@ use dirs::config_dir;
 use reqwest;
 use serde_json::{json, Value};
 use serde_yaml;
+use std::env;
 use std::fs::{DirBuilder, File};
 use std::io::prelude::*;
-use std::env;
+use tracing::info;
+use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
+    tracing_subscriber::fmt::init();
     let args: Vec<String> = env::args().collect();
     let mut port: u16 = 5600;
     if args.len() > 1 {
@@ -29,9 +31,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let aw_client = AwClient::new("localhost", port, "aw-firebase-sync").unwrap();
-
-    let start = Utc::now().date().and_hms_opt(0, 0, 0).unwrap() - chrono::Duration::days(6);
-    let end = Utc::now().date().and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::days(1);
 
     let path = config_dir()
         .map(|mut path| {
@@ -77,30 +76,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RETURN = events;
         ";
 
-    let timeperiods = vec![(start, end)];
-
-    let query_result = aw_client.query(&query, timeperiods).await.expect("Failed to query data");
-
-    let query_data = serde_json::to_string(&query_result[0]).unwrap();
-
     let firebase_url = "https://us-central1-aw-mockup.cloudfunctions.net/uploadData";
     // let firebase_url = "http://localhost:5001/aw-mockup/us-central1/uploadData";
 
-    let payload = json!({
-        "apiKey": apikey,
-        "data": query_data
-    });
-
     let firebase_client = reqwest::Client::new();
-    let response = firebase_client
-        .post(firebase_url)
-        .json(&payload)
-        .send()
-        .await?
-        .json::<Value>()
-        .await?;
 
-    println!("Response: {:?}", response);
+    loop {
+        #[allow(deprecated)]
+        let start =
+            Utc::now().date().and_hms_opt(0, 0, 0).unwrap() - chrono::Duration::seconds(300);
+        #[allow(deprecated)]
+        let end = Utc::now().date().and_hms_opt(0, 0, 0).unwrap();
+        let timeperiods = vec![(start, end)];
 
-    Ok(())
+        let query_result = aw_client
+            .query(&query, timeperiods)
+            .await
+            .expect("Failed to query data");
+        let query_data =
+            serde_json::to_string(&query_result[0]).expect("Failed to serialize query data");
+        let payload = json!({
+            "apiKey": apikey,
+            "data": query_data
+        });
+        let response = firebase_client
+            .post(firebase_url)
+            .json(&payload)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+        info!("Response: {:?}", response);
+        std::thread::sleep(std::time::Duration::from_secs(300));
+    }
+    // Ok(())
 }

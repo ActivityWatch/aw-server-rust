@@ -15,6 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let args: Vec<String> = env::args().collect();
     let mut port: u16 = 5600;
+    let mut testing = false;
     if args.len() > 1 {
         for idx in 1..args.len() {
             if args[idx] == "--port" {
@@ -22,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             if args[idx] == "--testing" {
-                port = 5699;
+                testing = true;
             }
             if args[idx] == "--help" {
                 println!("Usage: aw-firebase-sync [--testing] [--port PORT] [--help]");
@@ -76,8 +77,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RETURN = events;
         ";
 
-    let firebase_url = "https://us-central1-aw-mockup.cloudfunctions.net/uploadData";
-    // let firebase_url = "http://localhost:5001/aw-mockup/us-central1/uploadData";
+    let firebase_url = if testing {
+        "http://localhost:5001/aw-mockup/us-central1/uploadData"
+    } else {
+        "https://us-central1-aw-mockup.cloudfunctions.net/uploadData"
+    };
 
     let firebase_client = reqwest::Client::new();
 

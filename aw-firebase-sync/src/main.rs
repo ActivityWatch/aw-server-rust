@@ -1,5 +1,5 @@
 use aw_client_rust::AwClient;
-use chrono::Utc;
+use chrono::Local;
 use dirs::config_dir;
 use reqwest;
 use serde_json::{json, Value};
@@ -86,11 +86,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let firebase_client = reqwest::Client::new();
 
     loop {
-        #[allow(deprecated)]
-        let start =
-            Utc::now().date().and_hms_opt(0, 0, 0).unwrap() - chrono::Duration::seconds(300);
-        #[allow(deprecated)]
-        let end = Utc::now().date().and_hms_opt(0, 0, 0).unwrap();
+        let start = Local::now().to_utc() - chrono::Duration::minutes(5);
+        let end = Local::now().to_utc();
         let timeperiods = vec![(start, end)];
 
         let query_result = aw_client

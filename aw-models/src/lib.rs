@@ -23,6 +23,7 @@ mod info;
 mod query;
 mod timeinterval;
 mod tryvec;
+mod user;
 
 pub use self::bucket::Bucket;
 pub use self::bucket::BucketMetadata;
@@ -32,3 +33,4 @@ pub use self::info::Info;
 pub use self::query::Query;
 pub use self::timeinterval::TimeInterval;
 pub use self::tryvec::TryVec;
+pub use self::user::User;

@@ -13,6 +13,7 @@ use rusqlite::TransactionBehavior;
 
 use aw_models::Bucket;
 use aw_models::Event;
+use aw_models::User;
 
 use crate::DatastoreError;
 use crate::DatastoreInstance;
@@ -45,6 +46,7 @@ impl fmt::Debug for Datastore {
 #[derive(Debug, Clone)]
 pub enum Response {
     Empty(),
+    User(User),
     Bucket(Bucket),
     BucketMap(HashMap<String, Bucket>),
     Event(Event),
@@ -78,6 +80,7 @@ pub enum Command {
     SetKeyValue(String, String),
     DeleteKeyValue(String),
     Close(),
+    GetUser(String)
 }
 
 fn _unwrap_response(
@@ -290,6 +293,10 @@ impl DatastoreWorker {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
             },
+            Command::GetUser(username) => match ds.get_user(tx, username) {
+                Ok(()) => Ok(Response::Empty()),
+                Err(e) => Err(e),
+            }
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())
@@ -527,4 +534,17 @@ impl Datastore {
             Err(e) => panic!("Error closing database: {:?}", e),
         }
     }
+
+    pub fn get_user(&self, username:String) -> Result<User, DatastoreError> {
+        let cmd = Command::GetUser(username);
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Response::User(user) => Ok(user),
+                _ => Err(DatastoreError::NoUser()),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
 }

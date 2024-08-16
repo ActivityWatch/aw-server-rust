@@ -13,6 +13,7 @@ use serde_json::value::Value;
 use aw_models::Bucket;
 use aw_models::BucketMetadata;
 use aw_models::Event;
+use aw_models::User;
 
 use rusqlite::params;
 use rusqlite::types::ToSql;
@@ -52,6 +53,9 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 4 {
         _migrate_v3_to_v4(conn);
+    }
+    if version == 4{
+        _migrate_new_version(conn)
     }
 
     first_init
@@ -111,7 +115,6 @@ fn _migrate_v0_to_v1(conn: &Connection) {
         &[] as &[&dyn ToSql],
     )
     .expect("Failed to create events_endtime index");
-
     /* Update database version */
     conn.pragma_update(None, "user_version", 1)
         .expect("Failed to update database version!");
@@ -171,6 +174,20 @@ fn _migrate_v3_to_v4(conn: &Connection) {
         .expect("Failed to update database version!");
 }
 
+fn _migrate_new_version(conn:&Connection){
+    conn.execute(
+        "
+        CREATE TABLE IF NOT EXISTS User (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            lastname TEXT NOT NULL,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL
+        )",
+        &[] as &[&dyn ToSql],
+    )
+    .expect("Failed to create User table");
+}
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
     first_init: bool,
@@ -963,5 +980,21 @@ impl DatastoreInstance {
                 )),
             },
         }
+    }
+
+    pub fn get_user(&self, conn: &Connection, username:String) -> Result<(), DatastoreError> {
+        let query = format!("SELECT * FROM User WHERE username = '{username}'");
+        println!("{query}");
+        let mut stmt = match conn.prepare(query.as_str())
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to prepare get_value SQL statement: {err}"
+                )))
+            }
+        };
+        Ok(())
+        
     }
 }

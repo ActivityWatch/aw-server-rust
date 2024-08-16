@@ -53,6 +53,7 @@ mod hostcheck;
 mod import;
 mod query;
 mod settings;
+mod user;
 
 pub use util::HttpErrorJson;
 
@@ -169,6 +170,12 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 settings::setting_delete,
                 settings::settings_get,
             ],
+        )
+        .mount(
+            "/api/user",
+            routes![
+                user::login
+            ]
         )
         .mount("/", rocket_cors::catch_all_options_routes());
 

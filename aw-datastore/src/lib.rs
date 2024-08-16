@@ -36,6 +36,7 @@ pub enum DatastoreError {
     NoSuchKey(String),
     MpscError,
     InternalError(String),
+    NoUser(),
     // Errors specific to when migrate is disabled
     Uninitialized(String),
     OldDbVersion(String),

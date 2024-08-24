@@ -35,6 +35,9 @@ aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
 
+[target.'cfg(target_os="linux")'.dependencies]
+sd-notify = "0.4.2"
+
 [target.'cfg(all(target_os="linux", target_arch="x86"))'.dependencies]
 jemallocator = "0.5.0"
 

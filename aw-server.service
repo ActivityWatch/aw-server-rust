@@ -14,12 +14,12 @@
 #
 
 [Service]
-Type=simple
+Type=notify
 ExecStart=aw-server
 
 [Unit]
 Description=ActivityWatch Server (Rust implementation)
-Wants=network.target
+After=network.target
 
 [Install]
 WantedBy=default.target

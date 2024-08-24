@@ -9,6 +9,8 @@ use clap::Parser;
 
 use aw_server::*;
 
+#[cfg(target_os = "linux")]
+use sd_notify::NotifyState;
 #[cfg(all(target_os = "linux", target_arch = "x86"))]
 extern crate jemallocator;
 #[cfg(all(target_os = "linux", target_arch = "x86"))]
@@ -147,9 +149,12 @@ async fn main() -> Result<(), rocket::Error> {
         device_id,
     };
 
-    let _ = endpoints::build_rocket(server_state, config)
-        .launch()
+    let _rocket = endpoints::build_rocket(server_state, config)
+        .ignite()
         .await?;
+    #[cfg(target_os = "linux")]
+    let _ = sd_notify::notify(true, &[NotifyState::Ready]);
+    _rocket.launch().await?;
 
     Ok(())
 }

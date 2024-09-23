@@ -41,13 +41,6 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
         })
         .collect::<Vec<_>>();
 
-    // filter out dbs that are smaller than 50kB (workaround for trying to sync empty database
-    // files that are spuriously created somewhere)
-    let dbs = dbs
-        .into_iter()
-        .filter(|entry| entry.metadata().map(|m| m.len() > 50_000).unwrap_or(false))
-        .collect::<Vec<_>>();
-
     // if more than one db, warn and use the largest one
     if dbs.len() > 1 {
         warn!(

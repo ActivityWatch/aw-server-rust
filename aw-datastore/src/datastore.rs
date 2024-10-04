@@ -212,25 +212,40 @@ impl DatastoreInstance {
     }
 
     fn get_stored_ignores(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
-        let result = self.get_key_value(conn, "IGNORE_FILTERS");
+        let result = self.get_key_value(conn, "IGNORE_FILTERS_APPS");
         if result.is_ok() {
             let unwrapped_key_value = &result.unwrap();
-            let apps_exist = unwrapped_key_value.value.get("APPS");
+	    let parts = unwrapped_key_value.split(",");
+	    for part in parts {
+                    self.ignored_apps.push(part.to_uppercase());
+	    }
+
+            /*let apps_exist = unwrapped_key_value.value.get("APPS");
             if apps_exist.is_some() {
                 let apps = apps_exist.unwrap().as_array().unwrap();
                 for key in apps {
                     let value = key.as_str().unwrap().to_string();
                     self.ignored_apps.push(value.to_uppercase());
                 }
-            }
-            let titles_exist = unwrapped_key_value.value.get("TITLES");
+            }*/
+	}
+
+        let result = self.get_key_value(conn, "IGNORE_FILTERS_TITLES");
+        if result.is_ok() {
+            let unwrapped_key_value = &result.unwrap();
+	    let parts = unwrapped_key_value.split(",");
+	    for part in parts {
+                    self.ignored_titles.push(part.to_uppercase());
+	    }
+
+            /* let titles_exist = unwrapped_key_value.value.get("TITLES");
             if titles_exist.is_some() {
                 let titles = titles_exist.unwrap().as_array().unwrap();
                 for key in titles {
                     let value = key.as_str().unwrap().to_string();
                     self.ignored_titles.push(value.to_uppercase());
                 }
-            }
+            } */
 
             info!("Ignoring {} titles & {} apps.", self.ignored_titles.len(), self.ignored_apps.len());
         }

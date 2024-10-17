@@ -17,21 +17,21 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
 fn wait_for_server(socket_addr: &std::net::SocketAddr) -> Result<(), Box<dyn Error>> {
     // Check if server is running with exponential backoff
     let mut retry_delay = Duration::from_millis(100);
-    let max_retry_delay = Duration::from_secs(10);
+    let max_wait = Duration::from_secs(10);
     let mut total_wait = Duration::from_secs(0);
 
-    while total_wait < max_retry_delay {
+    while total_wait < max_wait {
         match TcpStream::connect_timeout(socket_addr, retry_delay) {
             Ok(_) => break,
             Err(_) => {
                 std::thread::sleep(retry_delay);
                 total_wait += retry_delay;
-                retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
+                retry_delay *= 2;
             }
         }
     }
 
-    if total_wait >= max_retry_delay {
+    if total_wait >= max_wait {
         return Err(format!(
             "Local server {} not running after 10 seconds of retrying",
             socket_addr

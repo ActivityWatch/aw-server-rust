@@ -143,7 +143,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Start daemon
         Commands::Daemon {} => {
             info!("Starting daemon...");
-            // TODO: log any errors before re-throwing
             daemon(&client)?;
         }
         // Perform basic sync

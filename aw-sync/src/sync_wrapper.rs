@@ -14,41 +14,8 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn wait_for_server(socket_addr: &std::net::SocketAddr) -> Result<(), Box<dyn Error>> {
-    // Check if server is running with exponential backoff
-    let mut retry_delay = Duration::from_millis(100);
-    let max_wait = Duration::from_secs(10);
-    let mut total_wait = Duration::from_secs(0);
-
-    while total_wait < max_wait {
-        match TcpStream::connect_timeout(socket_addr, retry_delay) {
-            Ok(_) => break,
-            Err(_) => {
-                std::thread::sleep(retry_delay);
-                total_wait += retry_delay;
-                retry_delay *= 2;
-            }
-        }
-    }
-
-    if total_wait >= max_wait {
-        return Err(format!(
-            "Local server {} not running after 10 seconds of retrying",
-            socket_addr
-        )
-        .into());
-    }
-
-    Ok(())
-}
-
 pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
-    let socket_addrs = client.baseurl.socket_addrs(|| None)?;
-    let socket_addr = socket_addrs
-        .get(0)
-        .ok_or("Unable to resolve baseurl into socket address")?;
-
-    wait_for_server(socket_addr)?;
+    client.wait_for_server()?;
 
     // Path to the sync folder
     // Sync folder is structured ./{hostname}/{device_id}/test.db

@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::fs;
-use std::net::TcpStream;
 
 use crate::sync::{sync_run, SyncMode, SyncSpec};
 use aw_client_rust::blocking::AwClient;
@@ -14,15 +13,7 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
-    let socket_addrs = client.baseurl.socket_addrs(|| None)?;
-    let socket_addr = socket_addrs
-        .get(0)
-        .ok_or("Unable to resolve baseurl into socket address")?;
-
-    // Check if server is running
-    if TcpStream::connect(socket_addr).is_err() {
-        return Err(format!("Local server {} not running", &client.baseurl).into());
-    }
+    client.wait_for_start()?;
 
     // Path to the sync folder
     // Sync folder is structured ./{hostname}/{device_id}/test.db

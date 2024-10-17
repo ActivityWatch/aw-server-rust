@@ -11,6 +11,8 @@ use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map};
+use std::net::TcpStream;
+use std::time::Duration;
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
 
@@ -220,5 +222,39 @@ impl AwClient {
     pub async fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {
         let url = format!("{}/api/0/info", self.baseurl);
         self.client.get(url).send().await?.json().await
+    }
+
+    // TODO: make async
+    pub fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
+        let socket_addrs = self.baseurl.socket_addrs(|| None)?;
+        let socket_addr = socket_addrs
+            .first()
+            .ok_or("Unable to resolve baseurl into socket address")?;
+
+        // Check if server is running with exponential backoff
+        let mut retry_delay = Duration::from_millis(100);
+        let max_wait = Duration::from_secs(10);
+        let mut total_wait = Duration::from_secs(0);
+
+        while total_wait < max_wait {
+            match TcpStream::connect_timeout(socket_addr, retry_delay) {
+                Ok(_) => break,
+                Err(_) => {
+                    std::thread::sleep(retry_delay);
+                    total_wait += retry_delay;
+                    retry_delay *= 2;
+                }
+            }
+        }
+
+        if total_wait >= max_wait {
+            return Err(format!(
+                "Local server {} not running after 10 seconds of retrying",
+                socket_addr
+            )
+            .into());
+        }
+
+        Ok(())
     }
 }

@@ -143,6 +143,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Start daemon
         Commands::Daemon {} => {
             info!("Starting daemon...");
+            // TODO: log any errors before re-throwing
             daemon(&client)?;
         }
         // Perform basic sync
@@ -208,14 +209,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn daemon(client: &AwClient) -> Result<(), Box<dyn Error>> {
     loop {
-        info!("Pulling from all hosts");
-        sync_wrapper::pull_all(client)?;
-
-        info!("Pushing local data");
-        sync_wrapper::push(client)?;
+        if let Err(e) = daemon_sync_cycle(client) {
+            error!("Error during sync cycle: {}", e);
+            // Re-throw the error
+            return Err(e);
+        }
 
         info!("Sync pass done, sleeping for 5 minutes");
-
         std::thread::sleep(std::time::Duration::from_secs(300));
     }
+}
+
+fn daemon_sync_cycle(client: &AwClient) -> Result<(), Box<dyn Error>> {
+    info!("Pulling from all hosts");
+    sync_wrapper::pull_all(client)?;
+
+    info!("Pushing local data");
+    sync_wrapper::push(client)?;
+
+    Ok(())
 }

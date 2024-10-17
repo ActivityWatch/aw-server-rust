@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fs;
 use std::net::TcpStream;
+use std::time::Duration;
 
 use crate::sync::{sync_run, SyncMode, SyncSpec};
 use aw_client_rust::blocking::AwClient;
@@ -13,16 +14,41 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn wait_for_server(socket_addr: &std::net::SocketAddr) -> Result<(), Box<dyn Error>> {
+    // Check if server is running with exponential backoff
+    let mut retry_delay = Duration::from_millis(100);
+    let max_retry_delay = Duration::from_secs(10);
+    let mut total_wait = Duration::from_secs(0);
+
+    while total_wait < max_retry_delay {
+        match TcpStream::connect_timeout(socket_addr, retry_delay) {
+            Ok(_) => break,
+            Err(_) => {
+                std::thread::sleep(retry_delay);
+                total_wait += retry_delay;
+                retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
+            }
+        }
+    }
+
+    if total_wait >= max_retry_delay {
+        return Err(format!(
+            "Local server {} not running after 10 seconds of retrying",
+            socket_addr
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
 pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
     let socket_addrs = client.baseurl.socket_addrs(|| None)?;
     let socket_addr = socket_addrs
         .get(0)
         .ok_or("Unable to resolve baseurl into socket address")?;
 
-    // Check if server is running
-    if TcpStream::connect(socket_addr).is_err() {
-        return Err(format!("Local server {} not running", &client.baseurl).into());
-    }
+    wait_for_server(socket_addr)?;
 
     // Path to the sync folder
     // Sync folder is structured ./{hostname}/{device_id}/test.db

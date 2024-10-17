@@ -1,7 +1,5 @@
 use std::error::Error;
 use std::fs;
-use std::net::TcpStream;
-use std::time::Duration;
 
 use crate::sync::{sync_run, SyncMode, SyncSpec};
 use aw_client_rust::blocking::AwClient;
@@ -15,7 +13,7 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
-    client.wait_for_server()?;
+    client.wait_for_start()?;
 
     // Path to the sync folder
     // Sync folder is structured ./{hostname}/{device_id}/test.db

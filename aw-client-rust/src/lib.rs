@@ -225,9 +225,10 @@ impl AwClient {
     }
 
     // TODO: make async
-    pub fn wait_for_server(&self) -> Result<(), Box<dyn Error>> {
+    pub fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
         let socket_addrs = self.baseurl.socket_addrs(|| None)?;
-        let socket_addr = socket_addrs.first()
+        let socket_addr = socket_addrs
+            .first()
             .ok_or("Unable to resolve baseurl into socket address")?;
 
         // Check if server is running with exponential backoff

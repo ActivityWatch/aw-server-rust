@@ -2,7 +2,6 @@
 
 all: build
 build: aw-server aw-sync
-	python scripts/copy_rust_binaries.py target/$(targetdir)
 
 DESTDIR :=
 ifeq ($(SUDO_USER),)
@@ -23,6 +22,7 @@ endif
 
 aw-server: set-version aw-webui
 	cargo build $(cargoflag) --bin aw-server
+	poetry install --directory python
 
 aw-sync: set-version
 	cargo build $(cargoflag) --bin aw-sync
@@ -108,5 +108,5 @@ install:
 	install -m 644 aw-server.service $(DESTDIR)$(PREFIX)/lib/systemd/user/aw-server.service
 
 clean:
-	python scripts/copy_rust_binaries.py --clean target/$(targetdir)
+	rm -rf __pycache__ python/__pycache__
 	cargo clean

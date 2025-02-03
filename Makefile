@@ -2,6 +2,7 @@
 
 all: build
 build: aw-server aw-sync
+	python scripts/copy_rust_binaries.py target/$(targetdir)
 
 DESTDIR :=
 ifeq ($(SUDO_USER),)
@@ -107,4 +108,5 @@ install:
 	install -m 644 aw-server.service $(DESTDIR)$(PREFIX)/lib/systemd/user/aw-server.service
 
 clean:
+	python scripts/copy_rust_binaries.py --clean target/$(targetdir)
 	cargo clean

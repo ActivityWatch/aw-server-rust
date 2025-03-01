@@ -95,7 +95,7 @@ jobs:
     # Note: closed-source code needs to provide a token,
     # but open source code does not.
     - name: Upload to codecov.io
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v5
 
   # Code coverage using grcov
   #build-coverage-grcov:

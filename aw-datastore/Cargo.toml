@@ -13,7 +13,7 @@ appdirs = "0.2"
 serde = "1.0"
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.30", features = ["chrono", "serde_json", "bundled"]  }
+rusqlite = { version = "0.33", features = ["chrono", "serde_json", "bundled"]  }
 mpsc_requests = "0.3"
 log = "0.4"
 

@@ -23,6 +23,7 @@ clap = { version = "4.1", features = ["derive"] }
 appdirs = "0.2.0"
 dirs = "5.0.1"
 gethostname = "0.4.3"
+ctrlc = "3.4.5"
 
 aw-server = { path = "../aw-server" }
 aw-models = { path = "../aw-models" }

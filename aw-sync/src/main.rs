@@ -13,11 +13,12 @@ extern crate chrono;
 extern crate serde;
 extern crate serde_json;
 
-use std::error::Error;
-use std::path::PathBuf;
-
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
+use std::error::Error;
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::time::Duration;
 
 use aw_client_rust::blocking::AwClient;
 
@@ -207,6 +208,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn daemon(client: &AwClient) -> Result<(), Box<dyn Error>> {
+    let (tx, rx) = channel();
+
+    ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    })?;
+
     loop {
         if let Err(e) = daemon_sync_cycle(client) {
             error!("Error during sync cycle: {}", e);
@@ -215,8 +222,20 @@ fn daemon(client: &AwClient) -> Result<(), Box<dyn Error>> {
         }
 
         info!("Sync pass done, sleeping for 5 minutes");
-        std::thread::sleep(std::time::Duration::from_secs(300));
+
+        // Wait for either the sleep duration or a termination signal
+        match rx.recv_timeout(Duration::from_secs(300)) {
+            Ok(_) | Err(RecvTimeoutError::Disconnected) => {
+                info!("Termination signal received, shutting down.");
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                // Continue the loop if the timeout occurs
+            }
+        }
     }
+
+    Ok(())
 }
 
 fn daemon_sync_cycle(client: &AwClient) -> Result<(), Box<dyn Error>> {

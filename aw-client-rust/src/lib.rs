@@ -6,6 +6,7 @@ extern crate serde_json;
 extern crate tokio;
 
 pub mod blocking;
+pub mod single_instance;
 
 use std::{collections::HashMap, error::Error};
 

@@ -6,11 +6,13 @@ extern crate serde_json;
 extern crate tokio;
 
 pub mod blocking;
+pub mod single_instance;
 
 use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map};
+use single_instance::SingleInstance;
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -18,6 +20,8 @@ pub use aw_models::{Bucket, BucketMetadata, Event};
 
 pub struct AwClient {
     client: reqwest::Client,
+    #[allow(dead_code)]
+    single_instance: SingleInstance,
     pub baseurl: reqwest::Url,
     pub name: String,
     pub hostname: String,
@@ -40,9 +44,13 @@ impl AwClient {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
+        //TODO: change localhost string to 127.0.0.1 for feature parity
+        let single_instance_name = format!("{}-at-{}-on-{}", name, host, port);
+        let single_instance = single_instance::SingleInstance::new(single_instance_name.as_str())?;
 
         Ok(AwClient {
             client,
+            single_instance,
             baseurl,
             name: name.to_string(),
             hostname,

@@ -15,10 +15,20 @@ Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch
 This will start a daemon which pulls and pushes events with the sync directory (`~/ActivityWatchSync` by default) every 5 minutes:
 
 ```sh
+# Basic sync daemon (syncs every 5 minutes)
 aw-sync
+
+# Same as above
+aw-sync daemon
+
+# Sync daemon with custom options
+aw-sync daemon --buckets "aw-watcher-window,aw-watcher-afk" --start-date "2024-01-01"
 ```
 
-For more options, see `aw-sync --help`.
+For more options, see `aw-sync --help`. Some notable options:
+- `--buckets`: Specify which buckets to sync (comma-separated)
+- `--start-date`: Only sync events after this date (YYYY-MM-DD)
+- `--sync-db`: Specify a specific database file in the sync directory
 
 ### Setting up sync
 

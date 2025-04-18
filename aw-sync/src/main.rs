@@ -2,10 +2,10 @@
 //  - [x] Setup local sync bucket
 //  - [x] Import local buckets and sync events from aw-server (either through API or through creating a read-only Datastore)
 //  - [x] Import buckets and sync events from remotes
-//  - [ ] Add CLI arguments
+//  - [x] Add CLI arguments
 //     - [x] For which local server to use
 //     - [x] For which sync dir to use
-//     - [ ] Date to start syncing from
+//     - [x] Date to start syncing from
 
 #[macro_use]
 extern crate log;
@@ -60,7 +60,29 @@ struct Opts {
 enum Commands {
     /// Daemon subcommand
     /// Starts aw-sync as a daemon, which will sync every 5 minutes.
-    Daemon {},
+    Daemon {
+        /// Use advanced sync mode
+        /// (automatically enabled when any advanced options are provided)
+        #[clap(long)]
+        advanced: bool,
+
+        /// Date to start syncing from.
+        /// If not specified, start from beginning.
+        /// Format: YYYY-MM-DD
+        #[clap(long, value_parser=parse_start_date)]
+        start_date: Option<DateTime<Utc>>,
+
+        /// Specify buckets to sync using a comma-separated list.
+        /// If not specified, all buckets will be synced.
+        #[clap(long, value_parser=parse_list)]
+        buckets: Option<Vec<String>>,
+
+        /// Full path to sync db file
+        /// Useful for syncing buckets from a specific db file in the sync directory.
+        /// Must be a valid absolute path to a file in the sync directory.
+        #[clap(long)]
+        sync_db: Option<PathBuf>,
+    },
 
     /// Sync subcommand (basic)
     ///
@@ -140,11 +162,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     let client = AwClient::new(&opts.host, port, "aw-sync")?;
 
     // if opts.command is None, then we're using the default subcommand (Sync)
-    match opts.command.unwrap_or(Commands::Daemon {}) {
+    match opts.command.unwrap_or(Commands::Daemon {
+        advanced: false,
+        start_date: None,
+        buckets: None,
+        sync_db: None,
+    }) {
         // Start daemon
-        Commands::Daemon {} => {
+        Commands::Daemon {
+            advanced,
+            start_date,
+            buckets,
+            sync_db,
+        } => {
             info!("Starting daemon...");
-            daemon(&client)?;
+            // Infer advanced mode if any advanced options are provided
+            let use_advanced = start_date.is_some() || buckets.is_some() || sync_db.is_some();
+
+            if use_advanced {
+                info!("Using advanced sync mode");
+                daemon_advanced(&client, start_date, buckets, sync_db)?;
+            } else {
+                info!("Using basic sync mode");
+                daemon(&client)?;
+            }
         }
         // Perform basic sync
         Commands::Sync { host } => {
@@ -167,6 +208,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sync_wrapper::push(&client)?
         }
         // Perform two-way sync
+        // Only way to sync non-window buckets
         Commands::SyncAdvanced {
             start_date,
             buckets,
@@ -244,6 +286,59 @@ fn daemon_sync_cycle(client: &AwClient) -> Result<(), Box<dyn Error>> {
 
     info!("Pushing local data");
     sync_wrapper::push(client)?;
+
+    Ok(())
+}
+
+fn daemon_advanced(
+    client: &AwClient,
+    start_date: Option<DateTime<Utc>>,
+    buckets: Option<Vec<String>>,
+    sync_db: Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
+    let (tx, rx) = channel();
+
+    ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    })?;
+
+    let sync_dir = dirs::get_sync_dir()?;
+    if let Some(db_path) = &sync_db {
+        info!("Using sync db: {}", &db_path.display());
+
+        if !db_path.is_absolute() {
+            Err("Sync db path must be absolute")?
+        }
+        if !db_path.starts_with(&sync_dir) {
+            Err("Sync db path must be in sync directory")?
+        }
+    }
+
+    let sync_spec = sync::SyncSpec {
+        path: sync_dir,
+        path_db: sync_db,
+        buckets,
+        start: start_date,
+    };
+
+    loop {
+        if let Err(e) = sync::sync_run(client, &sync_spec, sync::SyncMode::Both) {
+            error!("Error during sync cycle: {}", e);
+            return Err(e);
+        }
+
+        info!("Advanced sync pass done, sleeping for 5 minutes");
+
+        match rx.recv_timeout(Duration::from_secs(300)) {
+            Ok(_) | Err(RecvTimeoutError::Disconnected) => {
+                info!("Termination signal received, shutting down.");
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                // Continue the loop if the timeout occurs
+            }
+        }
+    }
 
     Ok(())
 }

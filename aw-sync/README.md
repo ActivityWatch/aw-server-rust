@@ -15,10 +15,26 @@ Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch
 This will start a daemon which pulls and pushes events with the sync directory (`~/ActivityWatchSync` by default) every 5 minutes:
 
 ```sh
+# Basic sync daemon (syncs all buckets every 5 minutes)
 aw-sync
+
+# Same as above
+aw-sync daemon
+
+# Sync daemon with specific buckets only
+aw-sync daemon --buckets "aw-watcher-window,aw-watcher-afk" --start-date "2024-01-01"
+
+# Sync all buckets once and exit
+aw-sync sync --start-date "2024-01-01"
 ```
 
-For more options, see `aw-sync --help`.
+For more options, see `aw-sync --help`. Some notable options:
+- `--buckets`: Specify which buckets to sync (comma-separated). By default, all buckets are synced.
+  - Use `--buckets "bucket1,bucket2"` to sync specific buckets
+  - Not specifying this option syncs all buckets by default
+- `--start-date`: Only sync events after this date (YYYY-MM-DD)
+- `--sync-db`: Specify a specific database file in the sync directory
+- `--mode`: Choose sync mode: "push", "pull", or "both" (default: "both")
 
 ### Setting up sync
 

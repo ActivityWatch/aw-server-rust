@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "aw-server-rust"
+version = "0.1.0"
+description = "Server for ActivityWatch"
+authors = ["Erik Bjäreholt <erik@bjareho.lt>"]
+license = "MPL-2.0"
+packages = [
+    { include = "aw_server_rust.py" }
+]
+
+[tool.poetry.scripts]
+aw-server-rust = "aw_server_rust:main"
+
+[tool.poetry.dependencies]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

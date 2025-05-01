@@ -21,6 +21,7 @@ mod duration;
 mod event;
 mod info;
 mod query;
+mod settings;
 mod timeinterval;
 mod tryvec;
 
@@ -30,5 +31,9 @@ pub use self::bucket::BucketsExport;
 pub use self::event::Event;
 pub use self::info::Info;
 pub use self::query::Query;
+pub use self::settings::Settings;
+pub use self::settings::{
+    Class, ClassData, ClassRule, NewReleaseCheckData, UserSatisfactionPollData, View, ViewElement,
+};
 pub use self::timeinterval::TimeInterval;
 pub use self::tryvec::TryVec;

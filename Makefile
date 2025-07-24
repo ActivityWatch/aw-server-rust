@@ -21,13 +21,17 @@ else
 endif
 
 aw-server: set-version aw-webui
+ifeq ($(SKIP_RUST_SERVER),true)
+	@echo "Skipping building aw-server"
+else
 	cargo build $(cargoflag) --bin aw-server
+endif
 
 aw-sync: set-version
 	cargo build $(cargoflag) --bin aw-sync
 
 aw-webui:
-ifeq ($(SKIP_WEBUI),true) # Skip building webui if SKIP_WEBUI is true
+ifneq ($(or $(filter true,$(SKIP_WEBUI)),$(filter true,$(SKIP_RUST_SERVER))),) # Skip building webui if SKIP_WEBUI or SKIP_RUST_SERVER is true
 	@echo "Skipping building webui"
 else
 	make -C ./aw-webui build
@@ -88,7 +92,9 @@ package:
 	rm -rf target/package
 	mkdir -p target/package
 	# Copy binaries
-	cp target/$(targetdir)/aw-server target/package/aw-server-rust
+	ifneq ($(SKIP_RUST_SERVER),true)
+		cp target/$(targetdir)/aw-server target/package/aw-server-rust
+	endif
 	cp target/$(targetdir)/aw-sync target/package/aw-sync
 	# Copy service file
 	cp -f aw-server.service target/package/aw-server.service

@@ -6,6 +6,8 @@ extern crate serde_json;
 extern crate tokio;
 
 pub mod blocking;
+pub mod classes;
+pub mod queries;
 
 use std::{collections::HashMap, error::Error};
 
@@ -221,6 +223,16 @@ impl AwClient {
 
     pub async fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {
         let url = format!("{}/api/0/info", self.baseurl);
+        self.client.get(url).send().await?.json().await
+    }
+
+    pub async fn get_setting(&self, setting: &str) -> Result<serde_json::Value, reqwest::Error> {
+        let url = format!("{}/api/0/settings/{}", self.baseurl, setting);
+        self.client.get(url).send().await?.json().await
+    }
+
+    pub async fn get_settings(&self) -> Result<aw_models::Settings, reqwest::Error> {
+        let url = format!("{}/api/0/settings", self.baseurl);
         self.client.get(url).send().await?.json().await
     }
 

@@ -48,10 +48,7 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
     let sync_spec = SyncSpec {
         path: sync_dir.clone(),
         path_db: Some(db.path().clone()),
-        buckets: Some(vec![
-            format!("aw-watcher-window_{}", host),
-            format!("aw-watcher-afk_{}", host),
-        ]),
+        buckets: None, // Sync all buckets by default
         start: None,
     };
     sync_run(client, &sync_spec, SyncMode::Pull)?;
@@ -67,10 +64,7 @@ pub fn push(client: &AwClient) -> Result<(), Box<dyn Error>> {
     let sync_spec = SyncSpec {
         path: sync_dir,
         path_db: None,
-        buckets: Some(vec![
-            format!("aw-watcher-window_{}", client.hostname),
-            format!("aw-watcher-afk_{}", client.hostname),
-        ]),
+        buckets: None, // Sync all buckets by default
         start: None,
     };
     sync_run(client, &sync_spec, SyncMode::Push)?;

@@ -170,16 +170,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             info!("Starting daemon...");
 
-            // Use an empty vector to sync all buckets for these cases:
-            // 1. When --buckets '*' is supplied
-            // 2. When no bucket argument is provided (default)
-            let effective_buckets = if buckets.as_deref() == Some("*") || buckets.is_none() {
-                Some(vec![])
-            } else if let Some(buckets_str) = buckets {
-                Some(buckets_str.split(',').map(|s| s.to_string()).collect())
-            } else {
-                None
-            };
+            let effective_buckets = buckets.map(|b| {
+                b.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<String>>()
+            });
 
             daemon(&client, start_date, effective_buckets, sync_db)?;
         }
@@ -191,16 +187,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             mode,
             sync_db,
         } => {
-            // Use an empty vector to sync all buckets for these cases:
-            // 1. When --buckets '*' is supplied
-            // 2. When no bucket argument is provided (default)
-            let effective_buckets = if buckets.as_deref() == Some("*") || buckets.is_none() {
-                Some(vec![])
-            } else if let Some(buckets_str) = buckets {
-                Some(buckets_str.split(',').map(|s| s.to_string()).collect())
-            } else {
-                None
-            };
+            let effective_buckets = buckets.map(|b| {
+                b.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<String>>()
+            });
 
             // If advanced options are provided, use advanced sync mode
             if start_date.is_some() || effective_buckets.is_some() || sync_db.is_some() {

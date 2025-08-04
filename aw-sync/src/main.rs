@@ -69,8 +69,8 @@ enum Commands {
 
         /// Specify buckets to sync using a comma-separated list.
         /// By default, all buckets are synced.
-        #[clap(long)]
-        buckets: Option<String>,
+        #[clap(long, value_parser=parse_list)]
+        buckets: Option<Vec<String>>,
 
         /// Full path to sync db file
         /// Useful for syncing buckets from a specific db file in the sync directory.
@@ -97,8 +97,8 @@ enum Commands {
 
         /// Specify buckets to sync using a comma-separated list.
         /// By default, all buckets are synced.
-        #[clap(long)]
-        buckets: Option<String>,
+        #[clap(long, value_parser=parse_list)]
+        buckets: Option<Vec<String>>,
 
         /// Mode to sync in. Can be "push", "pull", or "both".
         /// Defaults to "both".
@@ -127,8 +127,12 @@ fn parse_list(arg: &str) -> Result<Vec<String>, clap::Error> {
         return Ok(vec![]);
     }
 
-    // Otherwise, split by comma as usual
-    Ok(arg.split(',').map(|s| s.to_string()).collect())
+    // Otherwise, split by comma, trim each part, and filter out empty strings
+    Ok(arg
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -170,12 +174,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             info!("Starting daemon...");
 
-            let effective_buckets = buckets.map(|b| {
-                b.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<String>>()
-            });
+            let effective_buckets = buckets;
 
             daemon(&client, start_date, effective_buckets, sync_db)?;
         }
@@ -187,12 +186,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             mode,
             sync_db,
         } => {
-            let effective_buckets = buckets.map(|b| {
-                b.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<String>>()
-            });
+            let effective_buckets = buckets;
 
             // If advanced options are provided, use advanced sync mode
             if start_date.is_some() || effective_buckets.is_some() || sync_db.is_some() {

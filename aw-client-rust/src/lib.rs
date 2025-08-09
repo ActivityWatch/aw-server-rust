@@ -123,6 +123,8 @@ impl AwClient {
             .map(|(start, stop)| format!("{}/{}", start, stop))
             .collect();
 
+        let query_lines: Vec<&str> = query.split('\n').collect();
+
         // Result is a sequence, one element per timeperiod
         self.client
             .post(url)

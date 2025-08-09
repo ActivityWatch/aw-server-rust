@@ -5,6 +5,7 @@
 use log::warn;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use serde_json;
 
 use super::blocking::AwClient as ActivityWatchClient;
 
@@ -14,6 +15,7 @@ pub type CategoryId = Vec<String>;
 pub struct CategorySpec {
     #[serde(rename = "type")]
     pub spec_type: String,
+    #[serde(default)]
     pub regex: String,
     #[serde(default)]
     pub ignore_case: bool,
@@ -21,8 +23,12 @@ pub struct CategorySpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassSetting {
+    #[serde(default)]
+    pub id: Option<i32>,
     pub name: Vec<String>,
     pub rule: CategorySpec,
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
 }
 
 /// Returns the default categorization classes
@@ -173,11 +179,16 @@ pub fn get_classes_from_server(host: &str, port: u16) -> Vec<(CategoryId, Catego
                 return default_classes();
             }
 
-            let class_settings: Vec<ClassSetting> = serde_json::from_value(setting_value)
-                .unwrap_or_else(|_| {
-                    warn!("Failed to deserialize classes setting, using default classes");
-                    return vec![];
-                });
+            let class_settings: Vec<ClassSetting> = match serde_json::from_value(setting_value) {
+                Ok(classes) => classes,
+                Err(e) => {
+                    warn!(
+                        "Failed to deserialize classes setting: {}, using default classes",
+                        e
+                    );
+                    return default_classes();
+                }
+            };
 
             // Convert ClassSetting to (CategoryId, CategorySpec) format
             class_settings

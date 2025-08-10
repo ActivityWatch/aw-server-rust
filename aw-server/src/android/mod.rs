@@ -82,9 +82,10 @@ pub mod android {
         output.into_raw()
     }
 
-    unsafe fn jstring_to_string(env: &JNIEnv, string: JString) -> String {
-        let c_str = CStr::from_ptr(env.get_string(string).expect("invalid string").as_ptr());
-        String::from(c_str.to_str().unwrap())
+    unsafe fn jstring_to_string(env: &JNIEnv, string: JString) -> Option<String> {
+        let java_str = env.get_string(string).ok()?;
+        let c_str = CStr::from_ptr(java_str.as_ptr());
+        c_str.to_str().ok().map(String::from)
     }
 
     unsafe fn string_to_jstring(env: &JNIEnv, string: String) -> jstring {
@@ -136,7 +137,7 @@ pub mod android {
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_initialize(
         env: JNIEnv,
         _: JClass,
-    ) {
+    ) -> jstring {
         if !INITIALIZED {
             android_logger::init_once(
                 Config::default()
@@ -154,9 +155,8 @@ pub mod android {
         }
         INITIALIZED = true;
 
-        // Without this it might not work due to weird error probably arising from Rust optimizing away the JNIEnv:
-        //  JNI DETECTED ERROR IN APPLICATION: use of deleted weak global reference
-        string_to_jstring(&env, "test".to_string());
+        // Return a string as expected by Java
+        string_to_jstring(&env, "initialized".to_string())
     }
 
     #[no_mangle]
@@ -165,9 +165,16 @@ pub mod android {
         _: JClass,
         java_dir: JString,
     ) {
-        let path = &jstring_to_string(&env, java_dir);
-        debug!("Setting android data dir as {}", path);
-        dirs::set_android_data_dir(path);
+        match jstring_to_string(&env, java_dir) {
+            Some(path) => {
+                debug!("Setting android data dir as {}", path);
+                dirs::set_android_data_dir(&path);
+            }
+            None => {
+                // Failed to convert string - do nothing and return
+                return;
+            }
+        }
     }
 
     #[no_mangle]
@@ -185,7 +192,10 @@ pub mod android {
         _: JClass,
         java_bucket: JString,
     ) -> jstring {
-        let bucket = jstring_to_string(&env, java_bucket);
+        let bucket = match jstring_to_string(&env, java_bucket) {
+            Some(s) => s,
+            None => return create_error_object(&env, "Failed to parse bucket string".to_string()),
+        };
         let bucket_json: Bucket = match serde_json::from_str(&bucket) {
             Ok(json) => json,
             Err(err) => return create_error_object(&env, err.to_string()),
@@ -207,8 +217,16 @@ pub mod android {
         java_event: JString,
         java_pulsetime: jdouble,
     ) -> jstring {
-        let bucket_id = jstring_to_string(&env, java_bucket_id);
-        let event = jstring_to_string(&env, java_event);
+        let bucket_id = match jstring_to_string(&env, java_bucket_id) {
+            Some(s) => s,
+            None => {
+                return create_error_object(&env, "Failed to parse bucket_id string".to_string())
+            }
+        };
+        let event = match jstring_to_string(&env, java_event) {
+            Some(s) => s,
+            None => return create_error_object(&env, "Failed to parse event string".to_string()),
+        };
         let pulsetime = java_pulsetime as f64;
         let event_json: Event = match serde_json::from_str(&event) {
             Ok(json) => json,
@@ -233,7 +251,12 @@ pub mod android {
         java_bucket_id: JString,
         java_limit: jint,
     ) -> jstring {
-        let bucket_id = jstring_to_string(&env, java_bucket_id);
+        let bucket_id = match jstring_to_string(&env, java_bucket_id) {
+            Some(s) => s,
+            None => {
+                return create_error_object(&env, "Failed to parse bucket_id string".to_string())
+            }
+        };
         let limit = java_limit as u64;
         match openDatastore().get_events(&bucket_id, None, None, Some(limit)) {
             Ok(events) => string_to_jstring(&env, json!(events).to_string()),

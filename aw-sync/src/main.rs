@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 // What needs to be done:
 //  - [x] Setup local sync bucket
 //  - [x] Import local buckets and sync events from aw-server (either through API or through creating a read-only Datastore)

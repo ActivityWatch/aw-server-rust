@@ -54,7 +54,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPullAll(
 /// Pull sync data from a specific host
 #[no_mangle]
 pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPull(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     port: i32,
     hostname: JString,

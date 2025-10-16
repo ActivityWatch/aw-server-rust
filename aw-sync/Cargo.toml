@@ -7,6 +7,7 @@ edition = "2021"
 [lib]
 name = "aw_sync"
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "aw-sync"

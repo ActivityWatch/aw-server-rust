@@ -18,11 +18,14 @@ use chrono::{DateTime, Utc};
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Bucket, Event};
+
+#[cfg(feature = "cli")]
 use clap::ValueEnum;
 
 use crate::accessmethod::AccessMethod;
 
-#[derive(PartialEq, Eq, Copy, Clone, ValueEnum)]
+#[derive(PartialEq, Eq, Copy, Clone)]
+#[cfg_attr(feature = "cli", derive(ValueEnum))]
 pub enum SyncMode {
     Push,
     Pull,

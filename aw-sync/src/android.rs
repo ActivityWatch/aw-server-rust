@@ -1,12 +1,10 @@
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::jstring;
-use std::ffi::{CString, CStr};
 use aw_client_rust::blocking::AwClient;
 use serde_json::json;
 
 use crate::{pull, pull_all, push};
-use crate::util::get_server_port;
 
 /// Helper function to convert Rust string to Java string
 fn rust_string_to_jstring(env: &JNIEnv, s: String) -> jstring {
@@ -29,7 +27,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPullAll(
     _class: JClass,
     port: i32,
 ) -> jstring {
-    let result = (|| {
+    let result: Result<String, String> = (|| {
         let client = get_client(port)?;
         pull_all(&client)
             .map_err(|e| format!("Sync pull failed: {}", e))?;
@@ -43,9 +41,10 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPullAll(
         Ok(msg) => rust_string_to_jstring(&env, msg),
         Err(e) => {
             error!("syncPullAll error: {}", e);
+            let error_msg: &str = &e;
             let error_json = json!({
                 "success": false,
-                "error": e
+                "error": error_msg
             }).to_string();
             rust_string_to_jstring(&env, error_json)
         }
@@ -60,9 +59,9 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPull(
     port: i32,
     hostname: JString,
 ) -> jstring {
-    let result = (|| {
+    let result: Result<String, String> = (|| {
         let client = get_client(port)?;
-        let hostname_str: String = env.get_string(hostname)
+        let hostname_str: String = env.get_string(&hostname)
             .map_err(|e| format!("Failed to get hostname string: {}", e))?
             .into();
         
@@ -79,9 +78,10 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPull(
         Ok(msg) => rust_string_to_jstring(&env, msg),
         Err(e) => {
             error!("syncPull error: {}", e);
+            let error_msg: &str = &e;
             let error_json = json!({
                 "success": false,
-                "error": e
+                "error": error_msg
             }).to_string();
             rust_string_to_jstring(&env, error_json)
         }
@@ -95,7 +95,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPush(
     _class: JClass,
     port: i32,
 ) -> jstring {
-    let result = (|| {
+    let result: Result<String, String> = (|| {
         let client = get_client(port)?;
         push(&client)
             .map_err(|e| format!("Sync push failed: {}", e))?;
@@ -109,9 +109,10 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPush(
         Ok(msg) => rust_string_to_jstring(&env, msg),
         Err(e) => {
             error!("syncPush error: {}", e);
+            let error_msg: &str = &e;
             let error_json = json!({
                 "success": false,
-                "error": e
+                "error": error_msg
             }).to_string();
             rust_string_to_jstring(&env, error_json)
         }
@@ -125,7 +126,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
     _class: JClass,
     port: i32,
 ) -> jstring {
-    let result = (|| {
+    let result: Result<String, String> = (|| {
         let client = get_client(port)?;
         
         pull_all(&client)
@@ -144,9 +145,10 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
         Ok(msg) => rust_string_to_jstring(&env, msg),
         Err(e) => {
             error!("syncBoth error: {}", e);
+            let error_msg: &str = &e;
             let error_json = json!({
                 "success": false,
-                "error": e
+                "error": error_msg
             }).to_string();
             rust_string_to_jstring(&env, error_json)
         }

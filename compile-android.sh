@@ -90,5 +90,12 @@ for archtargetstr in \
 
     # People suggest to use this, but ime it needs all the same workarounds anyway :shrug:
     #cargo ndk build -p aw-server --target $target --lib $($RELEASE && echo '--release')
+    
+    # Build aw-server
+    echo "Building aw-server for $arch..."
     cargo build -p aw-server --target $target --lib $($RELEASE && echo '--release')
+    
+    # Build aw-sync (without cli feature for Android)
+    echo "Building aw-sync for $arch..."
+    cargo build -p aw-sync --target $target --lib --no-default-features $($RELEASE && echo '--release')
 done

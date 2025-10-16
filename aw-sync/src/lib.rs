@@ -19,3 +19,6 @@ pub use accessmethod::AccessMethod;
 
 mod dirs;
 mod util;
+
+#[cfg(target_os = "android")]
+pub mod android;

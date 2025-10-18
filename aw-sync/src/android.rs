@@ -23,10 +23,25 @@ fn get_client(port: i32) -> Result<AwClient, String> {
 /// Pull sync data from all hosts in the sync directory
 #[no_mangle]
 pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPullAll(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     port: i32,
+    hostname: JString,
 ) -> jstring {
+    let hostname_str: String = match env.get_string(&hostname) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            let error_msg = format!("Failed to get hostname: {}", e);
+            error!("syncPullAll: {}", error_msg);
+            return rust_string_to_jstring(&env, json!({
+                "success": false,
+                "error": error_msg
+            }).to_string());
+        }
+    };
+    // Set hostname for sync operations
+    std::env::set_var("AW_HOSTNAME", &hostname_str);
+    
     let result: Result<String, String> = (|| {
         let client = get_client(port)?;
         pull_all(&client)
@@ -91,10 +106,26 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPull(
 /// Push local sync data to the sync directory
 #[no_mangle]
 pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPush(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     port: i32,
+    hostname: JString,
 ) -> jstring {
+    let hostname_str: String = match env.get_string(&hostname) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            let error_msg = format!("Failed to get hostname: {}", e);
+            error!("syncPush: {}", error_msg);
+            return rust_string_to_jstring(&env, json!({
+                "success": false,
+                "error": error_msg
+            }).to_string());
+        }
+    };
+    
+    // Set hostname for sync operations
+    std::env::set_var("AW_HOSTNAME", &hostname_str);
+    
     let result: Result<String, String> = (|| {
         let client = get_client(port)?;
         push(&client)
@@ -122,10 +153,25 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPush(
 /// Perform full sync (pull from all hosts, then push local data)
 #[no_mangle]
 pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     port: i32,
+    hostname: JString,
 ) -> jstring {
+    let hostname_str: String = match env.get_string(&hostname) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            let error_msg = format!("Failed to get hostname: {}", e);
+            error!("syncBoth: {}", error_msg);
+            return rust_string_to_jstring(&env, json!({
+                "success": false,
+                "error": error_msg
+            }).to_string());
+        }
+    };
+    // Set hostname for sync operations
+    std::env::set_var("AW_HOSTNAME", &hostname_str);
+    
     let result: Result<String, String> = (|| {
         let client = get_client(port)?;
         

@@ -17,7 +17,7 @@ rand = "0.9"
 log = "0.4"
 libc = "0.2"
 thiserror = "1.0" 
-dirs = "4.0"
+dirs = "6.0"
 fs4 = { version = "0.13", features = ["sync"] }
 
 [dev-dependencies]

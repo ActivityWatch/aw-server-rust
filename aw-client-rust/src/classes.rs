@@ -2,12 +2,8 @@
 //!
 //! Taken from default classes in aw-webui
 
-use log::warn;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json;
-
-use super::blocking::AwClient as ActivityWatchClient;
 
 pub type CategoryId = Vec<String>;
 
@@ -145,62 +141,4 @@ pub fn default_classes() -> Vec<(CategoryId, CategorySpec)> {
             },
         ),
     ]
-}
-
-/// Get classes from server-side settings using default localhost:5600.
-/// Might throw an error if not set yet, in which case we use the default classes as a fallback.
-pub fn get_classes() -> Vec<(CategoryId, CategorySpec)> {
-    get_classes_from_server("localhost", 5600)
-}
-
-/// Get classes from server-side settings with custom host and port.
-/// Might throw an error if not set yet, in which case we use the default classes as a fallback.
-pub fn get_classes_from_server(host: &str, port: u16) -> Vec<(CategoryId, CategorySpec)> {
-    let mut rng = rand::rng();
-    let random_int = rng.random_range(0..10001);
-    let client_id = format!("get-setting-{}", random_int);
-
-    // Create a client with a random ID, similar to the Python implementation
-    let awc = match ActivityWatchClient::new(host, port, &client_id) {
-        Ok(client) => client,
-        Err(_) => {
-            warn!(
-                "Failed to create ActivityWatch client for {}:{}, using default classes",
-                host, port
-            );
-            return default_classes();
-        }
-    };
-
-    awc.get_setting("classes")
-        .map(|setting_value| {
-            // Try to deserialize the setting into Vec<ClassSetting>
-            if setting_value.is_null() {
-                return default_classes();
-            }
-
-            let class_settings: Vec<ClassSetting> = match serde_json::from_value(setting_value) {
-                Ok(classes) => classes,
-                Err(e) => {
-                    warn!(
-                        "Failed to deserialize classes setting: {}, using default classes",
-                        e
-                    );
-                    return default_classes();
-                }
-            };
-
-            // Convert ClassSetting to (CategoryId, CategorySpec) format
-            class_settings
-                .into_iter()
-                .map(|class| (class.name, class.rule))
-                .collect()
-        })
-        .unwrap_or_else(|_| {
-            warn!(
-                "Failed to get classes from server {}:{}, using default classes as fallback",
-                host, port
-            );
-            default_classes()
-        })
 }

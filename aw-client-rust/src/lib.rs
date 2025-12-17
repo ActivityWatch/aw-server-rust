@@ -36,7 +36,7 @@ impl std::fmt::Debug for AwClient {
 }
 
 fn get_hostname() -> String {
-    return gethostname::gethostname().to_string_lossy().to_string();
+    gethostname::gethostname().to_string_lossy().to_string()
 }
 
 impl AwClient {
@@ -122,8 +122,6 @@ impl AwClient {
             .map(|(start, stop)| (start.to_rfc3339(), stop.to_rfc3339()))
             .map(|(start, stop)| format!("{}/{}", start, stop))
             .collect();
-
-        let query_lines: Vec<&str> = query.split('\n').collect();
 
         // Result is a sequence, one element per timeperiod
         self.client

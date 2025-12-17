@@ -28,11 +28,8 @@
 //! };
 //!
 //! // Automatically fetches classes from localhost:5600
-//! let query = QueryParams::Desktop(params.clone()).canonical_events_with_classes();
+//! let query = QueryParams::Desktop(params.clone()).canonical_events();
 //!
-//! // Or from a custom server
-//! let query = QueryParams::Desktop(params)
-//!     .canonical_events_with_classes_from_server("localhost", 2345);
 //! ```
 
 use crate::classes::{CategoryId, CategorySpec};
@@ -135,33 +132,6 @@ impl QueryParams {
             QueryParams::Android(params) => build_android_canonical_events(params),
         }
     }
-
-    /// Build canonical events query string with automatic class fetching if not provided
-    pub fn canonical_events_with_classes(&self) -> String {
-        self.canonical_events_with_classes_from_server("localhost", 5600)
-    }
-
-    /// Build canonical events query string with automatic class fetching from custom server
-    pub fn canonical_events_with_classes_from_server(&self, host: &str, port: u16) -> String {
-        match self {
-            QueryParams::Desktop(params) => {
-                let mut params_with_classes = params.clone();
-                if params_with_classes.base.classes.is_empty() {
-                    params_with_classes.base.classes =
-                        crate::classes::get_classes_from_server(host, port);
-                }
-                build_desktop_canonical_events(&params_with_classes)
-            }
-            QueryParams::Android(params) => {
-                let mut params_with_classes = params.clone();
-                if params_with_classes.base.classes.is_empty() {
-                    params_with_classes.base.classes =
-                        crate::classes::get_classes_from_server(host, port);
-                }
-                build_android_canonical_events(&params_with_classes)
-            }
-        }
-    }
 }
 
 /// Helper function to serialize classes in the format expected by the categorize function
@@ -201,7 +171,7 @@ fn serialize_classes(classes: &[ClassRule]) -> String {
     format!("[{}]", parts.join(", "))
 }
 
-fn build_desktop_canonical_events(params: &DesktopQueryParams) -> String {
+pub fn build_desktop_canonical_events(params: &DesktopQueryParams) -> String {
     let mut query = Vec::new();
 
     // Fetch window events
@@ -256,7 +226,7 @@ not_afk = period_union(not_afk, audible_events)"
     query.join(";\n")
 }
 
-fn build_android_canonical_events(params: &AndroidQueryParams) -> String {
+pub fn build_android_canonical_events(params: &AndroidQueryParams) -> String {
     let mut query = Vec::new();
 
     // Fetch app events
@@ -287,7 +257,7 @@ fn build_android_canonical_events(params: &AndroidQueryParams) -> String {
     query.join(";\n")
 }
 
-fn build_browser_events(params: &DesktopQueryParams) -> String {
+pub fn build_browser_events(params: &DesktopQueryParams) -> String {
     let mut query = String::from("browser_events = [];");
 
     for browser_bucket in &params.base.bid_browsers {
@@ -311,9 +281,9 @@ browser_events = sort_by_timestamp(browser_events)",
     query
 }
 
-/// Build a full desktop query
+/// Build a full desktop query using default localhost:5600 configuration
 pub fn full_desktop_query(params: &DesktopQueryParams) -> String {
-    let mut query = QueryParams::Desktop(params.clone()).canonical_events_with_classes();
+    let mut query = QueryParams::Desktop(params.clone()).canonical_events();
 
     // Add basic event aggregations
     query.push_str(&format!(
@@ -443,7 +413,7 @@ mod tests {
         let params = DesktopQueryParams {
             base: QueryParamsBase {
                 bid_browsers: vec![],
-                classes: vec![], // Empty classes - should trigger server fetch
+                classes: vec![],
                 filter_classes: vec![],
                 filter_afk: true,
                 include_audible: true,
@@ -453,9 +423,9 @@ mod tests {
         };
 
         let query_params = QueryParams::Desktop(params);
-        let query = query_params.canonical_events_with_classes();
+        let query = query_params.canonical_events();
 
-        // Should contain basic query structure even if server fetch fails
+        // Should contain basic query structure
         assert!(query.contains("events = flood"));
         assert!(query.contains("test-window"));
     }
@@ -484,7 +454,7 @@ mod tests {
         };
 
         let query_params = QueryParams::Desktop(params);
-        let query = query_params.canonical_events_with_classes();
+        let query = query_params.canonical_events();
 
         // Should contain categorization
         assert!(query.contains("events = categorize"));

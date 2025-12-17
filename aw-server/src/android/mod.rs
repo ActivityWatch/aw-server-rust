@@ -83,8 +83,8 @@ pub mod android {
     }
 
     unsafe fn jstring_to_string(env: &JNIEnv, string: JString) -> String {
-        let c_str = CStr::from_ptr(env.get_string(string).expect("invalid string").as_ptr());
-        String::from(c_str.to_str().unwrap())
+        let jstr = env.get_string(string).expect("Failed to get Java string");
+        jstr.into()
     }
 
     unsafe fn string_to_jstring(env: &JNIEnv, string: String) -> jstring {

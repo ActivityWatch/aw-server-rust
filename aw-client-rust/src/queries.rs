@@ -28,11 +28,8 @@
 //! };
 //!
 //! // Automatically fetches classes from localhost:5600
-//! let query = QueryParams::Desktop(params.clone()).canonical_events_with_classes();
+//! let query = QueryParams::Desktop(params.clone()).canonical_events();
 //!
-//! // Or from a custom server
-//! let query = QueryParams::Desktop(params)
-//!     .canonical_events_with_classes_from_server("localhost", 2345);
 //! ```
 
 use crate::classes::{CategoryId, CategorySpec};
@@ -135,54 +132,46 @@ impl QueryParams {
             QueryParams::Android(params) => build_android_canonical_events(params),
         }
     }
-
-    /// Build canonical events query string with automatic class fetching if not provided
-    pub fn canonical_events_with_classes(&self) -> String {
-        self.canonical_events_with_classes_from_server("localhost", 5600)
-    }
-
-    /// Build canonical events query string with automatic class fetching from custom server
-    pub fn canonical_events_with_classes_from_server(&self, host: &str, port: u16) -> String {
-        match self {
-            QueryParams::Desktop(params) => {
-                let mut params_with_classes = params.clone();
-                if params_with_classes.base.classes.is_empty() {
-                    params_with_classes.base.classes =
-                        crate::classes::get_classes_from_server(host, port);
-                }
-                build_desktop_canonical_events(&params_with_classes)
-            }
-            QueryParams::Android(params) => {
-                let mut params_with_classes = params.clone();
-                if params_with_classes.base.classes.is_empty() {
-                    params_with_classes.base.classes =
-                        crate::classes::get_classes_from_server(host, port);
-                }
-                build_android_canonical_events(&params_with_classes)
-            }
-        }
-    }
 }
 
 /// Helper function to serialize classes in the format expected by the categorize function
+/// This version builds the query string directly without JSON serialization to avoid double-escaping
 fn serialize_classes(classes: &[ClassRule]) -> String {
-    // Convert Vec<(CategoryId, CategorySpec)> to the JSON format expected by categorize
-    let serialized_classes: Vec<(Vec<String>, serde_json::Value)> = classes
-        .iter()
-        .map(|(category_id, category_spec)| {
-            let spec_json = serde_json::json!({
-                "type": category_spec.spec_type,
-                "regex": category_spec.regex,
-                "ignore_case": category_spec.ignore_case
-            });
-            (category_id.clone(), spec_json)
-        })
-        .collect();
+    let mut parts = Vec::new();
 
-    serde_json::to_string(&serialized_classes).unwrap_or_else(|_| "[]".to_string())
+    for (category_id, category_spec) in classes {
+        // Build category array string manually: ["Work", "Programming"]
+        let category_str = format!(
+            "[{}]",
+            category_id
+                .iter()
+                .map(|s| format!("\"{}\"", s))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        // Build spec object manually to avoid JSON escaping regex patterns
+        let mut spec_parts = Vec::new();
+        spec_parts.push(format!("\"type\": \"{}\"", category_spec.spec_type));
+
+        // Only include regex for non-"none" types, and use raw pattern without escaping
+        if category_spec.spec_type != "none" {
+            spec_parts.push(format!("\"regex\": \"{}\"", category_spec.regex));
+        }
+
+        // Always include ignore_case field
+        spec_parts.push(format!("\"ignore_case\": {}", category_spec.ignore_case));
+
+        let spec_str = format!("{{{}}}", spec_parts.join(", "));
+
+        // Build the tuple [category, spec]
+        parts.push(format!("[{}, {}]", category_str, spec_str));
+    }
+
+    format!("[{}]", parts.join(", "))
 }
 
-fn build_desktop_canonical_events(params: &DesktopQueryParams) -> String {
+pub fn build_desktop_canonical_events(params: &DesktopQueryParams) -> String {
     let mut query = Vec::new();
 
     // Fetch window events
@@ -195,7 +184,7 @@ fn build_desktop_canonical_events(params: &DesktopQueryParams) -> String {
     if params.base.filter_afk {
         query.push(format!(
             "not_afk = flood(query_bucket(find_bucket(\"{}\")));
-             not_afk = filter_keyvals(not_afk, \"status\", [\"not-afk\"])",
+not_afk = filter_keyvals(not_afk, \"status\", [\"not-afk\"])",
             escape_doublequote(&params.bid_afk)
         ));
     }
@@ -207,7 +196,7 @@ fn build_desktop_canonical_events(params: &DesktopQueryParams) -> String {
         if params.base.include_audible {
             query.push(
                 "audible_events = filter_keyvals(browser_events, \"audible\", [true]);
-                 not_afk = period_union(not_afk, audible_events)"
+not_afk = period_union(not_afk, audible_events)"
                     .to_string(),
             );
         }
@@ -221,7 +210,7 @@ fn build_desktop_canonical_events(params: &DesktopQueryParams) -> String {
     // Add categorization if classes specified
     if !params.base.classes.is_empty() {
         query.push(format!(
-            "events = categorize(events, {})",
+            "events = categorize(events, {});",
             serialize_classes(&params.base.classes)
         ));
     }
@@ -237,7 +226,7 @@ fn build_desktop_canonical_events(params: &DesktopQueryParams) -> String {
     query.join(";\n")
 }
 
-fn build_android_canonical_events(params: &AndroidQueryParams) -> String {
+pub fn build_android_canonical_events(params: &AndroidQueryParams) -> String {
     let mut query = Vec::new();
 
     // Fetch app events
@@ -252,7 +241,7 @@ fn build_android_canonical_events(params: &AndroidQueryParams) -> String {
     // Add categorization if classes specified
     if !params.base.classes.is_empty() {
         query.push(format!(
-            "events = categorize(events, {})",
+            "events = categorize(events, {});",
             serialize_classes(&params.base.classes)
         ));
     }
@@ -268,19 +257,20 @@ fn build_android_canonical_events(params: &AndroidQueryParams) -> String {
     query.join(";\n")
 }
 
-fn build_browser_events(params: &DesktopQueryParams) -> String {
-    let mut query = String::from("browser_events = [];\n");
+pub fn build_browser_events(params: &DesktopQueryParams) -> String {
+    let mut query = String::from("browser_events = [];");
 
     for browser_bucket in &params.base.bid_browsers {
         for (browser_name, app_names) in BROWSER_APPNAMES.entries() {
             if browser_bucket.contains(browser_name) {
                 query.push_str(&format!(
-                    "events_{0} = flood(query_bucket(\"{1}\"));
-                     window_{0} = filter_keyvals(events, \"app\", {2});
-                     events_{0} = filter_period_intersect(events_{0}, window_{0});
-                     events_{0} = split_url_events(events_{0});
-                     browser_events = concat(browser_events, events_{0});
-                     browser_events = sort_by_timestamp(browser_events);\n",
+                    "
+events_{0} = flood(query_bucket(\"{1}\"));
+window_{0} = filter_keyvals(events, \"app\", {2});
+events_{0} = filter_period_intersect(events_{0}, window_{0});
+events_{0} = split_url_events(events_{0});
+browser_events = concat(browser_events, events_{0});
+browser_events = sort_by_timestamp(browser_events)",
                     browser_name,
                     escape_doublequote(browser_bucket),
                     serde_json::to_string(app_names).unwrap()
@@ -288,13 +278,12 @@ fn build_browser_events(params: &DesktopQueryParams) -> String {
             }
         }
     }
-
     query
 }
 
-/// Build a full desktop query
+/// Build a full desktop query using default localhost:5600 configuration
 pub fn full_desktop_query(params: &DesktopQueryParams) -> String {
-    let mut query = QueryParams::Desktop(params.clone()).canonical_events_with_classes();
+    let mut query = QueryParams::Desktop(params.clone()).canonical_events();
 
     // Add basic event aggregations
     query.push_str(&format!(
@@ -414,9 +403,9 @@ mod tests {
         assert!(serialized.contains("Programming"));
         assert!(serialized.contains("Google Docs"));
         assert!(serialized.contains("GitHub|vim"));
-        assert!(serialized.contains("\"type\":\"regex\""));
-        assert!(serialized.contains("\"ignore_case\":false"));
-        assert!(serialized.contains("\"ignore_case\":true"));
+        assert!(serialized.contains("\"type\": \"regex\""));
+        assert!(serialized.contains("\"ignore_case\": false"));
+        assert!(serialized.contains("\"ignore_case\": true"));
     }
 
     #[test]
@@ -424,7 +413,7 @@ mod tests {
         let params = DesktopQueryParams {
             base: QueryParamsBase {
                 bid_browsers: vec![],
-                classes: vec![], // Empty classes - should trigger server fetch
+                classes: vec![],
                 filter_classes: vec![],
                 filter_afk: true,
                 include_audible: true,
@@ -434,9 +423,9 @@ mod tests {
         };
 
         let query_params = QueryParams::Desktop(params);
-        let query = query_params.canonical_events_with_classes();
+        let query = query_params.canonical_events();
 
-        // Should contain basic query structure even if server fetch fails
+        // Should contain basic query structure
         assert!(query.contains("events = flood"));
         assert!(query.contains("test-window"));
     }
@@ -465,7 +454,7 @@ mod tests {
         };
 
         let query_params = QueryParams::Desktop(params);
-        let query = query_params.canonical_events_with_classes();
+        let query = query_params.canonical_events();
 
         // Should contain categorization
         assert!(query.contains("events = categorize"));

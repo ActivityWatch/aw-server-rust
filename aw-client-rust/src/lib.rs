@@ -36,7 +36,7 @@ impl std::fmt::Debug for AwClient {
 }
 
 fn get_hostname() -> String {
-    return gethostname::gethostname().to_string_lossy().to_string();
+    gethostname::gethostname().to_string_lossy().to_string()
 }
 
 impl AwClient {

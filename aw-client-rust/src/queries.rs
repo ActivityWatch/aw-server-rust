@@ -25,6 +25,7 @@
 //!     },
 //!     bid_window: "aw-watcher-window_example".to_string(),
 //!     bid_afk: "aw-watcher-afk_example".to_string(),
+//!     always_active_pattern: None,
 //! };
 //!
 //! // Automatically fetches classes from localhost:5600
@@ -106,6 +107,8 @@ pub struct DesktopQueryParams {
     pub base: QueryParamsBase,
     pub bid_window: String,
     pub bid_afk: String,
+    #[serde(default)]
+    pub always_active_pattern: Option<String>,
 }
 
 /// Query parameters specific to Android
@@ -182,11 +185,26 @@ pub fn build_desktop_canonical_events(params: &DesktopQueryParams) -> String {
 
     // Fetch not-afk events
     if params.base.filter_afk {
-        query.push(format!(
+        let mut not_afk_query = format!(
             "not_afk = flood(query_bucket(find_bucket(\"{}\")));
 not_afk = filter_keyvals(not_afk, \"status\", [\"not-afk\"])",
             escape_doublequote(&params.bid_afk)
-        ));
+        );
+
+        // Add treat_as_active functionality if pattern is provided
+        if let Some(ref pattern) = params.always_active_pattern {
+            not_afk_query.push_str(&format!(
+                ";
+not_treat_as_afk = filter_keyvals_regex(events, \"app\", \"{}\");
+not_afk = period_union(not_afk, not_treat_as_afk);
+not_treat_as_afk = filter_keyvals_regex(events, \"title\", \"{}\");
+not_afk = period_union(not_afk, not_treat_as_afk)",
+                escape_doublequote(pattern),
+                escape_doublequote(pattern)
+            ));
+        }
+
+        query.push(not_afk_query);
     }
 
     // Add browser events if any browser buckets specified
@@ -368,6 +386,7 @@ mod tests {
             },
             bid_window: "aw-watcher-window_".to_string(),
             bid_afk: "aw-watcher-afk_".to_string(),
+            always_active_pattern: None,
         };
 
         let query = full_desktop_query(&params);
@@ -420,6 +439,7 @@ mod tests {
             },
             bid_window: "test-window".to_string(),
             bid_afk: "test-afk".to_string(),
+            always_active_pattern: None,
         };
 
         let query_params = QueryParams::Desktop(params);
@@ -451,6 +471,7 @@ mod tests {
             },
             bid_window: "test-window".to_string(),
             bid_afk: "test-afk".to_string(),
+            always_active_pattern: None,
         };
 
         let query_params = QueryParams::Desktop(params);

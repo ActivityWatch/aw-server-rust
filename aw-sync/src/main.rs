@@ -157,7 +157,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let port = opts
         .port
-        .map(|a| Ok(a))
+        .map(Ok)
         .unwrap_or_else(|| util::get_server_port(opts.testing))?;
 
     let client = AwClient::new(&opts.host, port, "aw-sync")?;

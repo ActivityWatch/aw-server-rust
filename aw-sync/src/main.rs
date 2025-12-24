@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 // What needs to be done:
 //  - [x] Setup local sync bucket
 //  - [x] Import local buckets and sync events from aw-server (either through API or through creating a read-only Datastore)
@@ -155,7 +157,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let port = opts
         .port
-        .map(|a| Ok(a))
+        .map(Ok)
         .unwrap_or_else(|| util::get_server_port(opts.testing))?;
 
     let client = AwClient::new(&opts.host, port, "aw-sync")?;

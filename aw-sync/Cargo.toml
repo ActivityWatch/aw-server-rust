@@ -7,6 +7,7 @@ edition = "2021"
 [lib]
 name = "aw_sync"
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "aw-sync"
@@ -19,11 +20,13 @@ chrono = { version = "0.4", features = ["serde"] }
 serde = "1.0"
 serde_json = "1.0"
 reqwest = { version = "0.11", features = ["json", "blocking"] }
-clap = { version = "4.1", features = ["derive"] }
 appdirs = "0.2.0"
 dirs = "6.0.0"
 gethostname = "0.4.3"
-ctrlc = "3.4.5"
+
+# CLI-only dependencies (optional)
+clap = { version = "4.1", features = ["derive"], optional = true }
+ctrlc = { version = "3.4.5", optional = true }
 
 aw-server = { path = "../aw-server" }
 aw-models = { path = "../aw-models" }
@@ -32,3 +35,10 @@ aw-client-rust = { path = "../aw-client-rust" }
 
 [target.'cfg(target_os="linux")'.dependencies]
 openssl = { version = "0.10.64", features = ["vendored"] }  # https://github.com/ActivityWatch/aw-server-rust/issues/478
+
+[target.'cfg(target_os="android")'.dependencies]
+jni = { version = "0.21", default-features = false }
+
+[features]
+default = ["cli"]
+cli = ["clap", "ctrlc"]

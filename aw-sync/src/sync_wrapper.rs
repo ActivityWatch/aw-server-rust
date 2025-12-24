@@ -57,9 +57,13 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn push(client: &AwClient) -> Result<(), Box<dyn Error>> {
+    push_with_hostname(client, &client.hostname)
+}
+
+pub fn push_with_hostname(client: &AwClient, hostname: &str) -> Result<(), Box<dyn Error>> {
     let sync_dir = crate::dirs::get_sync_dir()
         .map_err(|_| "Could not get sync dir")?
-        .join(&client.hostname);
+        .join(hostname);
 
     let sync_spec = SyncSpec {
         path: sync_dir,

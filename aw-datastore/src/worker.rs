@@ -314,7 +314,29 @@ impl Datastore {
             mpsc_requests::channel::<Command, Result<Response, DatastoreError>>();
         let _thread = thread::spawn(move || {
             let mut di = DatastoreWorker::new(responder, legacy_import);
-            di.work_loop(method);
+            // Wrap work_loop in catch_unwind to handle any unexpected panics gracefully.
+            // This prevents panics from poisoning locks and leaving the server in an
+            // unusable state. Instead, the worker exits cleanly and the channel closes,
+            // allowing clients to receive proper errors instead of "poisoned lock" errors.
+            // See: https://github.com/ActivityWatch/aw-server-rust/issues/405
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                di.work_loop(method);
+            }));
+            if let Err(panic_info) = result {
+                // Extract panic message if possible
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                error!(
+                    "Datastore worker panicked: {}. Worker shutting down gracefully.",
+                    panic_msg
+                );
+            }
+            // Worker exits, channel closes, future requests get clean errors
         });
         Datastore { requester }
     }

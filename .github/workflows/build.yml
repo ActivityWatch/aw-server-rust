@@ -35,7 +35,7 @@ jobs:
       run: cargo build --workspace --verbose
     - name: Run tests
       run: cargo test --workspace --verbose
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v6
       with:
         # TODO: These binaries are debug builds
         name: binaries-${{runner.os}}
@@ -65,7 +65,7 @@ jobs:
       run: |
         export ANDROID_NDK_HOME=   # needed because GitHub Actions sets it by default...
         make android
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v6
       with:
         # TODO: These binaries are debug builds
         name: binaries-android

@@ -98,6 +98,10 @@ impl From<DatastoreError> for HttpErrorJson {
             DatastoreError::OldDbVersion(msg) => {
                 HttpErrorJson::new(Status::InternalServerError, msg)
             }
+            DatastoreError::CommitFailed(msg) => HttpErrorJson::new(
+                Status::ServiceUnavailable,
+                format!("Database commit failed (disk full?): {msg}"),
+            ),
         }
     }
 }

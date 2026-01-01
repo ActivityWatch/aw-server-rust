@@ -128,22 +128,26 @@ impl DatastoreWorker {
         };
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
 
-        // Ensure legacy import
+        // Ensure legacy import (best-effort, don't fail if it doesn't work)
         if self.legacy_import {
-            let transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
-                Ok(transaction) => transaction,
+            match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
+                Ok(transaction) => {
+                    match ds.ensure_legacy_import(&transaction) {
+                        Ok(_) => (),
+                        Err(err) => error!("Failed to do legacy import: {:?}", err),
+                    }
+                    match transaction.commit() {
+                        Ok(_) => (),
+                        Err(err) => {
+                            error!("Failed to commit legacy import transaction: {err}");
+                        }
+                    }
+                }
                 Err(err) => {
-                    panic!("Unable to start immediate transaction on SQLite database! {err}")
+                    error!("Unable to start transaction for legacy import: {err}");
+                    info!("Skipping legacy import due to transaction error");
                 }
             };
-            match ds.ensure_legacy_import(&transaction) {
-                Ok(_) => (),
-                Err(err) => error!("Failed to do legacy import: {:?}", err),
-            }
-            match transaction.commit() {
-                Ok(_) => (),
-                Err(err) => panic!("Failed to commit datastore transaction! {err}"),
-            }
         }
 
         // Start handling and respond to requests
@@ -192,7 +196,16 @@ impl DatastoreWorker {
             );
             match tx.commit() {
                 Ok(_) => (),
-                Err(err) => panic!("Failed to commit datastore transaction! {err}"),
+                Err(err) => {
+                    // Don't panic - that would poison locks and make the server unusable.
+                    // Instead, log the error and exit the worker gracefully.
+                    // This can happen when the disk is full or there are I/O errors.
+                    error!(
+                        "Failed to commit datastore transaction (disk full or I/O error?): {err}. \
+                         Worker will shut down gracefully."
+                    );
+                    self.quit = true;
+                }
             }
             if self.quit {
                 break;

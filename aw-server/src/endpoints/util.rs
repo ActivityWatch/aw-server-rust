@@ -120,3 +120,48 @@ macro_rules! endpoints_get_lock {
         }
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aw_datastore::DatastoreError;
+    use rocket::http::Status;
+
+    #[test]
+    fn test_datastore_error_to_http_error() {
+        // Test NoSuchBucket -> 404
+        let err: HttpErrorJson = DatastoreError::NoSuchBucket("test-bucket".into()).into();
+        assert_eq!(err.status, Status::NotFound);
+        assert!(err.message.contains("test-bucket"));
+
+        // Test BucketAlreadyExists -> 304
+        let err: HttpErrorJson = DatastoreError::BucketAlreadyExists("test-bucket".into()).into();
+        assert_eq!(err.status, Status::NotModified);
+
+        // Test NoSuchKey -> 404
+        let err: HttpErrorJson = DatastoreError::NoSuchKey("test-key".into()).into();
+        assert_eq!(err.status, Status::NotFound);
+
+        // Test MpscError -> 500
+        let err: HttpErrorJson = DatastoreError::MpscError.into();
+        assert_eq!(err.status, Status::InternalServerError);
+
+        // Test InternalError -> 500
+        let err: HttpErrorJson = DatastoreError::InternalError("internal".into()).into();
+        assert_eq!(err.status, Status::InternalServerError);
+
+        // Test Uninitialized -> 500
+        let err: HttpErrorJson = DatastoreError::Uninitialized("uninitialized".into()).into();
+        assert_eq!(err.status, Status::InternalServerError);
+
+        // Test OldDbVersion -> 500
+        let err: HttpErrorJson = DatastoreError::OldDbVersion("old version".into()).into();
+        assert_eq!(err.status, Status::InternalServerError);
+
+        // Test CommitFailed -> 503 (new test for disk-full handling)
+        let err: HttpErrorJson =
+            DatastoreError::CommitFailed("database or disk is full".into()).into();
+        assert_eq!(err.status, Status::ServiceUnavailable);
+        assert!(err.message.contains("disk full"));
+    }
+}

@@ -78,6 +78,10 @@ pub enum Command {
     SetKeyValue(String, String),
     DeleteKeyValue(String),
     Close(),
+    /// Test-only command to trigger a panic in the worker thread.
+    /// Only available with the `test-panic` feature.
+    #[cfg(feature = "test-panic")]
+    TriggerPanic(String),
 }
 
 fn _unwrap_response(
@@ -293,6 +297,10 @@ impl DatastoreWorker {
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())
+            }
+            #[cfg(feature = "test-panic")]
+            Command::TriggerPanic(msg) => {
+                panic!("{}", msg);
             }
         }
     }
@@ -547,6 +555,28 @@ impl Datastore {
                 _ => panic!("Invalid response"),
             },
             Err(e) => panic!("Error closing database: {:?}", e),
+        }
+    }
+
+    /// Test-only method to trigger a panic in the worker thread.
+    /// Used to verify that catch_unwind properly handles panics.
+    /// Only available with the `test-panic` feature.
+    #[cfg(feature = "test-panic")]
+    pub fn trigger_panic(&self, msg: &str) -> Result<(), DatastoreError> {
+        let cmd = Command::TriggerPanic(msg.to_string());
+        match self.requester.request(cmd) {
+            Ok(receiver) => match receiver.collect() {
+                Ok(result) => match result {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e),
+                },
+                Err(_) => Err(DatastoreError::InternalError(
+                    "Channel closed (worker panicked)".to_string(),
+                )),
+            },
+            Err(_) => Err(DatastoreError::InternalError(
+                "Failed to send command (channel closed)".to_string(),
+            )),
         }
     }
 }

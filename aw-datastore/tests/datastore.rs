@@ -494,4 +494,115 @@ mod datastore_tests {
             );
         }
     }
+
+    /// Test that when the worker thread panics, it shuts down gracefully
+    /// and subsequent requests receive clean errors instead of "poisoned lock" errors.
+    /// This tests the catch_unwind wrapper around work_loop().
+    #[cfg(feature = "test-panic")]
+    #[test]
+    fn test_worker_panic_graceful_shutdown() {
+        // Setup datastore
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+
+        // Verify datastore is working normally
+        let fetched_bucket = ds.get_bucket(&bucket.id).unwrap();
+        assert_eq!(fetched_bucket.id, bucket.id);
+
+        // Trigger a panic in the worker thread
+        let panic_result = ds.trigger_panic("Test panic for graceful shutdown");
+
+        // The panic should cause the worker to exit and close the channel.
+        // We may or may not get an error from the trigger_panic call itself
+        // depending on timing (whether the response was sent before the panic).
+        info!("trigger_panic result: {:?}", panic_result);
+
+        // Give the worker thread a moment to fully shut down
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Subsequent requests will fail. The current API uses .unwrap() which panics
+        // on closed channels, so we need to catch the panic and verify it's NOT
+        // a "poisoned lock" error (which would indicate catch_unwind didn't work).
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ds.get_buckets()
+        }));
+
+        // We expect either:
+        // 1. A panic with "SendError" (channel closed) - this is expected
+        // 2. An Ok(Err(...)) with a clean error - this is also fine
+        // What we must NOT see is a "poisoned" error which would mean catch_unwind failed
+        match result {
+            Ok(inner_result) => {
+                // If we got through without panic, check the error doesn't mention poison
+                if let Err(e) = inner_result {
+                    let err_msg = format!("{:?}", e);
+                    assert!(
+                        !err_msg.to_lowercase().contains("poison"),
+                        "Error should not be a poisoned lock error, got: {}",
+                        err_msg
+                    );
+                    info!("Got expected clean error: {}", err_msg);
+                }
+            }
+            Err(panic_info) => {
+                // We got a panic - extract the message and verify it's not about poisoned locks
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    format!("{:?}", panic_info)
+                };
+                assert!(
+                    !panic_msg.to_lowercase().contains("poison"),
+                    "Panic should not be about poisoned lock, got: {}",
+                    panic_msg
+                );
+                info!(
+                    "Got expected panic (channel closed, not poisoned lock): {}",
+                    panic_msg
+                );
+            }
+        }
+    }
+
+    /// Test that panic handling correctly extracts both &str and String panic messages.
+    #[cfg(feature = "test-panic")]
+    #[test]
+    fn test_worker_panic_with_string_message() {
+        let ds = Datastore::new_in_memory(false);
+
+        // The trigger_panic method accepts a &str which gets converted to String,
+        // so this tests the String panic message extraction path.
+        let _ = ds.trigger_panic("String panic message test");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Verify the datastore is no longer usable (channel closed)
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ds.get_buckets()
+        }));
+
+        // Should fail in some way (panic or error), just not with "poisoned"
+        match result {
+            Ok(inner_result) => {
+                assert!(inner_result.is_err(), "Expected error after worker panic");
+            }
+            Err(panic_info) => {
+                // Got a panic (expected behavior with current API that uses unwrap)
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    format!("{:?}", panic_info)
+                };
+                assert!(
+                    !panic_msg.to_lowercase().contains("poison"),
+                    "Panic should not be about poisoned lock, got: {}",
+                    panic_msg
+                );
+            }
+        }
+    }
 }

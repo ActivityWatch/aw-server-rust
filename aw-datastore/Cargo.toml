@@ -7,6 +7,8 @@ edition = "2021"
 [features]
 default = [] # no features by default
 legacy_import_tests = []
+# Test-only feature to enable panic triggering for testing catch_unwind behavior
+test-panic = []
 
 [dependencies]
 appdirs = "0.2"

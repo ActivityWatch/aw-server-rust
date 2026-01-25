@@ -551,16 +551,17 @@ impl DatastoreInstance {
         &mut self,
         conn: &Connection,
         bucket_id: &str,
+        event_id: i64,
         event: &Event,
     ) -> Result<(), DatastoreError> {
         let mut bucket = self.get_bucket(bucket_id)?;
 
+        // Use event ID directly instead of max(endtime) to avoid mismatch with get_events ordering
         let mut stmt = match conn.prepare(
             "
                 UPDATE events
                 SET starttime = ?2, endtime = ?3, data = ?4
-                WHERE bucketrow = ?1
-                    AND endtime = (SELECT max(endtime) FROM events WHERE bucketrow = ?1)
+                WHERE bucketrow = ?1 AND id = ?5
             ",
         ) {
             Ok(stmt) => stmt,
@@ -586,7 +587,13 @@ impl DatastoreInstance {
             &starttime_nanos,
             &endtime_nanos,
             &data as &dyn ToSql,
+            &event_id,
         ]) {
+            Ok(0) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "replace_last_event matched 0 rows for event_id {event_id} - cache/DB inconsistency"
+                )))
+            }
             Ok(_) => self.update_endtime(&mut bucket, event),
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -628,7 +635,11 @@ impl DatastoreInstance {
         let inserted_heartbeat = match aw_transform::heartbeat(&last_event, &heartbeat, pulsetime) {
             Some(merged_heartbeat) => {
                 debug!("Merged heartbeat successfully");
-                self.replace_last_event(conn, bucket_id, &merged_heartbeat)?;
+                // Use the event ID from last_event to ensure we update the correct row
+                let event_id = last_event.id.ok_or_else(|| {
+                    DatastoreError::InternalError("last_event has no ID".to_string())
+                })?;
+                self.replace_last_event(conn, bucket_id, event_id, &merged_heartbeat)?;
                 merged_heartbeat
             }
             None => {

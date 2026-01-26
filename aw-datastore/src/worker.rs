@@ -78,6 +78,10 @@ pub enum Command {
     SetKeyValue(String, String),
     DeleteKeyValue(String),
     Close(),
+    /// Test-only command to trigger a panic in the worker thread.
+    /// Only available with the `test-panic` feature.
+    #[cfg(feature = "test-panic")]
+    TriggerPanic(String),
 }
 
 fn _unwrap_response(
@@ -294,6 +298,10 @@ impl DatastoreWorker {
                 self.quit = true;
                 Ok(Response::Empty())
             }
+            #[cfg(feature = "test-panic")]
+            Command::TriggerPanic(msg) => {
+                panic!("{}", msg);
+            }
         }
     }
 }
@@ -314,7 +322,29 @@ impl Datastore {
             mpsc_requests::channel::<Command, Result<Response, DatastoreError>>();
         let _thread = thread::spawn(move || {
             let mut di = DatastoreWorker::new(responder, legacy_import);
-            di.work_loop(method);
+            // Wrap work_loop in catch_unwind to handle any unexpected panics gracefully.
+            // This prevents panics from poisoning locks and leaving the server in an
+            // unusable state. Instead, the worker exits cleanly and the channel closes,
+            // allowing clients to receive proper errors instead of "poisoned lock" errors.
+            // See: https://github.com/ActivityWatch/aw-server-rust/issues/405
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                di.work_loop(method);
+            }));
+            if let Err(panic_info) = result {
+                // Extract panic message if possible
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                error!(
+                    "Datastore worker panicked: {}. Worker shutting down gracefully.",
+                    panic_msg
+                );
+            }
+            // Worker exits, channel closes, future requests get clean errors
         });
         Datastore { requester }
     }
@@ -525,6 +555,28 @@ impl Datastore {
                 _ => panic!("Invalid response"),
             },
             Err(e) => panic!("Error closing database: {:?}", e),
+        }
+    }
+
+    /// Test-only method to trigger a panic in the worker thread.
+    /// Used to verify that catch_unwind properly handles panics.
+    /// Only available with the `test-panic` feature.
+    #[cfg(feature = "test-panic")]
+    pub fn trigger_panic(&self, msg: &str) -> Result<(), DatastoreError> {
+        let cmd = Command::TriggerPanic(msg.to_string());
+        match self.requester.request(cmd) {
+            Ok(receiver) => match receiver.collect() {
+                Ok(result) => match result {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e),
+                },
+                Err(_) => Err(DatastoreError::InternalError(
+                    "Channel closed (worker panicked)".to_string(),
+                )),
+            },
+            Err(_) => Err(DatastoreError::InternalError(
+                "Failed to send command (channel closed)".to_string(),
+            )),
         }
     }
 }

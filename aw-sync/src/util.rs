@@ -6,6 +6,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Returns the port of the local aw-server instance
+#[cfg(not(target_os = "android"))]
 pub fn get_server_port(testing: bool) -> Result<u16, Box<dyn Error>> {
     // TODO: get aw-server config more reliably
     let aw_server_conf = crate::dirs::get_server_config_path(testing)

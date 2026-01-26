@@ -73,6 +73,8 @@ for archtargetstr in \
     # Needed for runtime error: https://github.com/termux/termux-packages/issues/8029
     #   java.lang.UnsatisfiedLinkError: dlopen failed: cannot locate symbol "__extenddftf2"
     export RUSTFLAGS+=" -C link-arg=$($NDK_ARCH_DIR/${target}-clang -print-libgcc-file-name)"
+    # Align to 16KB for Android 15 compatibility
+    export RUSTFLAGS+=" -C link-arg=-z -C link-arg=max-page-size=16384"
     echo RUSTFLAGS=$RUSTFLAGS
 
     # fix armv7 -> arm
@@ -90,5 +92,12 @@ for archtargetstr in \
 
     # People suggest to use this, but ime it needs all the same workarounds anyway :shrug:
     #cargo ndk build -p aw-server --target $target --lib $($RELEASE && echo '--release')
+    
+    # Build aw-server
+    echo "Building aw-server for $arch..."
     cargo build -p aw-server --target $target --lib $($RELEASE && echo '--release')
+    
+    # Build aw-sync (without cli feature for Android)
+    echo "Building aw-sync for $arch..."
+    cargo build -p aw-sync --target $target --lib --no-default-features $($RELEASE && echo '--release')
 done

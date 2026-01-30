@@ -171,6 +171,8 @@ fn _migrate_v3_to_v4(conn: &Connection) {
 
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
+    ignored_apps: Vec<String>,
+    ignored_titles: Vec<String>,
     first_init: bool,
     pub db_version: i32,
 }
@@ -199,11 +201,55 @@ impl DatastoreInstance {
 
         let mut ds = DatastoreInstance {
             buckets_cache: HashMap::new(),
+            ignored_apps: vec![],
+            ignored_titles: vec![],
             first_init,
             db_version,
         };
         ds.get_stored_buckets(conn)?;
+        ds.get_stored_ignores(conn)?;
         Ok(ds)
+    }
+
+    fn get_stored_ignores(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
+        let result = self.get_key_value(conn, "IGNORE_FILTERS_APPS");
+        if result.is_ok() {
+            let unwrapped_key_value = &result.unwrap();
+	    let parts = unwrapped_key_value.split(",");
+	    for part in parts {
+                    self.ignored_apps.push(part.to_uppercase());
+	    }
+
+            /*let apps_exist = unwrapped_key_value.value.get("APPS");
+            if apps_exist.is_some() {
+                let apps = apps_exist.unwrap().as_array().unwrap();
+                for key in apps {
+                    let value = key.as_str().unwrap().to_string();
+                    self.ignored_apps.push(value.to_uppercase());
+                }
+            }*/
+	}
+
+        let result = self.get_key_value(conn, "IGNORE_FILTERS_TITLES");
+        if result.is_ok() {
+            let unwrapped_key_value = &result.unwrap();
+	    let parts = unwrapped_key_value.split(",");
+	    for part in parts {
+                    self.ignored_titles.push(part.to_uppercase());
+	    }
+
+            /* let titles_exist = unwrapped_key_value.value.get("TITLES");
+            if titles_exist.is_some() {
+                let titles = titles_exist.unwrap().as_array().unwrap();
+                for key in titles {
+                    let value = key.as_str().unwrap().to_string();
+                    self.ignored_titles.push(value.to_uppercase());
+                }
+            } */
+
+            info!("Ignoring {} titles & {} apps.", self.ignored_titles.len(), self.ignored_apps.len());
+        }
+        Ok(())
     }
 
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
@@ -442,8 +488,34 @@ impl DatastoreInstance {
                 )))
             }
         };
-        for event in &mut events {
+
+        'event: for event in &mut events {
+            let app = match event.data.get("app") {
+                Some(data) => data.as_str().unwrap().to_string().to_uppercase(),
+                None => String::new()
+            };
+            let title = match event.data.get("title") {
+                Some(data) => data.as_str().unwrap().to_string().to_uppercase(),
+                None => String::new()
+            };
+
+            if !app.is_empty() {
+                for key in self.ignored_apps.iter().cloned() {
+                    if app.contains(&key) {
+                        continue 'event;
+                    }
+                }
+            }
+            if !title.is_empty() {
+                for key in self.ignored_titles.iter().cloned() {
+                    if title.contains(&key) {
+                        continue 'event;
+                    }
+                }
+            }
+
             let starttime_nanos = event.timestamp.timestamp_nanos_opt().unwrap();
+
             let duration_nanos = match event.duration.num_nanoseconds() {
                 Some(nanos) => nanos,
                 None => {
@@ -554,6 +626,26 @@ impl DatastoreInstance {
         event_id: i64,
         event: &Event,
     ) -> Result<(), DatastoreError> {
+
+        let app_exists = event.data.get("app");
+        if app_exists.is_some() {
+            let app = app_exists.unwrap().as_str().unwrap().to_string().to_uppercase();
+            for key in self.ignored_apps.iter().cloned() {
+                if app.contains(&key) {
+                    return Ok(());
+                }
+            }
+        }
+        let title_exists = event.data.get("title");
+        if title_exists.is_some() {
+            let title = title_exists.unwrap().as_str().unwrap().to_string().to_uppercase();
+            for key in self.ignored_titles.iter().cloned() {
+                if title.contains(&key) {
+                    return Ok(());
+                }
+            }
+        }
+
         let mut bucket = self.get_bucket(bucket_id)?;
 
         // Use event ID directly instead of max(endtime) to avoid mismatch with get_events ordering

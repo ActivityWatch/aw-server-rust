@@ -46,3 +46,4 @@ jni = { version = "0.20", default-features = false }
 libc = "0.2"
 android_logger = "0.13"
 openssl-sys = { version = "0.9.82", features = ["vendored"]}
+aw-client-rust = { path = "../aw-client-rust" }

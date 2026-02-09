@@ -270,6 +270,7 @@ version = "0.13.1"
 dependencies = [
  "android_logger",
  "appdirs",
+ "aw-client-rust",
  "aw-datastore",
  "aw-models",
  "aw-query",

@@ -227,9 +227,10 @@ mod api_tests {
             )
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
+        // After the fix for #559, the heartbeat response includes the DB event ID
         assert_eq!(
             res.into_string().unwrap(),
-            r#"{"id":null,"timestamp":"2018-01-01T01:01:01Z","duration":2.0,"data":{}}"#
+            r#"{"id":1,"timestamp":"2018-01-01T01:01:01Z","duration":2.0,"data":{}}"#
         );
 
         // Get heartbeat event

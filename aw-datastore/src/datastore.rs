@@ -626,26 +626,32 @@ impl DatastoreInstance {
                     Some(last_event) => last_event,
                     None => {
                         // There was no last event, insert and return
-                        self.insert_events(conn, bucket_id, vec![heartbeat.clone()])?;
-                        return Ok(heartbeat);
+                        let mut inserted =
+                            self.insert_events(conn, bucket_id, vec![heartbeat])?;
+                        return Ok(inserted.pop().unwrap());
                     }
                 }
             }
         };
         let inserted_heartbeat = match aw_transform::heartbeat(&last_event, &heartbeat, pulsetime) {
-            Some(merged_heartbeat) => {
+            Some(mut merged_heartbeat) => {
                 debug!("Merged heartbeat successfully");
                 // Use the event ID from last_event to ensure we update the correct row
                 let event_id = last_event.id.ok_or_else(|| {
                     DatastoreError::InternalError("last_event has no ID".to_string())
                 })?;
                 self.replace_last_event(conn, bucket_id, event_id, &merged_heartbeat)?;
+                // Preserve the event ID on the cached heartbeat so subsequent
+                // heartbeats can look it up for replace_last_event
+                merged_heartbeat.id = Some(event_id);
                 merged_heartbeat
             }
             None => {
                 debug!("Failed to merge heartbeat");
-                self.insert_events(conn, bucket_id, vec![heartbeat.clone()])?;
-                heartbeat
+                // insert_events sets the ID on the events in the vec, so use the
+                // returned event (with ID) instead of the original heartbeat
+                let mut inserted = self.insert_events(conn, bucket_id, vec![heartbeat])?;
+                inserted.pop().unwrap()
             }
         };
         last_heartbeat.insert(bucket_id.to_string(), Some(inserted_heartbeat.clone()));

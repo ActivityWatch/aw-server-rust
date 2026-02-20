@@ -374,6 +374,37 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_event_heartbeat_consecutive_merges() {
+        // Regression test for https://github.com/ActivityWatch/aw-server-rust/issues/559
+        // After insert_heartbeat merges two events, the merged event stored in cache
+        // must retain the DB event ID so subsequent heartbeats can find it for
+        // replace_last_event. Without the ID, every other heartbeat would fail.
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+
+        let now = Utc::now();
+        let pulsetime = 10.0;
+
+        // Send 5 consecutive heartbeats with the same data, 1 second apart.
+        // They should all merge into a single event with increasing duration.
+        for i in 0..5 {
+            let e = Event {
+                id: None,
+                timestamp: now + Duration::seconds(i),
+                duration: Duration::seconds(0),
+                data: json_map! {"key": json!("value")},
+            };
+            ds.heartbeat(&bucket.id, e, pulsetime).unwrap();
+        }
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1, "all heartbeats should merge into one event");
+        assert_eq!(events[0].timestamp, now);
+        assert_eq!(events[0].duration, Duration::seconds(4));
+        assert!(events[0].id.is_some(), "event should have a DB id");
+    }
+
+    #[test]
     fn test_event_replace() {
         // Setup datastore
         let ds = Datastore::new_in_memory(false);

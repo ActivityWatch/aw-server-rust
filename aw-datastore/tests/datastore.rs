@@ -398,7 +398,11 @@ mod datastore_tests {
         }
 
         let events = ds.get_events(&bucket.id, None, None, None).unwrap();
-        assert_eq!(events.len(), 1, "all heartbeats should merge into one event");
+        assert_eq!(
+            events.len(),
+            1,
+            "all heartbeats should merge into one event"
+        );
         assert_eq!(events[0].timestamp, now);
         assert_eq!(events[0].duration, Duration::seconds(4));
         assert!(events[0].id.is_some(), "event should have a DB id");

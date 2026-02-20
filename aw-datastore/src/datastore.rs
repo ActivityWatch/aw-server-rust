@@ -626,8 +626,7 @@ impl DatastoreInstance {
                     Some(last_event) => last_event,
                     None => {
                         // There was no last event, insert and return
-                        let mut inserted =
-                            self.insert_events(conn, bucket_id, vec![heartbeat])?;
+                        let mut inserted = self.insert_events(conn, bucket_id, vec![heartbeat])?;
                         return Ok(inserted.pop().unwrap());
                     }
                 }

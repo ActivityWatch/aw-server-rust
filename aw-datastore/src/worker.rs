@@ -306,6 +306,18 @@ impl DatastoreWorker {
     }
 }
 
+/// Extracts a human-readable message from a panic payload.
+/// Handles the two common payload types (&str and String), with a fallback for other types.
+fn extract_panic_message(panic_info: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic_info.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "Unknown panic".to_string()
+    }
+}
+
 impl Datastore {
     pub fn new(dbpath: String, legacy_import: bool) -> Self {
         let method = DatastoreMethod::File(dbpath);
@@ -331,14 +343,7 @@ impl Datastore {
                 di.work_loop(method);
             }));
             if let Err(panic_info) = result {
-                // Extract panic message if possible
-                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Unknown panic".to_string()
-                };
+                let panic_msg = extract_panic_message(&panic_info);
                 error!(
                     "Datastore worker panicked: {}. Worker shutting down gracefully.",
                     panic_msg
@@ -578,5 +583,35 @@ impl Datastore {
                 "Failed to send command (channel closed)".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_panic_message;
+
+    /// &str panic payload (produced by panic!("literal"))
+    #[test]
+    fn test_extract_panic_message_str_literal() {
+        let panic_info = std::panic::catch_unwind(|| panic!("static str panic")).unwrap_err();
+        assert_eq!(extract_panic_message(&panic_info), "static str panic");
+    }
+
+    /// String panic payload (produced by panic!("{}", expr))
+    #[test]
+    fn test_extract_panic_message_string() {
+        let msg = format!("formatted panic {}", 42);
+        let panic_info =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| panic!("{}", msg)))
+                .unwrap_err();
+        assert_eq!(extract_panic_message(&panic_info), "formatted panic 42");
+    }
+
+    /// Unknown payload type falls back to "Unknown panic"
+    #[test]
+    fn test_extract_panic_message_unknown() {
+        let panic_info =
+            std::panic::catch_unwind(|| std::panic::panic_any(42u32)).unwrap_err();
+        assert_eq!(extract_panic_message(&panic_info), "Unknown panic");
     }
 }

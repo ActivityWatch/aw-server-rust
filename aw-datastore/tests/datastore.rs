@@ -40,7 +40,10 @@ mod datastore_tests {
     pub fn get_cache_dir() -> Result<PathBuf, ()> {
         #[cfg(not(target_os = "android"))]
         {
-            let dir = dirs::cache_dir().ok_or(())?.join("activitywatch").join("aw-server-rust");
+            let dir = dirs::cache_dir()
+                .ok_or(())?
+                .join("activitywatch")
+                .join("aw-server-rust");
             fs::create_dir_all(&dir).expect("Unable to create cache dir");
             Ok(dir)
         }

@@ -20,7 +20,7 @@ chrono = { version = "0.4", features = ["serde"] }
 serde = "1.0"
 serde_json = "1.0"
 reqwest = { version = "0.11", features = ["json", "blocking"] }
-dirs = "5"
+dirs = "6"
 gethostname = "0.4.3"
 
 # CLI-only dependencies (optional)

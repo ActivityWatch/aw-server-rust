@@ -7,9 +7,6 @@ extern crate serde_json;
 
 extern crate chrono;
 
-#[cfg(not(target_os = "android"))]
-extern crate dirs;
-
 #[cfg(target_os = "android")]
 #[macro_use]
 extern crate lazy_static;

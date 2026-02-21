@@ -15,7 +15,10 @@ lazy_static! {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, ()> {
-    let dir = dirs::config_dir().ok_or(())?.join("activitywatch").join("aw-server-rust");
+    let dir = dirs::config_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join("aw-server-rust");
     fs::create_dir_all(&dir).expect("Unable to create config dir");
     Ok(dir)
 }
@@ -27,7 +30,10 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_data_dir() -> Result<PathBuf, ()> {
-    let dir = dirs::data_dir().ok_or(())?.join("activitywatch").join("aw-server-rust");
+    let dir = dirs::data_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join("aw-server-rust");
     fs::create_dir_all(&dir).expect("Unable to create data dir");
     Ok(dir)
 }
@@ -39,7 +45,10 @@ pub fn get_data_dir() -> Result<PathBuf, ()> {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_cache_dir() -> Result<PathBuf, ()> {
-    let dir = dirs::cache_dir().ok_or(())?.join("activitywatch").join("aw-server-rust");
+    let dir = dirs::cache_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join("aw-server-rust");
     fs::create_dir_all(&dir).expect("Unable to create cache dir");
     Ok(dir)
 }
@@ -51,7 +60,10 @@ pub fn get_cache_dir() -> Result<PathBuf, ()> {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_log_dir(module: &str) -> Result<PathBuf, ()> {
-    let dir = dirs::cache_dir().ok_or(())?.join("activitywatch").join(module);
+    let dir = dirs::cache_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join(module);
     fs::create_dir_all(&dir).expect("Unable to create log dir");
     Ok(dir)
 }

@@ -34,11 +34,11 @@ mod import {
     use super::LegacyDatastoreImportError;
 
     fn dbfile_path() -> PathBuf {
-        let mut dir =
-            appdirs::user_data_dir(Some("activitywatch"), Some("activitywatch"), false).unwrap();
-        dir.push("aw-server");
-        dir.push("peewee-sqlite.v2.db");
-        dir
+        dirs::data_dir()
+            .expect("Unable to read user data dir")
+            .join("activitywatch")
+            .join("aw-server")
+            .join("peewee-sqlite.v2.db")
     }
 
     fn get_legacy_buckets(conn: &Connection) -> Result<Vec<Bucket>, LegacyDatastoreImportError> {

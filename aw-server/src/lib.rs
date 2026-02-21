@@ -8,7 +8,7 @@ extern crate serde_json;
 extern crate chrono;
 
 #[cfg(not(target_os = "android"))]
-extern crate appdirs;
+extern crate dirs;
 
 #[cfg(target_os = "android")]
 #[macro_use]

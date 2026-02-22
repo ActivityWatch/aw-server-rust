@@ -5,7 +5,7 @@ extern crate chrono;
 extern crate aw_datastore;
 extern crate serde_json;
 
-extern crate appdirs;
+extern crate dirs;
 
 #[cfg(test)]
 mod datastore_tests {
@@ -40,9 +40,11 @@ mod datastore_tests {
     pub fn get_cache_dir() -> Result<PathBuf, ()> {
         #[cfg(not(target_os = "android"))]
         {
-            let mut dir = appdirs::user_cache_dir(Some("activitywatch"), None)?;
-            dir.push("aw-server-rust");
-            fs::create_dir_all(dir.clone()).expect("Unable to create cache dir");
+            let dir = dirs::cache_dir()
+                .ok_or(())?
+                .join("activitywatch")
+                .join("aw-server-rust");
+            fs::create_dir_all(&dir).expect("Unable to create cache dir");
             Ok(dir)
         }
 

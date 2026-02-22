@@ -9,7 +9,7 @@ default = [] # no features by default
 legacy_import_tests = []
 
 [dependencies]
-appdirs = "0.2"
+dirs = "6"
 serde = "1.0"
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

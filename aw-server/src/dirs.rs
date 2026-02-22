@@ -152,8 +152,7 @@ fn test_log_dir_has_log_component() {
 
     #[cfg(target_os = "windows")]
     assert!(
-        path_str.contains("activitywatch\\Logs\\")
-            || path_str.contains("activitywatch/Logs/"),
+        path_str.contains("activitywatch\\Logs\\") || path_str.contains("activitywatch/Logs/"),
         "Windows log path should contain activitywatch/Logs, got: {}",
         path_str
     );

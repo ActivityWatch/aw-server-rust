@@ -27,12 +27,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Set up Rust nightly
-      uses: actions-rs/toolchain@v1
+    - name: Set up Rust stable
+      uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
-        toolchain: nightly
         components: clippy
-        override: true
     - name: Run clippy
       run: cargo clippy

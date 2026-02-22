@@ -60,12 +60,40 @@ pub fn get_cache_dir() -> Result<PathBuf, ()> {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_log_dir(module: &str) -> Result<PathBuf, ()> {
-    let dir = dirs::cache_dir()
-        .ok_or(())?
-        .join("activitywatch")
-        .join(module);
+    let dir = get_user_log_dir()?.join(module);
     fs::create_dir_all(&dir).expect("Unable to create log dir");
     Ok(dir)
+}
+
+/// Returns the platform-appropriate log directory for ActivityWatch.
+///
+/// Replicates the behavior of the old `appdirs::user_log_dir("activitywatch")`:
+/// - Linux:   ~/.cache/activitywatch/log/
+/// - macOS:   ~/Library/Logs/activitywatch/
+/// - Windows: {LOCALAPPDATA}\activitywatch\Logs\
+#[cfg(target_os = "linux")]
+fn get_user_log_dir() -> Result<PathBuf, ()> {
+    Ok(dirs::cache_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join("log"))
+}
+
+#[cfg(target_os = "macos")]
+fn get_user_log_dir() -> Result<PathBuf, ()> {
+    Ok(dirs::home_dir()
+        .ok_or(())?
+        .join("Library")
+        .join("Logs")
+        .join("activitywatch"))
+}
+
+#[cfg(target_os = "windows")]
+fn get_user_log_dir() -> Result<PathBuf, ()> {
+    Ok(dirs::data_local_dir()
+        .ok_or(())?
+        .join("activitywatch")
+        .join("Logs"))
 }
 
 #[cfg(target_os = "android")]
@@ -98,4 +126,34 @@ fn test_get_dirs() {
     get_log_dir("aw-server-rust").unwrap();
     db_path(true).unwrap();
     db_path(false).unwrap();
+}
+
+#[test]
+#[cfg(not(target_os = "android"))]
+fn test_log_dir_has_log_component() {
+    let log_dir = get_log_dir("aw-server-rust").unwrap();
+    let path_str = log_dir.to_string_lossy();
+
+    // The log path must contain a log-specific subdirectory, not just the cache dir.
+    // This guards against the regression from PR #562 where /log was dropped.
+    #[cfg(target_os = "linux")]
+    assert!(
+        path_str.contains("activitywatch/log/"),
+        "Linux log path should contain activitywatch/log/, got: {}",
+        path_str
+    );
+
+    #[cfg(target_os = "macos")]
+    assert!(
+        path_str.contains("Library/Logs/activitywatch"),
+        "macOS log path should use Library/Logs, got: {}",
+        path_str
+    );
+
+    #[cfg(target_os = "windows")]
+    assert!(
+        path_str.contains("activitywatch\\Logs\\") || path_str.contains("activitywatch/Logs/"),
+        "Windows log path should contain activitywatch/Logs, got: {}",
+        path_str
+    );
 }

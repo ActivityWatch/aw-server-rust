@@ -41,7 +41,9 @@ pub mod android {
     use crate::config::AWConfig;
     use crate::endpoints;
     use crate::endpoints::ServerState;
+    use aw_client_rust::blocking::AwClient;
     use aw_client_rust::classes::default_classes;
+    use aw_client_rust::classes::{CategoryId, CategorySpec};
     use aw_client_rust::queries::{
         build_android_canonical_events, AndroidQueryParams, QueryParamsBase,
     };
@@ -297,11 +299,59 @@ pub mod android {
         // Hardcoded bucket ID for testing
         let bid_android = "aw-watcher-android-test".to_string();
 
+        // Get classes from server settings via HTTP API
+        let classes = match AwClient::new("127.0.0.1", 5600, "aw-android-query") {
+            Ok(client) => {
+                match client.get_setting("classes") {
+                    Ok(classes_value) => {
+                        // Parse the server-side classes from JSON value
+                        match serde_json::from_value::<Vec<aw_models::Class>>(classes_value) {
+                            Ok(server_classes) => {
+                                if server_classes.is_empty() {
+                                    info!("Server classes list is empty, using default classes");
+                                    default_classes()
+                                } else {
+                                    // Convert from aw_models::Class to CategorySpec format
+                                    server_classes
+                                        .iter()
+                                        .map(|c| {
+                                            let category_id: CategoryId = c.name.clone();
+                                            let category_spec = CategorySpec {
+                                                spec_type: c.rule.rule_type.clone(),
+                                                regex: c.rule.regex.clone().unwrap_or_default(),
+                                                ignore_case: c.rule.ignore_case.unwrap_or(false),
+                                            };
+                                            (category_id, category_spec)
+                                        })
+                                        .collect()
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse server classes, using defaults: {:?}", e);
+                                default_classes()
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        info!("Failed to get server classes, using defaults: {:?}", e);
+                        default_classes()
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to create client for fetching classes, using defaults: {:?}",
+                    e
+                );
+                default_classes()
+            }
+        };
+
         // Build canonical Android query
         let params = AndroidQueryParams {
             base: QueryParamsBase {
                 bid_browsers: Vec::new(),
-                classes: default_classes(),
+                classes,
                 filter_classes: Vec::new(),
                 filter_afk: true,
                 include_audible: true,

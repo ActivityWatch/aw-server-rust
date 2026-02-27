@@ -192,7 +192,15 @@ impl DatastoreWorker {
             );
             match tx.commit() {
                 Ok(_) => (),
-                Err(err) => panic!("Failed to commit datastore transaction! {err}"),
+                Err(err) => {
+                    error!(
+                        "Failed to commit datastore transaction ({} events lost): {err}",
+                        self.uncommitted_events
+                    );
+                    // Continue instead of panicking — the rolled-back events will be
+                    // re-sent by watchers (heartbeats) or retried by clients.
+                    // This handles transient failures like disk full (SQLITE_FULL).
+                }
             }
             if self.quit {
                 break;

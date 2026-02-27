@@ -33,6 +33,9 @@ pub struct AWConfig {
     #[serde(default = "default_cors")]
     pub cors: Vec<String>,
 
+    #[serde(default = "default_cors")]
+    pub cors_regex: Vec<String>,
+
     // A mapping of watcher names to paths where the
     // custom visualizations are located.
     #[serde(default = "default_custom_static")]
@@ -46,6 +49,7 @@ impl Default for AWConfig {
             port: default_port(),
             testing: default_testing(),
             cors: default_cors(),
+            cors_regex: default_cors(),
             custom_static: default_custom_static(),
         }
     }

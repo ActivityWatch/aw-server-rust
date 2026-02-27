@@ -111,10 +111,7 @@ mod tests {
         split_url_event(&mut e);
         assert_eq!(e.data.get("$protocol"), Some(&json!("file")));
         assert_eq!(e.data.get("$domain"), Some(&json!("file")));
-        assert_eq!(
-            e.data.get("$path"),
-            Some(&json!("/home/user/document.pdf"))
-        );
+        assert_eq!(e.data.get("$path"), Some(&json!("/home/user/document.pdf")));
     }
 
     #[test]

@@ -41,9 +41,11 @@ pub fn split_url_event(event: &mut Event) {
         .data
         .insert("$protocol".to_string(), Value::String(protocol));
     // Domain
+    // For URLs without a host (e.g. file://, about:), fall back to the scheme
+    // so they don't all cluster as an empty string in "Top Browser Domains".
     let domain = match uri.host_str() {
         Some(domain) => domain.trim_start_matches("www.").to_string(),
-        None => "".to_string(),
+        None => uri.scheme().to_string(),
     };
     event
         .data
@@ -96,5 +98,32 @@ mod tests {
                 "$params": json!("query=1")
             }
         );
+    }
+
+    #[test]
+    fn test_split_url_file_scheme() {
+        let mut e = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"url": "file:///home/user/document.pdf"},
+        };
+        split_url_event(&mut e);
+        assert_eq!(e.data.get("$protocol"), Some(&json!("file")));
+        assert_eq!(e.data.get("$domain"), Some(&json!("file")));
+        assert_eq!(e.data.get("$path"), Some(&json!("/home/user/document.pdf")));
+    }
+
+    #[test]
+    fn test_split_url_about_scheme() {
+        let mut e = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"url": "about:blank"},
+        };
+        split_url_event(&mut e);
+        assert_eq!(e.data.get("$protocol"), Some(&json!("about")));
+        assert_eq!(e.data.get("$domain"), Some(&json!("about")));
     }
 }

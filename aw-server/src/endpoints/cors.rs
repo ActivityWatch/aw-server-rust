@@ -19,6 +19,7 @@ pub fn cors(config: &AWConfig) -> rocket_cors::Cors {
         // unfortunately have to allow all extensions to have access to aw-server
         "moz-extension://.*".to_string(),
     ];
+    allowed_regex_origins.extend(config.cors_regex.clone());
     if config.testing {
         allowed_regex_origins.push("chrome-extension://.*".to_string());
     }

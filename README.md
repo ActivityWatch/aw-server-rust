@@ -42,6 +42,43 @@ cargo run --bin aw-server
 
 *NOTE:* This will start aw-server-rust in testing mode (on port 5666 instead of port 5600).
 
+### Configuration
+
+The server reads its configuration from `~/.config/activitywatch/aw-server-rust/config.toml` (or `config-testing.toml` in testing mode).
+
+Available options:
+
+```toml
+# Address to listen on
+#address = "127.0.0.1"
+
+# Port to listen on (default: 5600, testing: 5666)
+#port = 5600
+
+# Additional exact CORS origins to allow (e.g. for custom web interfaces)
+#cors = ["http://localhost:3000"]
+
+# Additional regex CORS origins to allow (e.g. for sideloaded browser extensions)
+#cors_regex = ["chrome-extension://yourextensionidhere"]
+```
+
+#### Custom CORS Origins
+
+By default, the server allows requests from:
+- The server's own origin (`http://127.0.0.1:<port>`, `http://localhost:<port>`)
+- The official Chrome extension (`chrome-extension://nglaklhklhcoonedhgnpgddginnjdadi`)
+- All Firefox extensions (`moz-extension://.*`)
+
+To allow additional origins (e.g. a sideloaded Chrome extension), add them to your config:
+
+```toml
+# Allow a specific sideloaded Chrome extension
+cors_regex = ["chrome-extension://jmdbkmbphoikckgkcnpoojbfeiaoaocl"]
+
+# Or allow all Chrome extensions (less secure, but convenient for development)
+cors_regex = ["chrome-extension://.*"]
+```
+
 ### Syncing
 
 For details about aw-sync-rust, see the [README](./aw-sync/README.md) in its subdirectory.

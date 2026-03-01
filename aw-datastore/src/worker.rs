@@ -142,7 +142,11 @@ impl DatastoreWorker {
             }
             match transaction.commit() {
                 Ok(_) => (),
-                Err(err) => panic!("Failed to commit datastore transaction! {err}"),
+                Err(err) => {
+                    error!("Failed to commit legacy import transaction: {err}");
+                    // Continue without panicking — legacy import will be retried on
+                    // next startup if the commit didn't persist.
+                }
             }
         }
 

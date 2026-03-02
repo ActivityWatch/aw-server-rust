@@ -201,9 +201,12 @@ impl DatastoreWorker {
                         "Failed to commit datastore transaction ({} events lost): {err}",
                         self.uncommitted_events
                     );
-                    // Continue instead of panicking — the rolled-back events will be
-                    // re-sent by watchers (heartbeats) or retried by clients.
-                    // This handles transient failures like disk full (SQLITE_FULL).
+                    // Continue instead of panicking — the worker thread survives this
+                    // transient failure (e.g. SQLITE_FULL on disk full). Note: clients
+                    // already received success responses before the commit, so they won't
+                    // know to retry. Rolled-back events create a gap in the timeline;
+                    // watchers will resume sending heartbeats from current state, but the
+                    // specific batch of events is permanently lost.
                 }
             }
             if self.quit {

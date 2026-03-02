@@ -39,6 +39,4 @@ pub enum DatastoreError {
     // Errors specific to when migrate is disabled
     Uninitialized(String),
     OldDbVersion(String),
-    // Database write failure (e.g. disk full)
-    CommitFailed(String),
 }

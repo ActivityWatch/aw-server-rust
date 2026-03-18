@@ -17,18 +17,52 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(DatastoreError::BucketAlreadyExists(_)) => {
-                // Bucket already exists — merge events into it instead of failing
+                // Bucket already exists — merge events, skipping duplicates
                 info!("Bucket '{}' already exists, merging events", bucket.id);
                 if let Some(events) = bucket.events.take() {
                     let events_vec = events.take_inner();
                     if !events_vec.is_empty() {
-                        if let Err(e) = datastore.insert_events(&bucket.id, &events_vec) {
-                            let err_msg = format!(
-                                "Failed to merge events into existing bucket '{}': {e:?}",
-                                bucket.id
-                            );
-                            warn!("{}", err_msg);
-                            return Err(HttpErrorJson::new(Status::InternalServerError, err_msg));
+                        // Determine time range of events to import
+                        let start = events_vec.iter().map(|e| e.timestamp).min().unwrap();
+                        let end = events_vec
+                            .iter()
+                            .map(|e| e.calculate_endtime())
+                            .max()
+                            .unwrap();
+
+                        // Fetch existing events in that range to detect duplicates.
+                        // Events without an explicit ID would otherwise be inserted as new rows
+                        // via AUTOINCREMENT, silently creating duplicates on re-import.
+                        let existing = datastore
+                            .get_events(&bucket.id, Some(start), Some(end), None)
+                            .map_err(|e| {
+                                HttpErrorJson::new(
+                                    Status::InternalServerError,
+                                    format!(
+                                        "Failed to fetch existing events for dedup in '{}': {e:?}",
+                                        bucket.id
+                                    ),
+                                )
+                            })?;
+
+                        // Filter out events already present (matched by timestamp, duration, data)
+                        let new_events: Vec<_> = events_vec
+                            .into_iter()
+                            .filter(|e| !existing.contains(e))
+                            .collect();
+
+                        if !new_events.is_empty() {
+                            if let Err(e) = datastore.insert_events(&bucket.id, &new_events) {
+                                let err_msg = format!(
+                                    "Failed to merge events into existing bucket '{}': {e:?}",
+                                    bucket.id
+                                );
+                                warn!("{}", err_msg);
+                                return Err(HttpErrorJson::new(
+                                    Status::InternalServerError,
+                                    err_msg,
+                                ));
+                            }
                         }
                     }
                 }

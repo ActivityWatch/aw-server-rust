@@ -53,7 +53,7 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
                         // Events without an explicit ID would otherwise be inserted as new rows
                         // via AUTOINCREMENT, silently creating duplicates on re-import.
                         let existing = datastore
-                            .get_events(&bucket.id, Some(start), Some(end), None)
+                            .get_events_unclipped(&bucket.id, Some(start), Some(end), None)
                             .map_err(|e| {
                                 HttpErrorJson::new(
                                     Status::InternalServerError,

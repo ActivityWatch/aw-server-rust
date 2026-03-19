@@ -364,6 +364,42 @@ mod api_tests {
             "Re-importing the same event should be idempotent"
         );
 
+        // Import a narrower event fully contained within an existing longer event.
+        // This should be preserved as a distinct event, not dropped by clipped dedup.
+        let res = client
+            .post("/api/0/import")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(
+                r#"{"buckets":
+            {"id1": {
+                "id": "id1",
+                "type": "type",
+                "client": "client",
+                "hostname": "hostname",
+                "events": [{
+                    "timestamp":"2000-01-01T00:00:30Z",
+                    "duration":30.0,
+                    "data": {}
+                }]
+            }}}"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        let res = client
+            .get("/api/0/buckets/id1/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let events: serde_json::Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(
+            events.as_array().unwrap().len(),
+            3,
+            "Contained event should not be dropped by clipped dedup"
+        );
+
         // Export single created bucket
         let res = client
             .get("/api/0/buckets/id1/export")
@@ -429,7 +465,11 @@ mod api_tests {
         let mut buckets = export.buckets;
         assert_eq!(buckets.len(), 1);
         let b = buckets.remove("id1").unwrap();
-        assert_eq!(b.events.unwrap().take_inner().len(), 2);
+        assert_eq!(
+            b.events.unwrap().take_inner().len(),
+            3,
+            "Export should preserve the contained event added during merge testing"
+        );
 
         assert_eq!(buckets.len(), 0);
     }

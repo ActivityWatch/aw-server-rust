@@ -3,13 +3,32 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 
-use aw_models::BucketsExport;
+use aw_models::{BucketsExport, Event};
 
 use aw_datastore::{Datastore, DatastoreError};
 
 use crate::endpoints::{HttpErrorJson, ServerState};
+
+fn event_identity(
+    event: &Event,
+) -> Result<(chrono::DateTime<chrono::Utc>, i64, String), HttpErrorJson> {
+    let duration_ns = event.duration.num_nanoseconds().ok_or_else(|| {
+        HttpErrorJson::new(
+            Status::InternalServerError,
+            "Failed to encode event duration for dedup".to_string(),
+        )
+    })?;
+    let data_json = serde_json::to_string(&event.data).map_err(|e| {
+        HttpErrorJson::new(
+            Status::InternalServerError,
+            format!("Failed to encode event data for dedup: {e}"),
+        )
+    })?;
+    Ok((event.timestamp, duration_ns, data_json))
+}
 
 fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), HttpErrorJson> {
     let datastore = endpoints_get_lock!(datastore_mutex);
@@ -45,10 +64,20 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
                                 )
                             })?;
 
+                        let existing_identities: HashSet<_> = existing
+                            .iter()
+                            .map(event_identity)
+                            .collect::<Result<_, _>>()?;
+
                         // Filter out events already present (matched by timestamp, duration, data)
                         let new_events: Vec<_> = events_vec
                             .into_iter()
-                            .filter(|e| !existing.contains(e))
+                            .map(|event| Ok((event_identity(&event)?, event)))
+                            .collect::<Result<Vec<_>, HttpErrorJson>>()?
+                            .into_iter()
+                            .filter_map(|(identity, event)| {
+                                (!existing_identities.contains(&identity)).then_some(event)
+                            })
                             .collect();
 
                         if !new_events.is_empty() {

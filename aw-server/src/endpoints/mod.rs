@@ -132,7 +132,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
         "Starting aw-server-rust at {}:{}",
         config.address, config.port
     );
-    let cors = cors::cors(&config);
+    let cors = cors::cors(&config, &server_state.datastore);
     let hostcheck = hostcheck::HostCheck::new(&config);
     let custom_static = config.custom_static.clone();
 

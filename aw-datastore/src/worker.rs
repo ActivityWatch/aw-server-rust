@@ -78,6 +78,7 @@ pub enum Command {
     SetKeyValue(String, String),
     DeleteKeyValue(String),
     RefreshPrivacyFilter(),
+    MigrateHostname(String),
     Close(),
 }
 
@@ -404,6 +405,17 @@ impl DatastoreWorker {
                 }
                 Ok(Response::Empty())
             }
+            Command::MigrateHostname(new_hostname) => {
+                match ds.migrate_hostname(tx, &new_hostname) {
+                    Ok(count) => {
+                        if count > 0 {
+                            self.commit = true;
+                        }
+                        Ok(Response::Count(count as i64))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())
@@ -618,6 +630,22 @@ impl Datastore {
 
     pub fn refresh_privacy_filter(&self) -> Result<(), DatastoreError> {
         _unwrap_empty_response(self.request(Command::RefreshPrivacyFilter())?)
+    }
+
+    /// Migrates all buckets whose hostname is "unknown" or "Unknown" to `new_hostname`.
+    /// Returns the number of buckets updated.
+    pub fn migrate_hostname(&self, new_hostname: &str) -> Result<usize, DatastoreError> {
+        let cmd = Command::MigrateHostname(new_hostname.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Response::Count(n) => Ok(n as usize),
+                _ => Err(DatastoreError::InternalError(
+                    "Unexpected response to MigrateHostname command".to_string(),
+                )),
+            },
+            Err(e) => Err(e),
+        }
     }
 
     // Should block until worker has stopped

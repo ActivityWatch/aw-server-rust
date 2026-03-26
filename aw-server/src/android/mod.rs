@@ -251,6 +251,24 @@ pub mod android {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_migrateHostname(
+        env: JNIEnv,
+        _: JClass,
+        hostname: JString,
+    ) -> jstring {
+        let hostname = jstring_to_string(&env, hostname);
+        if hostname.is_empty() {
+            return create_error_object(&env, "hostname must not be empty".to_string());
+        }
+        match openDatastore().migrate_hostname(&hostname) {
+            Ok(count) => {
+                string_to_jstring(&env, format!("Migrated hostname for {} bucket(s)", count))
+            }
+            Err(e) => create_error_object(&env, format!("Failed to migrate hostname: {:?}", e)),
+        }
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_query(
         env: JNIEnv,
         _: JClass,

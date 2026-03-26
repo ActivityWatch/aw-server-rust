@@ -966,4 +966,40 @@ impl DatastoreInstance {
             },
         }
     }
+
+    /// Migrates all buckets whose hostname is "unknown" or "Unknown" to `new_hostname`.
+    /// Events are left untouched; only the bucket metadata is updated.
+    /// Returns the number of buckets that were updated.
+    pub fn migrate_hostname(
+        &mut self,
+        conn: &Connection,
+        new_hostname: &str,
+    ) -> Result<usize, DatastoreError> {
+        info!(
+            "Migrating hostname from 'unknown'/'Unknown' to '{}'",
+            new_hostname
+        );
+
+        let updated = match conn.execute(
+            "UPDATE buckets SET hostname = ?1 WHERE hostname = 'unknown' OR hostname = 'Unknown'",
+            [new_hostname],
+        ) {
+            Ok(n) => n,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to migrate hostname: {err}"
+                )))
+            }
+        };
+
+        if updated > 0 {
+            info!("Migrated hostname for {} bucket(s)", updated);
+            // Refresh the in-memory cache so callers see the new hostnames immediately.
+            self.get_stored_buckets(conn)?;
+        } else {
+            info!("No buckets with hostname 'unknown'/'Unknown' found; nothing to migrate");
+        }
+
+        Ok(updated)
+    }
 }

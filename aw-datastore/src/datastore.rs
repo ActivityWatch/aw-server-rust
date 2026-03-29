@@ -967,6 +967,44 @@ impl DatastoreInstance {
         }
     }
 
+    /// Renames a bucket from `old_id` to `new_id`.
+    /// Events are left untouched because they reference the integer row ID, not the name.
+    /// Returns `NoSuchBucket` if `old_id` does not exist, or `BucketAlreadyExists` if
+    /// `new_id` is already taken.
+    pub fn rename_bucket(
+        &mut self,
+        conn: &Connection,
+        old_id: &str,
+        new_id: &str,
+    ) -> Result<(), DatastoreError> {
+        if !self.buckets_cache.contains_key(old_id) {
+            return Err(DatastoreError::NoSuchBucket(old_id.to_string()));
+        }
+        if self.buckets_cache.contains_key(new_id) {
+            return Err(DatastoreError::BucketAlreadyExists(new_id.to_string()));
+        }
+
+        match conn.execute(
+            "UPDATE buckets SET name = ?1 WHERE name = ?2",
+            [new_id, old_id],
+        ) {
+            Ok(0) => Err(DatastoreError::NoSuchBucket(old_id.to_string())),
+            Ok(_) => {
+                info!("Renamed bucket '{}' to '{}'", old_id, new_id);
+                // Update the in-memory cache: remove the old entry and re-insert under the new id.
+                if let Some(mut bucket) = self.buckets_cache.remove(old_id) {
+                    bucket.id = new_id.to_string();
+                    self.buckets_cache.insert(new_id.to_string(), bucket);
+                }
+                Ok(())
+            }
+            Err(err) => Err(DatastoreError::InternalError(format!(
+                "Failed to rename bucket '{}' to '{}': {err}",
+                old_id, new_id
+            ))),
+        }
+    }
+
     /// Migrates all buckets whose hostname is "unknown" or "Unknown" to `new_hostname`.
     /// Events are left untouched; only the bucket metadata is updated.
     /// Returns the number of buckets that were updated.

@@ -269,6 +269,20 @@ pub mod android {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_migrateAndroidBucketName(
+        env: JNIEnv,
+        _: JClass,
+    ) -> jstring {
+        match openDatastore().rename_bucket("aw-android-test", "aw-android") {
+            Ok(()) => string_to_jstring(
+                &env,
+                "Renamed bucket 'aw-android-test' to 'aw-android'".to_string(),
+            ),
+            Err(e) => create_error_object(&env, format!("Failed to rename bucket: {:?}", e)),
+        }
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_query(
         env: JNIEnv,
         _: JClass,

@@ -77,6 +77,7 @@ pub enum Command {
     GetKeyValue(String),
     SetKeyValue(String, String),
     DeleteKeyValue(String),
+    RenameBucket(String, String),
     MigrateHostname(String),
     Close(),
 }
@@ -304,6 +305,13 @@ impl DatastoreWorker {
             },
             Command::DeleteKeyValue(key) => match ds.delete_key_value(tx, &key) {
                 Ok(()) => Ok(Response::Empty()),
+                Err(e) => Err(e),
+            },
+            Command::RenameBucket(old_id, new_id) => match ds.rename_bucket(tx, &old_id, &new_id) {
+                Ok(()) => {
+                    self.commit = true;
+                    Ok(Response::Empty())
+                }
                 Err(e) => Err(e),
             },
             Command::MigrateHostname(new_hostname) => {
@@ -538,6 +546,13 @@ impl Datastore {
         let cmd = Command::DeleteKeyValue(key.to_string());
         let receiver = self.requester.request(cmd).unwrap();
 
+        _unwrap_response(receiver)
+    }
+
+    /// Renames a bucket from `old_id` to `new_id`.
+    pub fn rename_bucket(&self, old_id: &str, new_id: &str) -> Result<(), DatastoreError> {
+        let cmd = Command::RenameBucket(old_id.to_string(), new_id.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
         _unwrap_response(receiver)
     }
 

@@ -78,6 +78,7 @@ pub enum Command {
     SetKeyValue(String, String),
     DeleteKeyValue(String),
     RefreshPrivacyFilter(),
+    RenameBucket(String, String),
     MigrateHostname(String),
     Close(),
 }
@@ -405,6 +406,13 @@ impl DatastoreWorker {
                 }
                 Ok(Response::Empty())
             }
+            Command::RenameBucket(old_id, new_id) => match ds.rename_bucket(tx, &old_id, &new_id) {
+                Ok(()) => {
+                    self.commit = true;
+                    Ok(Response::Empty())
+                }
+                Err(e) => Err(e),
+            },
             Command::MigrateHostname(new_hostname) => {
                 match ds.migrate_hostname(tx, &new_hostname) {
                     Ok(count) => {
@@ -630,6 +638,13 @@ impl Datastore {
 
     pub fn refresh_privacy_filter(&self) -> Result<(), DatastoreError> {
         _unwrap_empty_response(self.request(Command::RefreshPrivacyFilter())?)
+    }
+
+    /// Renames a bucket from `old_id` to `new_id`.
+    pub fn rename_bucket(&self, old_id: &str, new_id: &str) -> Result<(), DatastoreError> {
+        let cmd = Command::RenameBucket(old_id.to_string(), new_id.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+        _unwrap_response(receiver)
     }
 
     /// Migrates all buckets whose hostname is "unknown" or "Unknown" to `new_hostname`.

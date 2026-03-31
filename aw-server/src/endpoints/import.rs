@@ -12,6 +12,14 @@ use aw_datastore::{Datastore, DatastoreError};
 
 use crate::endpoints::{HttpErrorJson, ServerState};
 
+/// Computes a dedup identity tuple for an event.
+///
+/// **Note**: The `data` field is serialized via `serde_json::to_string`, which
+/// produces insertion-order-dependent JSON. This is correct for the primary
+/// use case (Android → desktop re-import, where the client serializes with
+/// consistent key ordering). For multi-client dedup across clients with
+/// different serialization orders, a canonical JSON representation
+/// (e.g., `BTreeMap` round-trip) would be needed.
 fn event_identity(
     event: &Event,
 ) -> Result<(chrono::DateTime<chrono::Utc>, i64, String), HttpErrorJson> {
@@ -52,6 +60,12 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
                         // Fetch existing events in that range to detect duplicates.
                         // Events without an explicit ID would otherwise be inserted as new rows
                         // via AUTOINCREMENT, silently creating duplicates on re-import.
+                        //
+                        // **Memory note**: This loads all events in the import time range into
+                        // memory for O(1) dedup lookups. Typical Android re-imports involve a
+                        // few thousand events (~1-2 MB), which is well within server bounds.
+                        // Pathological cases (years of data) could be mitigated with pagination
+                        // or a bloom filter if OOM issues arise in practice.
                         let existing = datastore
                             .get_events_unclipped(&bucket.id, Some(start), Some(end), None)
                             .map_err(|e| {

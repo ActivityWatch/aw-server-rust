@@ -294,7 +294,10 @@ impl DatastoreWorker {
                 Err(e) => Err(e),
             },
             Command::SetKeyValue(key, data) => match ds.insert_key_value(tx, &key, &data) {
-                Ok(()) => Ok(Response::Empty()),
+                Ok(()) => {
+                    self.commit = true;
+                    Ok(Response::Empty())
+                }
                 Err(e) => Err(e),
             },
             Command::GetKeyValue(key) => match ds.get_key_value(tx, &key) {
@@ -302,7 +305,10 @@ impl DatastoreWorker {
                 Err(e) => Err(e),
             },
             Command::DeleteKeyValue(key) => match ds.delete_key_value(tx, &key) {
-                Ok(()) => Ok(Response::Empty()),
+                Ok(()) => {
+                    self.commit = true;
+                    Ok(Response::Empty())
+                }
                 Err(e) => Err(e),
             },
             Command::Close() => {

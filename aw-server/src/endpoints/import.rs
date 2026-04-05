@@ -3,7 +3,7 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 
 use aw_models::{BucketsExport, Event};
@@ -14,12 +14,9 @@ use crate::endpoints::{HttpErrorJson, ServerState};
 
 /// Computes a dedup identity tuple for an event.
 ///
-/// **Note**: The `data` field is serialized via `serde_json::to_string`, which
-/// produces insertion-order-dependent JSON. This is correct for the primary
-/// use case (Android → desktop re-import, where the client serializes with
-/// consistent key ordering). For multi-client dedup across clients with
-/// different serialization orders, a canonical JSON representation
-/// (e.g., `BTreeMap` round-trip) would be needed.
+/// Uses canonical JSON serialization (sorted keys via `BTreeMap`) so that
+/// events with identical key-value pairs but different insertion order
+/// (e.g., from different clients) are correctly identified as duplicates.
 fn event_identity(
     event: &Event,
 ) -> Result<(chrono::DateTime<chrono::Utc>, i64, String), HttpErrorJson> {
@@ -29,7 +26,11 @@ fn event_identity(
             "Failed to encode event duration for dedup".to_string(),
         )
     })?;
-    let data_json = serde_json::to_string(&event.data).map_err(|e| {
+    // Sort keys before serializing for canonical, order-independent dedup.
+    // This prevents missed duplicates when events from different clients
+    // serialize the same data with different key orderings.
+    let sorted: BTreeMap<_, _> = event.data.iter().collect();
+    let data_json = serde_json::to_string(&sorted).map_err(|e| {
         HttpErrorJson::new(
             Status::InternalServerError,
             format!("Failed to encode event data for dedup: {e}"),

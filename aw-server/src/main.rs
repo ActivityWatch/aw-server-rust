@@ -79,7 +79,27 @@ async fn main() -> Result<(), rocket::Error> {
         info!("Running server in Testing mode");
     }
 
-    let mut config = config::create_config(testing);
+    // Set db path if overridden
+    let db_path: String = if let Some(dbpath) = opts.dbpath.clone() {
+        dbpath
+    } else {
+        dirs::db_path(testing)
+            .expect("Failed to get db path")
+            .to_str()
+            .unwrap()
+            .to_string()
+    };
+    info!("Using DB at path {:?}", db_path);
+
+    // Only use legacy import if opts.dbpath is not set
+    let legacy_import = !opts.no_legacy_import && opts.dbpath.is_none();
+    if opts.dbpath.is_some() {
+        info!("Since custom dbpath is set, --no-legacy-import is implied");
+    }
+
+    let datastore = aw_datastore::Datastore::new(db_path, legacy_import);
+
+    let mut config = config::create_config(testing, &datastore);
 
     // set host if overridden
     if let Some(host) = opts.host {
@@ -114,26 +134,8 @@ async fn main() -> Result<(), rocket::Error> {
         }
     }
 
-    // Set db path if overridden
-    let db_path: String = if let Some(dbpath) = opts.dbpath.clone() {
-        dbpath
-    } else {
-        dirs::db_path(testing)
-            .expect("Failed to get db path")
-            .to_str()
-            .unwrap()
-            .to_string()
-    };
-    info!("Using DB at path {:?}", db_path);
-
     let asset_path = opts.webpath.map(|webpath| PathBuf::from(webpath));
     info!("Using aw-webui assets at path {:?}", asset_path);
-
-    // Only use legacy import if opts.dbpath is not set
-    let legacy_import = !opts.no_legacy_import && opts.dbpath.is_none();
-    if opts.dbpath.is_some() {
-        info!("Since custom dbpath is set, --no-legacy-import is implied");
-    }
 
     let device_id: String = if let Some(id) = opts.device_id {
         id
@@ -144,9 +146,10 @@ async fn main() -> Result<(), rocket::Error> {
     let server_state = endpoints::ServerState {
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
-        datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
+        datastore: Mutex::new(datastore),
         asset_resolver: endpoints::AssetResolver::new(asset_path),
         device_id,
+        config: Mutex::new(config.clone()),
     };
 
     let _rocket = endpoints::build_rocket(server_state, config)

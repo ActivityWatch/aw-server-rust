@@ -42,6 +42,7 @@ pub struct ServerState {
     pub datastore: Mutex<Datastore>,
     pub asset_resolver: AssetResolver,
     pub device_id: String,
+    pub config: Mutex<AWConfig>,
 }
 
 #[macro_use]
@@ -53,6 +54,7 @@ mod hostcheck;
 mod import;
 mod query;
 mod settings;
+mod cors_config;
 
 pub use util::HttpErrorJson;
 
@@ -187,6 +189,13 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 settings::setting_set,
                 settings::setting_delete,
                 settings::settings_get,
+            ],
+        )
+        .mount(
+            "/api/0/cors-config",
+            routes![
+                cors_config::cors_config_get,
+                cors_config::cors_config_set,
             ],
         )
         .mount("/", rocket_cors::catch_all_options_routes());

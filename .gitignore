@@ -10,3 +10,5 @@ NDK
 *.sqlite*
 *.db
 *.db-journal
+
+.vscode

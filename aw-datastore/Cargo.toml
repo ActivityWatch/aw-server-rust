@@ -5,7 +5,15 @@ authors = ["Johan Bjäreholt <johan@bjareho.lt>"]
 edition = "2021"
 
 [features]
-default = [] # no features by default
+default = ["bundled"]
+# Use bundled SQLite (default, no encryption support)
+bundled = ["rusqlite/bundled"]
+# Use bundled SQLCipher for encrypted databases (mutually exclusive with 'bundled')
+# Build with: cargo build --no-default-features --features encryption
+# Requires OpenSSL. Use 'encryption-vendored' to vendor OpenSSL as well.
+encryption = ["rusqlite/bundled-sqlcipher"]
+# Like 'encryption' but also vendors OpenSSL (fully self-contained)
+encryption-vendored = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 legacy_import_tests = []
 
 [dependencies]
@@ -13,7 +21,7 @@ dirs = "6"
 serde = "1.0"
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.30", features = ["chrono", "serde_json", "bundled"]  }
+rusqlite = { version = "0.30", features = ["chrono", "serde_json"] }
 mpsc_requests = "0.3"
 log = "0.4"
 

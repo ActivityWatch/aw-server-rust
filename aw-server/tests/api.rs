@@ -20,12 +20,13 @@ mod api_tests {
     use rocket::local::blocking::Client;
 
     fn setup_testserver() -> rocket::Rocket<rocket::Build> {
+        let aw_config = config::AWConfig::default();
         let state = endpoints::ServerState {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
             asset_resolver: endpoints::AssetResolver::new(None),
             device_id: "test_id".to_string(),
+            config: Mutex::new(aw_config.clone()),
         };
-        let aw_config = config::AWConfig::default();
         endpoints::build_rocket(state, aw_config)
     }
 

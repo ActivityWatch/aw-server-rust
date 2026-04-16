@@ -60,16 +60,33 @@ Available options:
 
 # Additional regex CORS origins to allow (e.g. for sideloaded browser extensions)
 #cors_regex = ["chrome-extension://yourextensionidhere"]
+
+# Allow official ActivityWatch Chrome extension? (default: true)
+#cors_allow_aw_chrome_extension = true
+
+# Allow all Firefox extensions? (default: false, DANGEROUS)
+#cors_allow_all_mozilla_extension = false
 ```
+
+#### Persistence and Settings UI
+
+The CORS-related settings (`cors`, `cors_regex`, `cors_allow_aw_chrome_extension`, and `cors_allow_all_mozilla_extension`) follow a precedence logic between the configuration file and the database:
+
+- **TOML Precedence**: If a field is explicitly defined in your `config.toml`, it takes absolute precedence. The server will use the value from the file, and that setting will be **read-only** in the Web UI (marked as "Fixed in config file").
+- **Database Fallback**: If a field is **missing** or commented out in the `config.toml`, the server will look for it in the database. These can be managed and edited via the **Security & CORS** modal in the Settings page.
+- **Initial Setup**: On the first start, a default `config.toml` is created with all settings commented out, allowing the Web UI to take control of the configuration by default while providing a template for manual overrides.
+
+> [!IMPORTANT]
+> **Server Restart Required**: Changing any CORS-related settings (whether via `config.toml` or the Web UI) requires stopping and restarting the server for the changes to take effect. These settings are loaded into memory once during the server's initialization and are not hot-reloadable.
 
 #### Custom CORS Origins
 
 By default, the server allows requests from:
 - The server's own origin (`http://127.0.0.1:<port>`, `http://localhost:<port>`)
-- The official Chrome extension (`chrome-extension://nglaklhklhcoonedhgnpgddginnjdadi`)
-- All Firefox extensions (`moz-extension://.*`)
+- The official Chrome extension (`chrome-extension://nglaklhklhcoonedhgnpgddginnjdadi`) if `cors_allow_aw_chrome_extension` is true (default).
+- All Firefox extensions (`moz-extension://.*`) ONLY IF `cors_allow_all_mozilla_extension` is set to true.
 
-To allow additional origins (e.g. a sideloaded Chrome extension), add them to your config:
+To allow additional origins (e.g. a sideloaded Chrome extension), add them to your `cors` or `cors_regex` config:
 
 ```toml
 # Allow a specific sideloaded Chrome extension

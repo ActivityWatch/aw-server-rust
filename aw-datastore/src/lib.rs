@@ -26,6 +26,10 @@ pub use self::worker::Datastore;
 pub enum DatastoreMethod {
     Memory(),
     File(String),
+    /// Encrypted SQLite file using SQLCipher. Only available with the
+    /// `encryption` or `encryption-vendored` feature flags.
+    #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+    FileEncrypted(String, String), // (path, key)
 }
 
 /* TODO: Implement this as a proper error */

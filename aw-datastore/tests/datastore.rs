@@ -531,4 +531,46 @@ mod datastore_tests {
             );
         }
     }
+
+    /// Test that an encrypted datastore can be created, written to, and reopened with the same key
+    /// with data intact.
+    #[test]
+    #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+    fn test_encrypted_datastore_roundtrip() {
+        use std::fs;
+        let dir = get_cache_dir().unwrap();
+        let db_path = dir.join("test-encrypted.db").to_str().unwrap().to_string();
+        // Clean up from previous runs
+        let _ = fs::remove_file(&db_path);
+
+        let key = "s3cr3t-p@ssw0rd".to_string();
+
+        // Create and populate encrypted datastore
+        {
+            let ds = Datastore::new_encrypted(db_path.clone(), key.clone(), false);
+            let bucket = create_test_bucket(&ds);
+            let e = Event {
+                id: None,
+                timestamp: Utc::now(),
+                duration: Duration::seconds(1),
+                data: json_map! { "app": "test-encrypted" },
+            };
+            let inserted = ds.insert_events(&bucket.id, &[e]).unwrap();
+            assert_eq!(inserted.len(), 1);
+            ds.close();
+        }
+
+        // Reopen with correct key — data must survive the roundtrip
+        {
+            let ds = Datastore::new_encrypted(db_path.clone(), key.clone(), false);
+            let events = ds
+                .get_events("testid", None, None, None)
+                .expect("should read events from encrypted DB after reopen");
+            assert_eq!(events.len(), 1, "expected 1 event after encrypted reopen");
+            assert_eq!(events[0].data["app"], "test-encrypted");
+            ds.close();
+        }
+
+        let _ = fs::remove_file(&db_path);
+    }
 }

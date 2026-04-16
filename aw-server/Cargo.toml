@@ -13,6 +13,16 @@ path = "src/lib.rs"
 name = "aw-server"
 path = "src/main.rs"
 
+[features]
+default = ["bundled"]
+# Use bundled SQLite (default, no encryption support)
+bundled = ["aw-datastore/bundled"]
+# Enable SQLCipher encryption support (requires OpenSSL)
+# Build with: cargo build --no-default-features --features encryption
+encryption = ["aw-datastore/encryption"]
+# Enable SQLCipher encryption with vendored OpenSSL (fully self-contained)
+encryption-vendored = ["aw-datastore/encryption-vendored"]
+
 [dependencies]
 rocket = { version = "0.5.0", features = ["json"] }
 rocket_cors = { version = "0.6.0" }
@@ -29,8 +39,7 @@ uuid = { version = "1.3", features = ["serde", "v4"] }
 clap = { version = "4.1", features = ["derive", "cargo"] }
 log-panics = { version = "2", features = ["with-backtrace"]}
 rust-embed = { version = "8.0.0", features = ["interpolate-folder-path", "debug-embed"] }
-
-aw-datastore = { path = "../aw-datastore" }
+aw-datastore = { path = "../aw-datastore", default-features = false }
 aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }

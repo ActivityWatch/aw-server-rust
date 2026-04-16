@@ -46,10 +46,10 @@ pub struct ServerState {
 
 #[macro_use]
 mod util;
+mod apikey;
 mod bucket;
 mod cors;
 mod export;
-mod apikey;
 mod hostcheck;
 mod import;
 mod query;

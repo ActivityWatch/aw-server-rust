@@ -17,6 +17,8 @@
 //! CORS preflight requests (OPTIONS) are also passed through unconditionally so
 //! the browser can obtain allowed headers before sending the actual request.
 
+use subtle::ConstantTimeEq;
+
 use rocket::fairing::Fairing;
 use rocket::http::uri::Origin;
 use rocket::http::{Method, Status};
@@ -37,9 +39,14 @@ pub struct ApiKeyCheck {
 
 impl ApiKeyCheck {
     pub fn new(config: &AWConfig) -> ApiKeyCheck {
-        ApiKeyCheck {
-            api_key: config.api_key.clone(),
-        }
+        let api_key = match &config.api_key {
+            Some(k) if k.is_empty() => {
+                warn!("api_key is set to an empty string — authentication is disabled. Set a non-empty key to enable auth.");
+                None
+            }
+            other => other.clone(),
+        };
+        ApiKeyCheck { api_key }
     }
 }
 
@@ -109,11 +116,12 @@ impl Fairing for ApiKeyCheck {
         }
 
         // Validate Authorization: Bearer <key>
+        // Use constant-time comparison to prevent timing attacks.
         let auth_header = request.headers().get_one("Authorization");
         let valid = match auth_header {
             Some(value) => {
                 if let Some(token) = value.strip_prefix("Bearer ") {
-                    token == api_key
+                    token.as_bytes().ct_eq(api_key.as_bytes()).into()
                 } else {
                     false
                 }
@@ -234,5 +242,19 @@ mod tests {
             .header(Header::new("Authorization", "Basic secret123"))
             .dispatch();
         assert_eq!(res.status(), Status::Unauthorized);
+    }
+
+    #[test]
+    fn test_empty_api_key_disables_auth() {
+        // An empty string key should be treated as disabled (no auth required).
+        let server = setup_testserver(Some("".to_string()));
+        let client = rocket::local::blocking::Client::tracked(server).expect("valid instance");
+
+        let res = client
+            .get("/api/0/buckets/")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
     }
 }

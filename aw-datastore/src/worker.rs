@@ -130,6 +130,12 @@ impl DatastoreWorker {
                 let conn = Connection::open(path).expect("Failed to create encrypted datastore");
                 conn.pragma_update(None, "key", key)
                     .expect("Failed to set SQLCipher encryption key");
+                // PRAGMA key always succeeds even with a wrong passphrase; the
+                // first real SQL query is what fails. Read user_version immediately
+                // to surface an incorrect key as a clear error rather than an
+                // opaque panic later.
+                conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .expect("Failed to open encrypted database: wrong passphrase or not an encrypted database");
                 info!("Opened encrypted database at {}", path);
                 conn
             }

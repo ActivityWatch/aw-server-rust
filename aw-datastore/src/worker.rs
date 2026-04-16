@@ -69,6 +69,7 @@ pub enum Command {
         Option<DateTime<Utc>>,
         Option<DateTime<Utc>>,
         Option<u64>,
+        bool,
     ),
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
     DeleteEventsById(String, Vec<i64>),
@@ -267,8 +268,13 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
-            Command::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt) => {
-                match ds.get_events(tx, &bucketname, starttime_opt, endtime_opt, limit_opt) {
+            Command::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt, unclipped) => {
+                let result = if unclipped {
+                    ds.get_events_unclipped(tx, &bucketname, starttime_opt, endtime_opt, limit_opt)
+                } else {
+                    ds.get_events(tx, &bucketname, starttime_opt, endtime_opt, limit_opt)
+                };
+                match result {
                     Ok(el) => Ok(Response::EventList(el)),
                     Err(e) => Err(e),
                 }
@@ -433,7 +439,37 @@ impl Datastore {
         endtime_opt: Option<DateTime<Utc>>,
         limit_opt: Option<u64>,
     ) -> Result<Vec<Event>, DatastoreError> {
-        let cmd = Command::GetEvents(bucket_id.to_string(), starttime_opt, endtime_opt, limit_opt);
+        let cmd = Command::GetEvents(
+            bucket_id.to_string(),
+            starttime_opt,
+            endtime_opt,
+            limit_opt,
+            false,
+        );
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Response::EventList(el) => Ok(el),
+                _ => panic!("Invalid response"),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        starttime_opt: Option<DateTime<Utc>>,
+        endtime_opt: Option<DateTime<Utc>>,
+        limit_opt: Option<u64>,
+    ) -> Result<Vec<Event>, DatastoreError> {
+        let cmd = Command::GetEvents(
+            bucket_id.to_string(),
+            starttime_opt,
+            endtime_opt,
+            limit_opt,
+            true,
+        );
         let receiver = self.requester.request(cmd).unwrap();
         match receiver.collect().unwrap() {
             Ok(r) => match r {

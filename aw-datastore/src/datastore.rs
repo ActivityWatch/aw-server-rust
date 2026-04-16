@@ -713,13 +713,14 @@ impl DatastoreInstance {
         Ok(row)
     }
 
-    pub fn get_events(
+    fn get_events_inner(
         &mut self,
         conn: &Connection,
         bucket_id: &str,
         starttime_opt: Option<DateTime<Utc>>,
         endtime_opt: Option<DateTime<Utc>>,
         limit_opt: Option<u64>,
+        clip_to_query_range: bool,
     ) -> Result<Vec<Event>, DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
 
@@ -774,11 +775,13 @@ impl DatastoreInstance {
                 let mut endtime_ns: i64 = row.get(2)?;
                 let data_str: String = row.get(3)?;
 
-                if starttime_ns < starttime_filter_ns {
-                    starttime_ns = starttime_filter_ns
-                }
-                if endtime_ns > endtime_filter_ns {
-                    endtime_ns = endtime_filter_ns
+                if clip_to_query_range {
+                    if starttime_ns < starttime_filter_ns {
+                        starttime_ns = starttime_filter_ns
+                    }
+                    if endtime_ns > endtime_filter_ns {
+                        endtime_ns = endtime_filter_ns
+                    }
                 }
                 let duration_ns = endtime_ns - starttime_ns;
 
@@ -810,6 +813,35 @@ impl DatastoreInstance {
         }
 
         Ok(list)
+    }
+
+    pub fn get_events(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        starttime_opt: Option<DateTime<Utc>>,
+        endtime_opt: Option<DateTime<Utc>>,
+        limit_opt: Option<u64>,
+    ) -> Result<Vec<Event>, DatastoreError> {
+        self.get_events_inner(conn, bucket_id, starttime_opt, endtime_opt, limit_opt, true)
+    }
+
+    pub fn get_events_unclipped(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        starttime_opt: Option<DateTime<Utc>>,
+        endtime_opt: Option<DateTime<Utc>>,
+        limit_opt: Option<u64>,
+    ) -> Result<Vec<Event>, DatastoreError> {
+        self.get_events_inner(
+            conn,
+            bucket_id,
+            starttime_opt,
+            endtime_opt,
+            limit_opt,
+            false,
+        )
     }
 
     pub fn get_event_count(

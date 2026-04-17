@@ -1,13 +1,14 @@
 //! API key authentication via Bearer token.
 //!
-//! When `api_key` is set in the config, all API endpoints except `/api/0/info`
-//! require an `Authorization: Bearer <key>` header. Requests missing or
-//! presenting an invalid key receive a 401 Unauthorized response.
+//! When `api_key` is set under `[auth]` in the config, all API endpoints except
+//! `/api/0/info` require an `Authorization: Bearer <key>` header. Requests
+//! missing or presenting an invalid key receive a 401 Unauthorized response.
 //!
 //! By default `api_key` is `None`, meaning authentication is disabled.
 //! To enable, add to `config.toml`:
 //!
 //! ```toml
+//! [auth]
 //! api_key = "your-secret-key-here"
 //! ```
 //!
@@ -39,7 +40,7 @@ pub struct ApiKeyCheck {
 
 impl ApiKeyCheck {
     pub fn new(config: &AWConfig) -> ApiKeyCheck {
-        let api_key = match &config.api_key {
+        let api_key = match &config.auth.api_key {
             Some(k) if k.is_empty() => {
                 warn!("api_key is set to an empty string — authentication is disabled. Set a non-empty key to enable auth.");
                 None
@@ -158,7 +159,7 @@ mod tests {
             device_id: "test_id".to_string(),
         };
         let mut aw_config = AWConfig::default();
-        aw_config.api_key = api_key;
+        aw_config.auth.api_key = api_key;
         endpoints::build_rocket(state, aw_config)
     }
 

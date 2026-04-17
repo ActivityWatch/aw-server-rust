@@ -19,6 +19,17 @@ pub fn is_testing() -> bool {
     unsafe { TESTING }
 }
 
+/// Authentication configuration, serialised as `[auth]` in config.toml.
+#[derive(Serialize, Deserialize, Default)]
+pub struct AWAuthConfig {
+    /// Optional API key for Bearer-token authentication.
+    /// When set, all `/api/*` endpoints except `/api/0/info` require:
+    ///   Authorization: Bearer <api_key>
+    /// Leave unset (default) to disable authentication.
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct AWConfig {
     #[serde(default = "default_address")]
@@ -30,18 +41,15 @@ pub struct AWConfig {
     #[serde(skip, default = "default_testing")]
     pub testing: bool, // This is not written to the config file (serde(skip))
 
-    /// Optional API key for bearer token authentication.
-    /// When set, all API endpoints (except /api/0/info) require:
-    ///   Authorization: Bearer <api_key>
-    /// Leave unset (default) to disable authentication.
-    #[serde(default = "default_api_key")]
-    pub api_key: Option<String>,
-
     #[serde(default = "default_cors")]
     pub cors: Vec<String>,
 
     #[serde(default = "default_cors")]
     pub cors_regex: Vec<String>,
+
+    // Authentication settings — serialised as [auth] section.
+    #[serde(default)]
+    pub auth: AWAuthConfig,
 
     // A mapping of watcher names to paths where the
     // custom visualizations are located.
@@ -55,7 +63,7 @@ impl Default for AWConfig {
             address: default_address(),
             port: default_port(),
             testing: default_testing(),
-            api_key: default_api_key(),
+            auth: AWAuthConfig::default(),
             cors: default_cors(),
             cors_regex: default_cors(),
             custom_static: default_custom_static(),
@@ -89,10 +97,6 @@ impl AWConfig {
 
 fn default_address() -> String {
     "127.0.0.1".to_string()
-}
-
-fn default_api_key() -> Option<String> {
-    None
 }
 
 fn default_cors() -> Vec<String> {

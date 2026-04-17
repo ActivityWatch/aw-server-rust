@@ -156,6 +156,16 @@ async fn main() -> Result<(), rocket::Error> {
         aw_datastore::Datastore::new(db_path, legacy_import)
     };
     #[cfg(not(any(feature = "encryption", feature = "encryption-vendored")))]
+    {
+        if std::env::var("AW_DB_PASSWORD").is_ok() {
+            warn!(
+                "AW_DB_PASSWORD is set but this binary was not compiled with encryption support. \
+                 The database will NOT be encrypted. Rebuild with the 'encryption' or \
+                 'encryption-vendored' feature to enable encryption."
+            );
+        }
+    }
+    #[cfg(not(any(feature = "encryption", feature = "encryption-vendored")))]
     let datastore = aw_datastore::Datastore::new(db_path, legacy_import);
 
     let server_state = endpoints::ServerState {

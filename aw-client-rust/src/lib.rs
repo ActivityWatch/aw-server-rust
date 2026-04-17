@@ -10,15 +10,36 @@ pub mod classes;
 pub mod queries;
 pub mod single_instance;
 
-use std::{collections::HashMap, error::Error};
+use std::{collections::HashMap, error::Error, fs, path::PathBuf};
 
 use chrono::{DateTime, Utc};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::{json, Map};
 use single_instance::SingleInstance;
 use std::net::TcpStream;
 use std::time::Duration;
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
+
+#[derive(serde::Deserialize, Default)]
+struct LocalAuthConfig {
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LocalServerConfig {
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    auth: LocalAuthConfig,
+}
+
+#[derive(Clone, Copy)]
+struct ConfigCandidate {
+    filename: &'static str,
+    default_port: u16,
+}
 
 pub struct AwClient {
     client: reqwest::Client,
@@ -39,13 +60,69 @@ fn get_hostname() -> String {
     gethostname::gethostname().to_string_lossy().to_string()
 }
 
+fn get_server_config_dir() -> Option<PathBuf> {
+    Some(
+        dirs::config_dir()?
+            .join("activitywatch")
+            .join("aw-server-rust"),
+    )
+}
+
+fn load_local_api_key(host: &str, port: u16) -> Option<String> {
+    if host != "127.0.0.1" && host != "localhost" {
+        return None;
+    }
+
+    let config_dir = get_server_config_dir()?;
+    let candidates = [
+        ConfigCandidate {
+            filename: "config.toml",
+            default_port: 5600,
+        },
+        ConfigCandidate {
+            filename: "config-testing.toml",
+            default_port: 5666,
+        },
+    ];
+
+    for candidate in candidates {
+        let path = config_dir.join(candidate.filename);
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let config: LocalServerConfig = match toml::from_str(&content) {
+            Ok(config) => config,
+            Err(_) => continue,
+        };
+        let configured_port = config.port.unwrap_or(candidate.default_port);
+        if configured_port == port {
+            return config.auth.api_key.filter(|api_key| !api_key.is_empty());
+        }
+    }
+
+    None
+}
+
+fn build_client(api_key: Option<String>) -> Result<reqwest::Client, Box<dyn Error>> {
+    let mut headers = HeaderMap::new();
+    if let Some(api_key) = api_key {
+        let mut header_value = HeaderValue::from_str(&format!("Bearer {api_key}"))?;
+        header_value.set_sensitive(true);
+        headers.insert(AUTHORIZATION, header_value);
+    }
+
+    Ok(reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .default_headers(headers)
+        .build()?)
+}
+
 impl AwClient {
     pub fn new(host: &str, port: u16, name: &str) -> Result<AwClient, Box<dyn Error>> {
         let baseurl = reqwest::Url::parse(&format!("http://{}:{}", host, port))?;
         let hostname = get_hostname();
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+        let client = build_client(load_local_api_key(host, port))?;
         //TODO: change localhost string to 127.0.0.1 for feature parity
         let single_instance_name = format!("{}-at-{}-on-{}", name, host, port);
         let single_instance = single_instance::SingleInstance::new(single_instance_name.as_str())?;

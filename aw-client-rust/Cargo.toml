@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Johan Bjäreholt <johan@bjareho.lt>"]
 
 [dependencies]
-reqwest = { version = "0.11", features = ["json", "blocking"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "blocking", "rustls-tls-native-roots"] }
 gethostname = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 phf = { version = "0.11", features = ["macros"] }
@@ -16,9 +16,10 @@ tokio = { version = "1.28.2", features = ["rt"] }
 rand = "0.9"
 log = "0.4"
 libc = "0.2"
-thiserror = "1.0" 
+thiserror = "1.0"
 dirs = "6.0"
 fs4 = { version = "0.13", features = ["sync"] }
+toml = "0.8"
 
 [dev-dependencies]
 aw-datastore = { path = "../aw-datastore" }

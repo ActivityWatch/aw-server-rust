@@ -557,6 +557,7 @@ mod datastore_tests {
             };
             let inserted = ds.insert_events(&bucket.id, &[e]).unwrap();
             assert_eq!(inserted.len(), 1);
+            ds.force_commit().unwrap();
             ds.close();
         }
 

@@ -25,7 +25,7 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
 
 #[cfg(target_os = "android")]
 pub fn get_config_dir() -> Result<PathBuf, ()> {
-    panic!("not implemented on Android");
+    Ok(ANDROID_DATA_DIR.lock().unwrap().to_path_buf())
 }
 
 #[cfg(not(target_os = "android"))]

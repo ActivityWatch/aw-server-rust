@@ -38,7 +38,6 @@ pub mod android {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use crate::config::AWConfig;
     use crate::endpoints;
     use crate::endpoints::ServerState;
     use aw_client_rust::blocking::AwClient;
@@ -127,7 +126,7 @@ pub mod android {
             };
             info!("Using server_state:: device_id: {}", server_state.device_id);
 
-            let mut server_config: AWConfig = AWConfig::default();
+            let mut server_config = crate::config::create_config(false);
             server_config.port = 5600;
 
             endpoints::build_rocket(server_state, server_config)

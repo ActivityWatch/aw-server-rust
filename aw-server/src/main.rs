@@ -160,10 +160,11 @@ async fn main() -> Result<(), rocket::Error> {
     #[cfg(not(any(feature = "encryption", feature = "encryption-vendored")))]
     {
         if std::env::var("AW_DB_PASSWORD").is_ok() {
-            warn!(
+            panic!(
                 "AW_DB_PASSWORD is set but this binary was not compiled with encryption support. \
-                 The database will NOT be encrypted. Rebuild with the 'encryption' or \
-                 'encryption-vendored' feature to enable encryption."
+                 Refusing to start with an unencrypted database when the user requested encryption. \
+                 Rebuild with the 'encryption' or 'encryption-vendored' feature, or unset \
+                 AW_DB_PASSWORD to use an unencrypted database."
             );
         }
     }

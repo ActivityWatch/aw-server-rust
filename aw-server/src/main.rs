@@ -150,6 +150,8 @@ async fn main() -> Result<(), rocket::Error> {
 
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
     let datastore = if let Some(key) = opts.db_password {
+        // Clear the env var immediately so child processes don't inherit the key.
+        std::env::remove_var("AW_DB_PASSWORD");
         info!("Using encrypted database (SQLCipher)");
         aw_datastore::Datastore::new_encrypted(db_path, key, legacy_import)
     } else {

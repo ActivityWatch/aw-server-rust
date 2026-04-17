@@ -110,7 +110,12 @@ impl Fairing for ApiKeyCheck {
             return;
         }
 
-        // Always allow public paths
+        // Only gate API endpoints — static web UI assets are not under /api/
+        if !request.uri().path().as_str().starts_with("/api/") {
+            return;
+        }
+
+        // Always allow public API paths (e.g. /api/0/info for health checks)
         if PUBLIC_PATHS.contains(&request.uri().path().as_str()) {
             return;
         }

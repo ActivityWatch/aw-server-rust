@@ -46,6 +46,7 @@ pub struct ServerState {
 
 #[macro_use]
 mod util;
+mod apikey;
 mod bucket;
 mod cors;
 mod export;
@@ -134,11 +135,13 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
     );
     let cors = cors::cors(&config);
     let hostcheck = hostcheck::HostCheck::new(&config);
+    let apikey = apikey::ApiKeyCheck::new(&config);
     let custom_static = config.custom_static.clone();
 
     let mut rocket = rocket::custom(config.to_rocket_config())
         .attach(cors.clone())
         .attach(hostcheck)
+        .attach(apikey)
         .manage(cors)
         .manage(server_state)
         .manage(config)

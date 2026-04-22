@@ -111,13 +111,18 @@ impl Fairing for ApiKeyCheck {
             return;
         }
 
+        let path = request.uri().path().as_str();
+
+        // Normalize leading slashes to prevent bypass via `//api/...`
+        let normalized_path = format!("/{}", path.trim_start_matches('/'));
+
         // Only gate API endpoints — static web UI assets are not under /api/
-        if !request.uri().path().as_str().starts_with("/api/") {
+        if !normalized_path.starts_with("/api/") {
             return;
         }
 
         // Always allow public API paths (e.g. /api/0/info for health checks)
-        if PUBLIC_PATHS.contains(&request.uri().path().as_str()) {
+        if PUBLIC_PATHS.contains(&normalized_path.as_str()) {
             return;
         }
 
@@ -201,6 +206,14 @@ mod tests {
         // Other endpoints require auth
         let res = client
             .get("/api/0/buckets/")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::Unauthorized);
+
+        // Double slash should also require auth
+        let res = client
+            .get("//api/0/buckets/")
             .header(ContentType::JSON)
             .header(Header::new("Host", "localhost:5600"))
             .dispatch();

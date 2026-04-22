@@ -18,10 +18,10 @@ libc = "0.2"
 thiserror = "1.0"
 dirs = "6.0"
 fs4 = { version = "0.13", features = ["sync"] }
-toml = "0.8"
 
 [dev-dependencies]
 aw-datastore = { path = "../aw-datastore" }
 aw-server = { path = "../aw-server", default-features = false, features=[] }
 rocket = "0.5.0-rc.1"
 tokio-test = "*"
+toml = "0.8"

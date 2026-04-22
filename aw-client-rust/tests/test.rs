@@ -21,6 +21,69 @@ mod test {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio_test::block_on;
 
+    // Config-reading helpers — only needed in tests; production code passes API keys explicitly.
+
+    #[derive(serde::Deserialize, Default)]
+    struct LocalAuthConfig {
+        #[serde(default)]
+        api_key: Option<String>,
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct LocalServerConfig {
+        #[serde(default)]
+        port: Option<u16>,
+        #[serde(default)]
+        auth: LocalAuthConfig,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ConfigCandidate {
+        filename: &'static str,
+        default_port: u16,
+    }
+
+    fn get_server_config_dir() -> Option<PathBuf> {
+        Some(
+            dirs::config_dir()?
+                .join("activitywatch")
+                .join("aw-server-rust"),
+        )
+    }
+
+    fn load_local_api_key(host: &str, port: u16) -> Option<String> {
+        if host != "127.0.0.1" && host != "localhost" {
+            return None;
+        }
+        let config_dir = get_server_config_dir()?;
+        let candidates = [
+            ConfigCandidate {
+                filename: "config.toml",
+                default_port: 5600,
+            },
+            ConfigCandidate {
+                filename: "config-testing.toml",
+                default_port: 5666,
+            },
+        ];
+        for candidate in candidates {
+            let path = config_dir.join(candidate.filename);
+            let content = match fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let config: LocalServerConfig = match toml::from_str(&content) {
+                Ok(config) => config,
+                Err(_) => continue,
+            };
+            let configured_port = config.port.unwrap_or(candidate.default_port);
+            if configured_port == port {
+                return config.auth.api_key.filter(|k| !k.is_empty());
+            }
+        }
+        None
+    }
+
     // A random port, but still not guaranteed to not be bound
     // FIXME: Bind to a port that is free for certain and use that for the client instead
     static PORT: u16 = 41293;
@@ -211,8 +274,10 @@ RETURN = events;",
         let config_home = write_server_config(port, Some("secret123"));
 
         with_config_home(&config_home, || {
+            let api_key = load_local_api_key("127.0.0.1", port);
             let client: AwClient =
-                AwClient::new("127.0.0.1", port, clientname).expect("Client creation failed");
+                AwClient::new_with_api_key("127.0.0.1", port, clientname, api_key)
+                    .expect("Client creation failed");
             // Drop the reserved listener before Rocket tries to bind the same port.
             RESERVED_PORT.with(|cell| *cell.borrow_mut() = None);
             let shutdown_handler = setup_testserver(port, Some("secret123"));

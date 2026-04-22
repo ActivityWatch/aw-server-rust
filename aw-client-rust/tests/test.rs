@@ -12,6 +12,7 @@ mod test {
     use aw_client_rust::Event;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::Map;
+    use std::cell::RefCell;
     use std::fs;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
@@ -27,7 +28,7 @@ mod test {
 
     // Keep the listener alive until the server binds — prevents TOCTOU race in reserve_port
     thread_local! {
-        static RESERVED_PORT: Mutex<Option<TcpListener>> = Mutex::new(None);
+        static RESERVED_PORT: RefCell<Option<TcpListener>> = RefCell::new(None);
     }
 
     fn wait_for_server(timeout_s: u32, client: &AwClient) {
@@ -73,8 +74,7 @@ mod test {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         // Keep the listener alive until the server binds — prevents TOCTOU race
-        RESERVED_PORT
-            .with(|cell| *cell.borrow_mut() = Some(listener));
+        RESERVED_PORT.with(|cell| *cell.borrow_mut() = Some(listener));
         port
     }
 

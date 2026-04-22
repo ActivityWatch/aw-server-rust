@@ -12,13 +12,87 @@ mod test {
     use aw_client_rust::Event;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::Map;
+    use std::cell::RefCell;
+    use std::fs;
+    use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio_test::block_on;
+
+    // Config-reading helpers — only needed in tests; production code passes API keys explicitly.
+
+    #[derive(serde::Deserialize, Default)]
+    struct LocalAuthConfig {
+        #[serde(default)]
+        api_key: Option<String>,
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct LocalServerConfig {
+        #[serde(default)]
+        port: Option<u16>,
+        #[serde(default)]
+        auth: LocalAuthConfig,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ConfigCandidate {
+        filename: &'static str,
+        default_port: u16,
+    }
+
+    fn get_server_config_dir() -> Option<PathBuf> {
+        Some(
+            dirs::config_dir()?
+                .join("activitywatch")
+                .join("aw-server-rust"),
+        )
+    }
+
+    fn load_local_api_key(host: &str, port: u16) -> Option<String> {
+        if host != "127.0.0.1" && host != "localhost" {
+            return None;
+        }
+        let config_dir = get_server_config_dir()?;
+        let candidates = [
+            ConfigCandidate {
+                filename: "config.toml",
+                default_port: 5600,
+            },
+            ConfigCandidate {
+                filename: "config-testing.toml",
+                default_port: 5666,
+            },
+        ];
+        for candidate in candidates {
+            let path = config_dir.join(candidate.filename);
+            let content = match fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let config: LocalServerConfig = match toml::from_str(&content) {
+                Ok(config) => config,
+                Err(_) => continue,
+            };
+            let configured_port = config.port.unwrap_or(candidate.default_port);
+            if configured_port == port {
+                return config.auth.api_key.filter(|k| !k.is_empty());
+            }
+        }
+        None
+    }
 
     // A random port, but still not guaranteed to not be bound
     // FIXME: Bind to a port that is free for certain and use that for the client instead
     static PORT: u16 = 41293;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // Keep the listener alive until the server binds — prevents TOCTOU race in reserve_port
+    thread_local! {
+        static RESERVED_PORT: RefCell<Option<TcpListener>> = RefCell::new(None);
+    }
 
     fn wait_for_server(timeout_s: u32, client: &AwClient) {
         for i in 0.. {
@@ -36,7 +110,7 @@ mod test {
         }
     }
 
-    fn setup_testserver() -> rocket::Shutdown {
+    fn setup_testserver(port: u16, api_key: Option<&str>) -> rocket::Shutdown {
         use aw_server::endpoints::AssetResolver;
         use aw_server::endpoints::ServerState;
 
@@ -46,7 +120,8 @@ mod test {
             device_id: "test_id".to_string(),
         };
         let mut aw_config = aw_server::config::AWConfig::default();
-        aw_config.port = PORT;
+        aw_config.port = port;
+        aw_config.auth.api_key = api_key.map(str::to_owned);
         let server = aw_server::endpoints::build_rocket(state, aw_config);
         let server = block_on(server.ignite()).unwrap();
         let shutdown_handler = server.shutdown();
@@ -58,14 +133,64 @@ mod test {
         shutdown_handler
     }
 
+    fn reserve_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Keep the listener alive until the server binds — prevents TOCTOU race
+        RESERVED_PORT.with(|cell| *cell.borrow_mut() = Some(listener));
+        port
+    }
+
+    fn write_server_config(port: u16, api_key: Option<&str>) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let config_home = std::env::temp_dir().join(format!(
+            "aw-client-rust-config-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let config_dir = config_home.join("activitywatch").join("aw-server-rust");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let mut content = format!("port = {port}\n");
+        if let Some(api_key) = api_key {
+            content.push_str("\n[auth]\n");
+            content.push_str(&format!("api_key = \"{api_key}\"\n"));
+        }
+        fs::write(config_dir.join("config.toml"), content).unwrap();
+
+        config_home
+    }
+
+    fn with_config_home<T>(config_home: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_value = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", config_home);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        if let Some(old_value) = old_value {
+            std::env::set_var("XDG_CONFIG_HOME", old_value);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = fs::remove_dir_all(config_home);
+        result.unwrap()
+    }
+
     #[test]
     fn test_full() {
         let clientname = "aw-client-rust-test";
 
-        let client: AwClient =
-            AwClient::new("127.0.0.1", PORT, clientname).expect("Client creation failed");
+        // Hold ENV_LOCK during client creation to prevent parallel-test interference
+        // with test_reads_api_key_from_matching_server_config (which holds the lock
+        // via with_config_home for the entire client+server lifetime).
+        let client: AwClient = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            AwClient::new("127.0.0.1", PORT, clientname).expect("Client creation failed")
+        };
 
-        let shutdown_handler = setup_testserver();
+        let shutdown_handler = setup_testserver(PORT, None);
 
         wait_for_server(20, &client);
 
@@ -136,5 +261,38 @@ RETURN = events;",
         client.delete_bucket(&bucketname).unwrap();
 
         shutdown_handler.notify();
+    }
+
+    // XDG_CONFIG_HOME is only respected by dirs::config_dir() on Linux.
+    // On macOS it returns $HOME/Library/Application Support (ignoring XDG_CONFIG_HOME),
+    // so this test would fail — gate it on Linux only.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_reads_api_key_from_matching_server_config() {
+        let clientname = "aw-client-rust-auth-test";
+        let port = reserve_port();
+        let config_home = write_server_config(port, Some("secret123"));
+
+        with_config_home(&config_home, || {
+            let api_key = load_local_api_key("127.0.0.1", port);
+            let client: AwClient =
+                AwClient::new_with_api_key("127.0.0.1", port, clientname, api_key)
+                    .expect("Client creation failed");
+            // Drop the reserved listener before Rocket tries to bind the same port.
+            RESERVED_PORT.with(|cell| *cell.borrow_mut() = None);
+            let shutdown_handler = setup_testserver(port, Some("secret123"));
+
+            wait_for_server(20, &client);
+
+            let bucketname = format!("aw-client-rust-auth-test_{}", client.hostname);
+            client
+                .create_bucket_simple(&bucketname, "test-type")
+                .unwrap();
+
+            let bucket = client.get_bucket(&bucketname).unwrap();
+            assert_eq!(bucket.id, bucketname);
+
+            shutdown_handler.notify();
+        });
     }
 }

@@ -38,7 +38,16 @@ macro_rules! proxy_method
 
 impl AwClient {
     pub fn new(host: &str, port: u16, name: &str) -> Result<AwClient, Box<dyn Error>> {
-        let async_client = AsyncAwClient::new(host, port, name)?;
+        Self::new_with_api_key(host, port, name, None)
+    }
+
+    pub fn new_with_api_key(
+        host: &str,
+        port: u16,
+        name: &str,
+        api_key: Option<String>,
+    ) -> Result<AwClient, Box<dyn Error>> {
+        let async_client = AsyncAwClient::new_with_api_key(host, port, name, api_key)?;
 
         Ok(AwClient {
             baseurl: async_client.baseurl.clone(),

@@ -13,6 +13,7 @@ pub mod single_instance;
 use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::{json, Map};
 use single_instance::SingleInstance;
 use std::net::TcpStream;
@@ -39,13 +40,34 @@ fn get_hostname() -> String {
     gethostname::gethostname().to_string_lossy().to_string()
 }
 
+fn build_client(api_key: Option<String>) -> Result<reqwest::Client, Box<dyn Error>> {
+    let mut headers = HeaderMap::new();
+    if let Some(api_key) = api_key {
+        let mut header_value = HeaderValue::from_str(&format!("Bearer {api_key}"))?;
+        header_value.set_sensitive(true);
+        headers.insert(AUTHORIZATION, header_value);
+    }
+
+    Ok(reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .default_headers(headers)
+        .build()?)
+}
+
 impl AwClient {
     pub fn new(host: &str, port: u16, name: &str) -> Result<AwClient, Box<dyn Error>> {
+        Self::new_with_api_key(host, port, name, None)
+    }
+
+    pub fn new_with_api_key(
+        host: &str,
+        port: u16,
+        name: &str,
+        api_key: Option<String>,
+    ) -> Result<AwClient, Box<dyn Error>> {
         let baseurl = reqwest::Url::parse(&format!("http://{}:{}", host, port))?;
         let hostname = get_hostname();
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+        let client = build_client(api_key)?;
         //TODO: change localhost string to 127.0.0.1 for feature parity
         let single_instance_name = format!("{}-at-{}-on-{}", name, host, port);
         let single_instance = single_instance::SingleInstance::new(single_instance_name.as_str())?;

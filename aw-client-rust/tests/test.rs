@@ -213,6 +213,8 @@ RETURN = events;",
         with_config_home(&config_home, || {
             let client: AwClient =
                 AwClient::new("127.0.0.1", port, clientname).expect("Client creation failed");
+            // Drop the reserved listener before Rocket tries to bind the same port.
+            RESERVED_PORT.with(|cell| *cell.borrow_mut() = None);
             let shutdown_handler = setup_testserver(port, Some("secret123"));
 
             wait_for_server(20, &client);

@@ -25,6 +25,11 @@ mod test {
     static PORT: u16 = 41293;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    // Keep the listener alive until the server binds — prevents TOCTOU race in reserve_port
+    thread_local! {
+        static RESERVED_PORT: Mutex<Option<TcpListener>> = Mutex::new(None);
+    }
+
     fn wait_for_server(timeout_s: u32, client: &AwClient) {
         for i in 0.. {
             match client.get_info() {
@@ -65,11 +70,12 @@ mod test {
     }
 
     fn reserve_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Keep the listener alive until the server binds — prevents TOCTOU race
+        RESERVED_PORT
+            .with(|cell| *cell.borrow_mut() = Some(listener));
+        port
     }
 
     fn write_server_config(port: u16, api_key: Option<&str>) -> PathBuf {
@@ -113,8 +119,13 @@ mod test {
     fn test_full() {
         let clientname = "aw-client-rust-test";
 
-        let client: AwClient =
-            AwClient::new("127.0.0.1", PORT, clientname).expect("Client creation failed");
+        // Hold ENV_LOCK during client creation to prevent parallel-test interference
+        // with test_reads_api_key_from_matching_server_config (which holds the lock
+        // via with_config_home for the entire client+server lifetime).
+        let client: AwClient = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            AwClient::new("127.0.0.1", PORT, clientname).expect("Client creation failed")
+        };
 
         let shutdown_handler = setup_testserver(PORT, None);
 
@@ -189,7 +200,11 @@ RETURN = events;",
         shutdown_handler.notify();
     }
 
+    // XDG_CONFIG_HOME is only respected by dirs::config_dir() on Linux.
+    // On macOS it returns $HOME/Library/Application Support (ignoring XDG_CONFIG_HOME),
+    // so this test would fail — gate it on Linux only.
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_reads_api_key_from_matching_server_config() {
         let clientname = "aw-client-rust-auth-test";
         let port = reserve_port();

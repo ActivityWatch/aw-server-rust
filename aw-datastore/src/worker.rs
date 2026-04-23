@@ -78,6 +78,8 @@ pub enum Command {
     GetKeyValue(String),
     SetKeyValue(String, String),
     DeleteKeyValue(String),
+    RenameBucket(String, String),
+    MigrateHostname(String),
     Close(),
 }
 
@@ -311,6 +313,24 @@ impl DatastoreWorker {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
             },
+            Command::RenameBucket(old_id, new_id) => match ds.rename_bucket(tx, &old_id, &new_id) {
+                Ok(()) => {
+                    self.commit = true;
+                    Ok(Response::Empty())
+                }
+                Err(e) => Err(e),
+            },
+            Command::MigrateHostname(new_hostname) => {
+                match ds.migrate_hostname(tx, &new_hostname) {
+                    Ok(count) => {
+                        if count > 0 {
+                            self.commit = true;
+                        }
+                        Ok(Response::Count(count as i64))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())
@@ -563,6 +583,29 @@ impl Datastore {
         let receiver = self.requester.request(cmd).unwrap();
 
         _unwrap_response(receiver)
+    }
+
+    /// Renames a bucket from `old_id` to `new_id`.
+    pub fn rename_bucket(&self, old_id: &str, new_id: &str) -> Result<(), DatastoreError> {
+        let cmd = Command::RenameBucket(old_id.to_string(), new_id.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+        _unwrap_response(receiver)
+    }
+
+    /// Migrates all buckets whose hostname is "unknown" or "Unknown" to `new_hostname`.
+    /// Returns the number of buckets updated.
+    pub fn migrate_hostname(&self, new_hostname: &str) -> Result<usize, DatastoreError> {
+        let cmd = Command::MigrateHostname(new_hostname.to_string());
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Response::Count(n) => Ok(n as usize),
+                _ => Err(DatastoreError::InternalError(
+                    "Unexpected response to MigrateHostname command".to_string(),
+                )),
+            },
+            Err(e) => Err(e),
+        }
     }
 
     // Should block until worker has stopped

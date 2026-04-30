@@ -126,6 +126,20 @@ impl DatastoreWorker {
             DatastoreMethod::File(path) => {
                 Connection::open(path).expect("Failed to create datastore")
             }
+            #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+            DatastoreMethod::FileEncrypted(path, key) => {
+                let conn = Connection::open(path).expect("Failed to create encrypted datastore");
+                conn.pragma_update(None, "key", key)
+                    .expect("Failed to set SQLCipher encryption key");
+                // PRAGMA key always succeeds even with a wrong passphrase; the
+                // first real SQL query is what fails. Read user_version immediately
+                // to surface an incorrect key as a clear error rather than an
+                // opaque panic later.
+                conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .expect("Failed to open encrypted database: wrong passphrase or not an encrypted database");
+                info!("Opened encrypted database at {}", path);
+                conn
+            }
         };
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
 
@@ -327,6 +341,16 @@ impl Datastore {
 
     pub fn new_in_memory(legacy_import: bool) -> Self {
         let method = DatastoreMethod::Memory();
+        Datastore::_new_internal(method, legacy_import)
+    }
+
+    /// Create an encrypted datastore using SQLCipher.
+    ///
+    /// Requires the `encryption` or `encryption-vendored` feature flag.
+    /// Build with: `cargo build --no-default-features --features encryption`
+    #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+    pub fn new_encrypted(dbpath: String, key: String, legacy_import: bool) -> Self {
+        let method = DatastoreMethod::FileEncrypted(dbpath, key);
         Datastore::_new_internal(method, legacy_import)
     }
 

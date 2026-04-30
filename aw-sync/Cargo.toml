@@ -33,7 +33,7 @@ aw-datastore = { path = "../aw-datastore" }
 aw-client-rust = { path = "../aw-client-rust" }
 
 [target.'cfg(target_os="linux")'.dependencies]
-openssl = { version = "0.10.64", features = ["vendored"] }  # https://github.com/ActivityWatch/aw-server-rust/issues/478
+openssl = { version = "0.10.78", features = ["vendored"] }  # https://github.com/ActivityWatch/aw-server-rust/issues/478
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.21", default-features = false }

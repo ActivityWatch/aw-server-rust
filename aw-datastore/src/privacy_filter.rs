@@ -156,6 +156,12 @@ impl PrivacyFilterEngine {
                     rule.pattern
                 ));
             }
+            if rule.action == PrivacyFilterAction::Drop && rule.field.is_none() {
+                return Err(format!(
+                    "Drop rule with pattern {:?} is missing `field` — without a field path the pattern is never evaluated and every event in the matching bucket is dropped (specify a dotted field path, e.g. \"title\")",
+                    rule.pattern
+                ));
+            }
             if let Err(e) = regex::Regex::new(&rule.pattern) {
                 return Err(format!(
                     "Rule with pattern {:?} has an invalid regex: {e}",
@@ -382,6 +388,17 @@ mod tests {
             result.is_err(),
             "Rule with invalid regex must fail from_json"
         );
+    }
+
+    #[test]
+    fn test_from_json_drop_without_field_is_error() {
+        let json = r#"[{"enabled":true,"pattern":"(?i)incognito","action":"drop"}]"#;
+        let result = PrivacyFilterEngine::from_json(json);
+        assert!(
+            result.is_err(),
+            "Drop rule without field must fail from_json"
+        );
+        assert!(result.unwrap_err().contains("field"));
     }
 
     #[test]

@@ -42,6 +42,8 @@ pub struct ServerState {
     pub datastore: Mutex<Datastore>,
     pub asset_resolver: AssetResolver,
     pub device_id: String,
+    /// Compiled privacy-filter rules applied at heartbeat / event ingestion.
+    pub privacy_filters: Vec<crate::privacy_filter::CompiledRule>,
 }
 
 #[macro_use]

@@ -124,6 +124,7 @@ pub mod android {
                 datastore: Mutex::new(openDatastore()),
                 asset_resolver: endpoints::AssetResolver::new(None),
                 device_id: device_id::get_device_id(),
+                privacy_filters: Vec::new(),
             };
             info!("Using server_state:: device_id: {}", server_state.device_id);
 

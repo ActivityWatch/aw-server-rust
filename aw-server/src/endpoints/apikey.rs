@@ -162,6 +162,7 @@ mod tests {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
             asset_resolver: endpoints::AssetResolver::new(None),
             device_id: "test_id".to_string(),
+            privacy_filters: Vec::new(),
         };
         let mut aw_config = AWConfig::default();
         aw_config.auth.api_key = api_key;

@@ -7,6 +7,7 @@ use rocket::log::LogLevel;
 use serde::{Deserialize, Serialize};
 
 use crate::dirs;
+use crate::privacy_filter::PrivacyFilter;
 
 // Far from an optimal way to solve it, but works and is simple
 static mut TESTING: bool = true;
@@ -55,6 +56,11 @@ pub struct AWConfig {
     // custom visualizations are located.
     #[serde(default = "default_custom_static")]
     pub custom_static: std::collections::HashMap<String, String>,
+
+    /// Server-side privacy filter rules applied at heartbeat / event ingestion.
+    /// See `privacy_filter` module for shape and semantics.
+    #[serde(default = "default_privacy_filters")]
+    pub privacy_filters: Vec<PrivacyFilter>,
 }
 
 impl Default for AWConfig {
@@ -67,6 +73,7 @@ impl Default for AWConfig {
             cors: default_cors(),
             cors_regex: default_cors(),
             custom_static: default_custom_static(),
+            privacy_filters: default_privacy_filters(),
         }
     }
 }
@@ -117,6 +124,10 @@ fn default_port() -> u16 {
 
 fn default_custom_static() -> std::collections::HashMap<String, String> {
     std::collections::HashMap::new()
+}
+
+fn default_privacy_filters() -> Vec<PrivacyFilter> {
+    Vec::new()
 }
 
 pub fn create_config(testing: bool) -> AWConfig {

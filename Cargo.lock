@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "aw-server"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "android_logger",
  "aw-client-rust",
@@ -266,6 +266,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "fancy-regex",
  "fern",
  "gethostname",
  "jemallocator",

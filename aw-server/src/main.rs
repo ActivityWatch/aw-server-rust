@@ -141,12 +141,18 @@ async fn main() -> Result<(), rocket::Error> {
         device_id::get_device_id()
     };
 
+    let privacy_filters = aw_server::privacy_filter::compile(&config.privacy_filters);
+    if !privacy_filters.is_empty() {
+        info!("Loaded {} privacy filter rule(s)", privacy_filters.len());
+    }
+
     let server_state = endpoints::ServerState {
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
         datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
         asset_resolver: endpoints::AssetResolver::new(asset_path),
         device_id,
+        privacy_filters,
     };
 
     let _rocket = endpoints::build_rocket(server_state, config)

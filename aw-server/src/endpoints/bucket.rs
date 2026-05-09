@@ -16,6 +16,7 @@ use rocket::State;
 
 use crate::endpoints::util::BucketsExportRocket;
 use crate::endpoints::{HttpErrorJson, ServerState};
+use crate::privacy_filter;
 
 #[get("/")]
 pub fn buckets_get(
@@ -135,8 +136,12 @@ pub fn bucket_events_create(
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.insert_events(bucket_id, &events);
-    match res {
+    let filtered =
+        privacy_filter::apply_batch(&state.privacy_filters, bucket_id, events.into_inner());
+    if filtered.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    match datastore.insert_events(bucket_id, &filtered) {
         Ok(events) => Ok(Json(events)),
         Err(err) => Err(err.into()),
     }
@@ -154,6 +159,14 @@ pub fn bucket_events_heartbeat(
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let heartbeat = heartbeat_json.into_inner();
+    // Apply server-side privacy filter. If a `drop` rule matches, swallow
+    // the heartbeat with 200 OK and an empty event so older clients don't
+    // retry-storm; the watcher's view that "the event was accepted" is
+    // upheld even though nothing was persisted.
+    let heartbeat = match privacy_filter::apply(&state.privacy_filters, bucket_id, heartbeat) {
+        Some(e) => e,
+        None => return Ok(Json(Event::default())),
+    };
     let datastore = endpoints_get_lock!(state.datastore);
     match datastore.heartbeat(bucket_id, heartbeat, pulsetime) {
         Ok(e) => Ok(Json(e)),

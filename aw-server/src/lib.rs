@@ -24,6 +24,7 @@ pub mod device_id;
 pub mod dirs;
 pub mod endpoints;
 pub mod logging;
+pub mod privacy_filter;
 
 #[cfg(target_os = "android")]
 pub mod android;

@@ -24,6 +24,7 @@ mod api_tests {
             datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
             asset_resolver: endpoints::AssetResolver::new(None),
             device_id: "test_id".to_string(),
+            privacy_filters: Vec::new(),
         };
         let aw_config = config::AWConfig::default();
         endpoints::build_rocket(state, aw_config)
@@ -762,5 +763,119 @@ mod api_tests {
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
+
+    fn setup_testserver_with_privacy_filter(
+        filters: Vec<aw_server::privacy_filter::PrivacyFilter>,
+    ) -> rocket::Rocket<rocket::Build> {
+        let compiled = aw_server::privacy_filter::compile(&filters);
+        let state = endpoints::ServerState {
+            datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
+            asset_resolver: endpoints::AssetResolver::new(None),
+            device_id: "test_id".to_string(),
+            privacy_filters: compiled,
+        };
+        let aw_config = config::AWConfig::default();
+        endpoints::build_rocket(state, aw_config)
+    }
+
+    /// Heartbeats matching a `drop` rule should return 200 OK (so clients
+    /// don't retry-storm) but the event must not be stored.
+    #[test]
+    fn test_privacy_filter_drop_heartbeat() {
+        use aw_server::privacy_filter::{FilterAction, PrivacyFilter};
+
+        let server = setup_testserver_with_privacy_filter(vec![PrivacyFilter {
+            enabled: true,
+            bucket_prefix: "aw-watcher-window".to_string(),
+            field: "title".to_string(),
+            pattern: "(?i)private browsing|incognito".to_string(),
+            action: FilterAction::Drop,
+            replacement: "REDACTED".to_string(),
+        }]);
+        let client = Client::untracked(server).expect("valid instance");
+
+        // Create bucket
+        client
+            .post("/api/0/buckets/aw-watcher-window_test")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"client":"test","type":"currentwindow","hostname":"test"}"#)
+            .dispatch();
+
+        // Send a heartbeat whose title matches the drop rule.
+        let res = client
+            .post("/api/0/buckets/aw-watcher-window_test/heartbeat?pulsetime=30")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"timestamp":"2024-01-01T00:00:00Z","duration":0.0,"data":{"app":"Firefox","title":"Banking - Private Browsing"}}"#)
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok, "drop rule must return 200 OK");
+
+        // The event store must be empty — the event was silently discarded.
+        let res = client
+            .get("/api/0/buckets/aw-watcher-window_test/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+        let events: Vec<Value> =
+            serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert!(events.is_empty(), "dropped heartbeat must not be stored");
+    }
+
+    /// Heartbeats matching a `redact` rule must be stored with the field
+    /// value replaced, not the original sensitive text.
+    #[test]
+    fn test_privacy_filter_redact_heartbeat() {
+        use aw_server::privacy_filter::{FilterAction, PrivacyFilter};
+
+        let server = setup_testserver_with_privacy_filter(vec![PrivacyFilter {
+            enabled: true,
+            bucket_prefix: String::new(),
+            field: "title".to_string(),
+            pattern: "(?i)password".to_string(),
+            action: FilterAction::Redact,
+            replacement: "REDACTED".to_string(),
+        }]);
+        let client = Client::untracked(server).expect("valid instance");
+
+        // Create bucket
+        client
+            .post("/api/0/buckets/aw-watcher-window_test2")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"client":"test","type":"currentwindow","hostname":"test"}"#)
+            .dispatch();
+
+        // Send heartbeat with a sensitive title.
+        let res = client
+            .post("/api/0/buckets/aw-watcher-window_test2/heartbeat?pulsetime=30")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"timestamp":"2024-01-01T00:00:00Z","duration":0.0,"data":{"app":"1Password","title":"1Password - Master password"}}"#)
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+
+        // Event must be stored but with title replaced.
+        let res = client
+            .get("/api/0/buckets/aw-watcher-window_test2/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+        let events: Vec<Value> =
+            serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(events.len(), 1, "redacted event must be stored");
+        assert_eq!(
+            events[0]["data"]["title"],
+            "REDACTED",
+            "sensitive title must be replaced"
+        );
+        assert_eq!(
+            events[0]["data"]["app"],
+            "1Password",
+            "non-matching fields must be preserved"
+        );
     }
 }

@@ -17,6 +17,7 @@ macro_rules! json_map {
 
 mod datastore;
 mod legacy_import;
+mod privacy_filter;
 mod worker;
 
 pub use self::datastore::DatastoreInstance;

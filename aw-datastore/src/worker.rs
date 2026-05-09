@@ -14,6 +14,7 @@ use rusqlite::TransactionBehavior;
 use aw_models::Bucket;
 use aw_models::Event;
 
+use crate::privacy_filter::PrivacyFilterEngine;
 use crate::DatastoreError;
 use crate::DatastoreInstance;
 use crate::DatastoreMethod;
@@ -78,6 +79,7 @@ pub enum Command {
     GetKeyValue(String),
     SetKeyValue(String, String),
     DeleteKeyValue(String),
+    RefreshPrivacyFilter(),
     Close(),
 }
 
@@ -100,6 +102,7 @@ struct DatastoreWorker {
     uncommitted_events: usize,
     commit: bool,
     last_heartbeat: HashMap<String, Option<Event>>,
+    privacy_engine: PrivacyFilterEngine,
 }
 
 impl DatastoreWorker {
@@ -114,6 +117,7 @@ impl DatastoreWorker {
             uncommitted_events: 0,
             commit: false,
             last_heartbeat: HashMap::new(),
+            privacy_engine: PrivacyFilterEngine::with_defaults(),
         }
     }
 
@@ -244,7 +248,11 @@ impl DatastoreWorker {
             },
             Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets())),
             Command::InsertEvents(bucketname, events) => {
-                match ds.insert_events(tx, &bucketname, events) {
+                let filtered = self.privacy_engine.filter_events(&bucketname, events);
+                if filtered.is_empty() {
+                    return Ok(Response::EventList(vec![]));
+                }
+                match ds.insert_events(tx, &bucketname, filtered) {
                     Ok(events) => {
                         self.uncommitted_events += events.len();
                         self.last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
@@ -254,7 +262,27 @@ impl DatastoreWorker {
                 }
             }
             Command::Heartbeat(bucketname, event, pulsetime) => {
-                match ds.heartbeat(tx, &bucketname, event, pulsetime, &mut self.last_heartbeat) {
+                // Apply privacy filter to heartbeat
+                let filtered = match self.privacy_engine.filter_event(&bucketname, event) {
+                    Some(event) => event,
+                    None => {
+                        // Heartbeat dropped by filter — acknowledge as no-op
+                        // Return last cached event so the watcher can continue
+                        let last = self
+                            .last_heartbeat
+                            .get(&bucketname)
+                            .and_then(|e| e.clone())
+                            .unwrap_or_default();
+                        return Ok(Response::Event(last));
+                    }
+                };
+                match ds.heartbeat(
+                    tx,
+                    &bucketname,
+                    filtered,
+                    pulsetime,
+                    &mut self.last_heartbeat,
+                ) {
                     Ok(e) => {
                         self.uncommitted_events += 1;
                         Ok(Response::Event(e))
@@ -311,6 +339,18 @@ impl DatastoreWorker {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
             },
+            Command::RefreshPrivacyFilter() => {
+                // Reload privacy filter rules from settings
+                match ds.get_key_value(tx, "settings.privacy_filters") {
+                    Ok(json_str) => {
+                        if let Ok(engine) = PrivacyFilterEngine::from_json(&json_str) {
+                            self.privacy_engine = engine;
+                        }
+                    }
+                    Err(_) => {} // No rules set, keep defaults
+                }
+                Ok(Response::Empty())
+            }
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())
@@ -562,6 +602,14 @@ impl Datastore {
         let cmd = Command::DeleteKeyValue(key.to_string());
         let receiver = self.requester.request(cmd).unwrap();
 
+        _unwrap_response(receiver)
+    }
+
+    pub fn refresh_privacy_filter(&self) -> Result<(), DatastoreError> {
+        let receiver = self
+            .requester
+            .request(Command::RefreshPrivacyFilter())
+            .unwrap();
         _unwrap_response(receiver)
     }
 

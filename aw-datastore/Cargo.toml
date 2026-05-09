@@ -19,3 +19,4 @@ log = "0.4"
 
 aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
+regex = "1"

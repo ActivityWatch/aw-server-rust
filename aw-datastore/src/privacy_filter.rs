@@ -148,6 +148,18 @@ impl PrivacyFilterEngine {
                     rule.pattern
                 ));
             }
+            if rule.action == PrivacyFilterAction::Redact && rule.field.is_none() {
+                return Err(format!(
+                    "Redact rule with pattern {:?} is missing `field` — specify which data field to redact (e.g. \"title\")",
+                    rule.pattern
+                ));
+            }
+            if let Err(e) = regex::Regex::new(&rule.pattern) {
+                return Err(format!(
+                    "Rule with pattern {:?} has an invalid regex: {e}",
+                    rule.pattern
+                ));
+            }
         }
         Ok(PrivacyFilterEngine { rules })
     }
@@ -336,6 +348,27 @@ mod tests {
             "Redact rule without replacement must fail from_json"
         );
         assert!(result.unwrap_err().contains("replacement"));
+    }
+
+    #[test]
+    fn test_from_json_redact_without_field_is_error() {
+        let json = r#"[{"enabled":true,"pattern":"(?i)secret","action":"redact","replacement":"REDACTED"}]"#;
+        let result = PrivacyFilterEngine::from_json(json);
+        assert!(
+            result.is_err(),
+            "Redact rule without field must fail from_json"
+        );
+        assert!(result.unwrap_err().contains("field"));
+    }
+
+    #[test]
+    fn test_from_json_invalid_regex_is_error() {
+        let json = r#"[{"enabled":true,"pattern":"[unclosed","action":"drop","field":"title"}]"#;
+        let result = PrivacyFilterEngine::from_json(json);
+        assert!(
+            result.is_err(),
+            "Rule with invalid regex must fail from_json"
+        );
     }
 
     #[test]

@@ -142,7 +142,9 @@ impl PrivacyFilterEngine {
         let rules: Vec<PrivacyFilterRule> = serde_json::from_str(json_str)
             .map_err(|e| format!("Failed to parse privacy filter rules: {e}"))?;
         for rule in &rules {
-            if rule.action == PrivacyFilterAction::Redact && rule.replacement.is_none() {
+            if rule.action == PrivacyFilterAction::Redact
+                && rule.replacement.as_deref().map_or(true, str::is_empty)
+            {
                 return Err(format!(
                     "Redact rule with pattern {:?} is missing `replacement` — add a non-empty replacement string or use action=drop",
                     rule.pattern
@@ -346,6 +348,17 @@ mod tests {
         assert!(
             result.is_err(),
             "Redact rule without replacement must fail from_json"
+        );
+        assert!(result.unwrap_err().contains("replacement"));
+    }
+
+    #[test]
+    fn test_from_json_redact_with_empty_replacement_is_error() {
+        let json = r#"[{"enabled":true,"pattern":"(?i)secret","action":"redact","field":"title","replacement":""}]"#;
+        let result = PrivacyFilterEngine::from_json(json);
+        assert!(
+            result.is_err(),
+            "Redact rule with empty replacement must fail from_json"
         );
         assert!(result.unwrap_err().contains("replacement"));
     }

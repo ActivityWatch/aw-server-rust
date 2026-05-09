@@ -305,9 +305,16 @@ mod tests {
     #[test]
     fn test_set_field_no_panic_on_non_object_intermediate() {
         let mut data = serde_json::Map::new();
-        data.insert("title".to_string(), Value::String("flat string".to_string()));
+        data.insert(
+            "title".to_string(),
+            Value::String("flat string".to_string()),
+        );
         // "title" is a string, not an object — setting "title.nested" should not panic
-        set_field(&mut data, "title.nested", Value::String("value".to_string()));
+        set_field(
+            &mut data,
+            "title.nested",
+            Value::String("value".to_string()),
+        );
         // title should remain unchanged
         assert_eq!(data.get("title").unwrap().as_str().unwrap(), "flat string");
     }

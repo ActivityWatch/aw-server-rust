@@ -50,3 +50,6 @@ pub use period_union::period_union;
 
 mod union_no_overlap;
 pub use union_no_overlap::union_no_overlap;
+
+pub mod privacy_filter;
+pub use privacy_filter::{apply_privacy_filter, FilterAction, PrivacyFilterRule};

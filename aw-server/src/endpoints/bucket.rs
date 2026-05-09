@@ -10,6 +10,7 @@ use aw_models::Bucket;
 use aw_models::BucketsExport;
 use aw_models::Event;
 use aw_models::TryVec;
+use aw_transform::{apply_privacy_filter, PrivacyFilterRule};
 
 use rocket::http::Status;
 use rocket::State;
@@ -155,6 +156,23 @@ pub fn bucket_events_heartbeat(
 ) -> Result<Json<Event>, HttpErrorJson> {
     let heartbeat = heartbeat_json.into_inner();
     let datastore = endpoints_get_lock!(state.datastore);
+
+    // Load and apply privacy filters from settings.
+    // If the setting is absent or unparseable, filters are skipped (fail-open).
+    let rules: Vec<PrivacyFilterRule> = match datastore.get_key_value("settings.privacy_filters") {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
+            warn!("Failed to parse privacy_filters setting: {}", e);
+            vec![]
+        }),
+        Err(_) => vec![],
+    };
+
+    let heartbeat = match apply_privacy_filter(bucket_id, heartbeat, &rules) {
+        Some(event) => event,
+        // Event matched a drop rule — acknowledge without storing.
+        None => return Ok(Json(Event::default())),
+    };
+
     match datastore.heartbeat(bucket_id, heartbeat, pulsetime) {
         Ok(e) => Ok(Json(e)),
         Err(err) => Err(err.into()),

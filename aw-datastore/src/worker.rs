@@ -348,7 +348,10 @@ impl DatastoreWorker {
                         Ok(engine) => self.privacy_engine = engine,
                         Err(e) => warn!("Failed to parse privacy_filters setting: {e}"),
                     },
-                    Err(_) => {} // No rules configured — leave engine as-is
+                    Err(_) => {
+                        // Settings key absent — clear rules so removing the key disables filtering
+                        self.privacy_engine = PrivacyFilterEngine::new(vec![]);
+                    }
                 }
                 Ok(Response::Empty())
             }

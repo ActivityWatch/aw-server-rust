@@ -200,11 +200,14 @@ fn set_field(data: &mut Map<String, Value>, path: &str, value: Value) {
             current.insert(part.to_string(), value);
             return;
         }
-        current = current
+        current = match current
             .entry(part.to_string())
             .or_insert_with(|| Value::Object(Map::new()))
             .as_object_mut()
-            .expect("Field path conflicts with non-object value");
+        {
+            Some(m) => m,
+            None => return, // intermediate segment is not an object — skip silently
+        };
     }
 }
 
@@ -297,6 +300,16 @@ mod tests {
         };
         let event = test_event("test");
         assert!(!rule.matches("aw-watcher-window", &event));
+    }
+
+    #[test]
+    fn test_set_field_no_panic_on_non_object_intermediate() {
+        let mut data = serde_json::Map::new();
+        data.insert("title".to_string(), Value::String("flat string".to_string()));
+        // "title" is a string, not an object — setting "title.nested" should not panic
+        set_field(&mut data, "title.nested", Value::String("value".to_string()));
+        // title should remain unchanged
+        assert_eq!(data.get("title").unwrap().as_str().unwrap(), "flat string");
     }
 
     #[test]

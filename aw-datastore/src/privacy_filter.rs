@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 use serde_json::map::Map;
 use serde_json::Value;
@@ -15,7 +17,7 @@ pub enum PrivacyFilterAction {
 }
 
 /// A single privacy filter rule.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrivacyFilterRule {
     /// If true, this rule is active
     pub enabled: bool,
@@ -29,6 +31,20 @@ pub struct PrivacyFilterRule {
     pub action: PrivacyFilterAction,
     /// Replacement text for the redact action
     pub replacement: Option<String>,
+    /// Pre-compiled regex, populated lazily on first match. Not serialized.
+    #[serde(skip)]
+    regex_cache: OnceLock<Option<regex::Regex>>,
+}
+
+impl PartialEq for PrivacyFilterRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.bucket_prefix == other.bucket_prefix
+            && self.field == other.field
+            && self.pattern == other.pattern
+            && self.action == other.action
+            && self.replacement == other.replacement
+    }
 }
 
 impl PrivacyFilterRule {
@@ -49,9 +65,13 @@ impl PrivacyFilterRule {
         if let Some(ref field_path) = self.field {
             let field_value = resolve_field(&event.data, field_path);
             match field_value {
-                Some(Value::String(s)) => regex::Regex::new(&self.pattern)
-                    .map(|re| re.is_match(s))
-                    .unwrap_or(false),
+                Some(Value::String(s)) => {
+                    // Compile the regex once and cache it for subsequent calls.
+                    let re = self
+                        .regex_cache
+                        .get_or_init(|| regex::Regex::new(&self.pattern).ok());
+                    re.as_ref().map(|re| re.is_match(s)).unwrap_or(false)
+                }
                 Some(_) | None => false,
             }
         } else {
@@ -91,7 +111,8 @@ impl PrivacyFilterEngine {
         PrivacyFilterEngine { rules }
     }
 
-    /// Default rules for common sensitive data patterns.
+    /// Example rules for common sensitive data patterns.
+    /// Not applied automatically — use `new()` with these rules to opt in.
     pub fn with_defaults() -> Self {
         let rules = vec![
             PrivacyFilterRule {
@@ -101,6 +122,7 @@ impl PrivacyFilterEngine {
                 pattern: r"(?i)(private browsing|incognito)".to_string(),
                 action: PrivacyFilterAction::Drop,
                 replacement: None,
+                regex_cache: OnceLock::new(),
             },
             PrivacyFilterRule {
                 enabled: true,
@@ -109,6 +131,7 @@ impl PrivacyFilterEngine {
                 pattern: r"(?i).*banking.*".to_string(),
                 action: PrivacyFilterAction::Redact,
                 replacement: Some("REDACTED".to_string()),
+                regex_cache: OnceLock::new(),
             },
         ];
         PrivacyFilterEngine { rules }
@@ -239,6 +262,7 @@ mod tests {
             pattern: r"(?i)(private browsing|incognito)".to_string(),
             action: PrivacyFilterAction::Drop,
             replacement: None,
+            regex_cache: OnceLock::new(),
         };
         let event = test_event("Private Browsing - Mozilla Firefox");
         assert!(rule.matches("aw-watcher-window", &event));
@@ -254,6 +278,7 @@ mod tests {
             pattern: ".*".to_string(),
             action: PrivacyFilterAction::Drop,
             replacement: None,
+            regex_cache: OnceLock::new(),
         };
         let event = test_event("Anything at all");
         assert!(!rule.matches("aw-watcher-window", &event));
@@ -268,6 +293,7 @@ mod tests {
             pattern: r"[invalid".to_string(),
             action: PrivacyFilterAction::Drop,
             replacement: None,
+            regex_cache: OnceLock::new(),
         };
         let event = test_event("test");
         assert!(!rule.matches("aw-watcher-window", &event));
@@ -282,6 +308,7 @@ mod tests {
             pattern: ".*".to_string(),
             action: PrivacyFilterAction::Drop,
             replacement: None,
+            regex_cache: OnceLock::new(),
         };
         let mut event = test_event("anything");
         assert!(rule.matches("any-bucket", &event));

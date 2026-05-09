@@ -117,7 +117,7 @@ impl DatastoreWorker {
             uncommitted_events: 0,
             commit: false,
             last_heartbeat: HashMap::new(),
-            privacy_engine: PrivacyFilterEngine::with_defaults(),
+            privacy_engine: PrivacyFilterEngine::new(vec![]),
         }
     }
 
@@ -263,16 +263,18 @@ impl DatastoreWorker {
             }
             Command::Heartbeat(bucketname, event, pulsetime) => {
                 // Apply privacy filter to heartbeat
-                let filtered = match self.privacy_engine.filter_event(&bucketname, event) {
+                let filtered = match self.privacy_engine.filter_event(&bucketname, event.clone()) {
                     Some(event) => event,
                     None => {
-                        // Heartbeat dropped by filter — acknowledge as no-op
-                        // Return last cached event so the watcher can continue
+                        // Heartbeat dropped by filter — return last cached event so the
+                        // watcher's heartbeat-merge state machine continues correctly.
+                        // Fall back to the incoming event itself if no prior event is cached
+                        // (avoids returning a zero-timestamp default Event).
                         let last = self
                             .last_heartbeat
                             .get(&bucketname)
                             .and_then(|e| e.clone())
-                            .unwrap_or_default();
+                            .unwrap_or(event);
                         return Ok(Response::Event(last));
                     }
                 };
@@ -342,12 +344,11 @@ impl DatastoreWorker {
             Command::RefreshPrivacyFilter() => {
                 // Reload privacy filter rules from settings
                 match ds.get_key_value(tx, "settings.privacy_filters") {
-                    Ok(json_str) => {
-                        if let Ok(engine) = PrivacyFilterEngine::from_json(&json_str) {
-                            self.privacy_engine = engine;
-                        }
-                    }
-                    Err(_) => {} // No rules set, keep defaults
+                    Ok(json_str) => match PrivacyFilterEngine::from_json(&json_str) {
+                        Ok(engine) => self.privacy_engine = engine,
+                        Err(e) => warn!("Failed to parse privacy_filters setting: {e}"),
+                    },
+                    Err(_) => {} // No rules configured — leave engine as-is
                 }
                 Ok(Response::Empty())
             }

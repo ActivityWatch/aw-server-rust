@@ -177,22 +177,42 @@ mod tests {
     use super::create_config;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use uuid::Uuid;
 
-    fn unique_test_path(name: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join("aw-server-config-tests")
-            .join(format!("{name}-{}", Uuid::new_v4()))
-            .join("config.toml")
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestConfigPath {
+        root: PathBuf,
+        config_path: PathBuf,
+    }
+
+    impl TestConfigPath {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir()
+                .join("aw-server-config-tests")
+                .join(format!("{name}-{}", Uuid::new_v4()));
+            let config_path = root.join("config.toml");
+
+            Self { root, config_path }
+        }
+    }
+
+    impl Drop for TestConfigPath {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 
     #[test]
     fn create_config_uses_override_path() {
-        let config_path = unique_test_path("override");
-        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, "address = \"0.0.0.0\"\nport = 5611\n").unwrap();
+        // create_config mutates the TESTING global, so these tests must not overlap.
+        let _lock = TEST_LOCK.lock().unwrap();
+        let paths = TestConfigPath::new("override");
+        fs::create_dir_all(paths.config_path.parent().unwrap()).unwrap();
+        fs::write(&paths.config_path, "address = \"0.0.0.0\"\nport = 5611\n").unwrap();
 
-        let config = create_config(false, Some(config_path.as_path()));
+        let config = create_config(false, Some(paths.config_path.as_path()));
 
         assert_eq!(config.address, "0.0.0.0");
         assert_eq!(config.port, 5611);
@@ -200,11 +220,12 @@ mod tests {
 
     #[test]
     fn create_config_creates_missing_override_file() {
-        let config_path = unique_test_path("missing");
+        let _lock = TEST_LOCK.lock().unwrap();
+        let paths = TestConfigPath::new("missing");
 
-        let config = create_config(false, Some(config_path.as_path()));
+        let config = create_config(false, Some(paths.config_path.as_path()));
 
-        assert!(config_path.is_file());
+        assert!(paths.config_path.is_file());
         assert_eq!(config.address, "127.0.0.1");
         assert_eq!(config.port, 5600);
     }

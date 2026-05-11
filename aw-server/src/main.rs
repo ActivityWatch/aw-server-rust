@@ -42,6 +42,10 @@ struct Opts {
     #[clap(long)]
     dbpath: Option<String>,
 
+    /// Path to config file override
+    #[clap(short = 'c', long = "config")]
+    config: Option<PathBuf>,
+
     /// Path to webui override
     #[clap(long)]
     webpath: Option<String>,
@@ -79,7 +83,7 @@ async fn main() -> Result<(), rocket::Error> {
         info!("Running server in Testing mode");
     }
 
-    let mut config = config::create_config(testing);
+    let mut config = config::create_config(testing, opts.config.as_deref());
 
     // set host if overridden
     if let Some(host) = opts.host {

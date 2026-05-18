@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 /// Transforms for classifying (tagging and categorizing) events.
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
@@ -6,6 +8,7 @@ use fancy_regex::Regex;
 
 pub enum Rule {
     None,
+    Logical(LogicalRule),
     Regex(RegexRule),
 }
 
@@ -13,6 +16,7 @@ impl RuleTrait for Rule {
     fn matches(&self, event: &Event) -> bool {
         match self {
             Rule::None => false,
+            Rule::Logical(rule) => rule.matches(event),
             Rule::Regex(rule) => rule.matches(event),
         }
     }
@@ -24,10 +28,15 @@ trait RuleTrait {
 
 pub struct RegexRule {
     regex: Regex,
+    field: Option<String>,
 }
 
 impl RegexRule {
-    pub fn new(regex_str: &str, ignore_case: bool) -> Result<RegexRule, fancy_regex::Error> {
+    pub fn new(
+        regex_str: &str,
+        ignore_case: bool,
+        field: Option<String>,
+    ) -> Result<RegexRule, fancy_regex::Error> {
         // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
         // so we need to prefix with `(?i)` to make it case insensitive.
         let regex = if ignore_case {
@@ -37,7 +46,7 @@ impl RegexRule {
             Regex::new(regex_str)?
         };
 
-        Ok(RegexRule { regex })
+        Ok(RegexRule { regex, field })
     }
 }
 
@@ -50,15 +59,59 @@ impl RuleTrait for RegexRule {
     fn matches(&self, event: &Event) -> bool {
         event
             .data
-            .values()
-            .filter(|val| val.is_string())
-            .any(|val| self.regex.is_match(val.as_str().unwrap()).unwrap())
+            .iter()
+            .filter(|(field, val)| {
+                self.field.as_ref().map(|v| &v == field).unwrap_or(true) && val.is_string()
+            })
+            .any(|(_, val)| self.regex.is_match(val.as_str().unwrap()).unwrap())
     }
 }
 
 impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
-        Rule::Regex(RegexRule { regex: re })
+        Rule::Regex(RegexRule {
+            regex: re,
+            field: None,
+        })
+    }
+}
+
+pub enum LogicalOperator {
+    Or,
+    And,
+}
+
+impl FromStr for LogicalOperator {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "or" => Ok(Self::Or),
+            "and" => Ok(Self::And),
+            _ => Err(format!("Invalid logical operator: {}", s)),
+        }
+    }
+}
+
+pub struct LogicalRule {
+    rules: Vec<Rule>,
+    operator: LogicalOperator,
+}
+
+impl LogicalRule {
+    pub fn new(rules: Vec<Rule>, operator: LogicalOperator) -> Self {
+        Self { rules, operator }
+    }
+}
+
+impl RuleTrait for LogicalRule {
+    fn matches(&self, event: &Event) -> bool {
+        use LogicalOperator::{And, Or};
+
+        match self.operator {
+            Or => self.rules.iter().any(|rule| rule.matches(event)),
+            And => self.rules.iter().all(|rule| rule.matches(event)),
+        }
     }
 }
 
@@ -135,7 +188,7 @@ fn test_rule() {
         .insert("nonono".into(), serde_json::json!("no match!"));
 
     let rule_from_regex = Rule::from(Regex::new("test").unwrap());
-    let rule_from_new = Rule::Regex(RegexRule::new("test", false).unwrap());
+    let rule_from_new = Rule::Regex(RegexRule::new("test", false, None).unwrap());
     let rule_none = Rule::None;
     assert!(rule_from_regex.matches(&e_match));
     assert!(rule_from_new.matches(&e_match));

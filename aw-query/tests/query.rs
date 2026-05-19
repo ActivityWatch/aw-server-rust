@@ -413,6 +413,38 @@ mod query_tests {
     }
 
     #[test]
+    fn test_tag_select_keys() {
+        let ds = setup_datastore_with_bucket();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let event = Event {
+            id: None,
+            timestamp: chrono::Utc::now(),
+            duration: Duration::seconds(0),
+            data: json_map! {
+                "app": json!("terminal"),
+                "title": json!("just a test"),
+                "pid": json!(123)
+            },
+        };
+        ds.insert_events(BUCKET_ID, &[event]).unwrap();
+
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = tag(events, [["title-match", {{ "type": "regex", "regex": "test$", "select_keys": ["title"] }}], ["app-match", {{ "type": "regex", "regex": "test$", "select_keys": ["app"] }}], ["pid-match", {{ "type": "regex", "regex": "123", "select_keys": ["pid"] }}], ["missing-match", {{ "type": "regex", "regex": "test", "select_keys": ["missing"] }}]]);
+            return  events;"#,
+            BUCKET_ID
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+
+        let event = events.first().unwrap();
+        let tags = event.data.get("$tags").unwrap();
+        assert_eq!(tags, &serde_json::json!(vec!["title-match"]));
+    }
+
+    #[test]
     fn test_rule_parsing() {
         let ds = setup_datastore_populated();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
@@ -479,10 +511,33 @@ mod query_tests {
             return  events;"#;
         aw_query::query(code, &interval, &ds).unwrap();
 
+        // Test regex rule with valid select_keys field
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "regex", "regex": "test", "select_keys": ["key"] }]]);
+            return  events;"#;
+        aw_query::query(code, &interval, &ds).unwrap();
+
         // Test regex rule where ignore_case field is of invalid type
         let code = r#"
             events = [];
             events = tag(events, [["testtag", { "type": "regex", "regex": "test", "ignore_case": "" }]]);
+            return  events;"#;
+        let res = aw_query::query(code, &interval, &ds);
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
+
+        // Test regex rule where select_keys field is of invalid type
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "regex", "regex": "test", "select_keys": "key" }]]);
+            return  events;"#;
+        let res = aw_query::query(code, &interval, &ds);
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
+
+        // Test regex rule where select_keys contains non-string values
+        let code = r#"
+            events = [];
+            events = tag(events, [["testtag", { "type": "regex", "regex": "test", "select_keys": ["key", false] }]]);
             return  events;"#;
         let res = aw_query::query(code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidFunctionParameters(_));

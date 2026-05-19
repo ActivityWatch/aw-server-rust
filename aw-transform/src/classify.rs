@@ -24,10 +24,15 @@ trait RuleTrait {
 
 pub struct RegexRule {
     regex: Regex,
+    select_keys: Option<Vec<String>>,
 }
 
 impl RegexRule {
-    pub fn new(regex_str: &str, ignore_case: bool) -> Result<RegexRule, fancy_regex::Error> {
+    pub fn new(
+        regex_str: &str,
+        ignore_case: bool,
+        select_keys: Option<Vec<String>>,
+    ) -> Result<RegexRule, fancy_regex::Error> {
         // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
         // so we need to prefix with `(?i)` to make it case insensitive.
         let regex = if ignore_case {
@@ -37,7 +42,14 @@ impl RegexRule {
             Regex::new(regex_str)?
         };
 
-        Ok(RegexRule { regex })
+        Ok(RegexRule { regex, select_keys })
+    }
+
+    fn value_matches(&self, value: &serde_json::Value) -> bool {
+        match value.as_str() {
+            Some(value) => self.regex.is_match(value).unwrap(),
+            None => false,
+        }
     }
 }
 
@@ -48,17 +60,22 @@ impl RegexRule {
 /// compatibility (or have to maintain "old" query2 functions).
 impl RuleTrait for RegexRule {
     fn matches(&self, event: &Event) -> bool {
-        event
-            .data
-            .values()
-            .filter(|val| val.is_string())
-            .any(|val| self.regex.is_match(val.as_str().unwrap()).unwrap())
+        match &self.select_keys {
+            Some(select_keys) => select_keys
+                .iter()
+                .filter_map(|key| event.data.get(key))
+                .any(|val| self.value_matches(val)),
+            None => event.data.values().any(|val| self.value_matches(val)),
+        }
     }
 }
 
 impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
-        Rule::Regex(RegexRule { regex: re })
+        Rule::Regex(RegexRule {
+            regex: re,
+            select_keys: None,
+        })
     }
 }
 
@@ -135,7 +152,7 @@ fn test_rule() {
         .insert("nonono".into(), serde_json::json!("no match!"));
 
     let rule_from_regex = Rule::from(Regex::new("test").unwrap());
-    let rule_from_new = Rule::Regex(RegexRule::new("test", false).unwrap());
+    let rule_from_new = Rule::Regex(RegexRule::new("test", false, None).unwrap());
     let rule_none = Rule::None;
     assert!(rule_from_regex.matches(&e_match));
     assert!(rule_from_new.matches(&e_match));
@@ -155,6 +172,31 @@ fn test_rule_lookahead() {
 
     let rule_from_regex = Rule::from(Regex::new("testing (?!lookahead)").unwrap());
     assert!(!rule_from_regex.matches(&e_match));
+}
+
+#[test]
+fn test_rule_select_keys() {
+    let mut event = Event::default();
+    event
+        .data
+        .insert("app".into(), serde_json::json!("terminal"));
+    event
+        .data
+        .insert("title".into(), serde_json::json!("just a test"));
+    event.data.insert("pid".into(), serde_json::json!(123));
+
+    let title_only =
+        Rule::Regex(RegexRule::new("test", false, Some(vec!["title".into()])).unwrap());
+    let app_only = Rule::Regex(RegexRule::new("test", false, Some(vec!["app".into()])).unwrap());
+    let missing_key =
+        Rule::Regex(RegexRule::new("test", false, Some(vec!["missing".into()])).unwrap());
+    let non_string_key =
+        Rule::Regex(RegexRule::new("123", false, Some(vec!["pid".into()])).unwrap());
+
+    assert!(title_only.matches(&event));
+    assert!(!app_only.matches(&event));
+    assert!(!missing_key.matches(&event));
+    assert!(!non_string_key.matches(&event));
 }
 
 #[test]

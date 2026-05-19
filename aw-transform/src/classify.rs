@@ -42,12 +42,24 @@ impl RegexRule {
             Regex::new(regex_str)?
         };
 
+        // Validate that select_keys is not an empty list, which would silently never match.
+        if let Some(ref keys) = select_keys {
+            if keys.is_empty() {
+                return Err(fancy_regex::Error::ParseError(
+                    0,
+                    fancy_regex::ParseError::GeneralParseError(
+                        "select_keys must not be empty".to_string(),
+                    ),
+                ));
+            }
+        }
+
         Ok(RegexRule { regex, select_keys })
     }
 
     fn value_matches(&self, value: &serde_json::Value) -> bool {
         match value.as_str() {
-            Some(value) => self.regex.is_match(value).unwrap(),
+            Some(value) => self.regex.is_match(value).unwrap_or(false),
             None => false,
         }
     }
@@ -199,6 +211,13 @@ fn test_rule_select_keys() {
     assert!(!non_string_key.matches(&event));
 }
 
+#[test]
+fn test_rule_select_keys_empty_list() {
+    // An empty select_keys list should return an error rather than
+    // silently producing a rule that never matches anything.
+    let result = RegexRule::new("test", false, Some(vec![]));
+    assert!(result.is_err());
+}
 #[test]
 fn test_categorize() {
     let mut e = Event::default();

@@ -328,7 +328,28 @@ impl TryFrom<&DataType> for Rule {
                     ))
                 }
             };
-            let regex_rule = match RegexRule::new(regex_str, *ignore_case) {
+            let select_keys = match obj.get("select_keys") {
+                Some(DataType::List(keys)) => {
+                    let mut select_keys = Vec::with_capacity(keys.len());
+                    for key in keys {
+                        match key {
+                            DataType::String(key) => select_keys.push(key.clone()),
+                            _ => return Err(QueryError::InvalidFunctionParameters(
+                                "the select_keys field of the regex rule must contain only strings"
+                                    .to_string(),
+                            )),
+                        }
+                    }
+                    Some(select_keys)
+                }
+                Some(_) => {
+                    return Err(QueryError::InvalidFunctionParameters(
+                        "the select_keys field of the regex rule is not a list".to_string(),
+                    ))
+                }
+                None => None,
+            };
+            let regex_rule = match RegexRule::new(regex_str, *ignore_case, select_keys) {
                 Ok(regex_rule) => regex_rule,
                 Err(err) => {
                     return Err(QueryError::RegexCompileError(format!(

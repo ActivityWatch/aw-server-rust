@@ -40,6 +40,12 @@ fn get_hostname() -> String {
     gethostname::gethostname().to_string_lossy().to_string()
 }
 
+async fn send_for_status(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    request.send().await?.error_for_status()
+}
+
 fn build_client(api_key: Option<String>) -> Result<reqwest::Client, Box<dyn Error>> {
     let mut headers = HeaderMap::new();
     if let Some(api_key) = api_key {
@@ -83,25 +89,18 @@ impl AwClient {
 
     pub async fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
         let url = format!("{}api/0/buckets/{}", self.baseurl, bucketname);
-        let bucket = self
-            .client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let bucket = send_for_status(self.client.get(url)).await?.json().await?;
         Ok(bucket)
     }
 
     pub async fn get_buckets(&self) -> Result<HashMap<String, Bucket>, reqwest::Error> {
         let url = format!("{}api/0/buckets/", self.baseurl);
-        self.client.get(url).send().await?.json().await
+        send_for_status(self.client.get(url)).await?.json().await
     }
 
     pub async fn create_bucket(&self, bucket: &Bucket) -> Result<(), reqwest::Error> {
         let url = format!("{}api/0/buckets/{}", self.baseurl, bucket.id);
-        self.client.post(url).json(bucket).send().await?;
+        send_for_status(self.client.post(url).json(bucket)).await?;
         Ok(())
     }
 
@@ -127,7 +126,7 @@ impl AwClient {
 
     pub async fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
         let url = format!("{}api/0/buckets/{}", self.baseurl, bucketname);
-        self.client.delete(url).send().await?;
+        send_for_status(self.client.delete(url)).await?;
         Ok(())
     }
 
@@ -154,6 +153,7 @@ impl AwClient {
             }))
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await
     }
@@ -183,7 +183,7 @@ impl AwClient {
             url.query_pairs_mut()
                 .append_pair("limit", s.to_string().as_str());
         };
-        self.client.get(url).send().await?.json().await
+        send_for_status(self.client.get(url)).await?.json().await
     }
 
     pub async fn insert_event(
@@ -193,7 +193,7 @@ impl AwClient {
     ) -> Result<(), reqwest::Error> {
         let url = format!("{}api/0/buckets/{}/events", self.baseurl, bucketname);
         let eventlist = vec![event.clone()];
-        self.client.post(url).json(&eventlist).send().await?;
+        send_for_status(self.client.post(url).json(&eventlist)).await?;
         Ok(())
     }
 
@@ -203,7 +203,7 @@ impl AwClient {
         events: Vec<Event>,
     ) -> Result<(), reqwest::Error> {
         let url = format!("{}api/0/buckets/{}/events", self.baseurl, bucketname);
-        self.client.post(url).json(&events).send().await?;
+        send_for_status(self.client.post(url).json(&events)).await?;
         Ok(())
     }
 
@@ -217,7 +217,7 @@ impl AwClient {
             "{}api/0/buckets/{}/heartbeat?pulsetime={}",
             self.baseurl, bucketname, pulsetime
         );
-        self.client.post(url).json(&event).send().await?;
+        send_for_status(self.client.post(url).json(&event)).await?;
         Ok(())
     }
 
@@ -230,20 +230,13 @@ impl AwClient {
             "{}api/0/buckets/{}/events/{}",
             self.baseurl, bucketname, event_id
         );
-        self.client.delete(url).send().await?;
+        send_for_status(self.client.delete(url)).await?;
         Ok(())
     }
 
     pub async fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
         let url = format!("{}api/0/buckets/{}/events/count", self.baseurl, bucketname);
-        let res = self
-            .client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let res = send_for_status(self.client.get(url)).await?.text().await?;
         let count: i64 = match res.trim().parse() {
             Ok(count) => count,
             Err(err) => panic!("could not parse get_event_count response: {err:?}"),
@@ -253,17 +246,17 @@ impl AwClient {
 
     pub async fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {
         let url = format!("{}api/0/info", self.baseurl);
-        self.client.get(url).send().await?.json().await
+        send_for_status(self.client.get(url)).await?.json().await
     }
 
     pub async fn get_setting(&self, setting: &str) -> Result<serde_json::Value, reqwest::Error> {
         let url = format!("{}api/0/settings/{}", self.baseurl, setting);
-        self.client.get(url).send().await?.json().await
+        send_for_status(self.client.get(url)).await?.json().await
     }
 
     pub async fn get_settings(&self) -> Result<aw_models::Settings, reqwest::Error> {
         let url = format!("{}api/0/settings", self.baseurl);
-        self.client.get(url).send().await?.json().await
+        send_for_status(self.client.get(url)).await?.json().await
     }
 
     // TODO: make async

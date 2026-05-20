@@ -3,4 +3,5 @@ aw-client-rust
 
 WIP: aw-client implementation in Rust
 
-TODO: Better error handling (requests currently never fail?)
+Non-2xx HTTP responses are surfaced as `reqwest` status errors in both the async
+and blocking clients.

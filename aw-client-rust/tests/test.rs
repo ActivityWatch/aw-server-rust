@@ -2,6 +2,7 @@ extern crate aw_client_rust;
 extern crate aw_datastore;
 extern crate aw_server;
 extern crate chrono;
+extern crate reqwest;
 extern crate rocket;
 extern crate serde_json;
 extern crate tokio_test;
@@ -9,8 +10,10 @@ extern crate tokio_test;
 #[cfg(test)]
 mod test {
     use aw_client_rust::blocking::AwClient;
+    use aw_client_rust::AwClient as AsyncAwClient;
     use aw_client_rust::Event;
     use chrono::{DateTime, Duration, Utc};
+    use reqwest::StatusCode;
     use serde_json::Map;
     use std::cell::RefCell;
     use std::fs;
@@ -92,6 +95,10 @@ mod test {
     // Keep the listener alive until the server binds — prevents TOCTOU race in reserve_port
     thread_local! {
         static RESERVED_PORT: RefCell<Option<TcpListener>> = RefCell::new(None);
+    }
+
+    fn assert_status(err: reqwest::Error, status: StatusCode) {
+        assert_eq!(err.status(), Some(status));
     }
 
     fn wait_for_server(timeout_s: u32, client: &AwClient) {
@@ -259,6 +266,36 @@ RETURN = events;",
         assert_eq!(count, 0);
 
         client.delete_bucket(&bucketname).unwrap();
+
+        shutdown_handler.notify();
+    }
+
+    #[test]
+    fn test_non_2xx_responses_return_status_errors() {
+        let clientname = "aw-client-rust-status-test";
+        let async_clientname = "aw-client-rust-status-test-async";
+        let port = reserve_port();
+        let (client, async_client) = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            (
+                AwClient::new("127.0.0.1", port, clientname).expect("Client creation failed"),
+                AsyncAwClient::new("127.0.0.1", port, async_clientname)
+                    .expect("Client creation failed"),
+            )
+        };
+
+        RESERVED_PORT.with(|cell| *cell.borrow_mut() = None);
+        let shutdown_handler = setup_testserver(port, None);
+
+        wait_for_server(20, &client);
+
+        let missing_bucket = format!("aw-client-rust-missing_{}", client.hostname);
+        let delete_err = client.delete_bucket(&missing_bucket).unwrap_err();
+        assert_status(delete_err, StatusCode::NOT_FOUND);
+
+        let get_events_err =
+            block_on(async_client.get_events(&missing_bucket, None, None, None)).unwrap_err();
+        assert_status(get_events_err, StatusCode::NOT_FOUND);
 
         shutdown_handler.notify();
     }

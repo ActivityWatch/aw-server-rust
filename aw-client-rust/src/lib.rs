@@ -145,17 +145,13 @@ impl AwClient {
             .collect();
 
         // Result is a sequence, one element per timeperiod
-        self.client
-            .post(url)
-            .json(&json!({
-                "query": query.split('\n').collect::<Vec<&str>>(),
-                "timeperiods": timeperiods_str,
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await
+        send_for_status(self.client.post(url).json(&json!({
+            "query": query.split('\n').collect::<Vec<&str>>(),
+            "timeperiods": timeperiods_str,
+        })))
+        .await?
+        .json()
+        .await
     }
 
     pub async fn get_events(

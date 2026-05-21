@@ -1,7 +1,10 @@
 name: Dependabot Auto-merge
 
-# NOTE: This workflow relies on a Personal Access Token from the @ActivityWatchBot user
-#       See this issue for details: https://github.com/ridedott/merge-me-action/issues/1581
+# NOTE: `merge-me-action` still needs the bot PAT here.
+# Using `secrets.GITHUB_TOKEN` fails on `workflow_run` with
+# "Resource not accessible by integration" when the action queries
+# branch protection rules over GraphQL.
+# See: https://github.com/ridedott/merge-me-action/issues/1581
 
 on:
   workflow_run:
@@ -11,17 +14,16 @@ on:
       # List all required workflow names here.
       - Build
 
-permissions:
-  contents: write
-  pull-requests: read
-
 jobs:
   auto_merge:
     name: Auto-merge
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.conclusion == 'success' && github.actor == 'dependabot[bot]'
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.actor == 'dependabot[bot]'
 
     steps:
-      - uses: ridedott/merge-me-action@v2
+      - uses: ridedott/merge-me-action@2568f177a681785a874d6e7af950eb1a0dd31123
         with:
           GITHUB_TOKEN: ${{ secrets.AWBOT_GH_TOKEN }}

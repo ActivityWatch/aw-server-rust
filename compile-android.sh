@@ -1,11 +1,18 @@
 #!/bin/bash
 
 set -e
+SCRIPT_DIR="$(
+    unset CDPATH
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+    pwd
+)"
+cd "$SCRIPT_DIR"
+
 platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
 # if args, use them to select targets (x86_64, arm64, etc)
 if [ $# -gt 0 ]; then
-    targets="$@"
+    targets="$*"
 else
     # otherwise, default to all targets
     targets="arm64 x86_64 x86 arm"
@@ -13,11 +20,12 @@ fi
 
 ORIG_PATH="$PATH"
 ORIG_RUSTFLAGS="$RUSTFLAGS"
+release_args=()
 
 if [ -z "$ANDROID_NDK_HOME" ]; then
-    if [ -d `pwd`/"NDK" ]; then
+    if [ -d "$SCRIPT_DIR"/NDK ]; then
         echo "Found NDK folder in root, using."
-        ANDROID_NDK_HOME=`pwd`/NDK
+        ANDROID_NDK_HOME="$SCRIPT_DIR"/NDK
     else
         # NOTE: I had some issues with this and cargo that magically resolved themselves when I made the path absolute.
         echo "Environment variable ANDROID_NDK_HOME not set, please set to location of Android NDK."
@@ -28,6 +36,7 @@ export ANDROID_NDK_HOME
 
 if [ "$RELEASE" = "true" ]; then
     echo "Building in release mode... (slow)";
+    release_args+=(--release)
 else
     echo "Building in debug mode... (fast)"
     RELEASE=false;
@@ -43,13 +52,20 @@ for archtargetstr in \
     'x86 i686-linux-android' \
     'arm armv7-linux-androideabi' \
 ; do
-    arch=$(echo $archtargetstr | cut -d " " -f 1)
-    target=$(echo $archtargetstr | cut -d " " -f 2)
-    target_underscore=$(echo $target | sed 's/-/_/g')
+    arch="$(echo "$archtargetstr" | cut -d " " -f 1)"
+    target="$(echo "$archtargetstr" | cut -d " " -f 2)"
+    target_underscore="${target//-/_}"
 
-    echo ARCH $arch
-    echo TARGET $target
-    if ! echo "$targets" | grep -q "$arch"; then
+    echo ARCH "$arch"
+    echo TARGET "$target"
+    selected=false
+    for requested_arch in $targets; do
+        if [ "$requested_arch" = "$arch" ]; then
+            selected=true
+            break
+        fi
+    done
+    if [ "$selected" != "true" ]; then
         echo "Skipping $arch..."
         continue
     fi
@@ -66,21 +82,22 @@ for archtargetstr in \
     export RUSTFLAGS="$ORIG_RUSTFLAGS"
     # Need to set AR for target since NDK 21+:
     #   https://github.com/rust-lang/cc-rs/issues/636#issuecomment-1075352495
+    cc="$NDK_ARCH_DIR/${target}-clang"
+    if [ "$arch" = "arm" ]; then
+        cc="$NDK_ARCH_DIR/arm-linux-androideabi-clang"
+    fi
+
     declare -x "AR_${target_underscore}"="$NDK_ARCH_DIR/llvm-ar"
-    declare -x "CC_${target_underscore}"="$NDK_ARCH_DIR/${target}-clang"
+    declare -x "CC_${target_underscore}"="$cc"
     declare -x "RANLIB_${target_underscore}"="$NDK_ARCH_DIR/llvm-ranlib"
 
     # Needed for runtime error: https://github.com/termux/termux-packages/issues/8029
     #   java.lang.UnsatisfiedLinkError: dlopen failed: cannot locate symbol "__extenddftf2"
-    export RUSTFLAGS+=" -C link-arg=$($NDK_ARCH_DIR/${target}-clang -print-libgcc-file-name)"
+    libgcc_path="$("$cc" -print-libgcc-file-name)"
+    export RUSTFLAGS+=" -C link-arg=$libgcc_path"
     # Align to 16KB for Android 15 compatibility
     export RUSTFLAGS+=" -C link-arg=-z -C link-arg=max-page-size=16384"
-    echo RUSTFLAGS=$RUSTFLAGS
-
-    # fix armv7 -> arm
-    if [ "$arch" = "arm" ]; then
-        declare -x "CC_${target_underscore}"="$NDK_ARCH_DIR/arm-linux-androideabi-clang"
-    fi
+    echo RUSTFLAGS="$RUSTFLAGS"
 
     # check that they exist
     for var in AR_${target_underscore} CC_${target_underscore} RANLIB_${target_underscore}; do
@@ -92,12 +109,12 @@ for archtargetstr in \
 
     # People suggest to use this, but ime it needs all the same workarounds anyway :shrug:
     #cargo ndk build -p aw-server --target $target --lib $($RELEASE && echo '--release')
-    
+
     # Build aw-server
     echo "Building aw-server for $arch..."
-    cargo build -p aw-server --target $target --lib $($RELEASE && echo '--release')
-    
+    cargo build -p aw-server --target "$target" --lib "${release_args[@]}"
+
     # Build aw-sync (without cli feature for Android)
     echo "Building aw-sync for $arch..."
-    cargo build -p aw-sync --target $target --lib --no-default-features $($RELEASE && echo '--release')
+    cargo build -p aw-sync --target "$target" --lib --no-default-features "${release_args[@]}"
 done

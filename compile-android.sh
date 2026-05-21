@@ -82,22 +82,22 @@ for archtargetstr in \
     export RUSTFLAGS="$ORIG_RUSTFLAGS"
     # Need to set AR for target since NDK 21+:
     #   https://github.com/rust-lang/cc-rs/issues/636#issuecomment-1075352495
+    cc="$NDK_ARCH_DIR/${target}-clang"
+    if [ "$arch" = "arm" ]; then
+        cc="$NDK_ARCH_DIR/arm-linux-androideabi-clang"
+    fi
+
     declare -x "AR_${target_underscore}"="$NDK_ARCH_DIR/llvm-ar"
-    declare -x "CC_${target_underscore}"="$NDK_ARCH_DIR/${target}-clang"
+    declare -x "CC_${target_underscore}"="$cc"
     declare -x "RANLIB_${target_underscore}"="$NDK_ARCH_DIR/llvm-ranlib"
 
     # Needed for runtime error: https://github.com/termux/termux-packages/issues/8029
     #   java.lang.UnsatisfiedLinkError: dlopen failed: cannot locate symbol "__extenddftf2"
-    libgcc_path="$("$NDK_ARCH_DIR/${target}-clang" -print-libgcc-file-name)"
+    libgcc_path="$("$cc" -print-libgcc-file-name)"
     export RUSTFLAGS+=" -C link-arg=$libgcc_path"
     # Align to 16KB for Android 15 compatibility
     export RUSTFLAGS+=" -C link-arg=-z -C link-arg=max-page-size=16384"
     echo RUSTFLAGS="$RUSTFLAGS"
-
-    # fix armv7 -> arm
-    if [ "$arch" = "arm" ]; then
-        declare -x "CC_${target_underscore}"="$NDK_ARCH_DIR/arm-linux-androideabi-clang"
-    fi
 
     # check that they exist
     for var in AR_${target_underscore} CC_${target_underscore} RANLIB_${target_underscore}; do

@@ -47,7 +47,9 @@ fn drain_request(stream: &mut impl Read) {
     }
     if content_length > 0 {
         let mut body_buf = vec![0_u8; content_length];
-        reader.read_exact(&mut body_buf).expect("drain request body");
+        reader
+            .read_exact(&mut body_buf)
+            .expect("drain request body");
     }
 }
 

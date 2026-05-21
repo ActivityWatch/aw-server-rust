@@ -6,7 +6,7 @@ use crate::dirs;
 
 /// Retrieves the device ID, if none exists it generates one (using UUID v4)
 pub fn get_device_id() -> String {
-    // I chose get_data_dir over get_config_dir since the latter isn't yet supported on Android.
+    // Device IDs are mutable app data, so they live next to the datastore rather than config.
     let mut path = dirs::get_data_dir().unwrap();
     path.push("device_id");
     if path.exists() {

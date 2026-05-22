@@ -74,6 +74,11 @@ struct Opts {
 async fn main() -> Result<(), rocket::Error> {
     let opts: Opts = Opts::parse();
 
+    // Clear sensitive env vars immediately after parse, before setup_logger can start
+    // background threads (std::env::remove_var is not thread-safe on all platforms).
+    #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+    std::env::remove_var("AW_DB_PASSWORD");
+
     use std::sync::Mutex;
 
     let mut testing = opts.testing;
@@ -153,13 +158,17 @@ async fn main() -> Result<(), rocket::Error> {
     };
 
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
-    let datastore = if let Some(key) = opts.db_password {
-        // Clear the env var immediately so child processes don't inherit the key.
-        std::env::remove_var("AW_DB_PASSWORD");
-        info!("Using encrypted database (SQLCipher)");
-        aw_datastore::Datastore::new_encrypted(db_path, key, legacy_import)
-    } else {
-        aw_datastore::Datastore::new(db_path, legacy_import)
+    let datastore = match opts.db_password {
+        Some(key) if key.is_empty() => {
+            // SQLCipher silently treats PRAGMA key '' as no encryption — reject early so
+            // callers don't end up with a plaintext database while believing it is encrypted.
+            panic!("--db-password / AW_DB_PASSWORD must not be empty; aborting to prevent silent plaintext storage");
+        }
+        Some(key) => {
+            info!("Using encrypted database (SQLCipher)");
+            aw_datastore::Datastore::new_encrypted(db_path, key, legacy_import)
+        }
+        None => aw_datastore::Datastore::new(db_path, legacy_import),
     };
     #[cfg(not(any(feature = "encryption", feature = "encryption-vendored")))]
     {

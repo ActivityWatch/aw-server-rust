@@ -32,7 +32,7 @@ pub enum DatastoreMethod {
     /// Encrypted SQLite file using SQLCipher. Only available with the
     /// `encryption` or `encryption-vendored` feature flags.
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
-    FileEncrypted(String, String), // (path, key)
+    FileEncrypted(String, zeroize::Zeroizing<String>), // (path, key)
 }
 
 impl fmt::Debug for DatastoreMethod {

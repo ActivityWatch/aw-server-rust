@@ -61,11 +61,23 @@ struct Opts {
     /// Don't import from aw-server-python if no aw-server-rust db found
     #[clap(long)]
     no_legacy_import: bool,
+
+    /// Encryption key for the database (requires 'encryption' feature).
+    /// Can also be set via the AW_DB_PASSWORD environment variable.
+    /// WARNING: passing a password on the command line may expose it in process listings.
+    #[clap(long, env = "AW_DB_PASSWORD")]
+    #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+    db_password: Option<String>,
 }
 
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
     let opts: Opts = Opts::parse();
+
+    // Clear sensitive env vars immediately after parse, before setup_logger can start
+    // background threads (std::env::remove_var is not thread-safe on all platforms).
+    #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+    std::env::remove_var("AW_DB_PASSWORD");
 
     use std::sync::Mutex;
 
@@ -145,10 +157,37 @@ async fn main() -> Result<(), rocket::Error> {
         device_id::get_device_id()
     };
 
+    #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+    let datastore = match opts.db_password {
+        Some(key) if key.is_empty() => {
+            // SQLCipher silently treats PRAGMA key '' as no encryption — reject early so
+            // callers don't end up with a plaintext database while believing it is encrypted.
+            panic!("--db-password / AW_DB_PASSWORD must not be empty; aborting to prevent silent plaintext storage");
+        }
+        Some(key) => {
+            info!("Using encrypted database (SQLCipher)");
+            aw_datastore::Datastore::new_encrypted(db_path, key, legacy_import)
+        }
+        None => aw_datastore::Datastore::new(db_path, legacy_import),
+    };
+    #[cfg(not(any(feature = "encryption", feature = "encryption-vendored")))]
+    {
+        if std::env::var("AW_DB_PASSWORD").is_ok() {
+            panic!(
+                "AW_DB_PASSWORD is set but this binary was not compiled with encryption support. \
+                 Refusing to start with an unencrypted database when the user requested encryption. \
+                 Rebuild with the 'encryption' or 'encryption-vendored' feature, or unset \
+                 AW_DB_PASSWORD to use an unencrypted database."
+            );
+        }
+    }
+    #[cfg(not(any(feature = "encryption", feature = "encryption-vendored")))]
+    let datastore = aw_datastore::Datastore::new(db_path, legacy_import);
+
     let server_state = endpoints::ServerState {
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
-        datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
+        datastore: Mutex::new(datastore),
         asset_resolver: endpoints::AssetResolver::new(asset_path),
         device_id,
     };

@@ -95,7 +95,9 @@ impl From<Regex> for Rule {
 ///
 /// An event can only have one category, although the category may have a hierarchy,
 /// for instance: "Work -> ActivityWatch -> aw-server-rust"
-/// If multiple categories match, the deepest one will be chosen.
+/// If multiple categories match, the first-matching rule wins, except that
+/// a later rule may override when it is a strictly deeper descendant of the
+/// currently selected category (honouring rule order across unrelated branches).
 pub fn categorize(mut events: Vec<Event>, rules: &[(Vec<String>, Rule)]) -> Vec<Event> {
     let mut classified_events = Vec::new();
     for event in events.drain(..) {
@@ -105,7 +107,7 @@ pub fn categorize(mut events: Vec<Event>, rules: &[(Vec<String>, Rule)]) -> Vec<
 }
 
 fn categorize_one(mut event: Event, rules: &[(Vec<String>, Rule)]) -> Event {
-    let mut category: Vec<String> = vec!["Uncategorized".into()];
+    let mut category: Vec<String> = vec![UNCATEGORIZED.into()];
     for (cat, rule) in rules {
         if rule.matches(&event) {
             category = _pick_highest_ranking_category(category, cat);
@@ -142,8 +144,10 @@ fn tag_one(mut event: Event, rules: &[(String, Rule)]) -> Event {
     event
 }
 
+const UNCATEGORIZED: &str = "Uncategorized";
+
 fn _pick_highest_ranking_category(acc: Vec<String>, item: &[String]) -> Vec<String> {
-    if acc == ["Uncategorized"] {
+    if acc == [UNCATEGORIZED] {
         item.to_vec()
     } else if item.len() > acc.len() && item.starts_with(&acc) {
         // Rule order decides between unrelated categories. A later rule only

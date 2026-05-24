@@ -143,8 +143,12 @@ fn tag_one(mut event: Event, rules: &[(String, Rule)]) -> Event {
 }
 
 fn _pick_highest_ranking_category(acc: Vec<String>, item: &[String]) -> Vec<String> {
-    if item.len() >= acc.len() {
-        // If tag is category with greater or equal depth than current, then choose the new one instead.
+    if acc == ["Uncategorized"] {
+        item.to_vec()
+    } else if item.len() > acc.len() && item.starts_with(&acc) {
+        // Rule order decides between unrelated categories. A later rule only
+        // overrides an earlier match when it is a more specific child of the
+        // already selected category.
         item.to_vec()
     } else {
         acc
@@ -266,6 +270,32 @@ fn test_categorize_uncategorized() {
     assert_eq!(
         events.first().unwrap().data.get("$category").unwrap(),
         &serde_json::json!(vec!["Uncategorized"])
+    );
+}
+
+#[test]
+fn test_categorize_keeps_earlier_unrelated_category() {
+    let mut e = Event::default();
+    e.data
+        .insert("test".into(), serde_json::json!("just a test"));
+
+    let mut events = vec![e];
+    let rules: Vec<(Vec<String>, Rule)> = vec![
+        (
+            vec!["First".into()],
+            Rule::from(Regex::new(r"test").unwrap()),
+        ),
+        (
+            vec!["Second".into(), "Child".into()],
+            Rule::from(Regex::new(r"test").unwrap()),
+        ),
+    ];
+    events = categorize(events, &rules);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events.first().unwrap().data.get("$category").unwrap(),
+        &serde_json::json!(vec!["First"])
     );
 }
 

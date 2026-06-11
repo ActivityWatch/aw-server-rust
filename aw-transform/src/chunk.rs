@@ -34,7 +34,7 @@ pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
             let last_val = last_event.data.get(key).unwrap().clone();
             if &last_val == val {
                 // TODO: Add sub-chunks
-                last_event.duration = last_event.duration + event.duration;
+                last_event.duration += event.duration;
             }
             chunked_events.push(last_event);
             if &last_val != val {

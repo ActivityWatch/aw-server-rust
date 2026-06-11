@@ -144,7 +144,7 @@ mod qfunctions {
         // Typecheck
         validate::args_length(&args, 1)?;
 
-        let bucket_id: String = (&args[0]).try_into()?;
+        let bucket_id: String = args.into_iter().next().unwrap().try_into()?;
         let interval = validate::get_timeinterval(env)?;
 
         let events = match ds.get_events(
@@ -195,10 +195,11 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         validate::args_length(&args, 1).or_else(|_| validate::args_length(&args, 2))?;
 
-        let bucket_filter: String = (&args[0]).try_into()?;
-        let hostname_filter: Option<String> = match args.len() {
-            2 => Some((&args[1]).try_into()?),
-            _ => None,
+        let mut args = args.into_iter();
+        let bucket_filter: String = args.next().unwrap().try_into()?;
+        let hostname_filter: Option<String> = match args.next() {
+            Some(arg) => Some(arg.try_into()?),
+            None => None,
         };
 
         let buckets = match ds.get_buckets() {
@@ -236,7 +237,7 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        match args.get(0).unwrap() {
+        match args.first().unwrap() {
             DataType::List(ref list) => Ok(DataType::Bool(list.contains(&args[1]))),
             DataType::Dict(ref dict) => {
                 let s = match &args[1] {
@@ -264,7 +265,7 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let events: Vec<Event> = (&args[0]).try_into()?;
+        let events: Vec<Event> = args.into_iter().next().unwrap().try_into()?;
         // Run flood
         let mut flooded_events = aw_transform::flood(events, chrono::Duration::seconds(5));
         // Put events back into DataType::Event container
@@ -282,8 +283,9 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events: Vec<Event> = Vec::try_from(&args[0])?;
-        let rules: Vec<(Vec<String>, Rule)> = Vec::try_from(&args[1])?;
+        let mut args = args.into_iter();
+        let events: Vec<Event> = args.next().unwrap().try_into()?;
+        let rules: Vec<(Vec<String>, Rule)> = args.next().unwrap().try_into()?;
         // Run categorize
         let mut flooded_events = aw_transform::classify::categorize(events, &rules);
         // Put events back into DataType::Event container
@@ -301,8 +303,9 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events: Vec<Event> = Vec::try_from(&args[0])?;
-        let rules: Vec<(String, Rule)> = Vec::try_from(&args[1])?;
+        let mut args = args.into_iter();
+        let events: Vec<Event> = args.next().unwrap().try_into()?;
+        let rules: Vec<(String, Rule)> = args.next().unwrap().try_into()?;
         // Run categorize
         let mut flooded_events = aw_transform::classify::tag(events, &rules);
         // Put events back into DataType::Event container
@@ -320,7 +323,7 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let events: Vec<Event> = (&args[0]).try_into()?;
+        let events: Vec<Event> = args.into_iter().next().unwrap().try_into()?;
 
         // Sort by duration
         let mut sorted_events = aw_transform::sort_by_duration(events);
@@ -339,8 +342,9 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let mut events: Vec<Event> = (&args[0]).try_into()?;
-        let mut limit: usize = (&args[1]).try_into()?;
+        let mut args = args.into_iter();
+        let mut events: Vec<Event> = args.next().unwrap().try_into()?;
+        let mut limit: usize = args.next().unwrap().try_into()?;
 
         if events.len() < limit {
             limit = events.len()
@@ -359,7 +363,7 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let events: Vec<Event> = (&args[0]).try_into()?;
+        let events: Vec<Event> = args.into_iter().next().unwrap().try_into()?;
 
         // Sort by duration
         let mut sorted_events = aw_transform::sort_by_timestamp(events);
@@ -378,12 +382,12 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let mut events: Vec<Event> = (&args[0]).try_into()?;
+        let mut events: Vec<Event> = args.into_iter().next().unwrap().try_into()?;
 
         // Sort by duration
         let mut sum_durations = chrono::Duration::zero();
         for event in events.drain(..) {
-            sum_durations = sum_durations + event.duration;
+            sum_durations += event.duration;
         }
         Ok(DataType::Number(
             (sum_durations.num_milliseconds() as f64) / 1000.0,
@@ -397,8 +401,9 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events: Vec<Event> = (&args[0]).try_into()?;
-        let keys: Vec<String> = (&args[1]).try_into()?;
+        let mut args = args.into_iter();
+        let events: Vec<Event> = args.next().unwrap().try_into()?;
+        let keys: Vec<String> = args.next().unwrap().try_into()?;
 
         let mut merged_events = aw_transform::merge_events_by_keys(events, keys);
         let mut merged_tagged_events = Vec::new();
@@ -415,8 +420,9 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events: Vec<Event> = (&args[0]).try_into()?;
-        let key: String = (&args[1]).try_into()?;
+        let mut args = args.into_iter();
+        let events: Vec<Event> = args.next().unwrap().try_into()?;
+        let key: String = args.next().unwrap().try_into()?;
 
         let mut merged_events = aw_transform::chunk_events_by_key(events, &key);
         let mut merged_tagged_events = Vec::new();
@@ -433,9 +439,10 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 3)?;
-        let events = (&args[0]).try_into()?;
-        let key: String = (&args[1]).try_into()?;
-        let vals: Vec<_> = (&args[2]).try_into()?;
+        let mut args = args.into_iter();
+        let events = args.next().unwrap().try_into()?;
+        let key: String = args.next().unwrap().try_into()?;
+        let vals: Vec<_> = args.next().unwrap().try_into()?;
 
         let mut filtered_events = aw_transform::filter_keyvals(events, &key, &vals);
         let mut filtered_tagged_events = Vec::new();
@@ -454,9 +461,10 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 3)?;
-        let events = (&args[0]).try_into()?;
-        let key: String = (&args[1]).try_into()?;
-        let regex_str: String = (&args[2]).try_into()?;
+        let mut args = args.into_iter();
+        let events = args.next().unwrap().try_into()?;
+        let key: String = args.next().unwrap().try_into()?;
+        let regex_str: String = args.next().unwrap().try_into()?;
         let regex = match RegexBuilder::new(&regex_str).build() {
             Ok(regex) => regex,
             Err(e) => {
@@ -481,9 +489,10 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 3)?;
-        let events = (&args[0]).try_into()?;
-        let key: String = (&args[1]).try_into()?;
-        let vals: Vec<_> = (&args[2]).try_into()?;
+        let mut args = args.into_iter();
+        let events = args.next().unwrap().try_into()?;
+        let key: String = args.next().unwrap().try_into()?;
+        let vals: Vec<_> = args.next().unwrap().try_into()?;
 
         let mut filtered_events = aw_transform::exclude_keyvals(events, &key, &vals);
         let mut filtered_tagged_events = Vec::new();
@@ -500,8 +509,9 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events: Vec<Event> = (&args[0]).try_into()?;
-        let filter_events: Vec<Event> = (&args[1]).try_into()?;
+        let mut args = args.into_iter();
+        let events: Vec<Event> = args.next().unwrap().try_into()?;
+        let filter_events: Vec<Event> = args.next().unwrap().try_into()?;
 
         let mut filtered_events = aw_transform::filter_period_intersect(events, filter_events);
         let mut filtered_tagged_events = Vec::new();
@@ -518,7 +528,7 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
-        let mut events: Vec<Event> = (&args[0]).try_into()?;
+        let mut events: Vec<Event> = args.into_iter().next().unwrap().try_into()?;
 
         let mut tagged_split_url_events = Vec::new();
         for mut event in events.drain(..) {
@@ -535,7 +545,7 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         let mut event_list = Vec::new();
         for arg in args {
-            let mut events: Vec<Event> = (&arg).try_into()?;
+            let mut events: Vec<Event> = arg.try_into()?;
             for event in events.drain(..) {
                 event_list.push(DataType::Event(event));
             }
@@ -550,8 +560,9 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events1: Vec<Event> = (&args[0]).try_into()?;
-        let events2: Vec<Event> = (&args[1]).try_into()?;
+        let mut args = args.into_iter();
+        let events1: Vec<Event> = args.next().unwrap().try_into()?;
+        let events2: Vec<Event> = args.next().unwrap().try_into()?;
 
         let mut result = aw_transform::period_union(&events1, &events2);
         let mut result_tagged = Vec::new();
@@ -568,8 +579,9 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
-        let events1: Vec<Event> = (&args[0]).try_into()?;
-        let events2: Vec<Event> = (&args[1]).try_into()?;
+        let mut args = args.into_iter();
+        let events1: Vec<Event> = args.next().unwrap().try_into()?;
+        let events2: Vec<Event> = args.next().unwrap().try_into()?;
 
         let mut result = aw_transform::union_no_overlap(events1, events2);
         let mut result_tagged = Vec::new();

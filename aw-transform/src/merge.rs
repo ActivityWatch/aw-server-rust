@@ -56,7 +56,7 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
         let summed_key = key_values.join(".");
         if merged_events_map.contains_key(&summed_key) {
             let merged_event = merged_events_map.get_mut(&summed_key).unwrap();
-            merged_event.duration = merged_event.duration + event.duration;
+            merged_event.duration += event.duration;
         } else {
             let mut data = HashMap::new();
             for key in &keys {

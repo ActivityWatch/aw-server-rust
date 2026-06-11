@@ -1,3 +1,6 @@
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::vec_init_then_push)]
+
 use crate::ast::*;
 use crate::lexer::Token::*;
 use crate::lexer::*;

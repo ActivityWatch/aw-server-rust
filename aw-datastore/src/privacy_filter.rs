@@ -143,7 +143,7 @@ impl PrivacyFilterEngine {
             .map_err(|e| format!("Failed to parse privacy filter rules: {e}"))?;
         for rule in &rules {
             if rule.action == PrivacyFilterAction::Redact
-                && rule.replacement.as_deref().map_or(true, str::is_empty)
+                && rule.replacement.as_deref().is_none_or(str::is_empty)
             {
                 return Err(format!(
                     "Redact rule with pattern {:?} is missing `replacement` — add a non-empty replacement string or use action=drop",

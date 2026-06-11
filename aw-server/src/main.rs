@@ -71,6 +71,7 @@ struct Opts {
 }
 
 #[rocket::main]
+#[allow(clippy::result_large_err)]
 async fn main() -> Result<(), rocket::Error> {
     let opts: Opts = Opts::parse();
 

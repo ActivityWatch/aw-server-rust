@@ -590,7 +590,7 @@ mod datastore_tests {
             ds.create_bucket(&empty_bucket).unwrap();
             ds.create_bucket(&populated_bucket).unwrap();
             // Insert event
-            ds.insert_events(&populated_bucket.id, &[e1.clone()])
+            ds.insert_events(&populated_bucket.id, std::slice::from_ref(&e1))
                 .unwrap();
 
             // Check that all cached bucket data is correct

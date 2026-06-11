@@ -76,9 +76,7 @@ mod query_tests {
         e_replace.data = json_map! {"key": json!("value2")};
         e_replace.duration = Duration::seconds(2);
 
-        let mut event_list = Vec::new();
-        event_list.push(e1);
-        event_list.push(e2);
+        let event_list = vec![e1, e2];
 
         ds.insert_events(BUCKET_ID, &event_list).unwrap();
 
@@ -622,9 +620,7 @@ mod query_tests {
         // Append lists
         let code = String::from("return [1]+[2];");
         let res = aw_query::query(&code, &interval, &ds).unwrap();
-        let mut v = Vec::new();
-        v.push(DataType::Number(1.0));
-        v.push(DataType::Number(2.0));
+        let v = vec![DataType::Number(1.0), DataType::Number(2.0)];
         assert_eq!(res, DataType::List(v));
 
         // Append strings

@@ -127,8 +127,10 @@ mod tests {
             asset_resolver: endpoints::AssetResolver::new(None),
             device_id: "test_id".to_string(),
         };
-        let mut aw_config = AWConfig::default();
-        aw_config.address = address;
+        let aw_config = AWConfig {
+            address,
+            ..AWConfig::default()
+        };
         endpoints::build_rocket(state, aw_config)
     }
 

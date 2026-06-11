@@ -59,7 +59,12 @@ impl SingleInstance {
         #[cfg(unix)]
         {
             // On Unix-like systems, use flock
-            match OpenOptions::new().write(true).create(true).open(&lockfile) {
+            match OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&lockfile)
+            {
                 Ok(file) => match file.try_lock_exclusive() {
                     Ok(true) => Ok(SingleInstance {
                         file: Some(file),

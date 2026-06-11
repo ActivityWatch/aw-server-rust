@@ -114,7 +114,6 @@ impl Fairing for HostCheck {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
 
     use rocket::http::{ContentType, Header, Status};
     use rocket::Rocket;
@@ -124,7 +123,7 @@ mod tests {
 
     fn setup_testserver(address: String) -> Rocket<rocket::Build> {
         let state = endpoints::ServerState {
-            datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
+            datastore: aw_datastore::Datastore::new_in_memory(false),
             asset_resolver: endpoints::AssetResolver::new(None),
             device_id: "test_id".to_string(),
         };

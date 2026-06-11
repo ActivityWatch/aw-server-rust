@@ -1,7 +1,6 @@
 use rust_embed::RustEmbed;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use gethostname::gethostname;
 use rocket::fs::FileServer;
@@ -38,8 +37,12 @@ impl AssetResolver {
     }
 }
 
+// The Datastore is just a cheap handle to the DB worker thread (a crossbeam
+// channel sender), which serializes all DB access internally. No mutex is
+// needed here — wrapping it in one would serialize all HTTP requests, letting
+// a slow query block every heartbeat.
 pub struct ServerState {
-    pub datastore: Mutex<Datastore>,
+    pub datastore: Datastore,
     pub asset_resolver: AssetResolver,
     pub device_id: String,
 }

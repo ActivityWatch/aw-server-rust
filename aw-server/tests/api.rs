@@ -8,7 +8,6 @@ extern crate aw_server;
 #[cfg(test)]
 mod api_tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
 
     use rocket::http::{ContentType, Header, Status};
     use serde_json::{json, Value};
@@ -21,7 +20,7 @@ mod api_tests {
 
     fn setup_testserver() -> rocket::Rocket<rocket::Build> {
         let state = endpoints::ServerState {
-            datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
+            datastore: aw_datastore::Datastore::new_in_memory(false),
             asset_resolver: endpoints::AssetResolver::new(None),
             device_id: "test_id".to_string(),
         };

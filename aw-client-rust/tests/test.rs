@@ -115,7 +115,7 @@ mod test {
         use aw_server::endpoints::ServerState;
 
         let state = ServerState {
-            datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
+            datastore: aw_datastore::Datastore::new_in_memory(false),
             asset_resolver: AssetResolver::new(None),
             device_id: "test_id".to_string(),
         };

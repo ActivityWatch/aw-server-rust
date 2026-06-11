@@ -79,8 +79,6 @@ async fn main() -> Result<(), rocket::Error> {
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
     std::env::remove_var("AW_DB_PASSWORD");
 
-    use std::sync::Mutex;
-
     let mut testing = opts.testing;
 
     // Always override environment if --testing is specified
@@ -142,7 +140,7 @@ async fn main() -> Result<(), rocket::Error> {
     };
     info!("Using DB at path {:?}", db_path);
 
-    let asset_path = opts.webpath.map(|webpath| PathBuf::from(webpath));
+    let asset_path = opts.webpath.map(PathBuf::from);
     info!("Using aw-webui assets at path {:?}", asset_path);
 
     // Only use legacy import if opts.dbpath is not set
@@ -187,7 +185,7 @@ async fn main() -> Result<(), rocket::Error> {
     let server_state = endpoints::ServerState {
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
-        datastore: Mutex::new(datastore),
+        datastore,
         asset_resolver: endpoints::AssetResolver::new(asset_path),
         device_id,
     };

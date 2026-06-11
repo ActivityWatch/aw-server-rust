@@ -19,8 +19,6 @@ use crate::DatastoreError;
 use crate::DatastoreInstance;
 use crate::DatastoreMethod;
 
-use mpsc_requests::ResponseReceiver;
-
 type RequestSender = mpsc_requests::RequestSender<Command, Result<Response, DatastoreError>>;
 type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>;
 
@@ -83,15 +81,10 @@ pub enum Command {
     Close(),
 }
 
-fn _unwrap_response(
-    receiver: ResponseReceiver<Result<Response, DatastoreError>>,
-) -> Result<(), DatastoreError> {
-    match receiver.collect().unwrap() {
-        Ok(r) => match r {
-            Response::Empty() => Ok(()),
-            _ => panic!("Invalid response"),
-        },
-        Err(e) => Err(e),
+fn _unwrap_empty_response(response: Response) -> Result<(), DatastoreError> {
+    match response {
+        Response::Empty() => Ok(()),
+        _ => panic!("Invalid response"),
     }
 }
 
@@ -408,50 +401,50 @@ impl Datastore {
         Datastore { requester }
     }
 
+    /// Send a command to the worker thread and wait for its response.
+    ///
+    /// Fails with `InternalError` instead of panicking when the worker thread
+    /// is gone (e.g. it panicked on an earlier request), so callers such as
+    /// HTTP endpoints can degrade to a 5xx response instead of crashing the
+    /// request.
+    fn request(&self, cmd: Command) -> Result<Response, DatastoreError> {
+        let receiver = self.requester.request(cmd).map_err(|e| {
+            DatastoreError::InternalError(format!(
+                "Failed to send request, datastore worker is gone: {e:?}"
+            ))
+        })?;
+        receiver.collect().map_err(|e| {
+            DatastoreError::InternalError(format!(
+                "Failed to receive response, datastore worker died while handling request: {e:?}"
+            ))
+        })?
+    }
+
     pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
         let cmd = Command::CreateBucket(bucket.clone());
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        _unwrap_empty_response(self.request(cmd)?)
     }
 
     pub fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError> {
         let cmd = Command::DeleteBucket(bucket_id.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Empty() => Ok(()),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
-        }
+        _unwrap_empty_response(self.request(cmd)?)
     }
 
     pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
         let cmd = Command::GetBucket(bucket_id.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Bucket(b) => Ok(b),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::Bucket(b) => Ok(b),
+            _ => panic!("Invalid response"),
         }
     }
 
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
         let cmd = Command::GetBuckets();
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::BucketMap(bm) => Ok(bm),
-                e => Err(DatastoreError::InternalError(format!(
-                    "Invalid response: {e:?}"
-                ))),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::BucketMap(bm) => Ok(bm),
+            e => Err(DatastoreError::InternalError(format!(
+                "Invalid response: {e:?}"
+            ))),
         }
     }
 
@@ -461,13 +454,9 @@ impl Datastore {
         events: &[Event],
     ) -> Result<Vec<Event>, DatastoreError> {
         let cmd = Command::InsertEvents(bucket_id.to_string(), events.to_vec());
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::EventList(events) => Ok(events),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::EventList(events) => Ok(events),
+            _ => panic!("Invalid response"),
         }
     }
 
@@ -478,25 +467,17 @@ impl Datastore {
         pulsetime: f64,
     ) -> Result<Event, DatastoreError> {
         let cmd = Command::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime);
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Event(e) => Ok(e),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::Event(e) => Ok(e),
+            _ => panic!("Invalid response"),
         }
     }
 
     pub fn get_event(&self, bucket_id: &str, event_id: i64) -> Result<Event, DatastoreError> {
         let cmd = Command::GetEvent(bucket_id.to_string(), event_id);
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Event(el) => Ok(el),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::Event(el) => Ok(el),
+            _ => panic!("Invalid response"),
         }
     }
 
@@ -514,13 +495,9 @@ impl Datastore {
             limit_opt,
             false,
         );
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::EventList(el) => Ok(el),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::EventList(el) => Ok(el),
+            _ => panic!("Invalid response"),
         }
     }
 
@@ -538,13 +515,9 @@ impl Datastore {
             limit_opt,
             true,
         );
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::EventList(el) => Ok(el),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::EventList(el) => Ok(el),
+            _ => panic!("Invalid response"),
         }
     }
 
@@ -555,13 +528,9 @@ impl Datastore {
         endtime_opt: Option<DateTime<Utc>>,
     ) -> Result<i64, DatastoreError> {
         let cmd = Command::GetEventCount(bucket_id.to_string(), starttime_opt, endtime_opt);
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Count(n) => Ok(n),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::Count(n) => Ok(n),
+            _ => panic!("Invalid response"),
         }
     }
 
@@ -571,87 +540,52 @@ impl Datastore {
         event_ids: Vec<i64>,
     ) -> Result<(), DatastoreError> {
         let cmd = Command::DeleteEventsById(bucket_id.to_string(), event_ids);
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Empty() => Ok(()),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
-        }
+        _unwrap_empty_response(self.request(cmd)?)
     }
 
     pub fn force_commit(&self) -> Result<(), DatastoreError> {
         let cmd = Command::ForceCommit();
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Empty() => Ok(()),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
-        }
+        _unwrap_empty_response(self.request(cmd)?)
     }
 
     pub fn get_key_values(&self, pattern: &str) -> Result<HashMap<String, String>, DatastoreError> {
         let cmd = Command::GetKeyValues(pattern.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::KeyValues(value) => Ok(value),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::KeyValues(value) => Ok(value),
+            _ => panic!("Invalid response"),
         }
     }
 
     pub fn get_key_value(&self, key: &str) -> Result<String, DatastoreError> {
         let cmd = Command::GetKeyValue(key.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::KeyValue(kv) => Ok(kv),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::KeyValue(kv) => Ok(kv),
+            _ => panic!("Invalid response"),
         }
     }
 
     pub fn set_key_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
         let cmd = Command::SetKeyValue(key.to_string(), data.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        _unwrap_response(receiver)
+        _unwrap_empty_response(self.request(cmd)?)
     }
 
     pub fn delete_key_value(&self, key: &str) -> Result<(), DatastoreError> {
         let cmd = Command::DeleteKeyValue(key.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        _unwrap_response(receiver)
+        _unwrap_empty_response(self.request(cmd)?)
     }
 
     pub fn refresh_privacy_filter(&self) -> Result<(), DatastoreError> {
-        let receiver = self
-            .requester
-            .request(Command::RefreshPrivacyFilter())
-            .unwrap();
-        _unwrap_response(receiver)
+        _unwrap_empty_response(self.request(Command::RefreshPrivacyFilter())?)
     }
 
     // Should block until worker has stopped
     pub fn close(&self) {
         info!("Sending close request to database");
-        let receiver = self.requester.request(Command::Close()).unwrap();
-
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Empty() => (),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => panic!("Error closing database: {:?}", e),
+        match self.request(Command::Close()) {
+            Ok(Response::Empty()) => (),
+            Ok(_) => panic!("Invalid response"),
+            // Worker already gone means there is nothing left to close
+            Err(e) => warn!("Error closing database: {e:?}"),
         }
     }
 }

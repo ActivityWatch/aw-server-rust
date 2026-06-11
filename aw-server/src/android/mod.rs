@@ -36,7 +36,6 @@ pub mod android {
     use super::*;
 
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     use crate::endpoints;
     use crate::endpoints::ServerState;
@@ -120,7 +119,7 @@ pub mod android {
         // FIXME: Why is unsafe needed here? Can we get rid of it?
         unsafe {
             let server_state: ServerState = endpoints::ServerState {
-                datastore: Mutex::new(openDatastore()),
+                datastore: openDatastore(),
                 asset_resolver: endpoints::AssetResolver::new(None),
                 device_id: device_id::get_device_id(),
             };

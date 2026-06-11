@@ -4,7 +4,6 @@ use rocket::serde::json::Json;
 use rocket::State;
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Mutex;
 
 use aw_models::{BucketsExport, Event};
 
@@ -39,8 +38,7 @@ fn event_identity(
     Ok((event.timestamp, duration_ns, data_json))
 }
 
-fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), HttpErrorJson> {
-    let datastore = endpoints_get_lock!(datastore_mutex);
+fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJson> {
     for (_bucketname, mut bucket) in import.buckets {
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),

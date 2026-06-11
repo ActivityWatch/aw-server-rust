@@ -471,6 +471,99 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_migration_v4_to_v5() {
+        let mut db_path = get_cache_dir().unwrap();
+        db_path.push("datastore-unittest-migration-v4.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+
+        if db_path.exists() {
+            std::fs::remove_file(&db_path)
+                .expect("Failed to remove datastore-unittest-migration-v4.db file");
+        }
+
+        // Construct a database with the v4 schema (single-column indexes)
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE buckets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    type TEXT NOT NULL,
+                    client TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    created TEXT NOT NULL,
+                    data TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX bucket_id_index ON buckets(id);
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bucketrow INTEGER NOT NULL,
+                    starttime INTEGER NOT NULL,
+                    endtime INTEGER NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+                );
+                CREATE INDEX events_bucketrow_index ON events(bucketrow);
+                CREATE INDEX events_starttime_index ON events(starttime);
+                CREATE INDEX events_endtime_index ON events(endtime);
+                CREATE TABLE key_value (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    last_modified NUMBER NOT NULL
+                );
+                INSERT INTO buckets (name, type, client, hostname, created, data)
+                    VALUES ('testid', 'testtype', 'testclient', 'testhost',
+                            '2024-01-01T00:00:00+00:00', '{}');
+                INSERT INTO events (bucketrow, starttime, endtime, data)
+                    VALUES (1, 1000000000, 2000000000, '{"key": "value"}');
+                PRAGMA user_version = 4;
+            "#,
+            )
+            .unwrap();
+        }
+
+        // Opening the datastore migrates to the newest version
+        {
+            let ds = Datastore::new(db_path_str, false);
+            let events = ds.get_events("testid", None, None, None).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data, json_map! {"key": json!("value")});
+            ds.close();
+        }
+
+        // Verify version bump and index replacement
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let version: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 5);
+            let old_indexes: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN
+                     ('events_bucketrow_index', 'events_starttime_index', 'events_endtime_index')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(old_indexes, 0, "single-column indexes should be dropped");
+            let new_index: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'index'
+                     AND name = 'events_bucketrow_starttime_endtime_index'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(new_index, 1, "composite index should exist");
+        }
+
+        std::fs::remove_file(&db_path)
+            .expect("Failed to remove datastore-unittest-migration-v4.db file");
+    }
+
+    #[test]
     fn test_datastore_reload() {
         // Create tmp datastore path
         let mut db_path = get_cache_dir().unwrap();

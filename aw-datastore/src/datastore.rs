@@ -29,8 +29,9 @@ fn _get_db_version(conn: &Connection) -> i32 {
  * 2: Added 'data' field to 'buckets' table
  * 3: see: https://github.com/ActivityWatch/aw-server-rust/pull/52
  * 4: Added 'key_value' table for storing key - value pairs
+ * 5: Replaced single-column events indexes with a composite index
  */
-static NEWEST_DB_VERSION: i32 = 4;
+static NEWEST_DB_VERSION: i32 = 5;
 
 fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;
@@ -50,6 +51,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 4 {
         _migrate_v3_to_v4(conn);
+    }
+
+    if version < 5 {
+        _migrate_v4_to_v5(conn);
     }
 
     first_init
@@ -167,6 +172,35 @@ fn _migrate_v3_to_v4(conn: &Connection) {
 
     conn.pragma_update(None, "user_version", 4)
         .expect("Failed to update database version!");
+}
+
+fn _migrate_v4_to_v5(conn: &Connection) {
+    info!(
+        "Upgrading database to v5, replacing single-column events indexes with a composite index"
+    );
+    // Every event query filters on bucketrow and a starttime/endtime range,
+    // ordered by starttime. A composite index serves the seek, the range scan
+    // and the ORDER BY in one pass (with endtime checked from the index
+    // without fetching the row), where the single-column indexes could only
+    // cover one predicate and left the rest as scan + sort. Dropping them
+    // also makes inserts cheaper (one index to maintain instead of three).
+    //
+    // starttime is DESC so a forward scan yields the query's newest-first
+    // order with equal-timestamp events in rowid (insertion) order, matching
+    // the ordering callers observed before this index existed.
+    conn.execute_batch(
+        "
+        BEGIN EXCLUSIVE TRANSACTION;
+        CREATE INDEX IF NOT EXISTS events_bucketrow_starttime_endtime_index
+            ON events(bucketrow, starttime DESC, endtime);
+        DROP INDEX IF EXISTS events_bucketrow_index;
+        DROP INDEX IF EXISTS events_starttime_index;
+        DROP INDEX IF EXISTS events_endtime_index;
+        PRAGMA user_version = 5;
+        COMMIT;
+    ",
+    )
+    .expect("Failed to run v5 migration transaction");
 }
 
 pub struct DatastoreInstance {

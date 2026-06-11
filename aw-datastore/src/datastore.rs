@@ -241,7 +241,7 @@ impl DatastoreInstance {
     }
 
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
             SELECT  buckets.id, buckets.name, buckets.type, buckets.client,
                     buckets.hostname, buckets.created,
@@ -358,7 +358,7 @@ impl DatastoreInstance {
             Some(created) => Some(created),
             None => Some(Utc::now()),
         };
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 INSERT INTO buckets (name, type, client, hostname, created, data)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -464,7 +464,7 @@ impl DatastoreInstance {
     ) -> Result<Vec<Event>, DatastoreError> {
         let mut bucket = self.get_bucket(bucket_id)?;
 
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 INSERT OR REPLACE INTO events(bucketrow, id, starttime, endtime, data)
                 VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -518,7 +518,7 @@ impl DatastoreInstance {
         event_ids: Vec<i64>,
     ) -> Result<(), DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 DELETE FROM events
                 WHERE bucketrow = ?1 AND id = ?2",
@@ -591,7 +591,7 @@ impl DatastoreInstance {
         let mut bucket = self.get_bucket(bucket_id)?;
 
         // Use event ID directly instead of max(endtime) to avoid mismatch with get_events ordering
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 UPDATE events
                 SET starttime = ?2, endtime = ?3, data = ?4
@@ -699,7 +699,7 @@ impl DatastoreInstance {
     ) -> Result<Event, DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
 
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 SELECT id, starttime, endtime, data
                 FROM events
@@ -777,7 +777,7 @@ impl DatastoreInstance {
             None => -1,
         };
 
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 SELECT id, starttime, endtime, data
                 FROM events
@@ -900,7 +900,7 @@ impl DatastoreInstance {
             return Ok(0);
         }
 
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
             SELECT count(*) FROM events
             WHERE bucketrow = ?1
@@ -940,7 +940,7 @@ impl DatastoreInstance {
         key: &str,
         data: &str,
     ) -> Result<(), DatastoreError> {
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 INSERT OR REPLACE INTO key_value(key, value, last_modified)
                 VALUES (?1, ?2, ?3)",
@@ -966,7 +966,7 @@ impl DatastoreInstance {
     }
 
     pub fn get_key_value(&self, conn: &Connection, key: &str) -> Result<String, DatastoreError> {
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 SELECT * FROM key_value WHERE KEY = ?1",
         ) {
@@ -996,14 +996,15 @@ impl DatastoreInstance {
         conn: &Connection,
         pattern: &str,
     ) -> Result<HashMap<String, String>, DatastoreError> {
-        let mut stmt = match conn.prepare("SELECT key, value FROM key_value WHERE key LIKE ?") {
-            Ok(stmt) => stmt,
-            Err(err) => {
-                return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare get_value SQL statement: {err}"
-                )))
-            }
-        };
+        let mut stmt =
+            match conn.prepare_cached("SELECT key, value FROM key_value WHERE key LIKE ?") {
+                Ok(stmt) => stmt,
+                Err(err) => {
+                    return Err(DatastoreError::InternalError(format!(
+                        "Failed to prepare get_value SQL statement: {err}"
+                    )))
+                }
+            };
 
         let mut output = HashMap::<String, String>::new();
         // Rusqlite's get wants index and item type as parameters.

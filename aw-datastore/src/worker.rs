@@ -197,6 +197,15 @@ impl DatastoreWorker {
 
             self.uncommitted_events = 0;
             self.commit = false;
+            // ForceCommit and Close promise the caller that their data is
+            // committed, so their acks are held back until the transaction
+            // below has actually committed. Acking first (as before) let a
+            // caller reopen the database and read a pre-commit snapshot —
+            // harmless under the rollback journal's locking, but a real race
+            // in WAL mode where readers never block on the writer.
+            // All other commands are acked immediately: a watcher heartbeat
+            // must not wait up to 15 s for the batch commit.
+            let mut deferred_ack = None;
             loop {
                 let (request, response_sender) = match self.responder.poll() {
                     Ok((req, res_sender)) => (req, res_sender),
@@ -207,7 +216,13 @@ impl DatastoreWorker {
                         break;
                     }
                 };
+                let ack_after_commit = matches!(request, Command::ForceCommit() | Command::Close());
                 let response = self.handle_request(request, &mut ds, &tx);
+                if ack_after_commit {
+                    // Both commands force a commit, so the loop ends here.
+                    deferred_ack = Some((response_sender, response));
+                    break;
+                }
                 response_sender.respond(response);
 
                 let now: DateTime<Utc> = Utc::now();
@@ -225,7 +240,11 @@ impl DatastoreWorker {
                 self.commit, self.uncommitted_events
             );
             match tx.commit() {
-                Ok(_) => (),
+                Ok(_) => {
+                    if let Some((sender, response)) = deferred_ack.take() {
+                        sender.respond(response);
+                    }
+                }
                 Err(err) => {
                     error!(
                         "Failed to commit datastore transaction ({} events lost): {err}",
@@ -237,6 +256,11 @@ impl DatastoreWorker {
                     // know to retry. Rolled-back events create a gap in the timeline;
                     // watchers will resume sending heartbeats from current state, but the
                     // specific batch of events is permanently lost.
+                    if let Some((sender, _)) = deferred_ack.take() {
+                        sender.respond(Err(DatastoreError::InternalError(format!(
+                            "Failed to commit datastore transaction: {err}"
+                        ))));
+                    }
                 }
             }
             if self.quit {

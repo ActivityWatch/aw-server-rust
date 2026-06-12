@@ -138,6 +138,24 @@ impl DatastoreWorker {
                 conn
             }
         };
+
+        // WAL turns each commit into a single sequential WAL append+fsync where
+        // delete mode paid two fsyncs plus journal-file churn, and lets future
+        // reader connections proceed while a commit is in flight.
+        // synchronous=FULL is set explicitly (rather than relying on the
+        // default) so a commit remains durable on disk the moment it returns;
+        // with NORMAL the WAL is only synced at checkpoints, which would
+        // silently widen the loss window on power failure.
+        // In-memory databases ignore the request (journal_mode stays "memory").
+        let journal_mode: String = conn
+            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+            .expect("Failed to query journal_mode");
+        if !matches!(&method, DatastoreMethod::Memory()) && journal_mode != "wal" {
+            warn!("Failed to enable WAL (journal_mode={journal_mode}), continuing without it");
+        }
+        conn.pragma_update(None, "synchronous", "FULL")
+            .expect("Failed to set synchronous=FULL");
+
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
 
         // Ensure legacy import

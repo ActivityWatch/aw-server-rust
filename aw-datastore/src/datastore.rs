@@ -188,14 +188,18 @@ fn _migrate_v4_to_v5(conn: &Connection) {
     // starttime is DESC so a forward scan yields the query's newest-first
     // order with equal-timestamp events in rowid (insertion) order, matching
     // the ordering callers observed before this index existed.
+    //
+    // The drops run before the create so the pages they free are reused to
+    // build the new index within the same transaction; creating first would
+    // permanently grow the database file by the new index's size.
     conn.execute_batch(
         "
         BEGIN EXCLUSIVE TRANSACTION;
-        CREATE INDEX IF NOT EXISTS events_bucketrow_starttime_endtime_index
-            ON events(bucketrow, starttime DESC, endtime);
         DROP INDEX IF EXISTS events_bucketrow_index;
         DROP INDEX IF EXISTS events_starttime_index;
         DROP INDEX IF EXISTS events_endtime_index;
+        CREATE INDEX IF NOT EXISTS events_bucketrow_starttime_endtime_index
+            ON events(bucketrow, starttime DESC, endtime);
         PRAGMA user_version = 5;
         COMMIT;
     ",

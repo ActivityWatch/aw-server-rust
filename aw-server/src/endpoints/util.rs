@@ -101,18 +101,3 @@ impl From<DatastoreError> for HttpErrorJson {
         }
     }
 }
-
-#[macro_export]
-macro_rules! endpoints_get_lock {
-    ( $lock:expr ) => {
-        match $lock.lock() {
-            Ok(r) => r,
-            Err(e) => {
-                use rocket::http::Status;
-                let err_msg = format!("Taking datastore lock failed, returning 504: {}", e);
-                warn!("{}", err_msg);
-                return Err(HttpErrorJson::new(Status::ServiceUnavailable, err_msg));
-            }
-        }
-    };
-}

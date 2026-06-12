@@ -29,8 +29,9 @@ fn _get_db_version(conn: &Connection) -> i32 {
  * 2: Added 'data' field to 'buckets' table
  * 3: see: https://github.com/ActivityWatch/aw-server-rust/pull/52
  * 4: Added 'key_value' table for storing key - value pairs
+ * 5: Replaced single-column events indexes with a composite index
  */
-static NEWEST_DB_VERSION: i32 = 4;
+static NEWEST_DB_VERSION: i32 = 5;
 
 fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;
@@ -50,6 +51,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 4 {
         _migrate_v3_to_v4(conn);
+    }
+
+    if version < 5 {
+        _migrate_v4_to_v5(conn);
     }
 
     first_init
@@ -169,6 +174,39 @@ fn _migrate_v3_to_v4(conn: &Connection) {
         .expect("Failed to update database version!");
 }
 
+fn _migrate_v4_to_v5(conn: &Connection) {
+    info!(
+        "Upgrading database to v5, replacing single-column events indexes with a composite index"
+    );
+    // Every event query filters on bucketrow and a starttime/endtime range,
+    // ordered by starttime. A composite index serves the seek, the range scan
+    // and the ORDER BY in one pass (with endtime checked from the index
+    // without fetching the row), where the single-column indexes could only
+    // cover one predicate and left the rest as scan + sort. Dropping them
+    // also makes inserts cheaper (one index to maintain instead of three).
+    //
+    // starttime is DESC so a forward scan yields the query's newest-first
+    // order with equal-timestamp events in rowid (insertion) order, matching
+    // the ordering callers observed before this index existed.
+    //
+    // The drops run before the create so the pages they free are reused to
+    // build the new index within the same transaction; creating first would
+    // permanently grow the database file by the new index's size.
+    conn.execute_batch(
+        "
+        BEGIN EXCLUSIVE TRANSACTION;
+        DROP INDEX IF EXISTS events_bucketrow_index;
+        DROP INDEX IF EXISTS events_starttime_index;
+        DROP INDEX IF EXISTS events_endtime_index;
+        CREATE INDEX IF NOT EXISTS events_bucketrow_starttime_endtime_index
+            ON events(bucketrow, starttime DESC, endtime);
+        PRAGMA user_version = 5;
+        COMMIT;
+    ",
+    )
+    .expect("Failed to run v5 migration transaction");
+}
+
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
     first_init: bool,
@@ -207,7 +245,7 @@ impl DatastoreInstance {
     }
 
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
             SELECT  buckets.id, buckets.name, buckets.type, buckets.client,
                     buckets.hostname, buckets.created,
@@ -324,7 +362,7 @@ impl DatastoreInstance {
             Some(created) => Some(created),
             None => Some(Utc::now()),
         };
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 INSERT INTO buckets (name, type, client, hostname, created, data)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -430,7 +468,7 @@ impl DatastoreInstance {
     ) -> Result<Vec<Event>, DatastoreError> {
         let mut bucket = self.get_bucket(bucket_id)?;
 
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 INSERT OR REPLACE INTO events(bucketrow, id, starttime, endtime, data)
                 VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -484,7 +522,7 @@ impl DatastoreInstance {
         event_ids: Vec<i64>,
     ) -> Result<(), DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 DELETE FROM events
                 WHERE bucketrow = ?1 AND id = ?2",
@@ -557,7 +595,7 @@ impl DatastoreInstance {
         let mut bucket = self.get_bucket(bucket_id)?;
 
         // Use event ID directly instead of max(endtime) to avoid mismatch with get_events ordering
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 UPDATE events
                 SET starttime = ?2, endtime = ?3, data = ?4
@@ -665,7 +703,7 @@ impl DatastoreInstance {
     ) -> Result<Event, DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
 
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 SELECT id, starttime, endtime, data
                 FROM events
@@ -743,7 +781,7 @@ impl DatastoreInstance {
             None => -1,
         };
 
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 SELECT id, starttime, endtime, data
                 FROM events
@@ -866,7 +904,7 @@ impl DatastoreInstance {
             return Ok(0);
         }
 
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
             SELECT count(*) FROM events
             WHERE bucketrow = ?1
@@ -906,7 +944,7 @@ impl DatastoreInstance {
         key: &str,
         data: &str,
     ) -> Result<(), DatastoreError> {
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 INSERT OR REPLACE INTO key_value(key, value, last_modified)
                 VALUES (?1, ?2, ?3)",
@@ -932,7 +970,7 @@ impl DatastoreInstance {
     }
 
     pub fn get_key_value(&self, conn: &Connection, key: &str) -> Result<String, DatastoreError> {
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "
                 SELECT * FROM key_value WHERE KEY = ?1",
         ) {
@@ -962,14 +1000,15 @@ impl DatastoreInstance {
         conn: &Connection,
         pattern: &str,
     ) -> Result<HashMap<String, String>, DatastoreError> {
-        let mut stmt = match conn.prepare("SELECT key, value FROM key_value WHERE key LIKE ?") {
-            Ok(stmt) => stmt,
-            Err(err) => {
-                return Err(DatastoreError::InternalError(format!(
-                    "Failed to prepare get_value SQL statement: {err}"
-                )))
-            }
-        };
+        let mut stmt =
+            match conn.prepare_cached("SELECT key, value FROM key_value WHERE key LIKE ?") {
+                Ok(stmt) => stmt,
+                Err(err) => {
+                    return Err(DatastoreError::InternalError(format!(
+                        "Failed to prepare get_value SQL statement: {err}"
+                    )))
+                }
+            };
 
         let mut output = HashMap::<String, String>::new();
         // Rusqlite's get wants index and item type as parameters.

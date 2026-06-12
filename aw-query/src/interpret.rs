@@ -184,7 +184,9 @@ fn interpret_expr(
             env.insert(var, val);
             Ok(DataType::None())
         }
-        // FIXME: avoid clone, it's slow
+        // This clone is the one necessary copy per variable reference: the env
+        // must retain the value since it may be referenced again, while
+        // function arguments and transforms need owned events.
         Var(var) => match env.get(&var) {
             Some(v) => Ok(v.clone()),
             None => Err(QueryError::VariableNotDefined(var.to_string())),
@@ -237,7 +239,7 @@ fn interpret_expr(
             let mut dict = HashMap::new();
             for (key, val_uninterpreted) in d {
                 let val = interpret_expr(env, ds, val_uninterpreted)?;
-                dict.insert(key.clone(), val);
+                dict.insert(key, val);
             }
             Ok(DataType::Dict(dict))
         }

@@ -1,6 +1,6 @@
 use dirs::cache_dir;
 use fs4::fs_std::FileExt;
-use log::{debug, error};
+use log::debug;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,7 +48,8 @@ impl SingleInstance {
                     locked: Arc::new(AtomicBool::new(true)),
                 }),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    error!("Another instance is already running");
+                    // Qualified so the unix build doesn't carry an unused `error` import
+                    log::error!("Another instance is already running");
                     Err(SingleInstanceError::AlreadyRunning)
                 }
                 Err(e) => Err(SingleInstanceError::Io(e)),
@@ -58,7 +59,12 @@ impl SingleInstance {
         #[cfg(unix)]
         {
             // On Unix-like systems, use flock
-            match OpenOptions::new().write(true).create(true).open(&lockfile) {
+            match OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&lockfile)
+            {
                 Ok(file) => match file.try_lock_exclusive() {
                     Ok(true) => Ok(SingleInstance {
                         file: Some(file),

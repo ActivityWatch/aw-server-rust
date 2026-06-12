@@ -334,7 +334,7 @@ fn sync_one(
 
     // Sort ascending
     // FIXME: What happens here if two events have the same timestamp?
-    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    events.sort_by_key(|a| a.timestamp);
 
     // TODO: Do bulk insert using insert_events instead? (for performance)
     //       Client-side heartbeat queueing should keep things somewhat performant though?

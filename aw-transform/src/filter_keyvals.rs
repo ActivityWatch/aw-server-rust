@@ -100,7 +100,7 @@ mod tests {
         e2.data = json_map! {"test": json!(1), "test2": json!(1)};
         let mut e3 = e1.clone();
         e3.data = json_map! {"test2": json!(2)};
-        let res = filter_keyvals(vec![e1.clone(), e2.clone(), e3], "test", &vec![json!(1)]);
+        let res = filter_keyvals(vec![e1.clone(), e2.clone(), e3], "test", &[json!(1)]);
         assert_eq!(vec![e1, e2], res);
     }
 
@@ -160,7 +160,7 @@ mod tests {
         e2.data = json_map! {"test": json!(1), "test2": json!(2)};
         let mut e3 = e1.clone();
         e3.data = json_map! {"test": json!(2)};
-        let res = exclude_keyvals(vec![e1.clone(), e2.clone(), e3], "test", &vec![json!(2)]);
+        let res = exclude_keyvals(vec![e1.clone(), e2.clone(), e3], "test", &[json!(2)]);
         assert_eq!(vec![e1, e2], res);
     }
 }

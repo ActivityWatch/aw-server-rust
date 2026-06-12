@@ -3,9 +3,8 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
 use std::collections::HashMap;
-use std::sync::MutexGuard;
 
-use aw_datastore::{Datastore, DatastoreError};
+use aw_datastore::DatastoreError;
 
 use crate::endpoints::HttpErrorJson;
 
@@ -25,7 +24,7 @@ fn parse_key(key: String) -> Result<String, HttpErrorJson> {
 pub fn settings_get(
     state: &State<ServerState>,
 ) -> Result<Json<HashMap<String, serde_json::Value>>, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
+    let datastore = &state.datastore;
     let queryresults = match datastore.get_key_values("settings.%") {
         Ok(result) => Ok(result),
         Err(err) => Err(err.into()),
@@ -53,7 +52,7 @@ pub fn setting_get(
     key: String,
 ) -> Result<Json<serde_json::Value>, HttpErrorJson> {
     let setting_key = parse_key(key)?;
-    let datastore = endpoints_get_lock!(state.datastore);
+    let datastore = &state.datastore;
 
     match datastore.get_key_value(&setting_key) {
         Ok(value) => Ok(Json(serde_json::from_str(&value).unwrap())),
@@ -79,7 +78,7 @@ pub fn setting_set(
         }
     };
 
-    let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
+    let datastore = &state.datastore;
     let result = datastore.set_key_value(&setting_key, &value_str);
 
     match result {
@@ -92,7 +91,7 @@ pub fn setting_set(
 pub fn setting_delete(state: &State<ServerState>, key: String) -> Result<(), HttpErrorJson> {
     let setting_key = parse_key(key)?;
 
-    let datastore = endpoints_get_lock!(state.datastore);
+    let datastore = &state.datastore;
     let result = datastore.delete_key_value(&setting_key);
 
     match result {

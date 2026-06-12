@@ -96,13 +96,39 @@ impl PartialEq for DataType {
     }
 }
 
+/* Conversions out of DataType.
+ *
+ * The by-value impls move the contained data out and are what query functions
+ * should use, since functions own their argument vector. The by-ref impls
+ * delegate via a clone and only exist for callers that cannot give up
+ * ownership — going through them deep-copies every contained event. */
+
+impl TryFrom<DataType> for Vec<DataType> {
+    type Error = QueryError;
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
+        match value {
+            DataType::List(s) => Ok(s),
+            invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
+                "Expected function parameter of type List, got {invalid_type:?}"
+            ))),
+        }
+    }
+}
+
 impl TryFrom<&DataType> for Vec<DataType> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        value.clone().try_into()
+    }
+}
+
+impl TryFrom<DataType> for String {
+    type Error = QueryError;
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
         match value {
-            DataType::List(ref s) => Ok(s.clone()),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
-                "Expected function parameter of type List, got {invalid_type:?}"
+            DataType::String(s) => Ok(s),
+            invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
+                "Expected function parameter of type String, list contains {invalid_type:?}"
             ))),
         }
     }
@@ -111,37 +137,38 @@ impl TryFrom<&DataType> for Vec<DataType> {
 impl TryFrom<&DataType> for String {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        match value {
-            DataType::String(s) => Ok(s.clone()),
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
-                "Expected function parameter of type String, list contains {invalid_type:?}"
-            ))),
+        value.clone().try_into()
+    }
+}
+
+impl TryFrom<DataType> for Vec<String> {
+    type Error = QueryError;
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
+        let tagged_strings: Vec<DataType> = value.try_into()?;
+        let mut strings = Vec::with_capacity(tagged_strings.len());
+        for string in tagged_strings {
+            strings.push(string.try_into()?);
         }
+        Ok(strings)
     }
 }
 
 impl TryFrom<&DataType> for Vec<String> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_strings: Vec<DataType> = value.try_into()?;
-        let mut strings = Vec::new();
-        for string in tagged_strings.drain(..) {
-            let s: String = (&string).try_into()?;
-            strings.push(s);
-        }
-        Ok(strings)
+        value.clone().try_into()
     }
 }
 
-impl TryFrom<&DataType> for Vec<Event> {
+impl TryFrom<DataType> for Vec<Event> {
     type Error = QueryError;
-    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_events: Vec<DataType> = value.try_into()?;
-        let mut events = Vec::new();
-        for event in tagged_events.drain(..) {
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
+        let tagged_events: Vec<DataType> = value.try_into()?;
+        let mut events = Vec::with_capacity(tagged_events.len());
+        for event in tagged_events {
             match event {
-                DataType::Event(e) => events.push(e.clone()),
-                ref invalid_type => {
+                DataType::Event(e) => events.push(e),
+                invalid_type => {
                     return Err(QueryError::InvalidFunctionParameters(format!(
                         "Expected function parameter of type List of Events, list contains {invalid_type:?}"
                     )))
@@ -152,15 +179,29 @@ impl TryFrom<&DataType> for Vec<Event> {
     }
 }
 
+impl TryFrom<&DataType> for Vec<Event> {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        value.clone().try_into()
+    }
+}
+
 impl TryFrom<&DataType> for Vec<(String, Rule)> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_lists: Vec<DataType> = value.try_into()?;
-        let mut lists: Vec<(String, Rule)> = Vec::new();
-        for list in tagged_lists.drain(..) {
+        value.clone().try_into()
+    }
+}
+
+impl TryFrom<DataType> for Vec<(String, Rule)> {
+    type Error = QueryError;
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
+        let tagged_lists: Vec<DataType> = value.try_into()?;
+        let mut lists: Vec<(String, Rule)> = Vec::with_capacity(tagged_lists.len());
+        for list in tagged_lists {
             match list {
                 DataType::List(ref l) => {
-                    let tag: String = match l.get(0) {
+                    let tag: String = match l.first() {
                         Some(tag) => tag.try_into()?,
                         None => return Err(QueryError::InvalidFunctionParameters(
                             format!("Expected function parameter of type list of (tag, rule) tuples, list contains {l:?}")))
@@ -186,12 +227,19 @@ impl TryFrom<&DataType> for Vec<(String, Rule)> {
 impl TryFrom<&DataType> for Vec<(Vec<String>, Rule)> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_lists: Vec<DataType> = value.try_into()?;
-        let mut lists: Vec<(Vec<String>, Rule)> = Vec::new();
-        for list in tagged_lists.drain(..) {
+        value.clone().try_into()
+    }
+}
+
+impl TryFrom<DataType> for Vec<(Vec<String>, Rule)> {
+    type Error = QueryError;
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
+        let tagged_lists: Vec<DataType> = value.try_into()?;
+        let mut lists: Vec<(Vec<String>, Rule)> = Vec::with_capacity(tagged_lists.len());
+        for list in tagged_lists {
             match list {
                 DataType::List(ref l) => {
-                    let category: Vec<String> = match l.get(0) {
+                    let category: Vec<String> = match l.first() {
                         Some(category) => category.try_into()?,
                         None => return Err(QueryError::InvalidFunctionParameters(
                             format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
@@ -226,6 +274,13 @@ impl TryFrom<&DataType> for f64 {
     }
 }
 
+impl TryFrom<DataType> for f64 {
+    type Error = QueryError;
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
+        (&value).try_into()
+    }
+}
+
 impl TryFrom<&DataType> for usize {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
@@ -234,38 +289,58 @@ impl TryFrom<&DataType> for usize {
     }
 }
 
-impl TryFrom<&DataType> for Value {
+impl TryFrom<DataType> for usize {
     type Error = QueryError;
-    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
+        (&value).try_into()
+    }
+}
+
+impl TryFrom<DataType> for Value {
+    type Error = QueryError;
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
         match value {
             DataType::None() => Ok(Value::Null),
-            DataType::Bool(b) => Ok(Value::Bool(*b)),
-            DataType::Number(n) => Ok(Value::Number(Number::from_f64(*n).unwrap())),
-            DataType::String(s) => Ok(Value::String(s.to_string())),
-            DataType::List(_l) => {
-                let mut tagged_values: Vec<DataType> = value.try_into()?;
-                let mut values: Vec<Value> = Vec::new();
-                for value in tagged_values.drain(..) {
-                    values.push((&value).try_into()?);
+            DataType::Bool(b) => Ok(Value::Bool(b)),
+            DataType::Number(n) => Ok(Value::Number(Number::from_f64(n).unwrap())),
+            DataType::String(s) => Ok(Value::String(s)),
+            DataType::List(l) => {
+                let mut values: Vec<Value> = Vec::with_capacity(l.len());
+                for value in l {
+                    values.push(value.try_into()?);
                 }
                 Ok(Value::Array(values))
             }
-            ref invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
+            invalid_type => Err(QueryError::InvalidFunctionParameters(format!(
                 "Query2 support for parsing values is limited, does not support parsing {invalid_type:?}"
             ))),
         }
     }
 }
 
+impl TryFrom<&DataType> for Value {
+    type Error = QueryError;
+    fn try_from(value: &DataType) -> Result<Self, Self::Error> {
+        value.clone().try_into()
+    }
+}
+
+impl TryFrom<DataType> for Vec<Value> {
+    type Error = QueryError;
+    fn try_from(value: DataType) -> Result<Self, Self::Error> {
+        let tagged_values: Vec<DataType> = value.try_into()?;
+        let mut values: Vec<Value> = Vec::with_capacity(tagged_values.len());
+        for value in tagged_values {
+            values.push(value.try_into()?);
+        }
+        Ok(values)
+    }
+}
+
 impl TryFrom<&DataType> for Vec<Value> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
-        let mut tagged_values: Vec<DataType> = value.try_into()?;
-        let mut values: Vec<Value> = Vec::new();
-        for value in tagged_values.drain(..) {
-            values.push((&value).try_into()?);
-        }
-        Ok(values)
+        value.clone().try_into()
     }
 }
 

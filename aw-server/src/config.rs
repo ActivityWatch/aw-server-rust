@@ -89,7 +89,6 @@ impl AWConfig {
 
         config.address = self.address.parse().unwrap();
         config.port = self.port;
-        config.keep_alive = 0;
         config.limits = limits;
 
         config

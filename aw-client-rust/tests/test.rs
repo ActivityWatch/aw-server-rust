@@ -91,7 +91,7 @@ mod test {
 
     // Keep the listener alive until the server binds — prevents TOCTOU race in reserve_port
     thread_local! {
-        static RESERVED_PORT: RefCell<Option<TcpListener>> = RefCell::new(None);
+        static RESERVED_PORT: RefCell<Option<TcpListener>> = const { RefCell::new(None) };
     }
 
     fn wait_for_server(timeout_s: u32, client: &AwClient) {
@@ -115,13 +115,17 @@ mod test {
         use aw_server::endpoints::ServerState;
 
         let state = ServerState {
-            datastore: Mutex::new(aw_datastore::Datastore::new_in_memory(false)),
+            datastore: aw_datastore::Datastore::new_in_memory(false),
             asset_resolver: AssetResolver::new(None),
             device_id: "test_id".to_string(),
         };
-        let mut aw_config = aw_server::config::AWConfig::default();
-        aw_config.port = port;
-        aw_config.auth.api_key = api_key.map(str::to_owned);
+        let aw_config = aw_server::config::AWConfig {
+            port,
+            auth: aw_server::config::AWAuthConfig {
+                api_key: api_key.map(str::to_owned),
+            },
+            ..Default::default()
+        };
         let server = aw_server::endpoints::build_rocket(state, aw_config);
         let server = block_on(server.ignite()).unwrap();
         let shutdown_handler = server.shutdown();

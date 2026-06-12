@@ -18,7 +18,7 @@ use crate::sort_by_timestamp;
 /// output:        [a    ]  [a ][b ]
 /// ```
 pub fn filter_period_intersect(events: Vec<Event>, filter_events: Vec<Event>) -> Vec<Event> {
-    if events.len() == 0 || filter_events.len() == 0 {
+    if events.is_empty() || filter_events.is_empty() {
         return Vec::new();
     }
 

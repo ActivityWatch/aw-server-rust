@@ -56,7 +56,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
     } {
         if let Some(gap) = gap_prev {
             e1.timestamp -= gap / 2;
-            e1.duration = e1.duration + (gap / 2);
+            e1.duration += gap / 2;
             gap_prev = None;
         }
         let e2 = match e1_iter.peek() {
@@ -148,7 +148,7 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
                 continue;
             } else {
                 // Extend e1 to middle of the gap.
-                e1.duration = e1.duration + (gap / 2);
+                e1.duration += gap / 2;
 
                 // Make sure next event (e2) is gets extended before it's processed
                 gap_prev = Some(gap);

@@ -108,9 +108,10 @@ enum Commands {
         buckets: Option<Vec<String>>,
 
         /// Mode to sync in. Can be "push", "pull", or "both".
-        /// Defaults to "both".
-        #[clap(long, default_value = "both")]
-        mode: sync::SyncMode,
+        /// Defaults to "both". Implies advanced sync mode (see below),
+        /// since the simple host-based sync mode always does both.
+        #[clap(long)]
+        mode: Option<sync::SyncMode>,
 
         /// Full path to sync db file
         /// Useful for syncing buckets from a specific db file in the sync directory.
@@ -198,7 +199,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             let effective_buckets = buckets;
 
             // If advanced options are provided, use advanced sync mode
-            if start_date.is_some() || effective_buckets.is_some() || sync_db.is_some() {
+            if start_date.is_some()
+                || effective_buckets.is_some()
+                || sync_db.is_some()
+                || mode.is_some()
+            {
                 let sync_dir = dirs::get_sync_dir()?;
                 if let Some(db_path) = &sync_db {
                     info!("Using sync db: {}", &db_path.display());
@@ -218,7 +223,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     start: start_date,
                 };
 
-                sync::sync_run(&client, &sync_spec, mode)?
+                sync::sync_run(&client, &sync_spec, mode.unwrap_or(sync::SyncMode::Both))?
             } else {
                 // Simple host-based sync mode (backwards compatibility)
                 // Pull

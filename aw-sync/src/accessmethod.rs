@@ -22,7 +22,6 @@ pub trait AccessMethod: std::fmt::Debug {
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String>;
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
-    fn close(&self);
 }
 
 impl AccessMethod for Datastore {
@@ -58,9 +57,6 @@ impl AccessMethod for Datastore {
     }
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
         Ok(Datastore::get_event_count(self, bucket_id, None, None).unwrap())
-    }
-    fn close(&self) {
-        Datastore::close(self);
     }
 }
 
@@ -104,8 +100,5 @@ impl AccessMethod for AwClient {
     }
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
         AwClient::heartbeat(self, bucket_id, &event, duration).map_err(|e| format!("{e:?}"))
-    }
-    fn close(&self) {
-        // NOP
     }
 }

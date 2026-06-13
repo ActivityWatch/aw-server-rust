@@ -757,7 +757,9 @@ mod datastore_tests {
             assert!(compressed > 0, "expected some rows to be stored compressed");
         }
 
-        std::fs::remove_file(&db_path).unwrap();
+        // Best-effort cleanup: on Windows the worker may still hold the file
+        // handle briefly after close(), which would make a hard unwrap flaky.
+        let _ = std::fs::remove_file(&db_path);
     }
 
     /// Upgrading a populated pre-v6 database should train and apply compression
@@ -847,7 +849,9 @@ mod datastore_tests {
             );
         }
 
-        std::fs::remove_file(&db_path).unwrap();
+        // Best-effort cleanup: on Windows the worker may still hold the file
+        // handle briefly after close(), which would make a hard unwrap flaky.
+        let _ = std::fs::remove_file(&db_path);
     }
 
     /// A row that looks compressed (zstd magic) but can't be decompressed — e.g.
@@ -915,6 +919,8 @@ mod datastore_tests {
             ds.close();
         }
 
-        std::fs::remove_file(&db_path).unwrap();
+        // Best-effort cleanup: on Windows the worker may still hold the file
+        // handle briefly after close(), which would make a hard unwrap flaky.
+        let _ = std::fs::remove_file(&db_path);
     }
 }

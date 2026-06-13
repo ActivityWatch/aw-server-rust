@@ -18,6 +18,12 @@ encryption-vendored = ["rusqlite/bundled-sqlcipher-vendored-openssl", "dep:zeroi
 # on the database's own events (~47% smaller event JSON on real data).
 # Opt-in: once rows are compressed, the database can only be read by a build with
 # this feature enabled.
+#
+# One-time cost: the first startup after upgrading to db version 6 rebuilds the
+# events table (TEXT -> BLOB column) and, once the database has enough rows,
+# trains a dictionary and recompresses every existing row in a single
+# transaction. Benchmark on a real ~545k-event database:
+# https://github.com/ActivityWatch/aw-server-rust/pull/618#issuecomment-4698391405
 compression-zstd = ["dep:zstd"]
 legacy_import_tests = []
 

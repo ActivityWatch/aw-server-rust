@@ -14,6 +14,11 @@ bundled = ["rusqlite/bundled"]
 encryption = ["rusqlite/bundled-sqlcipher", "dep:zeroize"]
 # Like 'encryption' but also vendors OpenSSL (fully self-contained)
 encryption-vendored = ["rusqlite/bundled-sqlcipher-vendored-openssl", "dep:zeroize"]
+# Enable transparent zstd compression of event data, using a dictionary trained
+# on the database's own events (~47% smaller event JSON on real data).
+# Opt-in: once rows are compressed, the database can only be read by a build with
+# this feature enabled.
+compression-zstd = ["dep:zstd"]
 legacy_import_tests = []
 
 [dependencies]
@@ -25,6 +30,7 @@ rusqlite = { version = "0.30", features = ["chrono", "serde_json"] }
 mpsc_requests = "0.3"
 log = "0.4"
 zeroize = { version = "1", optional = true, features = ["alloc"] }
+zstd = { version = "0.13", optional = true }
 
 aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }

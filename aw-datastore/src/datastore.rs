@@ -15,11 +15,29 @@ use aw_models::Event;
 use rusqlite::params;
 use rusqlite::types::ToSql;
 
+use super::compression;
 use super::DatastoreError;
 
 fn _get_db_version(conn: &Connection) -> i32 {
     conn.pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap()
+}
+
+/// Load the stored zstd compression dictionary, if one has been trained.
+fn _load_dictionary(conn: &Connection) -> Option<Vec<u8>> {
+    conn.query_row(
+        "SELECT dict FROM compression_dict WHERE id = 0",
+        [],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .ok()
+}
+
+/// Count of events in the database (used to decide whether to train a dictionary).
+#[cfg(feature = "compression-zstd")]
+fn _event_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .unwrap_or(0)
 }
 
 /*
@@ -30,8 +48,9 @@ fn _get_db_version(conn: &Connection) -> i32 {
  * 3: see: https://github.com/ActivityWatch/aw-server-rust/pull/52
  * 4: Added 'key_value' table for storing key - value pairs
  * 5: Replaced single-column events indexes with a composite index
+ * 6: Enable zstd compression for event data column
  */
-static NEWEST_DB_VERSION: i32 = 5;
+static NEWEST_DB_VERSION: i32 = 6;
 
 fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;
@@ -55,6 +74,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 5 {
         _migrate_v4_to_v5(conn);
+    }
+
+    if version < 6 {
+        _migrate_v5_to_v6(conn);
     }
 
     first_init
@@ -207,10 +230,64 @@ fn _migrate_v4_to_v5(conn: &Connection) {
     .expect("Failed to run v5 migration transaction");
 }
 
+fn _migrate_v5_to_v6(conn: &Connection) {
+    info!("Upgrading database to v6, converting event data column to BLOB for zstd compression");
+
+    // The data column becomes a BLOB so compressed binary can be stored without
+    // any text-encoding overhead. The actual dictionary training and
+    // compression of existing rows happens once at startup in
+    // `ensure_compression`, which is shared with the path that compresses
+    // databases that grow large enough after a fresh install.
+    //
+    // CAST(data AS BLOB) reinterprets each TEXT value as its raw UTF-8 bytes,
+    // converting the whole column in a single statement. The table is rebuilt
+    // (rather than altered in place) so the column's declared type — and thus
+    // the type returned to readers — is BLOB.
+    //
+    // The new table's foreign key uses ON DELETE CASCADE so deleting a bucket
+    // removes its events automatically (foreign keys are enforced on the
+    // connection, see work_loop). Older databases can contain orphan events
+    // whose bucket was already deleted; those are dropped here (the WHERE
+    // clause copies only events with an existing bucket) rather than carried
+    // forward, which also lets the copy satisfy the foreign key.
+    conn.execute_batch(
+        "
+        BEGIN EXCLUSIVE TRANSACTION;
+        CREATE TABLE events_v6 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bucketrow INTEGER NOT NULL,
+            starttime INTEGER NOT NULL,
+            endtime INTEGER NOT NULL,
+            data BLOB NOT NULL,
+            FOREIGN KEY (bucketrow) REFERENCES buckets(id) ON DELETE CASCADE
+        );
+        INSERT INTO events_v6 (id, bucketrow, starttime, endtime, data)
+            SELECT id, bucketrow, starttime, endtime, CAST(data AS BLOB)
+            FROM events
+            WHERE bucketrow IN (SELECT id FROM buckets);
+        DROP INDEX IF EXISTS events_bucketrow_starttime_endtime_index;
+        DROP TABLE events;
+        ALTER TABLE events_v6 RENAME TO events;
+        CREATE INDEX events_bucketrow_starttime_endtime_index
+            ON events(bucketrow, starttime DESC, endtime);
+        CREATE TABLE IF NOT EXISTS compression_dict (
+            id INTEGER PRIMARY KEY CHECK (id = 0),
+            dict BLOB NOT NULL
+        );
+        PRAGMA user_version = 6;
+        COMMIT;
+    ",
+    )
+    .expect("Failed to complete v6 migration transaction");
+
+    info!("Database upgrade to v6 complete");
+}
+
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
     first_init: bool,
     pub db_version: i32,
+    compression: compression::CompressionContext,
 }
 
 impl DatastoreInstance {
@@ -239,9 +316,121 @@ impl DatastoreInstance {
             buckets_cache: HashMap::new(),
             first_init,
             db_version,
+            compression: compression::CompressionContext::empty(),
         };
+        ds.ensure_compression(conn, migrate_enabled);
         ds.get_stored_buckets(conn)?;
         Ok(ds)
+    }
+
+    /// Load the compression dictionary, training and applying one if the
+    /// database is large enough and doesn't have one yet.
+    ///
+    /// Runs once at startup. Loading a dictionary always happens (so compressed
+    /// rows can be read); training/back-filling only happens when migration is
+    /// enabled (we must not write to a read-only/migration-disabled datastore).
+    fn ensure_compression(&mut self, conn: &Connection, migrate_enabled: bool) {
+        // The compression_dict table only exists from v6 onward.
+        if self.db_version < 6 {
+            return;
+        }
+        if let Some(dict) = _load_dictionary(conn) {
+            self.compression = compression::CompressionContext::from_dictionary(&dict);
+            return;
+        }
+        #[cfg(feature = "compression-zstd")]
+        {
+            if migrate_enabled && _event_count(conn) >= compression::MIN_EVENTS_TO_TRAIN {
+                if let Err(e) = self.train_and_backfill(conn) {
+                    warn!("Failed to set up event-data compression: {e:?}");
+                }
+            }
+        }
+        #[cfg(not(feature = "compression-zstd"))]
+        {
+            let _ = migrate_enabled;
+        }
+    }
+
+    /// Train a dictionary from existing events, store it, and recompress all
+    /// rows against it. Only called once, when a database first has enough data.
+    #[cfg(feature = "compression-zstd")]
+    fn train_and_backfill(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
+        // Load every row's data (raw, uncompressed at this point).
+        let mut stmt = conn
+            .prepare("SELECT id, data FROM events")
+            .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+        let rows: Vec<(i64, Vec<u8>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| DatastoreError::InternalError(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+        drop(stmt);
+
+        // Decompress (a no-op for already-raw rows) to recover the JSON to train on.
+        let jsons: Vec<String> = rows
+            .iter()
+            .filter_map(|(_, bytes)| self.compression.decompress(bytes).ok())
+            .collect();
+        let sample_refs: Vec<&[u8]> = jsons.iter().map(|s| s.as_bytes()).collect();
+
+        let dict = match compression::train_dictionary(&sample_refs) {
+            Some(dict) => dict,
+            None => return Ok(()), // not enough usable data; leave uncompressed
+        };
+
+        info!(
+            "Trained {}-byte compression dictionary, recompressing {} events",
+            dict.len(),
+            rows.len()
+        );
+
+        self.compression = compression::CompressionContext::from_dictionary(&dict);
+
+        // Store the dictionary and recompress every row in a single transaction.
+        // Without it, each statement would auto-commit and, with
+        // synchronous=FULL, fsync — turning a one-time backfill into hundreds of
+        // thousands of disk syncs.
+        conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+            .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+
+        let result = (|| -> Result<(), DatastoreError> {
+            conn.execute(
+                "INSERT OR REPLACE INTO compression_dict (id, dict) VALUES (0, ?1)",
+                params![dict],
+            )
+            .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+
+            let mut update = conn
+                .prepare("UPDATE events SET data = ?1 WHERE id = ?2")
+                .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+            for (id, bytes) in &rows {
+                let json = match self.compression.decompress(bytes) {
+                    Ok(json) => json,
+                    Err(_) => continue,
+                };
+                let compressed = self.compression.compress(&json);
+                update
+                    .execute(params![compressed, id])
+                    .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT;")
+                    .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                // Revert to no compression so reads don't expect compressed rows
+                // that were rolled back.
+                self.compression = compression::CompressionContext::empty();
+                Err(e)
+            }
+        }
     }
 
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
@@ -491,7 +680,8 @@ impl DatastoreInstance {
                 }
             };
             let endtime_nanos = starttime_nanos + duration_nanos;
-            let data = serde_json::to_string(&event.data).unwrap();
+            let json_data = serde_json::to_string(&event.data).unwrap();
+            let data = self.compression.compress(&json_data);
             let res = stmt.execute([
                 &bucket.bid.unwrap(),
                 &event.id as &dyn ToSql,
@@ -619,7 +809,8 @@ impl DatastoreInstance {
             }
         };
         let endtime_nanos = starttime_nanos + duration_nanos;
-        let data = serde_json::to_string(&event.data).unwrap();
+        let json_data = serde_json::to_string(&event.data).unwrap();
+        let data = self.compression.compress(&json_data);
         match stmt.execute([
             &bucket.bid.unwrap(),
             &starttime_nanos,
@@ -721,17 +912,30 @@ impl DatastoreInstance {
         };
 
         // TODO: Refactor to share row-parsing logic with get_events
+        let compression = &self.compression;
         let row = match stmt.query_row([&bucket.bid.unwrap(), &event_id], |row| {
             let id = row.get(0)?;
             let starttime_ns: i64 = row.get(1)?;
             let endtime_ns: i64 = row.get(2)?;
-            let data_str: String = row.get(3)?;
+            let data_bytes: Vec<u8> = row.get(3)?;
 
             let time_seconds: i64 = starttime_ns / 1_000_000_000;
             let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
             let duration_ns = endtime_ns - starttime_ns;
+
+            let decompressed_data_str = match compression.decompress(&data_bytes) {
+                Ok(decompressed) => decompressed,
+                Err(e) => {
+                    warn!(
+                        "Failed to decompress event data: {}. Attempting to parse as uncompressed.",
+                        e
+                    );
+                    String::from_utf8_lossy(&data_bytes).to_string()
+                }
+            };
+
             let data: serde_json::map::Map<String, Value> =
-                serde_json::from_str(&data_str).unwrap();
+                serde_json::from_str(&decompressed_data_str).unwrap();
 
             Ok(Event {
                 id: Some(id),
@@ -781,6 +985,8 @@ impl DatastoreInstance {
             None => -1,
         };
 
+        let compression = &self.compression;
+
         let mut stmt = match conn.prepare_cached(
             "
                 SELECT id, starttime, endtime, data
@@ -811,7 +1017,7 @@ impl DatastoreInstance {
                 let id = row.get(0)?;
                 let mut starttime_ns: i64 = row.get(1)?;
                 let mut endtime_ns: i64 = row.get(2)?;
-                let data_str: String = row.get(3)?;
+                let data_bytes: Vec<u8> = row.get(3)?;
 
                 if clip_to_query_range {
                     if starttime_ns < starttime_filter_ns {
@@ -825,8 +1031,17 @@ impl DatastoreInstance {
 
                 let time_seconds: i64 = starttime_ns / 1_000_000_000;
                 let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
+
+                let decompressed_data_str = match compression.decompress(&data_bytes) {
+                    Ok(decompressed) => decompressed,
+                    Err(e) => {
+                        warn!("Failed to decompress event data: {}. Attempting to parse as uncompressed.", e);
+                        String::from_utf8_lossy(&data_bytes).to_string()
+                    }
+                };
+
                 let data: serde_json::map::Map<String, Value> =
-                    serde_json::from_str(&data_str).unwrap();
+                    serde_json::from_str(&decompressed_data_str).unwrap();
 
                 Ok(Event {
                     id: Some(id),

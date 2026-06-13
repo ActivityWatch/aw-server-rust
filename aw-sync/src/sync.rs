@@ -289,7 +289,7 @@ pub fn sync_datastores(
 
     for bucket_from in buckets_from {
         let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push);
-        sync_one(ds_from, ds_to, bucket_from, bucket_to);
+        sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec);
     }
 }
 
@@ -299,6 +299,7 @@ fn sync_one(
     ds_to: &dyn AccessMethod,
     bucket_from: Bucket,
     bucket_to: Bucket,
+    sync_spec: &SyncSpec,
 ) {
     let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
@@ -310,7 +311,12 @@ fn sync_one(
     let most_recent_events = ds_to
         .get_events(bucket_to.id.as_str(), None, None, Some(1))
         .unwrap();
-    let resume_sync_at = most_recent_events.first().map(|e| e.timestamp + e.duration);
+    // If the destination bucket already has events, resume from where it left off.
+    // Otherwise (first sync of this bucket), fall back to sync_spec.start, if specified.
+    let resume_sync_at = most_recent_events
+        .first()
+        .map(|e| e.timestamp + e.duration)
+        .or(sync_spec.start);
 
     if let Some(resume_time) = resume_sync_at {
         info!("   + Resuming at {:?}", resume_time);

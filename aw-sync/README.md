@@ -24,6 +24,10 @@ aw-sync daemon
 # Sync daemon with specific buckets only
 aw-sync daemon --buckets "aw-watcher-window,aw-watcher-afk" --start-date "2024-01-01"
 
+# Sync daemon in push-only or pull-only mode
+aw-sync daemon --mode push
+aw-sync daemon --mode pull
+
 # Sync all buckets once and exit
 aw-sync sync --start-date "2024-01-01"
 ```

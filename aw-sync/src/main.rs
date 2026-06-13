@@ -74,6 +74,11 @@ enum Commands {
         #[clap(long, value_parser=parse_list)]
         buckets: Option<Vec<String>>,
 
+        /// Mode to sync in. Can be "push", "pull", or "both".
+        /// Defaults to "both".
+        #[clap(long, default_value = "both")]
+        mode: sync::SyncMode,
+
         /// Full path to sync db file
         /// Useful for syncing buckets from a specific db file in the sync directory.
         /// Must be a valid absolute path to a file in the sync directory.
@@ -166,19 +171,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     match opts.command.unwrap_or(Commands::Daemon {
         start_date: None,
         buckets: None,
+        mode: sync::SyncMode::Both,
         sync_db: None,
     }) {
         // Start daemon
         Commands::Daemon {
             start_date,
             buckets,
+            mode,
             sync_db,
         } => {
             info!("Starting daemon...");
 
             let effective_buckets = buckets;
 
-            daemon(&client, start_date, effective_buckets, sync_db)?;
+            daemon(&client, start_date, effective_buckets, sync_db, mode)?;
         }
         // Perform sync
         Commands::Sync {
@@ -251,6 +258,7 @@ fn daemon(
     start_date: Option<DateTime<Utc>>,
     buckets: Option<Vec<String>>,
     sync_db: Option<PathBuf>,
+    mode: sync::SyncMode,
 ) -> Result<(), Box<dyn Error>> {
     let (tx, rx) = channel();
 
@@ -278,7 +286,7 @@ fn daemon(
     };
 
     loop {
-        if let Err(e) = sync::sync_run(client, &sync_spec, sync::SyncMode::Both) {
+        if let Err(e) = sync::sync_run(client, &sync_spec, mode) {
             error!("Error during sync cycle: {}", e);
             return Err(e);
         }

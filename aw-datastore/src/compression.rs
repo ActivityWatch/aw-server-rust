@@ -38,6 +38,7 @@ const COMPRESSION_LEVEL: i32 = 6;
 /// Minimum number of events before it is worth training a dictionary. Below
 /// this the database is small enough that the savings are negligible, and there
 /// is too little data to train a good dictionary.
+#[cfg(feature = "compression-zstd")]
 pub const MIN_EVENTS_TO_TRAIN: i64 = 2000;
 
 /// Holds the reusable zstd compressor/decompressor (with the loaded

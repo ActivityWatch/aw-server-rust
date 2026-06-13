@@ -96,17 +96,6 @@ impl CompressionContext {
         CompressionContext {}
     }
 
-    pub fn has_dictionary(&self) -> bool {
-        #[cfg(feature = "compression-zstd")]
-        {
-            self.dict.is_some()
-        }
-        #[cfg(not(feature = "compression-zstd"))]
-        {
-            false
-        }
-    }
-
     /// Compress a JSON string into the stored blob representation.
     ///
     /// Never fails: if there is no dictionary, the feature is disabled, or

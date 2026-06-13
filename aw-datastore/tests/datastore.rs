@@ -538,7 +538,8 @@ mod datastore_tests {
             let version: i32 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 5);
+            // Database should be upgraded to v6 (compression) automatically
+            assert_eq!(version, 6);
             let old_indexes: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN
@@ -551,7 +552,7 @@ mod datastore_tests {
             let new_index: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'index'
-                     AND name = 'events_bucketrow_starttime_endtime_index'",
+                     AND name = 'events_bucketrow_starttime_index'",
                     [],
                     |row| row.get(0),
                 )
@@ -666,5 +667,96 @@ mod datastore_tests {
         }
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    /// With the compression feature, a database that grows past the training
+    /// threshold should get a dictionary on the next open, recompress its rows,
+    /// and still return every event's data intact.
+    #[test]
+    #[cfg(feature = "compression-zstd")]
+    fn test_compression_dictionary_roundtrip() {
+        use rusqlite::Connection;
+
+        let mut db_path = get_cache_dir().unwrap();
+        db_path.push("datastore-unittest-compression.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+        if db_path.exists() {
+            std::fs::remove_file(&db_path).unwrap();
+        }
+
+        let bucket = test_bucket();
+        // Realistic, highly-repetitive event data, well above MIN_EVENTS_TO_TRAIN.
+        let n = 4000;
+        let make_event = |i: usize| Event {
+            id: None,
+            timestamp: Utc::now() + Duration::milliseconds(i as i64),
+            duration: Duration::seconds(1),
+            data: json_map! {
+                "app": json!(["Firefox", "Terminal", "Code", "Slack"][i % 4]),
+                "title": json!(format!("Working on window {}", i % 100))
+            },
+        };
+
+        // Session 1: no dictionary exists yet (DB started empty), rows stored raw.
+        {
+            let ds = Datastore::new(db_path_str.clone(), false);
+            ds.create_bucket(&bucket).unwrap();
+            let events: Vec<Event> = (0..n).map(make_event).collect();
+            ds.insert_events(&bucket.id, &events).unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+        }
+
+        // No dictionary should have been trained during session 1.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let dict_rows: i64 = conn
+                .query_row("SELECT count(*) FROM compression_dict", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(dict_rows, 0, "no dictionary expected before reopen");
+        }
+
+        // Session 2: reopening trains a dictionary and recompresses existing rows.
+        {
+            let ds = Datastore::new(db_path_str.clone(), false);
+            let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+            assert_eq!(events.len(), n);
+            // Data must survive the train + recompress roundtrip exactly.
+            for e in &events {
+                let i = e.data["title"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("Working on window ")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert!(i < 100);
+                assert!(e.data["app"].is_string());
+            }
+            // Inserting more after the dictionary exists must also roundtrip.
+            ds.insert_events(&bucket.id, &[make_event(99999)]).unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+        }
+
+        // A dictionary now exists and at least some rows are stored compressed.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let dict_rows: i64 = conn
+                .query_row("SELECT count(*) FROM compression_dict", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(dict_rows, 1, "dictionary should exist after reopen");
+            // 0x28 0xB5 0x2F 0xFD is the zstd magic number (Little Endian).
+            let compressed: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM events WHERE hex(substr(data, 1, 4)) = '28B52FFD'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(compressed > 0, "expected some rows to be stored compressed");
+        }
+
+        std::fs::remove_file(&db_path).unwrap();
     }
 }

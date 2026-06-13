@@ -312,6 +312,13 @@ impl DatastoreInstance {
             )));
         }
 
+        // Re-read the version: migrations bump user_version, and
+        // ensure_compression keys off the post-migration schema (the
+        // compression_dict table only exists from v6). Using the pre-migration
+        // value here would skip compression setup on the first startup after an
+        // upgrade.
+        let db_version = _get_db_version(conn);
+
         let mut ds = DatastoreInstance {
             buckets_cache: HashMap::new(),
             first_init,
@@ -920,19 +927,22 @@ impl DatastoreInstance {
             let time_seconds: i64 = starttime_ns / 1_000_000_000;
             let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
 
-            let decompressed_data_str = match compression.decompress(&data_bytes) {
-                Ok(decompressed) => decompressed,
-                Err(e) => {
-                    warn!(
-                        "Failed to decompress event data: {}. Attempting to parse as uncompressed.",
-                        e
-                    );
-                    String::from_utf8_lossy(&data_bytes).to_string()
-                }
-            };
+            // On decompression or JSON-parse failure, surface a row error rather
+            // than fabricating a string and unwrapping (which would panic the
+            // worker thread, e.g. when a compressed row is read without the
+            // dictionary or feature).
+            let decompressed_data_str = compression.decompress(&data_bytes).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Blob, e.into())
+            })?;
 
             let data: serde_json::map::Map<String, Value> =
-                serde_json::from_str(&decompressed_data_str).unwrap();
+                serde_json::from_str(&decompressed_data_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
 
             Ok(Event {
                 id: Some(id),
@@ -1030,16 +1040,26 @@ impl DatastoreInstance {
                 let time_seconds: i64 = starttime_ns / 1_000_000_000;
                 let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
 
-                let decompressed_data_str = match compression.decompress(&data_bytes) {
-                    Ok(decompressed) => decompressed,
-                    Err(e) => {
-                        warn!("Failed to decompress event data: {}. Attempting to parse as uncompressed.", e);
-                        String::from_utf8_lossy(&data_bytes).to_string()
-                    }
-                };
+                // On decompression or JSON-parse failure, surface a row error so
+                // the loop below skips this row with a warning, rather than
+                // fabricating a string and unwrapping (which would panic the
+                // worker thread).
+                let decompressed_data_str = compression.decompress(&data_bytes).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Blob,
+                        e.into(),
+                    )
+                })?;
 
                 let data: serde_json::map::Map<String, Value> =
-                    serde_json::from_str(&decompressed_data_str).unwrap();
+                    serde_json::from_str(&decompressed_data_str).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
 
                 Ok(Event {
                     id: Some(id),

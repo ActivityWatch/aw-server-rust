@@ -78,6 +78,9 @@ pub enum Command {
     SetKeyValue(String, String),
     DeleteKeyValue(String),
     RefreshPrivacyFilter(),
+    RenameBucket(String, String),
+    MigrateHostname(String),
+    MigrateTestBucketNames(),
     Close(),
 }
 
@@ -404,6 +407,33 @@ impl DatastoreWorker {
                 }
                 Ok(Response::Empty())
             }
+            Command::RenameBucket(old_id, new_id) => match ds.rename_bucket(tx, &old_id, &new_id) {
+                Ok(()) => {
+                    self.commit = true;
+                    Ok(Response::Empty())
+                }
+                Err(e) => Err(e),
+            },
+            Command::MigrateHostname(new_hostname) => {
+                match ds.migrate_hostname(tx, &new_hostname) {
+                    Ok(count) => {
+                        if count > 0 {
+                            self.commit = true;
+                        }
+                        Ok(Response::Count(count as i64))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Command::MigrateTestBucketNames() => match ds.migrate_test_bucket_names(tx) {
+                Ok(count) => {
+                    if count > 0 {
+                        self.commit = true;
+                    }
+                    Ok(Response::Count(count as i64))
+                }
+                Err(e) => Err(e),
+            },
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())
@@ -618,6 +648,37 @@ impl Datastore {
 
     pub fn refresh_privacy_filter(&self) -> Result<(), DatastoreError> {
         _unwrap_empty_response(self.request(Command::RefreshPrivacyFilter())?)
+    }
+
+    /// Renames a bucket from `old_id` to `new_id`.
+    pub fn rename_bucket(&self, old_id: &str, new_id: &str) -> Result<(), DatastoreError> {
+        let cmd = Command::RenameBucket(old_id.to_string(), new_id.to_string());
+        _unwrap_empty_response(self.request(cmd)?)
+    }
+
+    /// Migrates all buckets whose hostname is "unknown" or "Unknown" to `new_hostname`.
+    /// Returns the number of buckets updated.
+    pub fn migrate_hostname(&self, new_hostname: &str) -> Result<usize, DatastoreError> {
+        let cmd = Command::MigrateHostname(new_hostname.to_string());
+        match self.request(cmd)? {
+            Response::Count(n) => Ok(n as usize),
+            _ => Err(DatastoreError::InternalError(
+                "Unexpected response to MigrateHostname command".to_string(),
+            )),
+        }
+    }
+
+    /// Migrates all buckets whose name starts with `aw-watcher-android-test` to use
+    /// `aw-watcher-android` instead (e.g. debug-build buckets from older app versions).
+    /// Returns the number of buckets updated.
+    pub fn migrate_test_bucket_names(&self) -> Result<usize, DatastoreError> {
+        let cmd = Command::MigrateTestBucketNames();
+        match self.request(cmd)? {
+            Response::Count(n) => Ok(n as usize),
+            _ => Err(DatastoreError::InternalError(
+                "Unexpected response to MigrateTestBucketNames command".to_string(),
+            )),
+        }
     }
 
     // Should block until worker has stopped

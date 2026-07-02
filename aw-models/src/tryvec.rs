@@ -10,6 +10,7 @@ use std::fmt::Debug;
 #[derive(Debug, Clone)]
 pub enum TryParse<T: JsonSchema> {
     Parsed(T),
+    #[allow(dead_code)]
     Unparsed(Value),
     NotPresent,
 }

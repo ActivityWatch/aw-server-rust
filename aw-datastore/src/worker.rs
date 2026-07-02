@@ -660,15 +660,11 @@ impl Datastore {
     /// Returns the number of buckets updated.
     pub fn migrate_hostname(&self, new_hostname: &str) -> Result<usize, DatastoreError> {
         let cmd = Command::MigrateHostname(new_hostname.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Count(n) => Ok(n as usize),
-                _ => Err(DatastoreError::InternalError(
-                    "Unexpected response to MigrateHostname command".to_string(),
-                )),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::Count(n) => Ok(n as usize),
+            _ => Err(DatastoreError::InternalError(
+                "Unexpected response to MigrateHostname command".to_string(),
+            )),
         }
     }
 
@@ -677,15 +673,11 @@ impl Datastore {
     /// Returns the number of buckets updated.
     pub fn migrate_test_bucket_names(&self) -> Result<usize, DatastoreError> {
         let cmd = Command::MigrateTestBucketNames();
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Count(n) => Ok(n as usize),
-                _ => Err(DatastoreError::InternalError(
-                    "Unexpected response to MigrateTestBucketNames command".to_string(),
-                )),
-            },
-            Err(e) => Err(e),
+        match self.request(cmd)? {
+            Response::Count(n) => Ok(n as usize),
+            _ => Err(DatastoreError::InternalError(
+                "Unexpected response to MigrateTestBucketNames command".to_string(),
+            )),
         }
     }
 

@@ -1111,4 +1111,39 @@ impl DatastoreInstance {
 
         Ok(updated)
     }
+
+    /// Migrates all buckets whose name starts with `aw-watcher-android-test` to use
+    /// `aw-watcher-android` instead.  This covers the old debug-build bucket naming
+    /// convention (e.g. `aw-watcher-android-test_hostname` → `aw-watcher-android_hostname`).
+    /// Events are left untouched; only the bucket metadata is updated.
+    /// Returns the number of buckets that were updated.
+    pub fn migrate_test_bucket_names(
+        &mut self,
+        conn: &Connection,
+    ) -> Result<usize, DatastoreError> {
+        info!("Migrating 'aw-watcher-android-test' bucket names to 'aw-watcher-android'");
+
+        let updated = match conn.execute(
+            "UPDATE buckets SET name = REPLACE(name, 'aw-watcher-android-test', 'aw-watcher-android') \
+             WHERE name LIKE 'aw-watcher-android-test%'",
+            [],
+        ) {
+            Ok(n) => n,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to migrate test bucket names: {err}"
+                )))
+            }
+        };
+
+        if updated > 0 {
+            info!("Migrated {} 'aw-watcher-android-test' bucket(s)", updated);
+            // Refresh the in-memory cache so callers see the new names immediately.
+            self.get_stored_buckets(conn)?;
+        } else {
+            info!("No 'aw-watcher-android-test' buckets found; nothing to migrate");
+        }
+
+        Ok(updated)
+    }
 }

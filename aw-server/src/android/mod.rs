@@ -281,6 +281,23 @@ pub mod android {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_migrateWatcherAndroidBucketNames(
+        env: JNIEnv,
+        _: JClass,
+    ) -> jstring {
+        match openDatastore().migrate_test_bucket_names() {
+            Ok(count) => string_to_jstring(
+                &env,
+                format!("Migrated {} 'aw-watcher-android-test' bucket(s)", count),
+            ),
+            Err(e) => create_error_object(
+                &env,
+                format!("Failed to migrate watcher bucket names: {:?}", e),
+            ),
+        }
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_query(
         env: JNIEnv,
         _: JClass,

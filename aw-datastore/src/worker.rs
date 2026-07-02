@@ -80,6 +80,7 @@ pub enum Command {
     RefreshPrivacyFilter(),
     RenameBucket(String, String),
     MigrateHostname(String),
+    MigrateTestBucketNames(),
     Close(),
 }
 
@@ -424,6 +425,17 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
+            Command::MigrateTestBucketNames() => {
+                match ds.migrate_test_bucket_names(tx) {
+                    Ok(count) => {
+                        if count > 0 {
+                            self.commit = true;
+                        }
+                        Ok(Response::Count(count as i64))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())
@@ -657,6 +669,23 @@ impl Datastore {
                 Response::Count(n) => Ok(n as usize),
                 _ => Err(DatastoreError::InternalError(
                     "Unexpected response to MigrateHostname command".to_string(),
+                )),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Migrates all buckets whose name starts with `aw-watcher-android-test` to use
+    /// `aw-watcher-android` instead (e.g. debug-build buckets from older app versions).
+    /// Returns the number of buckets updated.
+    pub fn migrate_test_bucket_names(&self) -> Result<usize, DatastoreError> {
+        let cmd = Command::MigrateTestBucketNames();
+        let receiver = self.requester.request(cmd).unwrap();
+        match receiver.collect().unwrap() {
+            Ok(r) => match r {
+                Response::Count(n) => Ok(n as usize),
+                _ => Err(DatastoreError::InternalError(
+                    "Unexpected response to MigrateTestBucketNames command".to_string(),
                 )),
             },
             Err(e) => Err(e),

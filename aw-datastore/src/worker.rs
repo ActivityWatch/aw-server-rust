@@ -156,6 +156,13 @@ impl DatastoreWorker {
         conn.pragma_update(None, "synchronous", "FULL")
             .expect("Failed to set synchronous=FULL");
 
+        // Enforce foreign keys so deleting a bucket cascades to its events
+        // (events.bucketrow REFERENCES buckets(id) ON DELETE CASCADE). SQLite
+        // defaults this off per connection; set it before migrations run and
+        // outside any transaction so it takes effect.
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("Failed to enable foreign_keys");
+
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
 
         // Ensure legacy import

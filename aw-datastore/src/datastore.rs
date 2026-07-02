@@ -1116,7 +1116,9 @@ impl DatastoreInstance {
     /// `aw-watcher-android` instead.  This covers the old debug-build bucket naming
     /// convention (e.g. `aw-watcher-android-test_hostname` → `aw-watcher-android_hostname`).
     /// Events are left untouched; only the bucket metadata is updated.
-    /// Returns the number of buckets that were updated.
+    /// Returns the number of buckets that were migrated.
+    /// Note: if a UNIQUE constraint violation occurs on any single row, `UPDATE OR IGNORE`
+    /// will skip conflicting rows instead of aborting the entire batch.
     pub fn migrate_test_bucket_names(
         &mut self,
         conn: &Connection,
@@ -1124,7 +1126,7 @@ impl DatastoreInstance {
         info!("Migrating 'aw-watcher-android-test' bucket names to 'aw-watcher-android'");
 
         let updated = match conn.execute(
-            "UPDATE buckets SET name = REPLACE(name, 'aw-watcher-android-test', 'aw-watcher-android') \
+            "UPDATE OR IGNORE buckets SET name = 'aw-watcher-android' || SUBSTR(name, LENGTH('aw-watcher-android-test') + 1) \
              WHERE name LIKE 'aw-watcher-android-test%'",
             [],
         ) {

@@ -425,17 +425,15 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
-            Command::MigrateTestBucketNames() => {
-                match ds.migrate_test_bucket_names(tx) {
-                    Ok(count) => {
-                        if count > 0 {
-                            self.commit = true;
-                        }
-                        Ok(Response::Count(count as i64))
+            Command::MigrateTestBucketNames() => match ds.migrate_test_bucket_names(tx) {
+                Ok(count) => {
+                    if count > 0 {
+                        self.commit = true;
                     }
-                    Err(e) => Err(e),
+                    Ok(Response::Count(count as i64))
                 }
-            }
+                Err(e) => Err(e),
+            },
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())
@@ -655,8 +653,7 @@ impl Datastore {
     /// Renames a bucket from `old_id` to `new_id`.
     pub fn rename_bucket(&self, old_id: &str, new_id: &str) -> Result<(), DatastoreError> {
         let cmd = Command::RenameBucket(old_id.to_string(), new_id.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-        _unwrap_response(receiver)
+        _unwrap_empty_response(self.request(cmd)?)
     }
 
     /// Migrates all buckets whose hostname is "unknown" or "Unknown" to `new_hostname`.

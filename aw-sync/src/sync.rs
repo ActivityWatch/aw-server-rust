@@ -352,10 +352,18 @@ fn sync_one(
 
         // chunk is in DESC order (newest first); last element = oldest in this chunk.
         // Set fetch_end to just before the oldest to retrieve the next older page.
+        // KNOWN LIMITATION: if >BATCH_SIZE events share the exact same nanosecond timestamp T,
+        // those beyond the page boundary are silently dropped (advancing to T-1ns skips them).
+        // In practice this cannot occur with AW's event model (activity records span seconds+),
+        // but a correct fix would require offset-based pagination or tie-draining at the boundary.
         if let Some(oldest) = chunk.last() {
             fetch_end = Some(oldest.timestamp - Duration::nanoseconds(1));
         }
 
+        // TODO: To reduce peak memory to O(BATCH_SIZE) rather than O(total events), streaming
+        // processing would require ascending-order pagination or a two-pass boundary-scan approach.
+        // The current design is still a significant improvement over the original single unbounded
+        // allocation (SIGABRT on Android); each datastore query is bounded to BATCH_SIZE events.
         pages.push(chunk);
 
         if is_last {

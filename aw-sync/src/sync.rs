@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aw_client_rust::blocking::AwClient;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Bucket, Event};
@@ -318,63 +318,89 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    // Fetch events
-    // Unset ID on events, as they are not globally unique
-    // TODO: Fetch at most ~5,000 events at a time (or so, to avoid timeout from huge buckets)
-    let mut events: Vec<Event> = ds_from
-        .get_events(bucket_from.id.as_str(), resume_sync_at, None, None)
-        .unwrap()
-        .iter()
-        .map(|e| {
-            let mut new_e = e.clone();
-            new_e.id = None;
-            new_e
-        })
-        .collect();
+    // Fetch events in bounded chunks to avoid OOM on devices with limited RAM (e.g. Android).
+    // get_events returns events in descending order (newest first), so we paginate backwards
+    // using the `end` parameter and reverse the page order before processing to ensure the
+    // oldest event is handled first (required for correct heartbeat merge semantics).
+    const BATCH_SIZE: usize = 5000;
+    let mut pages: Vec<Vec<Event>> = Vec::new();
+    let mut fetch_end: Option<DateTime<Utc>> = None;
 
-    // Sort ascending
-    // FIXME: What happens here if two events have the same timestamp?
-    events.sort_by_key(|a| a.timestamp);
+    loop {
+        let chunk: Vec<Event> = ds_from
+            .get_events(
+                bucket_from.id.as_str(),
+                resume_sync_at,
+                fetch_end,
+                Some(BATCH_SIZE as u64),
+            )
+            .unwrap()
+            .iter()
+            .map(|e| {
+                // Unset ID on events, as they are not globally unique
+                let mut new_e = e.clone();
+                new_e.id = None;
+                new_e
+            })
+            .collect();
 
-    // TODO: Do bulk insert using insert_events instead? (for performance)
-    //       Client-side heartbeat queueing should keep things somewhat performant though?
-    // NOTE: First event needs to be inserted with heartbeat, to ensure appropriate
-    // merging/updating of pulsed events.
-    let events_total = events.len();
-    let mut events_sent = 0;
-    let mut events_iter = events.into_iter();
-    if let Some(e) = events_iter.next() {
-        ds_to.heartbeat(bucket_to.id.as_str(), e, 0.0).unwrap();
-        events_sent += 1;
+        if chunk.is_empty() {
+            break;
+        }
+
+        let is_last = chunk.len() < BATCH_SIZE;
+
+        // chunk is in DESC order (newest first); last element = oldest in this chunk.
+        // Set fetch_end to just before the oldest to retrieve the next older page.
+        if let Some(oldest) = chunk.last() {
+            fetch_end = Some(oldest.timestamp - Duration::nanoseconds(1));
+        }
+
+        pages.push(chunk);
+
+        if is_last {
+            break;
+        }
     }
 
-    const BATCH_SIZE: usize = 5000;
-    if BATCH_SIZE == 1 {
-        // TODO: Don't print progress messages if not in a suitable terminal environment (such as a
-        // pipe or systemd journal)
-        for event in events_iter {
-            print!("{} ({}/{})\r", &event.timestamp, events_sent, events_total);
-            ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
-            events_sent += 1;
-        }
-    } else {
-        let mut batch_events = Vec::with_capacity(BATCH_SIZE);
-        for e in events_iter {
-            print!("{} ({}/{})\r", e.timestamp, events_sent, events_total);
-            batch_events.push(e);
-            events_sent += 1;
-            if batch_events.len() >= BATCH_SIZE {
-                ds_to
-                    .insert_events(bucket_to.id.as_str(), batch_events.clone())
-                    .unwrap();
-                batch_events.clear();
+    // Process pages oldest-first (reverse of fetch order).
+    // NOTE: First event across all pages uses heartbeat to ensure appropriate
+    // merging/updating of pulsed events at the resume boundary.
+    let mut events_sent = 0usize;
+    let mut first_event_done = false;
+
+    for page in pages.into_iter().rev() {
+        // Sort ascending within each page (FIXME: equal-timestamp events retain insertion order)
+        let mut sorted_page = page;
+        sorted_page.sort_by_key(|a| a.timestamp);
+
+        let mut page_iter = sorted_page.into_iter();
+
+        if !first_event_done {
+            if let Some(e) = page_iter.next() {
+                ds_to.heartbeat(bucket_to.id.as_str(), e, 0.0).unwrap();
+                events_sent += 1;
+                first_event_done = true;
             }
         }
 
-        if !batch_events.is_empty() {
-            ds_to
-                .insert_events(bucket_to.id.as_str(), batch_events)
-                .unwrap();
+        let remaining: Vec<Event> = page_iter.collect();
+        if !remaining.is_empty() {
+            let mut batch = Vec::with_capacity(BATCH_SIZE);
+            for e in remaining {
+                print!("({}/…)\r", events_sent);
+                batch.push(e);
+                events_sent += 1;
+                if batch.len() >= BATCH_SIZE {
+                    ds_to
+                        .insert_events(bucket_to.id.as_str(), batch.clone())
+                        .unwrap();
+                    batch.clear();
+                }
+            }
+            if !batch.is_empty() {
+                ds_to.insert_events(bucket_to.id.as_str(), batch).unwrap();
+            }
         }
     }
 

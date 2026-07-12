@@ -230,6 +230,13 @@ fn get_or_create_sync_bucket(
     }
 }
 
+/// Number of events fetched per page in the chunked-fetch loop in `sync_one`.
+/// Reduced in tests so multi-page paths can be exercised with a small event count.
+#[cfg(not(test))]
+const BATCH_SIZE: usize = 5000;
+#[cfg(test)]
+const BATCH_SIZE: usize = 5;
+
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
 ///
 /// is_push: a bool indicating if we're pushing local buckets to the sync dir
@@ -331,7 +338,6 @@ fn sync_one(
     // — before inserting newer events from that page — so that dest's "last event" is still at
     // the resume boundary when heartbeat() runs. This ensures correct merge semantics without
     // creating duplicates at the boundary.
-    const BATCH_SIZE: usize = 5000;
     let mut fetch_end: Option<DateTime<Utc>> = None;
     let mut events_sent = 0usize;
 
@@ -366,12 +372,18 @@ fn sync_one(
             // Naively setting the next `end` to `oldest.timestamp - 1ns` silently drops events
             // if the page happens to end mid-run of same-timestamp events: anything else at
             // that exact timestamp would fall outside the next page's range. Guard against that
-            // by dropping the trailing same-timestamp run from this page and leaving it for the
-            // next fetch (whose `end` stays inclusive of that timestamp, so it re-fetches the
-            // whole run at once).
+            // by dropping ALL trailing events at `boundary_ts` from this page and leaving them
+            // for the next fetch (whose `end = boundary_ts` is inclusive, so it re-fetches
+            // the whole tied run at once).
+            //
+            // Note: we must drop the boundary event itself, not just its duplicates. Keeping
+            // one copy in this chunk while also setting `fetch_end = Some(boundary_ts)` (inclusive)
+            // would cause that event to be fetched again next page, producing a duplicate row.
             let boundary_ts = chunk.last().unwrap().timestamp;
             if chunk.first().unwrap().timestamp != boundary_ts {
-                while chunk.len() > 1 && chunk[chunk.len() - 2].timestamp == boundary_ts {
+                // Safe to pop all boundary_ts events: the `if` guard ensures at least one
+                // earlier event (with a different timestamp) remains in the chunk.
+                while chunk.last().map_or(false, |e| e.timestamp == boundary_ts) {
                     chunk.pop();
                 }
                 fetch_end = Some(boundary_ts);

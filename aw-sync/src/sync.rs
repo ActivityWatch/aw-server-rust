@@ -334,12 +334,17 @@ fn sync_one(
     // insertion order in the source DB). This preserves consistent ID assignment across source
     // and destination, which the sync tests rely on.
     //
-    // For the last (oldest) page, the globally-oldest event is handled via heartbeat() FIRST
-    // — before inserting newer events from that page — so that dest's "last event" is still at
-    // the resume boundary when heartbeat() runs. This ensures correct merge semantics without
-    // creating duplicates at the boundary.
+    // Heartbeat semantics at the resume boundary: we use heartbeat() for the globally-oldest
+    // new event ONLY in the single-page case (pages_written == 0 when is_last_fetch fires).
+    // In that case dest's "last event" is still the pre-sync resume-boundary row, so
+    // heartbeat() can correctly merge an adjacent new event into it.
+    //
+    // In the multi-page case (pages_written > 0), newer pages have already been inserted and
+    // dest's "last event" is no longer the resume boundary — heartbeat() would compare against
+    // the wrong row and skip the merge anyway. Inserting the oldest event directly is correct.
     let mut fetch_end: Option<DateTime<Utc>> = None;
     let mut events_sent = 0usize;
+    let mut pages_written = 0u32;
 
     loop {
         let raw = ds_from
@@ -398,6 +403,7 @@ fn sync_one(
             // Reverse to ASC order (oldest first) before inserting.
             chunk.reverse();
             events_sent += chunk.len();
+            pages_written += 1;
             for batch in chunk.chunks(BATCH_SIZE) {
                 print!("({}/…)\r", events_sent);
                 ds_to
@@ -405,13 +411,15 @@ fn sync_one(
                     .unwrap();
             }
         } else {
-            // Last (oldest) page: process oldest-first to preserve ID ordering and correct
-            // heartbeat semantics at the resume boundary.
+            // Last (oldest) page: process oldest-first to preserve ID ordering.
             chunk.reverse(); // chunk is now ASC (oldest first)
 
-            // Heartbeat the globally-oldest event FIRST, while dest's last event is still at
-            // the resume boundary. This merges correctly rather than creating a duplicate.
-            if !chunk.is_empty() {
+            // Use heartbeat() for the oldest event only in the single-page case:
+            // dest's "last event" is still the pre-sync resume-boundary row, so heartbeat()
+            // can correctly merge an adjacent new event into it (delta=0.0 → exact adjacency).
+            // In multi-page syncs, newer pages are already in dest, so heartbeat() would
+            // compare against the wrong row — insert directly instead.
+            if !chunk.is_empty() && pages_written == 0 {
                 let oldest = chunk.remove(0);
                 ds_to.heartbeat(bucket_to.id.as_str(), oldest, 0.0).unwrap();
                 events_sent += 1;

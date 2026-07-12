@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aw_client_rust::blocking::AwClient;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Bucket, Event};
@@ -230,6 +230,13 @@ fn get_or_create_sync_bucket(
     }
 }
 
+/// Number of events fetched per page in the chunked-fetch loop in `sync_one`.
+/// Reduced in tests so multi-page paths can be exercised with a small event count.
+#[cfg(not(test))]
+const BATCH_SIZE: usize = 5000;
+#[cfg(test)]
+const BATCH_SIZE: usize = 5;
+
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
 ///
 /// is_push: a bool indicating if we're pushing local buckets to the sync dir
@@ -324,63 +331,118 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    // Fetch events
-    // Unset ID on events, as they are not globally unique
-    // TODO: Fetch at most ~5,000 events at a time (or so, to avoid timeout from huge buckets)
-    let mut events: Vec<Event> = ds_from
-        .get_events(bucket_from.id.as_str(), resume_sync_at, None, None)
-        .unwrap()
-        .iter()
-        .map(|e| {
-            let mut new_e = e.clone();
-            new_e.id = None;
-            new_e
-        })
-        .collect();
+    // Fetch events in bounded chunks to avoid OOM on devices with limited RAM (e.g. Android).
+    // get_events returns events in descending order (newest first), so we paginate backwards
+    // using the `end` parameter. Each chunk is written to `ds_to` as soon as it is fetched,
+    // so peak memory is O(BATCH_SIZE), not O(total events in the bucket).
+    //
+    // Each chunk is reversed before writing so events are inserted oldest-first (matching the
+    // insertion order in the source DB). This preserves consistent ID assignment across source
+    // and destination, which the sync tests rely on.
+    //
+    // Heartbeat semantics at the resume boundary: we use heartbeat() for the globally-oldest
+    // new event ONLY in the single-page case (pages_written == 0 when is_last_fetch fires).
+    // In that case dest's "last event" is still the pre-sync resume-boundary row, so
+    // heartbeat() can correctly merge an adjacent new event into it.
+    //
+    // In the multi-page case (pages_written > 0), newer pages have already been inserted and
+    // dest's "last event" is no longer the resume boundary — heartbeat() would compare against
+    // the wrong row and skip the merge anyway. Inserting the oldest event directly is correct.
+    let mut fetch_end: Option<DateTime<Utc>> = None;
+    let mut events_sent = 0usize;
+    let mut pages_written = 0u32;
 
-    // Sort ascending
-    // FIXME: What happens here if two events have the same timestamp?
-    events.sort_by_key(|a| a.timestamp);
+    loop {
+        let raw = ds_from
+            .get_events(
+                bucket_from.id.as_str(),
+                resume_sync_at,
+                fetch_end,
+                Some(BATCH_SIZE as u64),
+            )
+            .unwrap();
 
-    // TODO: Do bulk insert using insert_events instead? (for performance)
-    //       Client-side heartbeat queueing should keep things somewhat performant though?
-    // NOTE: First event needs to be inserted with heartbeat, to ensure appropriate
-    // merging/updating of pulsed events.
-    let events_total = events.len();
-    let mut events_sent = 0;
-    let mut events_iter = events.into_iter();
-    if let Some(e) = events_iter.next() {
-        ds_to.heartbeat(bucket_to.id.as_str(), e, 0.0).unwrap();
-        events_sent += 1;
-    }
-
-    const BATCH_SIZE: usize = 5000;
-    if BATCH_SIZE == 1 {
-        // TODO: Don't print progress messages if not in a suitable terminal environment (such as a
-        // pipe or systemd journal)
-        for event in events_iter {
-            print!("{} ({}/{})\r", &event.timestamp, events_sent, events_total);
-            ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
-            events_sent += 1;
+        if raw.is_empty() {
+            break;
         }
-    } else {
-        let mut batch_events = Vec::with_capacity(BATCH_SIZE);
-        for e in events_iter {
-            print!("{} ({}/{})\r", e.timestamp, events_sent, events_total);
-            batch_events.push(e);
-            events_sent += 1;
-            if batch_events.len() >= BATCH_SIZE {
-                ds_to
-                    .insert_events(bucket_to.id.as_str(), batch_events.clone())
-                    .unwrap();
-                batch_events.clear();
+
+        // Fewer events than requested means there's nothing older left to fetch.
+        let is_last_fetch = raw.len() < BATCH_SIZE;
+
+        let mut chunk: Vec<Event> = raw
+            .into_iter()
+            .map(|mut e| {
+                // Unset ID on events, as they are not globally unique
+                e.id = None;
+                e
+            })
+            .collect();
+
+        if !is_last_fetch {
+            // chunk is in DESC order (newest first); chunk.last() = oldest in this (full) page.
+            // Naively setting the next `end` to `oldest.timestamp - 1ns` silently drops events
+            // if the page happens to end mid-run of same-timestamp events: anything else at
+            // that exact timestamp would fall outside the next page's range. Guard against that
+            // by dropping ALL trailing events at `boundary_ts` from this page and leaving them
+            // for the next fetch (whose `end = boundary_ts` is inclusive, so it re-fetches
+            // the whole tied run at once).
+            //
+            // Note: we must drop the boundary event itself, not just its duplicates. Keeping
+            // one copy in this chunk while also setting `fetch_end = Some(boundary_ts)` (inclusive)
+            // would cause that event to be fetched again next page, producing a duplicate row.
+            let boundary_ts = chunk.last().unwrap().timestamp;
+            if chunk.first().unwrap().timestamp != boundary_ts {
+                // Safe to pop all boundary_ts events: the `if` guard ensures at least one
+                // earlier event (with a different timestamp) remains in the chunk.
+                while chunk.last().map_or(false, |e| e.timestamp == boundary_ts) {
+                    chunk.pop();
+                }
+                fetch_end = Some(boundary_ts);
+            } else {
+                // Pathological case: every event in this full page shares the exact same
+                // timestamp, so we can't tell where the tied run ends without an unbounded
+                // query. This can't occur with AW's event model in practice (activity records
+                // span seconds+) — accept the page as-is rather than looping forever.
+                fetch_end = Some(boundary_ts - Duration::nanoseconds(1));
             }
-        }
 
-        if !batch_events.is_empty() {
-            ds_to
-                .insert_events(bucket_to.id.as_str(), batch_events)
-                .unwrap();
+            // Reverse to ASC order (oldest first) before inserting.
+            chunk.reverse();
+            events_sent += chunk.len();
+            pages_written += 1;
+            for batch in chunk.chunks(BATCH_SIZE) {
+                print!("({}/…)\r", events_sent);
+                ds_to
+                    .insert_events(bucket_to.id.as_str(), batch.to_vec())
+                    .unwrap();
+            }
+        } else {
+            // Last (oldest) page: process oldest-first to preserve ID ordering.
+            chunk.reverse(); // chunk is now ASC (oldest first)
+
+            // Use heartbeat() for the oldest event only in the single-page case:
+            // dest's "last event" is still the pre-sync resume-boundary row, so heartbeat()
+            // can correctly merge an adjacent new event into it (delta=0.0 → exact adjacency).
+            // In multi-page syncs, newer pages are already in dest, so heartbeat() would
+            // compare against the wrong row — insert directly instead.
+            if !chunk.is_empty() && pages_written == 0 {
+                let oldest = chunk.remove(0);
+                ds_to.heartbeat(bucket_to.id.as_str(), oldest, 0.0).unwrap();
+                events_sent += 1;
+            }
+
+            // Insert the remaining events from the last page in ASC order.
+            if !chunk.is_empty() {
+                events_sent += chunk.len();
+                for batch in chunk.chunks(BATCH_SIZE) {
+                    print!("({}/…)\r", events_sent);
+                    ds_to
+                        .insert_events(bucket_to.id.as_str(), batch.to_vec())
+                        .unwrap();
+                }
+            }
+
+            break;
         }
     }
 

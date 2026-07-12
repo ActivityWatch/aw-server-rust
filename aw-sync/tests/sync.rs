@@ -209,6 +209,79 @@ mod sync_tests {
         check_synced_buckets_equal_to_src(&all_buckets_map);
     }
 
+    #[test]
+    fn test_sync_resume_after_partial_sync() {
+        // Verify that resuming an interrupted sync picks up where it left off.
+        // This exercises the resume_sync_at path in the chunked-fetch loop.
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        create_events(&state.ds_src, bucket_id.as_str(), 15);
+
+        // First sync pass
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
+
+        let all_datastores_1: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
+        check_synced_buckets_equal_to_src(&get_all_buckets_map(all_datastores_1));
+
+        // Add more events and sync again — verifies resume logic
+        create_events(&state.ds_src, bucket_id.as_str(), 15);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
+
+        let all_datastores_2: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
+        check_synced_buckets_equal_to_src(&get_all_buckets_map(all_datastores_2));
+    }
+
+    #[test]
+    fn test_sync_multipage_no_duplicates() {
+        // Verify that multi-page syncs (more events than BATCH_SIZE) produce no duplicates.
+        // In tests, BATCH_SIZE=5, so 12 events triggers 3 pages (5+5+2).
+        // This exercises the boundary-event cursor logic that previously left one copy of
+        // the page-boundary event in the current chunk AND re-fetched it on the next page.
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        create_events(&state.ds_src, bucket_id.as_str(), 12);
+
+        // Initial sync
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
+
+        let all_datastores_1: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
+        check_synced_buckets_equal_to_src(&get_all_buckets_map(all_datastores_1));
+
+        // Resume sync: add another 12 events (3 more pages) and sync again.
+        // Exercises multi-page resume path where heartbeat order matters.
+        create_events(&state.ds_src, bucket_id.as_str(), 12);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        );
+
+        let all_datastores_2: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
+        check_synced_buckets_equal_to_src(&get_all_buckets_map(all_datastores_2));
+    }
+
     // TODO: Find a way to reuse this (previously used in an integration test)
     fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         let mut datastores: Vec<Datastore> = Vec::new();

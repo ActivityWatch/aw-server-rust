@@ -24,6 +24,10 @@ aw-sync daemon
 # Sync daemon with specific buckets only
 aw-sync daemon --buckets "aw-watcher-window,aw-watcher-afk" --start-date "2024-01-01"
 
+# Sync daemon in push-only or pull-only mode
+aw-sync daemon --mode push
+aw-sync daemon --mode pull
+
 # Sync all buckets once and exit
 aw-sync sync --start-date "2024-01-01"
 ```
@@ -35,6 +39,7 @@ For more options, see `aw-sync --help`. Some notable options:
 - `--start-date`: Only sync events after this date (YYYY-MM-DD)
 - `--sync-db`: Specify a specific database file in the sync directory
 - `--mode`: Choose sync mode: "push", "pull", or "both" (default: "both")
+  - For `aw-sync sync`, passing `--mode` (with no other options) is enough to opt into the per-bucket sync path where it's respected; without it, or any of `--buckets`/`--start-date`/`--sync-db`, `aw-sync sync` falls back to the legacy host-based mode, which always does both a pull and a push
 
 ### Setting up sync
 

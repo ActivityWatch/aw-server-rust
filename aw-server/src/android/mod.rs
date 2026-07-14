@@ -343,8 +343,8 @@ pub mod android {
             Err(err) => return create_error_object(&env, err.to_string()),
         };
 
-        // Hardcoded bucket ID for testing
-        let bid_android = "aw-watcher-android-test".to_string();
+        // Hardcoded bucket ID
+        let bid_android = "aw-watcher-android".to_string();
 
         // Get classes from server settings via HTTP API
         let classes = match AwClient::new("127.0.0.1", 5600, "aw-android-query") {

@@ -7,18 +7,27 @@ pub fn find_bucket<'a>(
     hostname_filter: &Option<String>,
     buckets: impl IntoIterator<Item = &'a Bucket>,
 ) -> Option<String> {
+    let mut prefix_match = None;
     for bucket in buckets {
         if bucket.id.starts_with(bucket_filter) {
-            if let Some(hostname) = hostname_filter {
-                if hostname == &bucket.hostname {
+            let hostname_matches = match hostname_filter {
+                Some(hostname) => hostname == &bucket.hostname,
+                None => true,
+            };
+
+            if hostname_matches {
+                if bucket.id == bucket_filter {
+                    // Exact match, return immediately
                     return Some(bucket.id.to_string());
                 }
-            } else {
-                return Some(bucket.id.to_string());
+                if prefix_match.is_none() {
+                    // Save the first prefix match in case we don't find an exact match
+                    prefix_match = Some(bucket.id.to_string());
+                }
             }
         }
     }
-    None
+    prefix_match
 }
 
 #[cfg(test)]

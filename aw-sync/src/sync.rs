@@ -42,6 +42,7 @@ pub struct SyncSpec {
     /// Bucket IDs to sync
     pub buckets: Option<Vec<String>>,
     /// Start of time range to sync
+    #[allow(dead_code)]
     pub start: Option<DateTime<Utc>>,
 }
 

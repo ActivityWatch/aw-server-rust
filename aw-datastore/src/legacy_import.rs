@@ -3,7 +3,9 @@ use rusqlite::Connection;
 
 #[derive(Debug, Clone)]
 pub enum LegacyDatastoreImportError {
+    #[allow(dead_code)]
     SQLPrepareError(String),
+    #[allow(dead_code)]
     SQLMapError(String),
 }
 

@@ -9,6 +9,7 @@ pub struct Program {
 
 #[derive(Debug, Clone)]
 pub struct Expr {
+    #[allow(dead_code)]
     pub span: Span,
     pub node: Expr_,
 }

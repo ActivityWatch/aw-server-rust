@@ -538,7 +538,8 @@ mod datastore_tests {
             let version: i32 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 5);
+            // Database should be upgraded to v6 (compression) automatically
+            assert_eq!(version, 6);
             let old_indexes: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN
@@ -551,7 +552,7 @@ mod datastore_tests {
             let new_index: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'index'
-                     AND name = 'events_bucketrow_starttime_endtime_index'",
+                     AND name = 'events_bucketrow_starttime_index'",
                     [],
                     |row| row.get(0),
                 )
@@ -666,5 +667,260 @@ mod datastore_tests {
         }
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    /// With the compression feature, a database that grows past the training
+    /// threshold should get a dictionary on the next open, recompress its rows,
+    /// and still return every event's data intact.
+    #[test]
+    #[cfg(feature = "compression-zstd")]
+    fn test_compression_dictionary_roundtrip() {
+        use rusqlite::Connection;
+
+        let mut db_path = get_cache_dir().unwrap();
+        db_path.push("datastore-unittest-compression.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+        if db_path.exists() {
+            std::fs::remove_file(&db_path).unwrap();
+        }
+
+        let bucket = test_bucket();
+        // Realistic, highly-repetitive event data, well above MIN_EVENTS_TO_TRAIN.
+        let n = 4000;
+        let make_event = |i: usize| Event {
+            id: None,
+            timestamp: Utc::now() + Duration::milliseconds(i as i64),
+            duration: Duration::seconds(1),
+            data: json_map! {
+                "app": json!(["Firefox", "Terminal", "Code", "Slack"][i % 4]),
+                "title": json!(format!("Working on window {}", i % 100))
+            },
+        };
+
+        // Session 1: no dictionary exists yet (DB started empty), rows stored raw.
+        {
+            let ds = Datastore::new(db_path_str.clone(), false);
+            ds.create_bucket(&bucket).unwrap();
+            let events: Vec<Event> = (0..n).map(make_event).collect();
+            ds.insert_events(&bucket.id, &events).unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+        }
+
+        // No dictionary should have been trained during session 1.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let dict_rows: i64 = conn
+                .query_row("SELECT count(*) FROM compression_dict", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(dict_rows, 0, "no dictionary expected before reopen");
+        }
+
+        // Session 2: reopening trains a dictionary and recompresses existing rows.
+        {
+            let ds = Datastore::new(db_path_str.clone(), false);
+            let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+            assert_eq!(events.len(), n);
+            // Data must survive the train + recompress roundtrip exactly.
+            for e in &events {
+                let i = e.data["title"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("Working on window ")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert!(i < 100);
+                assert!(e.data["app"].is_string());
+            }
+            // Inserting more after the dictionary exists must also roundtrip.
+            ds.insert_events(&bucket.id, &[make_event(99999)]).unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+        }
+
+        // A dictionary now exists and at least some rows are stored compressed.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let dict_rows: i64 = conn
+                .query_row("SELECT count(*) FROM compression_dict", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(dict_rows, 1, "dictionary should exist after reopen");
+            // 0x28 0xB5 0x2F 0xFD is the zstd magic number (Little Endian).
+            let compressed: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM events WHERE hex(substr(data, 1, 4)) = '28B52FFD'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(compressed > 0, "expected some rows to be stored compressed");
+        }
+
+        // Best-effort cleanup: on Windows the worker may still hold the file
+        // handle briefly after close(), which would make a hard unwrap flaky.
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// Upgrading a populated pre-v6 database should train and apply compression
+    /// on the very first open (not only after a second restart). Regression test
+    /// for the db_version being captured before migrations ran.
+    #[test]
+    #[cfg(feature = "compression-zstd")]
+    fn test_migration_v5_to_v6_trains_on_first_open() {
+        let mut db_path = get_cache_dir().unwrap();
+        db_path.push("datastore-unittest-migration-v6.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+        if db_path.exists() {
+            std::fs::remove_file(&db_path).unwrap();
+        }
+
+        // Build a v5 database with enough repetitive events to train a dictionary.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE buckets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL, type TEXT NOT NULL, client TEXT NOT NULL,
+                    hostname TEXT NOT NULL, created TEXT NOT NULL,
+                    data TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX bucket_id_index ON buckets(id);
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bucketrow INTEGER NOT NULL, starttime INTEGER NOT NULL,
+                    endtime INTEGER NOT NULL, data TEXT NOT NULL,
+                    FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+                );
+                CREATE INDEX events_bucketrow_starttime_endtime_index
+                    ON events(bucketrow, starttime DESC, endtime);
+                CREATE TABLE key_value (key TEXT PRIMARY KEY, value TEXT, last_modified NUMBER NOT NULL);
+                INSERT INTO buckets (name, type, client, hostname, created, data)
+                    VALUES ('testid', 'testtype', 'testclient', 'testhost',
+                            '2024-01-01T00:00:00+00:00', '{}');
+                WITH RECURSIVE seq(x) AS (
+                    SELECT 1 UNION ALL SELECT x + 1 FROM seq WHERE x < 3000
+                )
+                INSERT INTO events (bucketrow, starttime, endtime, data)
+                    SELECT 1, x * 1000000000, x * 1000000000 + 1000000000,
+                           '{"app":"App' || (x % 4) || '","title":"Window title ' || (x % 50) || '"}'
+                    FROM seq;
+                PRAGMA user_version = 5;
+            "#,
+            )
+            .unwrap();
+        }
+
+        // First open migrates to v6 AND sets up compression in the same session.
+        {
+            let ds = Datastore::new(db_path_str, false);
+            let events = ds.get_events("testid", None, None, None).unwrap();
+            assert_eq!(events.len(), 3000);
+            // newest-first ordering: last inserted was x=3000 -> App0
+            assert_eq!(events[0].data["app"], json!("App0"));
+            ds.close();
+        }
+
+        // A dictionary was trained and some rows compressed on that first open.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let version: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 6);
+            let dict_rows: i64 = conn
+                .query_row("SELECT count(*) FROM compression_dict", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                dict_rows, 1,
+                "dictionary should be trained on the first open after upgrade"
+            );
+            let compressed: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM events WHERE hex(substr(data, 1, 4)) = '28B52FFD'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                compressed > 0,
+                "expected rows to be compressed after first open"
+            );
+        }
+
+        // Best-effort cleanup: on Windows the worker may still hold the file
+        // handle briefly after close(), which would make a hard unwrap flaky.
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// A row that looks compressed (zstd magic) but can't be decompressed — e.g.
+    /// the dictionary is missing or the feature is disabled — must be skipped
+    /// with a warning, never panic the worker. Regression test for the previous
+    /// unwrap() on the decompression-failure path.
+    #[test]
+    fn test_unreadable_compressed_row_does_not_panic() {
+        let mut db_path = get_cache_dir().unwrap();
+        db_path.push("datastore-unittest-badrow.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+        if db_path.exists() {
+            std::fs::remove_file(&db_path).unwrap();
+        }
+
+        // Create a v6 database with one valid event.
+        {
+            let ds = Datastore::new(db_path_str.clone(), false);
+            ds.create_bucket(&test_bucket()).unwrap();
+            ds.insert_events(
+                "testid",
+                &[Event {
+                    id: None,
+                    timestamp: Utc::now(),
+                    duration: Duration::seconds(1),
+                    data: json_map! {"app": json!("ok")},
+                }],
+            )
+            .unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+        }
+
+        // Inject a row whose data starts with the zstd magic number but is not a
+        // valid frame, and for which no dictionary exists.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let bid: i64 = conn
+                .query_row("SELECT id FROM buckets WHERE name = 'testid'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            conn.execute(
+                "INSERT INTO events (bucketrow, starttime, duration, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    bid,
+                    5_000_000_000i64,
+                    1_000_000_000i64,
+                    vec![0x28u8, 0xB5, 0x2F, 0xFD, 0xDE, 0xAD]
+                ],
+            )
+            .unwrap();
+        }
+
+        // Reading must not panic: the bad row is skipped, the good row returned.
+        {
+            let ds = Datastore::new(db_path_str, false);
+            let events = ds.get_events("testid", None, None, None).unwrap();
+            assert_eq!(
+                events.len(),
+                1,
+                "the unreadable row should be skipped, the valid one kept"
+            );
+            assert_eq!(events[0].data["app"], json!("ok"));
+            ds.close();
+        }
+
+        // Best-effort cleanup: on Windows the worker may still hold the file
+        // handle briefly after close(), which would make a hard unwrap flaky.
+        let _ = std::fs::remove_file(&db_path);
     }
 }

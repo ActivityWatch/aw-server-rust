@@ -3,6 +3,13 @@
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
 use aw_models::Event;
 use fancy_regex::Regex;
+use lru::LruCache;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex, OnceLock};
+
+const REGEX_CACHE_CAPACITY: usize = 512;
+
+static REGEX_CACHE: OnceLock<Mutex<LruCache<String, Arc<Regex>>>> = OnceLock::new();
 
 pub enum Rule {
     None,
@@ -23,7 +30,7 @@ trait RuleTrait {
 }
 
 pub struct RegexRule {
-    regex: Regex,
+    regex: Arc<Regex>,
     select_keys: Option<Vec<String>>,
 }
 
@@ -33,15 +40,6 @@ impl RegexRule {
         ignore_case: bool,
         select_keys: Option<Vec<String>>,
     ) -> Result<RegexRule, fancy_regex::Error> {
-        // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
-        // so we need to prefix with `(?i)` to make it case insensitive.
-        let regex = if ignore_case {
-            let regex_str = format!("(?i){regex_str}");
-            Regex::new(&regex_str)?
-        } else {
-            Regex::new(regex_str)?
-        };
-
         // Validate that select_keys is not an empty list, which would silently never match.
         if let Some(ref keys) = select_keys {
             if keys.is_empty() {
@@ -53,6 +51,29 @@ impl RegexRule {
                 ));
             }
         }
+
+        // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
+        // so we need to prefix with `(?i)` to make it case insensitive.
+        let full_regex_str = if ignore_case {
+            format!("(?i){regex_str}")
+        } else {
+            regex_str.to_string()
+        };
+
+        let cache = REGEX_CACHE.get_or_init(|| {
+            Mutex::new(LruCache::new(
+                NonZeroUsize::new(REGEX_CACHE_CAPACITY).unwrap(),
+            ))
+        });
+        let mut cache = cache.lock().unwrap();
+
+        let regex = if let Some(re) = cache.get(&full_regex_str) {
+            re.clone()
+        } else {
+            let re = Arc::new(Regex::new(&full_regex_str)?);
+            cache.put(full_regex_str.clone(), re.clone());
+            re
+        };
 
         Ok(RegexRule { regex, select_keys })
     }
@@ -85,7 +106,7 @@ impl RuleTrait for RegexRule {
 impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
         Rule::Regex(RegexRule {
-            regex: re,
+            regex: Arc::new(re),
             select_keys: None,
         })
     }

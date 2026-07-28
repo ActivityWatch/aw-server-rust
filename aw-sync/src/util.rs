@@ -28,6 +28,27 @@ pub fn get_server_port(testing: bool) -> Result<u16, Box<dyn Error>> {
     Ok(port)
 }
 
+/// Returns the API key from the local aw-server config, if one is set.
+#[cfg(not(target_os = "android"))]
+pub fn get_server_api_key(testing: bool) -> Result<Option<String>, Box<dyn Error>> {
+    let aw_server_conf = crate::dirs::get_server_config_path(testing)
+        .map_err(|_| "Could not get aw-server config path")?;
+    if !aw_server_conf.exists() {
+        return Ok(None);
+    }
+    let mut file = File::open(&aw_server_conf)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let value: toml::Value = toml::from_str(&contents)?;
+    let api_key = value
+        .get("auth")
+        .and_then(|a| a.get("api_key"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    Ok(api_key)
+}
+
 /// Check if a directory contains a .db file
 fn contains_db_file(dir: &std::path::Path) -> bool {
     fs::read_dir(dir)

@@ -166,7 +166,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(Ok)
         .unwrap_or_else(|| util::get_server_port(opts.testing))?;
 
-    let client = AwClient::new(&opts.host, port, "aw-sync")?;
+    let api_key = util::get_server_api_key(opts.testing)?;
+    if api_key.is_some() {
+        info!("Using API key from server config for authentication");
+    }
+    let client = AwClient::new_with_api_key(&opts.host, port, "aw-sync", api_key)?;
 
     // if opts.command is None, then we're using the default subcommand (Daemon)
     match opts.command.unwrap_or(Commands::Daemon {

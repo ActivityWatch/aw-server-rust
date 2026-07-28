@@ -10,8 +10,8 @@
 //! actually uses:
 //!
 //! - `GET /api/0/info` — hostname/version detection
-//! - `POST /api/0/buckets/<id>` — ensure bucket
-//! - `POST /api/0/buckets/<id>/heartbeat` — heartbeats
+//! - `POST /api/0/buckets/aw-watcher-web-<id>` — ensure its web-watcher bucket
+//! - `POST /api/0/buckets/aw-watcher-web-<id>/heartbeat` — heartbeats
 //!
 //! Everything else (`/api/0/export`, `/api/0/import`, `/api/0/query`,
 //! `/api/0/settings`, event reads, bucket deletion, ...) is closed to
@@ -147,13 +147,18 @@ fn effective_method(request: &Request) -> Option<Method> {
 }
 
 /// The endpoints `aw-watcher-web` needs, as decoded path segments.
+///
+/// The bucket prefix matters: without it, any installed extension could send
+/// heartbeats to an existing bucket owned by another watcher.
 fn is_watcher_endpoint(method: Method, segments: &[&str]) -> bool {
-    matches!(
-        (method, segments),
-        (Method::Get, ["api", "0", "info"])
-            | (Method::Post, ["api", "0", "buckets", _])
-            | (Method::Post, ["api", "0", "buckets", _, "heartbeat"])
-    )
+    match (method, segments) {
+        (Method::Get, ["api", "0", "info"]) => true,
+        (Method::Post, ["api", "0", "buckets", bucket_id])
+        | (Method::Post, ["api", "0", "buckets", bucket_id, "heartbeat"]) => {
+            bucket_id.starts_with("aw-watcher-web-")
+        }
+        _ => false,
+    }
 }
 
 /// Route handler returning 403 for out-of-scope extension requests.
@@ -328,6 +333,37 @@ mod tests {
             .dispatch();
         assert_eq!(res.status(), Status::Ok, "heartbeat blocked");
         assert_eq!(allow_origin(&res).as_deref(), Some(EXT_ORIGIN));
+    }
+
+    /// A wildcard-matched extension must not create or write to buckets owned
+    /// by other watchers. The URL bucket ID is the downstream authorization
+    /// boundary, so this check must happen before the handler runs.
+    #[test]
+    fn test_extension_cannot_write_other_watcher_bucket() {
+        let client = client();
+
+        let res = client
+            .post("/api/0/buckets/aw-watcher-window_testhost")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .header(Header::new("Origin", EXT_ORIGIN))
+            .body(r#"{"type":"currentwindow","client":"aw-client","hostname":"testhost"}"#)
+            .dispatch();
+        assert_eq!(res.status(), Status::Forbidden, "foreign bucket created");
+        assert_eq!(allow_origin(&res), None);
+
+        let res = client
+            .post("/api/0/buckets/aw-watcher-window_testhost/heartbeat?pulsetime=60")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .header(Header::new("Origin", EXT_ORIGIN))
+            .body(
+                r#"{"timestamp":"2026-07-28T09:00:00+00:00","duration":0,
+                    "data":{"app":"attacker","title":"injected"}}"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), Status::Forbidden, "foreign heartbeat written");
+        assert_eq!(allow_origin(&res), None);
     }
 
     /// Preflight for a watcher endpoint must still succeed — aw-client-js

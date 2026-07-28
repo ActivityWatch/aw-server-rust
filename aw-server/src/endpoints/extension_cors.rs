@@ -13,6 +13,15 @@
 //! - `POST /api/0/buckets/aw-watcher-web-<id>` — ensure its web-watcher bucket
 //! - `POST /api/0/buckets/aw-watcher-web-<id>/heartbeat` — heartbeats
 //!
+//! # Accepted limitation
+//!
+//! The bucket prefix is a coarse scope, not an origin-to-bucket ownership
+//! boundary. Any wildcard-matched Firefox extension can still create or send
+//! heartbeats to another existing `aw-watcher-web-*` bucket. This preserves
+//! the official watcher's zero-configuration flow while blocking writes to
+//! other watcher types; eliminating web-bucket poisoning requires pairing an
+//! extension origin with its bucket in a future protocol.
+//!
 //! Everything else (`/api/0/export`, `/api/0/import`, `/api/0/query`,
 //! `/api/0/settings`, event reads, bucket deletion, ...) is closed to
 //! wildcard-matched extension origins. That removes the data-exfiltration half
@@ -148,8 +157,9 @@ fn effective_method(request: &Request) -> Option<Method> {
 
 /// The endpoints `aw-watcher-web` needs, as decoded path segments.
 ///
-/// The bucket prefix matters: without it, any installed extension could send
-/// heartbeats to an existing bucket owned by another watcher.
+/// The prefix blocks writes to other watcher types, but deliberately does not
+/// bind an extension origin to one `aw-watcher-web-*` bucket. See the accepted
+/// limitation in the module documentation.
 fn is_watcher_endpoint(method: Method, segments: &[&str]) -> bool {
     match (method, segments) {
         (Method::Get, ["api", "0", "info"]) => true,

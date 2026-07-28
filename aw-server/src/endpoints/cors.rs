@@ -16,7 +16,10 @@ pub fn cors(config: &AWConfig) -> rocket_cors::Cors {
     let mut allowed_regex_origins = vec![
         "chrome-extension://nglaklhklhcoonedhgnpgddginnjdadi".to_string(),
         // Every version of a mozilla extension has its own ID to avoid fingerprinting, so we
-        // unfortunately have to allow all extensions to have access to aw-server
+        // unfortunately have to allow all extensions to have access to aw-server.
+        // The endpoints this wildcard actually reaches are narrowed to the ones
+        // aw-watcher-web needs by the ExtensionCorsScope fairing — see
+        // endpoints/extension_cors.rs.
         "moz-extension://.*".to_string(),
     ];
     allowed_regex_origins.extend(config.cors_regex.clone());

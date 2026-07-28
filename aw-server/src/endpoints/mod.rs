@@ -53,6 +53,7 @@ mod apikey;
 mod bucket;
 mod cors;
 mod export;
+mod extension_cors;
 mod hostcheck;
 mod import;
 mod query;
@@ -137,12 +138,16 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
         config.address, config.port
     );
     let cors = cors::cors(&config);
+    let extension_cors = extension_cors::ExtensionCorsScope::new(&config);
     let hostcheck = hostcheck::HostCheck::new(&config);
     let apikey = apikey::ApiKeyCheck::new(&config);
     let custom_static = config.custom_static.clone();
 
     let mut rocket = rocket::custom(config.to_rocket_config())
         .attach(cors.clone())
+        // Attached before the other request fairings so a blocked extension
+        // request is rewritten to the 403 route before they inspect the path.
+        .attach(extension_cors)
         .attach(hostcheck)
         .attach(apikey)
         .manage(cors)

@@ -44,6 +44,10 @@ struct Opts {
     #[clap(long)]
     port: Option<u16>,
 
+    /// Path to the local aw-server config file.
+    #[clap(short = 'c', long = "config")]
+    config: Option<PathBuf>,
+
     /// Convenience option for using the default testing host and port.
     #[clap(long)]
     testing: bool,
@@ -161,23 +165,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::set_var("AW_SYNC_DIR", sync_dir);
     }
 
-    let port = opts
-        .port
-        .map(Ok)
-        .unwrap_or_else(|| util::get_server_port(opts.testing))?;
-
-    // Only use the local server's API key when connecting to localhost.
-    // Forwarding it to a remote host would leak the credential over HTTP.
-    let is_localhost = matches!(opts.host.as_str(), "127.0.0.1" | "::1" | "localhost");
-    let api_key = if is_localhost {
-        let key = util::get_server_api_key(opts.testing)?;
-        if key.is_some() {
-            info!("Using API key from server config for authentication");
-        }
-        key
+    let server_config = if util::is_loopback_host(&opts.host) {
+        util::get_server_config(opts.testing, opts.config.as_deref())?
     } else {
-        None
+        util::ServerConfig::default_for(opts.testing)
     };
+    let port = opts.port.unwrap_or(server_config.port);
+
+    let api_key = server_config.api_key;
+    if api_key.is_some() {
+        info!("Using API key from server config for authentication");
+    }
     let client = AwClient::new_with_api_key(&opts.host, port, "aw-sync", api_key)?;
 
     // if opts.command is None, then we're using the default subcommand (Daemon)

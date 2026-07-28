@@ -17,6 +17,15 @@
 //!
 //! CORS preflight requests (OPTIONS) are also passed through unconditionally so
 //! the browser can obtain allowed headers before sending the actual request.
+//!
+//! # Path matching
+//!
+//! The gate matches on `request.uri().path().segments()` — the same
+//! percent-decoded, empty-skipping segment view Rocket's router uses to select
+//! a handler (see `rocket::router::collider::paths_match`). Comparing the raw
+//! path string instead lets an attacker desynchronize the gate from the router
+//! (e.g. `/%61pi/0/buckets/` or `//api/0/buckets/`), skipping auth on a request
+//! the router still dispatches to a real `/api/` handler.
 
 use subtle::ConstantTimeEq;
 
@@ -31,8 +40,11 @@ use crate::endpoints::HttpErrorJson;
 
 static FAIRING_ROUTE_BASE: &str = "/apikey_fairing";
 
-/// Paths that are always accessible without authentication.
-const PUBLIC_PATHS: &[&str] = &["/api/0/info"];
+/// Path segments gated by API key authentication.
+const API_SEGMENT: &str = "api";
+
+/// Paths that are always accessible without authentication, as decoded segments.
+const PUBLIC_PATHS: &[&[&str]] = &[&["api", "0", "info"]];
 
 pub struct ApiKeyCheck {
     api_key: Option<String>,
@@ -111,18 +123,17 @@ impl Fairing for ApiKeyCheck {
             return;
         }
 
-        let path = request.uri().path().as_str();
-
-        // Normalize leading slashes to prevent bypass via `//api/...`
-        let normalized_path = format!("/{}", path.trim_start_matches('/'));
+        // Match on the same decoded segment view the router uses to dispatch,
+        // so the gate cannot be desynchronized from the handler it protects.
+        let segments: Vec<&str> = request.uri().path().segments().collect();
 
         // Only gate API endpoints — static web UI assets are not under /api/
-        if !normalized_path.starts_with("/api/") {
+        if segments.first() != Some(&API_SEGMENT) {
             return;
         }
 
         // Always allow public API paths (e.g. /api/0/info for health checks)
-        if PUBLIC_PATHS.contains(&normalized_path.as_str()) {
+        if PUBLIC_PATHS.contains(&segments.as_slice()) {
             return;
         }
 
@@ -213,6 +224,126 @@ mod tests {
         // Double slash should also require auth
         let res = client
             .get("//api/0/buckets/")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::Unauthorized);
+    }
+
+    /// Percent-encoded paths must not bypass the gate.
+    ///
+    /// Rocket's router decodes the path before matching, so a fairing that
+    /// compares the *raw* path string can be desynchronized from the handler
+    /// it protects: `/%61pi/0/buckets/` reaches the `/api/0/buckets/` handler
+    /// while a raw `starts_with("/api/")` check sees `/%61pi/...` and skips auth.
+    #[test]
+    fn test_api_key_percent_encoded_paths_require_auth() {
+        let server = setup_testserver(Some("secret123".to_string()));
+        let client = rocket::local::blocking::Client::tracked(server).expect("valid instance");
+
+        // Each of these decodes to the real /api/0/buckets/ route, so each must
+        // be rejected by the auth gate specifically — asserting "not 200" would
+        // also pass on a 404, hiding a route miss as an auth success.
+        for path in [
+            "/%61pi/0/buckets/",     // lowercase hex, first char
+            "/ap%69/0/buckets/",     // encoded char mid-segment
+            "/%61%70%69/0/buckets/", // fully encoded segment
+            "//%61pi/0/buckets/",    // encoding combined with the #588 double-slash trick
+        ] {
+            let res = client
+                .get(path)
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "localhost:5600"))
+                .dispatch();
+            assert_eq!(
+                res.status(),
+                Status::Unauthorized,
+                "expected auth rejection for encoded path {path}"
+            );
+        }
+
+        // Sanity check on the above: these paths really do reach the buckets
+        // handler once a valid key is supplied, so the 401s are the gate
+        // rejecting them rather than the router failing to match.
+        for path in ["/%61pi/0/buckets/", "//%61pi/0/buckets/"] {
+            let res = client
+                .get(path)
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "localhost:5600"))
+                .header(Header::new("Authorization", "Bearer secret123"))
+                .dispatch();
+            assert_eq!(
+                res.status(),
+                Status::Ok,
+                "encoded path {path} does not reach the real handler"
+            );
+        }
+
+        // Case is significant: /API/ is not a registered route at all, so this
+        // 404s at the router rather than exercising the gate. Asserted
+        // explicitly so a future case-insensitive router change would show up
+        // here instead of silently passing a "not 200" check.
+        let res = client
+            .get("/%41PI/0/buckets/")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::NotFound);
+    }
+
+    /// Writes must be gated too — a bypass that only blocked GETs would still
+    /// allow bucket creation / event insertion.
+    #[test]
+    fn test_api_key_percent_encoded_write_requires_auth() {
+        let server = setup_testserver(Some("secret123".to_string()));
+        let client = rocket::local::blocking::Client::tracked(server).expect("valid instance");
+
+        let res = client
+            .post("/%61pi/0/buckets/authbypass-poc")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .body(r#"{"type":"test","client":"authbypass-poc","hostname":"poc-host"}"#)
+            .dispatch();
+        assert_eq!(
+            res.status(),
+            Status::Unauthorized,
+            "write bypassed via encoded path"
+        );
+
+        // And the bucket must not exist afterwards — 404 from an authenticated
+        // lookup, not merely "some non-200 status".
+        let res = client
+            .get("/api/0/buckets/authbypass-poc")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .header(Header::new("Authorization", "Bearer secret123"))
+            .dispatch();
+        assert_eq!(
+            res.status(),
+            Status::NotFound,
+            "bucket was created without auth"
+        );
+    }
+
+    /// The public-path exemption is matched on decoded segments, so encoded
+    /// spellings of `/api/0/info` stay public (parity with the router) while
+    /// nothing else slips through the exemption.
+    #[test]
+    fn test_public_path_matched_on_decoded_segments() {
+        let server = setup_testserver(Some("secret123".to_string()));
+        let client = rocket::local::blocking::Client::tracked(server).expect("valid instance");
+
+        let res = client
+            .get("/api/0/%69nfo")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+
+        // A longer path that merely starts with the public prefix is not public:
+        // the exemption is an exact segment match, so this hits the gate.
+        let res = client
+            .get("/api/0/info/../buckets/")
             .header(ContentType::JSON)
             .header(Header::new("Host", "localhost:5600"))
             .dispatch();

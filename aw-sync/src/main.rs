@@ -166,10 +166,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(Ok)
         .unwrap_or_else(|| util::get_server_port(opts.testing))?;
 
-    let api_key = util::get_server_api_key(opts.testing)?;
-    if api_key.is_some() {
-        info!("Using API key from server config for authentication");
-    }
+    // Only use the local server's API key when connecting to localhost.
+    // Forwarding it to a remote host would leak the credential over HTTP.
+    let is_localhost = matches!(opts.host.as_str(), "127.0.0.1" | "::1" | "localhost");
+    let api_key = if is_localhost {
+        let key = util::get_server_api_key(opts.testing)?;
+        if key.is_some() {
+            info!("Using API key from server config for authentication");
+        }
+        key
+    } else {
+        None
+    };
     let client = AwClient::new_with_api_key(&opts.host, port, "aw-sync", api_key)?;
 
     // if opts.command is None, then we're using the default subcommand (Daemon)

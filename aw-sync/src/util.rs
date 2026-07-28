@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 #[cfg(not(target_os = "android"))]
@@ -58,7 +59,10 @@ pub fn get_server_config(
 /// Local config must never be read for a caller-selected remote target.
 #[cfg(not(target_os = "android"))]
 pub fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "::1" | "localhost")
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 #[cfg(all(test, not(target_os = "android")))]
@@ -109,7 +113,7 @@ mod tests {
 
     #[test]
     fn recognizes_only_loopback_hosts() {
-        for host in ["127.0.0.1", "::1", "localhost"] {
+        for host in ["127.0.0.1", "127.0.0.2", "::1", "localhost", "LOCALHOST"] {
             assert!(is_loopback_host(host));
         }
         for host in ["example.com", "192.0.2.1", "localhost.example.com"] {

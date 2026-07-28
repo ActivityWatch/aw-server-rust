@@ -241,10 +241,11 @@ mod tests {
         let server = setup_testserver(Some("secret123".to_string()));
         let client = rocket::local::blocking::Client::tracked(server).expect("valid instance");
 
-        // Each of these decodes to a real /api/ route and must be gated.
+        // Each of these decodes to the real /api/0/buckets/ route, so each must
+        // be rejected by the auth gate specifically — asserting "not 200" would
+        // also pass on a 404, hiding a route miss as an auth success.
         for path in [
             "/%61pi/0/buckets/",     // lowercase hex, first char
-            "/%41PI/0/buckets/",     // uppercase — decodes to /API/, not a route
             "/ap%69/0/buckets/",     // encoded char mid-segment
             "/%61%70%69/0/buckets/", // fully encoded segment
             "//%61pi/0/buckets/",    // encoding combined with the #588 double-slash trick
@@ -254,12 +255,40 @@ mod tests {
                 .header(ContentType::JSON)
                 .header(Header::new("Host", "localhost:5600"))
                 .dispatch();
-            assert_ne!(
+            assert_eq!(
                 res.status(),
-                Status::Ok,
-                "auth bypassed via encoded path {path}"
+                Status::Unauthorized,
+                "expected auth rejection for encoded path {path}"
             );
         }
+
+        // Sanity check on the above: these paths really do reach the buckets
+        // handler once a valid key is supplied, so the 401s are the gate
+        // rejecting them rather than the router failing to match.
+        for path in ["/%61pi/0/buckets/", "//%61pi/0/buckets/"] {
+            let res = client
+                .get(path)
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "localhost:5600"))
+                .header(Header::new("Authorization", "Bearer secret123"))
+                .dispatch();
+            assert_eq!(
+                res.status(),
+                Status::Ok,
+                "encoded path {path} does not reach the real handler"
+            );
+        }
+
+        // Case is significant: /API/ is not a registered route at all, so this
+        // 404s at the router rather than exercising the gate. Asserted
+        // explicitly so a future case-insensitive router change would show up
+        // here instead of silently passing a "not 200" check.
+        let res = client
+            .get("/%41PI/0/buckets/")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "localhost:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::NotFound);
     }
 
     /// Writes must be gated too — a bypass that only blocked GETs would still
@@ -275,16 +304,25 @@ mod tests {
             .header(Header::new("Host", "localhost:5600"))
             .body(r#"{"type":"test","client":"authbypass-poc","hostname":"poc-host"}"#)
             .dispatch();
-        assert_ne!(res.status(), Status::Ok, "write bypassed via encoded path");
+        assert_eq!(
+            res.status(),
+            Status::Unauthorized,
+            "write bypassed via encoded path"
+        );
 
-        // And the bucket must not exist afterwards.
+        // And the bucket must not exist afterwards — 404 from an authenticated
+        // lookup, not merely "some non-200 status".
         let res = client
             .get("/api/0/buckets/authbypass-poc")
             .header(ContentType::JSON)
             .header(Header::new("Host", "localhost:5600"))
             .header(Header::new("Authorization", "Bearer secret123"))
             .dispatch();
-        assert_ne!(res.status(), Status::Ok, "bucket was created without auth");
+        assert_eq!(
+            res.status(),
+            Status::NotFound,
+            "bucket was created without auth"
+        );
     }
 
     /// The public-path exemption is matched on decoded segments, so encoded
@@ -302,13 +340,14 @@ mod tests {
             .dispatch();
         assert_eq!(res.status(), Status::Ok);
 
-        // A longer path that merely starts with the public prefix is not public.
+        // A longer path that merely starts with the public prefix is not public:
+        // the exemption is an exact segment match, so this hits the gate.
         let res = client
             .get("/api/0/info/../buckets/")
             .header(ContentType::JSON)
             .header(Header::new("Host", "localhost:5600"))
             .dispatch();
-        assert_ne!(res.status(), Status::Ok);
+        assert_eq!(res.status(), Status::Unauthorized);
     }
 
     #[test]

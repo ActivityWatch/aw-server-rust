@@ -1,0 +1,8 @@
+target/
+dist/
+aw-webui/dist/
+aw-webui/node_modules/
+**/node_modules/
+.cov/
+coverage-html/
+.serena/

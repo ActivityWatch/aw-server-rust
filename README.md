@@ -42,6 +42,41 @@ cargo run --bin aw-server
 
 *NOTE:* This will start aw-server-rust in testing mode (on port 5666 instead of port 5600).
 
+### Docker
+
+A multi-stage `Dockerfile` is included. It builds the web UI and the server, and
+produces a slim Debian-based image containing only the `aw-server` binary (the
+web UI assets are embedded into it at compile time).
+
+The `aw-webui` submodule must be initialized before building:
+
+```sh
+git submodule update --init --recursive
+docker build -t aw-server-rust:local .
+```
+
+Run it with:
+
+```sh
+docker run -d --name aw-server-rust \
+    -p 5600:5600 \
+    -v aw-server-rust-data:/root/.local/share/activitywatch \
+    aw-server-rust:local aw-server-rust --host 0.0.0.0
+```
+
+Notes:
+
+ - The server binds to `127.0.0.1` by default, which is unreachable from outside
+   the container. Pass `--host 0.0.0.0` (as above) to make it reachable.
+ - The database lives in `/root/.local/share/activitywatch/aw-server-rust`.
+   Mount a volume there to keep it across container recreations.
+ - The image only ships `aw-server`. The `aw-sync` binary is deliberately not
+   built, since on Linux it pulls in OpenSSL with the `vendored` feature and
+   compiles it from source.
+ - `docker build` produces an image for the architecture of the machine running
+   it. To target a different one, use
+   `docker buildx build --platform linux/amd64 ...`.
+
 ### Configuration
 
 The server reads its configuration from `~/.config/activitywatch/aw-server-rust/config.toml` (or `config-testing.toml` in testing mode).

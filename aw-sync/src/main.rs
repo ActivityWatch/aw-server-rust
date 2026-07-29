@@ -176,7 +176,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     if api_key.is_some() {
         info!("Using API key from server config for authentication");
     }
-    let client = AwClient::new_with_api_key(&opts.host, port, "aw-sync", api_key)?;
+    let url_host = util::host_for_url(&opts.host);
+    let client = AwClient::new_with_api_key(&url_host, port, "aw-sync", api_key)?;
 
     // if opts.command is None, then we're using the default subcommand (Daemon)
     match opts.command.unwrap_or(Commands::Daemon {

@@ -65,9 +65,18 @@ pub fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
+/// Add URL brackets around bare IPv6 literals.
+#[cfg(not(target_os = "android"))]
+pub fn host_for_url(host: &str) -> String {
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V6(_)) => format!("[{host}]"),
+        _ => host.to_string(),
+    }
+}
+
 #[cfg(all(test, not(target_os = "android")))]
 mod tests {
-    use super::{get_server_config, is_loopback_host};
+    use super::{get_server_config, host_for_url, is_loopback_host};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -119,6 +128,14 @@ mod tests {
         for host in ["example.com", "192.0.2.1", "localhost.example.com"] {
             assert!(!is_loopback_host(host));
         }
+    }
+
+    #[test]
+    fn brackets_bare_ipv6_hosts_for_urls() {
+        assert_eq!(host_for_url("::1"), "[::1]");
+        assert_eq!(host_for_url("2001:db8::1"), "[2001:db8::1]");
+        assert_eq!(host_for_url("127.0.0.1"), "127.0.0.1");
+        assert_eq!(host_for_url("localhost"), "localhost");
     }
 }
 

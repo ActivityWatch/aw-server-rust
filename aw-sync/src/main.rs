@@ -44,6 +44,10 @@ struct Opts {
     #[clap(long)]
     port: Option<u16>,
 
+    /// Path to the local aw-server config file.
+    #[clap(short = 'c', long = "config")]
+    config: Option<PathBuf>,
+
     /// Convenience option for using the default testing host and port.
     #[clap(long)]
     testing: bool,
@@ -161,12 +165,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::set_var("AW_SYNC_DIR", sync_dir);
     }
 
-    let port = opts
-        .port
-        .map(Ok)
-        .unwrap_or_else(|| util::get_server_port(opts.testing))?;
+    let server_config = if util::is_loopback_host(&opts.host) {
+        util::get_server_config(opts.testing, opts.config.as_deref())?
+    } else {
+        util::ServerConfig::default_for(opts.testing)
+    };
+    let port = opts.port.unwrap_or(server_config.port);
 
-    let client = AwClient::new(&opts.host, port, "aw-sync")?;
+    let api_key = server_config.api_key;
+    if api_key.is_some() {
+        info!("Using API key from server config for authentication");
+    }
+    let url_host = util::host_for_url(&opts.host);
+    let client = AwClient::new_with_api_key(&url_host, port, "aw-sync", api_key)?;
 
     // if opts.command is None, then we're using the default subcommand (Daemon)
     match opts.command.unwrap_or(Commands::Daemon {

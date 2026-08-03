@@ -8,10 +8,10 @@ use aw_query::QueryError;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 fn query_error_status(e: &QueryError) -> Status {
-    // All QueryError variants represent bad user input (invalid query syntax,
-    // invalid regex, undefined variables, wrong types, etc.). None of them
-    // indicate a server-side fault, so return 400 Bad Request instead of 500.
     match e {
+        // BucketQueryError also wraps datastore failures, which are server
+        // errors rather than malformed client queries.
+        QueryError::BucketQueryError(_) => Status::InternalServerError,
         QueryError::ParsingError(_)
         | QueryError::EmptyQuery()
         | QueryError::VariableNotDefined(_)
@@ -19,8 +19,24 @@ fn query_error_status(e: &QueryError) -> Status {
         | QueryError::InvalidType(_)
         | QueryError::InvalidFunctionParameters(_)
         | QueryError::TimeIntervalError(_)
-        | QueryError::BucketQueryError(_)
         | QueryError::RegexCompileError(_) => Status::BadRequest,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_error_status_distinguishes_client_and_server_errors() {
+        assert_eq!(
+            query_error_status(&QueryError::RegexCompileError("invalid regex".into())),
+            Status::BadRequest
+        );
+        assert_eq!(
+            query_error_status(&QueryError::BucketQueryError("datastore failure".into())),
+            Status::InternalServerError
+        );
     }
 }
 

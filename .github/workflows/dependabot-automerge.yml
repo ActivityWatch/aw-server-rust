@@ -1,10 +1,7 @@
 name: Dependabot Auto-merge
 
-# NOTE: `merge-me-action` still needs the bot PAT here.
-# Using `secrets.GITHUB_TOKEN` fails on `workflow_run` with
-# "Resource not accessible by integration" when the action queries
-# branch protection rules over GraphQL.
-# See: https://github.com/ridedott/merge-me-action/issues/1581
+# Run in the trusted `workflow_run` context and merge Dependabot PRs directly
+# with the repository token instead of depending on an external PAT.
 
 on:
   workflow_run:
@@ -13,6 +10,10 @@ on:
     workflows:
       # List all required workflow names here.
       - Build
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   auto_merge:
@@ -24,6 +25,37 @@ jobs:
       github.actor == 'dependabot[bot]'
 
     steps:
-      - uses: ridedott/merge-me-action@2568f177a681785a874d6e7af950eb1a0dd31123
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9
         with:
-          GITHUB_TOKEN: ${{ secrets.AWBOT_GH_TOKEN }}
+          script: |
+            const pr = context.payload.workflow_run.pull_requests?.[0];
+            if (!pr) {
+              core.setFailed("No pull request found in workflow_run payload.");
+              return;
+            }
+
+            const { data: pull } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+            });
+
+            if (pull.state !== "open") {
+              core.info(`PR #${pull.number} is already ${pull.state}; nothing to do.`);
+              return;
+            }
+
+            if (pull.draft) {
+              core.info(`PR #${pull.number} is a draft; skipping.`);
+              return;
+            }
+
+            await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pull.number,
+              merge_method: "squash",
+              sha: context.payload.workflow_run.head_sha,
+            });
+
+            core.info(`Merged Dependabot PR #${pull.number}.`);

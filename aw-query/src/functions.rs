@@ -154,6 +154,11 @@ mod qfunctions {
             None,
         ) {
             Ok(events) => events,
+            Err(aw_datastore::DatastoreError::NoSuchBucket(_)) => {
+                return Err(QueryError::BucketNotFound(format!(
+                    "Failed to find bucket '{bucket_id}'"
+                )))
+            }
             Err(e) => {
                 return Err(QueryError::BucketQueryError(format!(
                     "Failed to query bucket: {e:?}"
@@ -217,14 +222,14 @@ mod qfunctions {
         ) {
             Some(bucketname) => bucketname,
             None => {
-                return Err(QueryError::BucketQueryError(match hostname_filter {
-                        None => {
-                            format!("Failed to find bucket matching filter '{bucket_filter}'")
-                        }
-                        Some(hostname_filter) => format!(
-                            "Failed to find bucket matching filter '{bucket_filter}' and hostname '{hostname_filter}'"
-                        ),
-                    }));
+                return Err(QueryError::BucketNotFound(match hostname_filter {
+                    None => {
+                        format!("Failed to find bucket matching filter '{bucket_filter}'")
+                    }
+                    Some(hostname_filter) => format!(
+                        "Failed to find bucket matching filter '{bucket_filter}' and hostname '{hostname_filter}'"
+                    ),
+                }));
             }
         };
         Ok(DataType::String(bucketname))

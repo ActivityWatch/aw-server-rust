@@ -14,6 +14,7 @@ fn query_error_status(e: &QueryError) -> Status {
         QueryError::BucketQueryError(_) => Status::InternalServerError,
         QueryError::ParsingError(_)
         | QueryError::EmptyQuery()
+        | QueryError::BucketNotFound(_)
         | QueryError::VariableNotDefined(_)
         | QueryError::MathError(_)
         | QueryError::InvalidType(_)
@@ -31,6 +32,10 @@ mod tests {
     fn query_error_status_distinguishes_client_and_server_errors() {
         assert_eq!(
             query_error_status(&QueryError::RegexCompileError("invalid regex".into())),
+            Status::BadRequest
+        );
+        assert_eq!(
+            query_error_status(&QueryError::BucketNotFound("missing bucket".into())),
             Status::BadRequest
         );
         assert_eq!(

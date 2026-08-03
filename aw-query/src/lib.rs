@@ -40,6 +40,7 @@ pub enum QueryError {
     InvalidType(String),
     InvalidFunctionParameters(String),
     TimeIntervalError(String),
+    BucketNotFound(String),
     BucketQueryError(String),
     RegexCompileError(String),
 }

@@ -313,3 +313,61 @@ fn test_tag() {
     let tags = event.data.get("$tags").unwrap();
     assert_eq!(tags, &serde_json::json!(vec!["test", "test-2"]));
 }
+
+/// Verify that syntactically invalid regex patterns are rejected by RegexRule::new()
+/// rather than panicking or silently succeeding.
+///
+/// Note: fancy_regex supports possessive quantifiers (e.g. `++`, `**`) which standard
+/// Python `re` does not. The original ActivityWatch#1340 bug (`Notepad++` → 500 error)
+/// only affected the Python aw-server; in aw-server-rust `Notepad++` is a valid
+/// possessive quantifier and is accepted. Users wanting a literal `+` must escape it:
+/// `Notepad\+\+`.
+#[test]
+fn test_invalid_regex_patterns_are_rejected() {
+    let invalid_patterns = [
+        "***",       // no target for first `*` quantifier
+        "???",       // no target for first `?` quantifier
+        "[unclosed", // unclosed character class
+        "(",         // unclosed group
+        "(?P<name",  // malformed named capturing group
+        "\\",        // lone backslash (incomplete escape sequence)
+        "(?i",       // incomplete flag group (no closing parenthesis)
+    ];
+    for pattern in &invalid_patterns {
+        let result = RegexRule::new(pattern, false, None);
+        assert!(
+            result.is_err(),
+            "Expected pattern {:?} to be rejected as invalid regex, but it was accepted",
+            pattern
+        );
+    }
+}
+
+/// Verify that valid patterns — including possessive quantifiers and lookaheads — are
+/// accepted. These cover the correct workaround for ActivityWatch#1340 and other
+/// patterns users commonly write.
+#[test]
+fn test_valid_regex_patterns_are_accepted() {
+    let valid_patterns = [
+        r"Notepad\+\+", // literal `+` match — correct workaround for #1340
+        "Notepad++",    // possessive quantifier (valid in fancy_regex, unlike Python re)
+        r"test.*value",
+        r"(?i)case.insensitive",
+        r"^start",
+        r"end$",
+        r"\d+",
+        r"[a-z]+",
+        r"(group1|group2)",
+        r"look(?=ahead)",
+        r"look(?!ahead)",
+    ];
+    for pattern in &valid_patterns {
+        let result = RegexRule::new(pattern, false, None);
+        assert!(
+            result.is_ok(),
+            "Expected pattern {:?} to be accepted as valid regex, but it was rejected: {:?}",
+            pattern,
+            result.err()
+        );
+    }
+}

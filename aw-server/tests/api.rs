@@ -554,7 +554,7 @@ mod api_tests {
             }"#,
             )
             .dispatch();
-        assert_eq!(res.status(), rocket::http::Status::InternalServerError);
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
         assert_eq!(res.into_string().unwrap(), r#"{"message":"EmptyQuery"}"#);
     }
 

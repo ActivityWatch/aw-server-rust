@@ -245,6 +245,13 @@ const BATCH_SIZE: usize = 5;
 /// `$aw.sync.origin` cannot be used here: it is written on push-staging as well
 /// as on import (see the FIXME on `sync_datastores`), so it is set on a host's
 /// own exported buckets too and would make every bucket look second-hand.
+///
+/// `-synced-from-` is a **reserved token** in aw-sync's ID grammar, not merely a
+/// convention: `get_or_create_sync_bucket` splits on it to recover the original
+/// ID, so a first-hand bucket whose own ID contained it would already have that
+/// ID truncated on import, independently of this check. Treating it as a marker
+/// therefore adds no new failure mode. Issue #649 tracks moving provenance to
+/// bucket metadata, which removes the dependency on the ID string entirely.
 fn is_synced_bucket(bucket: &Bucket) -> bool {
     bucket.id.contains("-synced-from-")
 }

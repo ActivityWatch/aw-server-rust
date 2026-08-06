@@ -114,3 +114,39 @@ fn test_own_data_does_not_return_via_peer() {
         "HOSTA must not gain a synced-from-HOSTA copy of its own bucket"
     );
 }
+
+/// `-synced-from-` is a reserved token in aw-sync's ID grammar, not just a
+/// naming convention. `get_or_create_sync_bucket` splits on it to recover the
+/// original bucket ID, so a first-hand bucket whose own ID contains it is
+/// already mangled on import regardless of provenance filtering.
+///
+/// This pins that pre-existing behaviour so the reservation is explicit: such a
+/// bucket is treated as a synced copy. Issue #649 tracks moving provenance into
+/// bucket metadata, which removes the dependency on the ID string.
+#[test]
+fn test_synced_from_is_a_reserved_id_token() {
+    let spec = SyncSpec::default();
+    let local = datastore("reserved-local");
+    let export = datastore("reserved-export");
+
+    // A bucket the sync layer would mangle anyway: the ID grammar reserves the
+    // token, so this is not a supported first-hand bucket name.
+    local
+        .create_bucket(&bucket(
+            "aw-watcher-window_HOSTA-synced-from-HOSTB",
+            "HOSTA",
+        ))
+        .unwrap();
+    // A normally-named bucket alongside it, to prove the filter is not blanket.
+    local
+        .create_bucket(&bucket("aw-watcher-afk_HOSTA", "HOSTA"))
+        .unwrap();
+
+    sync_datastores(&local, &export, true, Some("device-A"), &spec);
+
+    assert_eq!(
+        bucket_ids(&export),
+        vec!["aw-watcher-afk_HOSTA".to_string()],
+        "the reserved token marks a bucket as synced; unmarked buckets still export"
+    );
+}

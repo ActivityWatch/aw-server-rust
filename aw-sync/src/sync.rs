@@ -237,7 +237,22 @@ const BATCH_SIZE: usize = 5000;
 #[cfg(test)]
 const BATCH_SIZE: usize = 5;
 
+/// Whether a bucket holds data synced from another host, rather than data
+/// collected on this host.
+///
+/// The `-synced-from-<origin>` ID suffix is the marker, matching how
+/// `get_or_create_sync_bucket` builds and parses these IDs. Note that
+/// `$aw.sync.origin` cannot be used here: it is written on push-staging as well
+/// as on import (see the FIXME on `sync_datastores`), so it is set on a host's
+/// own exported buckets too and would make every bucket look second-hand.
+fn is_synced_bucket(bucket: &Bucket) -> bool {
+    bucket.id.contains("-synced-from-")
+}
+
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
+///
+/// Buckets that were themselves synced from another host are skipped in both
+/// directions, so data is only ever exchanged first-hand.
 ///
 /// is_push: a bool indicating if we're pushing local buckets to the sync dir
 ///          (as opposed to pulling from remotes)
@@ -257,6 +272,20 @@ pub fn sync_datastores(
         .get_buckets()
         .unwrap()
         .iter_mut()
+        // Never sync a bucket that is itself a copy synced from another host.
+        // A host must only ever offer data it collected itself. Without this,
+        // HOSTA's buckets reach HOSTB, are re-exported by HOSTB's next push, and
+        // come back to HOSTA as `<bucket>_HOSTA-synced-from-HOSTA` — a duplicate
+        // of the local bucket, so /timeline renders every event twice.
+        // See https://github.com/orgs/ActivityWatch/discussions/1373
+        .filter(|tup| {
+            if is_synced_bucket(&tup.1) {
+                debug!(" - Skipping already-synced bucket '{}'", tup.1.id);
+                false
+            } else {
+                true
+            }
+        })
         // Only filter buckets if specific bucket IDs are provided
         .filter(|tup| {
             let bucket = &tup.1;

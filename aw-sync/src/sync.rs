@@ -227,6 +227,11 @@ fn get_or_create_sync_bucket(
                 bucket_new
                     .data
                     .insert("$aw.sync.origin".to_string(), serde_json::json!(origin));
+            } else {
+                // Push path: strip any stale $aw.sync.origin that bucket_from may carry
+                // (e.g. if it was previously imported by a pull).  Staging copies must
+                // never look like synced-from-remote buckets.
+                bucket_new.data.remove("$aw.sync.origin");
             }
             ds_to.create_bucket(&bucket_new).unwrap();
             match ds_to.get_bucket(new_id.as_str()) {

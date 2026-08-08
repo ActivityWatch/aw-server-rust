@@ -167,6 +167,42 @@ mod sync_tests {
         );
     }
 
+    /// When bucket_from was previously pulled (carries $aw.sync.origin in its data), pushing it
+    /// to staging must strip the stale field so downstream devices don't trust a wrong origin.
+    #[test]
+    fn test_push_strips_stale_sync_origin() {
+        let state = init_teststate();
+
+        // Create a source bucket that already has $aw.sync.origin (simulating a
+        // previously-pulled bucket being pushed back to staging).
+        let bucket_id = "bucket-with-origin".to_string();
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": bucket_id,
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test",
+            "data": { "$aw.sync.origin": "some-other-host" }
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            true, // is_push
+            Some("device-0"),
+            &SyncSpec::default(),
+        );
+
+        let push_buckets = state.ds_dest.get_buckets().unwrap();
+        let push_bucket = push_buckets.get(&bucket_id).expect("push bucket not found");
+        assert!(
+            !push_bucket.data.contains_key("$aw.sync.origin"),
+            "push-staging bucket must not carry stale $aw.sync.origin from a previously-pulled source, got: {:?}",
+            push_bucket.data
+        );
+    }
+
     fn check_synced_buckets_equal_to_src(all_buckets_map: &HashMap<String, (&Datastore, Bucket)>) {
         for (ds, bucket) in all_buckets_map.values() {
             if bucket.id.contains("-synced") {

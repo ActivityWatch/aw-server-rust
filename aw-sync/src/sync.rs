@@ -194,10 +194,13 @@ fn get_or_create_sync_bucket(
     ds_to: &dyn AccessMethod,
     is_push: bool,
 ) -> Bucket {
-    let new_id = if is_push {
-        bucket_from.id.clone()
+    // On pull/import: derive the origin from $aw.sync.origin metadata (preferred) or the
+    // hostname (legacy fallback for buckets that predate the metadata field).  On push-staging
+    // the bucket keeps its original ID and we do NOT stamp $aw.sync.origin — staging copies
+    // should not look like synced-from-remote buckets.
+    let (new_id, sync_origin) = if is_push {
+        (bucket_from.id.clone(), None)
     } else {
-        // Ensure the bucket ID ends in "-synced-from-{device id}"
         let orig_bucketid = bucket_from.id.split("-synced-from-").next().unwrap();
         let fallback = serde_json::to_value(&bucket_from.hostname).unwrap();
         let origin = bucket_from
@@ -205,8 +208,12 @@ fn get_or_create_sync_bucket(
             .get("$aw.sync.origin")
             .unwrap_or(&fallback)
             .as_str()
-            .unwrap();
-        format!("{orig_bucketid}-synced-from-{origin}")
+            .unwrap()
+            .to_string();
+        (
+            format!("{orig_bucketid}-synced-from-{origin}"),
+            Some(origin),
+        )
     };
 
     match ds_to.get_bucket(new_id.as_str()) {
@@ -214,12 +221,18 @@ fn get_or_create_sync_bucket(
         Err(DatastoreError::NoSuchBucket(_)) => {
             let mut bucket_new = bucket_from.clone();
             bucket_new.id = new_id.clone();
-            // TODO: Replace sync origin with hostname/GUID and discuss how we will treat the data
-            // attributes for internal use.
-            bucket_new.data.insert(
-                "$aw.sync.origin".to_string(),
-                serde_json::json!(bucket_from.hostname),
-            );
+            // Only stamp $aw.sync.origin on pull/import.  The derived origin already handles
+            // the legacy case: hostname is used when the source bucket has no metadata field.
+            if let Some(origin) = sync_origin {
+                bucket_new
+                    .data
+                    .insert("$aw.sync.origin".to_string(), serde_json::json!(origin));
+            } else {
+                // Push path: strip any stale $aw.sync.origin that bucket_from may carry
+                // (e.g. if it was previously imported by a pull).  Staging copies must
+                // never look like synced-from-remote buckets.
+                bucket_new.data.remove("$aw.sync.origin");
+            }
             ds_to.create_bucket(&bucket_new).unwrap();
             match ds_to.get_bucket(new_id.as_str()) {
                 Ok(bucket) => bucket,

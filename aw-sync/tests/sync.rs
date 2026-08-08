@@ -115,6 +115,58 @@ mod sync_tests {
         assert!(buckets_src.len() == buckets_dest.len());
     }
 
+    /// On pull (is_push=false), the destination bucket should have $aw.sync.origin set to
+    /// the source bucket's hostname.  On push (is_push=true), $aw.sync.origin must NOT be
+    /// written to the staging copy.
+    #[test]
+    fn test_sync_origin_metadata() {
+        let state = init_teststate();
+        let bucket_id = create_bucket(&state.ds_src, 0);
+
+        // --- push: staging copy must have no $aw.sync.origin ---
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            true, // is_push
+            Some("device-0"),
+            &SyncSpec::default(),
+        );
+
+        let push_buckets = state.ds_dest.get_buckets().unwrap();
+        let push_bucket = push_buckets.get(&bucket_id).expect("push bucket not found");
+        assert!(
+            !push_bucket.data.contains_key("$aw.sync.origin"),
+            "push-staging bucket must not have $aw.sync.origin, got: {:?}",
+            push_bucket.data
+        );
+
+        // --- pull: imported bucket must have $aw.sync.origin set to the hostname ---
+        let ds_pull_dest = Datastore::new_in_memory(false);
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &ds_pull_dest,
+            false, // is_push (pull)
+            None,
+            &SyncSpec::default(),
+        );
+
+        let pull_buckets = ds_pull_dest.get_buckets().unwrap();
+        let pull_bucket_id = format!("{bucket_id}-synced-from-device-0");
+        let pull_bucket = pull_buckets
+            .get(&pull_bucket_id)
+            .expect("pull bucket not found");
+        let origin = pull_bucket
+            .data
+            .get("$aw.sync.origin")
+            .expect("pull bucket must have $aw.sync.origin")
+            .as_str()
+            .expect("$aw.sync.origin must be a string");
+        assert_eq!(
+            origin, "device-0",
+            "$aw.sync.origin should match source hostname"
+        );
+    }
+
     fn check_synced_buckets_equal_to_src(all_buckets_map: &HashMap<String, (&Datastore, Bucket)>) {
         for (ds, bucket) in all_buckets_map.values() {
             if bucket.id.contains("-synced") {

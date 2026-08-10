@@ -33,6 +33,7 @@ aw-sync sync --start-date "2024-01-01"
 ```
 
 For more options, see `aw-sync --help`. Some notable options:
+- `--config`: Read the local server port and API key from a custom aw-server config file. Pass the same path to both aw-server and aw-sync when using aw-server's `--config` override.
 - `--buckets`: Specify which buckets to sync (comma-separated). By default, all buckets are synced.
   - Use `--buckets "bucket1,bucket2"` to sync specific buckets
   - Not specifying this option syncs all buckets by default
@@ -74,7 +75,7 @@ We also avoid having to implement complex features such as conflict resolution, 
   - It will work a lot better once proper `hostname -> device ID` migration is complete.
 - It doesn't sync settings
 - It doesn't support Android, yet.
-- It mirrors events to all devices, 
+- It mirrors events to all devices,
   - If you have a lot of devices you'll get a lot of duplicates, taking up a lot of space and potentially impacting performance.
 - It doesn't support modifying/deleting events, yet.
 
@@ -88,7 +89,7 @@ If you want to try sync, you can do so by following these steps.
 
 We will use a separate testing instance of aw-server(-rust) to store and view the synced data from the sync directory. This is to avoid testing against & potentially pollute production instances in write-scenarios. We will sync all devices with the sync folder, and then sync the sync folder into our testing instance to view.
 
-To test syncing real events to a sync folder which can then be pulled from. 
+To test syncing real events to a sync folder which can then be pulled from.
 We will use some helper scripts to do the following:
 
 1. `./test-sync-push.sh`
@@ -116,7 +117,7 @@ In the end, You should get something like this: https://twitter.com/ErikBjare/st
 
 #### Pushing to the sync directory
 
-First start the sending aw-server instance. For example: 
+First start the sending aw-server instance. For example:
 
 ```sh
 PORT=5667
@@ -129,7 +130,7 @@ Then run `cargo run --bin aw-sync-rust -- --port 5667` to sync your instance's b
 
 #### Pulling from the sync directory
 
-Now to sync things back from the sync directory into another instance. 
+Now to sync things back from the sync directory into another instance.
 
 First, lets start another instance:
 
@@ -139,4 +140,3 @@ cargo run --bin aw-server -- --testing --port $PORT --dbpath test-$PORT.sqlite -
 ```
 
 Now run `cargo run --bin aw-sync -- --port 5668` to pull buckets from the sync dir (retrieving events from the 5667 instance) and push buckets from the 5668 instance to the sync dir.
-

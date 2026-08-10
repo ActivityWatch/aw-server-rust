@@ -66,7 +66,7 @@ impl AccessMethod for Datastore {
 
 impl AccessMethod for AwClient {
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
-        Ok(AwClient::get_buckets(self).unwrap())
+        AwClient::get_buckets(self).map_err(|e| e.to_string())
     }
     fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
         let bucket = AwClient::get_bucket(self, bucket_id);
@@ -74,11 +74,13 @@ impl AccessMethod for AwClient {
             Ok(bucket) => Ok(bucket),
             Err(e) => {
                 warn!("{:?}", e);
-                let code = e.status().unwrap();
+                let code = e.status().unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 if code == StatusCode::NOT_FOUND {
                     Err(DatastoreError::NoSuchBucket(bucket_id.into()))
                 } else {
-                    panic!("Unexpected error");
+                    Err(DatastoreError::InternalError(format!(
+                        "Unexpected error fetching bucket {bucket_id}: {e}"
+                    )))
                 }
             }
         }
@@ -90,16 +92,17 @@ impl AccessMethod for AwClient {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
-        Ok(AwClient::get_events(self, bucket_id, start, end, limit).unwrap())
+        AwClient::get_events(self, bucket_id, start, end, limit).map_err(|e| e.to_string())
     }
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
         AwClient::insert_events(self, bucket_id, events).map_err(|e| e.to_string())
     }
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
-        Ok(AwClient::get_event_count(self, bucket_id).unwrap())
+        AwClient::get_event_count(self, bucket_id).map_err(|e| e.to_string())
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        AwClient::create_bucket(self, bucket).unwrap();
+        AwClient::create_bucket(self, bucket)
+            .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
         Ok(())
     }
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {

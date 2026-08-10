@@ -194,10 +194,13 @@ fn get_or_create_sync_bucket(
     ds_to: &dyn AccessMethod,
     is_push: bool,
 ) -> Bucket {
-    let new_id = if is_push {
-        bucket_from.id.clone()
+    // On pull/import: derive the origin from $aw.sync.origin metadata (preferred) or the
+    // hostname (legacy fallback for buckets that predate the metadata field).  On push-staging
+    // the bucket keeps its original ID and we do NOT stamp $aw.sync.origin — staging copies
+    // should not look like synced-from-remote buckets.
+    let (new_id, sync_origin) = if is_push {
+        (bucket_from.id.clone(), None)
     } else {
-        // Ensure the bucket ID ends in "-synced-from-{device id}"
         let orig_bucketid = bucket_from.id.split("-synced-from-").next().unwrap();
         let fallback = serde_json::to_value(&bucket_from.hostname).unwrap();
         let origin = bucket_from
@@ -205,8 +208,12 @@ fn get_or_create_sync_bucket(
             .get("$aw.sync.origin")
             .unwrap_or(&fallback)
             .as_str()
-            .unwrap();
-        format!("{orig_bucketid}-synced-from-{origin}")
+            .unwrap()
+            .to_string();
+        (
+            format!("{orig_bucketid}-synced-from-{origin}"),
+            Some(origin),
+        )
     };
 
     match ds_to.get_bucket(new_id.as_str()) {
@@ -214,12 +221,18 @@ fn get_or_create_sync_bucket(
         Err(DatastoreError::NoSuchBucket(_)) => {
             let mut bucket_new = bucket_from.clone();
             bucket_new.id = new_id.clone();
-            // TODO: Replace sync origin with hostname/GUID and discuss how we will treat the data
-            // attributes for internal use.
-            bucket_new.data.insert(
-                "$aw.sync.origin".to_string(),
-                serde_json::json!(bucket_from.hostname),
-            );
+            // Only stamp $aw.sync.origin on pull/import.  The derived origin already handles
+            // the legacy case: hostname is used when the source bucket has no metadata field.
+            if let Some(origin) = sync_origin {
+                bucket_new
+                    .data
+                    .insert("$aw.sync.origin".to_string(), serde_json::json!(origin));
+            } else {
+                // Push path: strip any stale $aw.sync.origin that bucket_from may carry
+                // (e.g. if it was previously imported by a pull).  Staging copies must
+                // never look like synced-from-remote buckets.
+                bucket_new.data.remove("$aw.sync.origin");
+            }
             ds_to.create_bucket(&bucket_new).unwrap();
             match ds_to.get_bucket(new_id.as_str()) {
                 Ok(bucket) => bucket,
@@ -237,7 +250,29 @@ const BATCH_SIZE: usize = 5000;
 #[cfg(test)]
 const BATCH_SIZE: usize = 5;
 
+/// Whether a bucket holds data synced from another host, rather than data
+/// collected on this host.
+///
+/// The `-synced-from-<origin>` ID suffix is the marker, matching how
+/// `get_or_create_sync_bucket` builds and parses these IDs. Note that
+/// `$aw.sync.origin` cannot be used here: it is written on push-staging as well
+/// as on import (see the FIXME on `sync_datastores`), so it is set on a host's
+/// own exported buckets too and would make every bucket look second-hand.
+///
+/// `-synced-from-` is a **reserved token** in aw-sync's ID grammar, not merely a
+/// convention: `get_or_create_sync_bucket` splits on it to recover the original
+/// ID, so a first-hand bucket whose own ID contained it would already have that
+/// ID truncated on import, independently of this check. Treating it as a marker
+/// therefore adds no new failure mode. Issue #649 tracks moving provenance to
+/// bucket metadata, which removes the dependency on the ID string entirely.
+fn is_synced_bucket(bucket: &Bucket) -> bool {
+    bucket.id.contains("-synced-from-")
+}
+
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
+///
+/// Buckets that were themselves synced from another host are skipped in both
+/// directions, so data is only ever exchanged first-hand.
 ///
 /// is_push: a bool indicating if we're pushing local buckets to the sync dir
 ///          (as opposed to pulling from remotes)
@@ -257,6 +292,20 @@ pub fn sync_datastores(
         .get_buckets()
         .unwrap()
         .iter_mut()
+        // Never sync a bucket that is itself a copy synced from another host.
+        // A host must only ever offer data it collected itself. Without this,
+        // HOSTA's buckets reach HOSTB, are re-exported by HOSTB's next push, and
+        // come back to HOSTA as `<bucket>_HOSTA-synced-from-HOSTA` — a duplicate
+        // of the local bucket, so /timeline renders every event twice.
+        // See https://github.com/orgs/ActivityWatch/discussions/1373
+        .filter(|tup| {
+            if is_synced_bucket(&tup.1) {
+                debug!(" - Skipping already-synced bucket '{}'", tup.1.id);
+                false
+            } else {
+                true
+            }
+        })
         // Only filter buckets if specific bucket IDs are provided
         .filter(|tup| {
             let bucket = &tup.1;

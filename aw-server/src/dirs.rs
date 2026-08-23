@@ -150,15 +150,24 @@ pub fn set_android_data_dir(path: &str) {
 fn test_db_path_suffix_rule() {
     // default → no suffix (legacy unsuffixed path)
     let p = db_path("default").unwrap();
-    assert!(p.ends_with("sqlite.db"), "default should be sqlite.db, got {p:?}");
+    assert!(
+        p.ends_with("sqlite.db"),
+        "default should be sqlite.db, got {p:?}"
+    );
 
     // testing → -testing suffix (legacy path preserved)
     let p = db_path("testing").unwrap();
-    assert!(p.ends_with("sqlite-testing.db"), "testing should be sqlite-testing.db, got {p:?}");
+    assert!(
+        p.ends_with("sqlite-testing.db"),
+        "testing should be sqlite-testing.db, got {p:?}"
+    );
 
     // custom profile → -<profile> suffix
     let p = db_path("research").unwrap();
-    assert!(p.ends_with("sqlite-research.db"), "research should be sqlite-research.db, got {p:?}");
+    assert!(
+        p.ends_with("sqlite-research.db"),
+        "research should be sqlite-research.db, got {p:?}"
+    );
 }
 
 #[test]
@@ -170,10 +179,16 @@ fn test_validate_profile() {
     assert!(validate_profile("profile_1").is_ok());
 
     assert!(validate_profile("").is_err());
-    assert!(validate_profile("Research").is_err(), "uppercase should be rejected");
+    assert!(
+        validate_profile("Research").is_err(),
+        "uppercase should be rejected"
+    );
     assert!(validate_profile("-bad").is_err(), "must start with alnum");
     assert!(validate_profile("bad name").is_err(), "spaces not allowed");
-    assert!(validate_profile("a/b").is_err(), "path separator not allowed");
+    assert!(
+        validate_profile("a/b").is_err(),
+        "path separator not allowed"
+    );
     assert!(validate_profile(&"a".repeat(33)).is_err(), "too long");
 }
 

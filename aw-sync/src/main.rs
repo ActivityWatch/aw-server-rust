@@ -153,7 +153,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Started aw-sync...");
 
-    aw_server::logging::setup_logger("aw-sync", opts.testing, verbose)?;
+    let profile = if opts.testing { "testing" } else { "default" };
+    aw_server::logging::setup_logger("aw-sync", profile, verbose)?;
 
     // if sync_dir, set env var
     if let Some(sync_dir) = opts.sync_dir {

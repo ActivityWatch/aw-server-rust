@@ -21,7 +21,13 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 #[derive(Parser)]
 #[clap(version = crate_version!(), author = "Johan Bjäreholt, Erik Bjäreholt, et al.")]
 struct Opts {
-    /// Run in testing mode
+    /// Named instance profile (e.g. "default", "testing", "research").
+    /// Drives the config section, database filename, and logfile suffix.
+    /// Defaults to "testing" in debug builds, "default" in release builds.
+    #[clap(long)]
+    profile: Option<String>,
+
+    /// Run in testing mode (alias for --profile testing)
     #[clap(long)]
     testing: bool,
 
@@ -80,21 +86,37 @@ async fn main() -> Result<(), rocket::Error> {
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
     std::env::remove_var("AW_DB_PASSWORD");
 
-    let mut testing = opts.testing;
+    // Resolve profile: --profile wins; --testing is an alias for "testing";
+    // debug builds default to "testing" (preserving prior behaviour).
+    let profile: String = match opts.profile {
+        Some(p) => {
+            if opts.testing && p != "testing" {
+                warn!(
+                    "--testing and --profile {} both given; --profile wins, using '{}'",
+                    p, p
+                );
+            }
+            p
+        }
+        None => {
+            if opts.testing || cfg!(debug_assertions) {
+                "testing".to_string()
+            } else {
+                "default".to_string()
+            }
+        }
+    };
 
-    // Always override environment if --testing is specified
-    if !testing && cfg!(debug_assertions) {
-        testing = true;
-    }
+    dirs::validate_profile(&profile).unwrap_or_else(|e| panic!("Invalid profile name: {e}"));
 
-    logging::setup_logger("aw-server-rust", testing, opts.verbose)
+    logging::setup_logger("aw-server-rust", &profile, opts.verbose)
         .expect("Failed to setup logging");
 
-    if testing {
-        info!("Running server in Testing mode");
+    if profile != "default" {
+        info!("Running server with profile '{}'", profile);
     }
 
-    let mut config = config::create_config(testing, opts.config.as_deref());
+    let mut config = config::create_config(&profile, opts.config.as_deref());
 
     // set host if overridden
     if let Some(host) = opts.host {
@@ -133,7 +155,7 @@ async fn main() -> Result<(), rocket::Error> {
     let db_path: String = if let Some(dbpath) = opts.dbpath.clone() {
         dbpath
     } else {
-        dirs::db_path(testing)
+        dirs::db_path(&profile)
             .expect("Failed to get db path")
             .to_str()
             .unwrap()

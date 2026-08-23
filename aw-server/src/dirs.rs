@@ -101,12 +101,41 @@ pub fn get_log_dir(module: &str) -> Result<PathBuf, ()> {
     panic!("not implemented on Android");
 }
 
-pub fn db_path(testing: bool) -> Result<PathBuf, ()> {
+/// Validate a profile name: lowercase alphanumerics plus `-` and `_`, max 32
+/// chars, must start with a letter or digit. Returns Err(message) on failure.
+pub fn validate_profile(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("profile name must not be empty".into());
+    }
+    if name.len() > 32 {
+        return Err(format!(
+            "profile name too long ({} chars, max 32)",
+            name.len()
+        ));
+    }
+    let first = name.chars().next().unwrap();
+    if !first.is_ascii_alphanumeric() {
+        return Err(format!(
+            "profile name must start with a letter or digit, got '{first}'"
+        ));
+    }
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' {
+            return Err(format!("invalid character '{c}' in profile name"));
+        }
+    }
+    if name != name.to_lowercase() {
+        return Err("profile name must be lowercase".into());
+    }
+    Ok(())
+}
+
+pub fn db_path(profile: &str) -> Result<PathBuf, ()> {
     let mut db_path = get_data_dir()?;
-    if testing {
-        db_path.push("sqlite-testing.db");
-    } else {
+    if profile == "default" {
         db_path.push("sqlite.db");
+    } else {
+        db_path.push(format!("sqlite-{profile}.db"));
     }
     Ok(db_path)
 }
@@ -118,14 +147,46 @@ pub fn set_android_data_dir(path: &str) {
 }
 
 #[test]
+fn test_db_path_suffix_rule() {
+    // default → no suffix (legacy unsuffixed path)
+    let p = db_path("default").unwrap();
+    assert!(p.ends_with("sqlite.db"), "default should be sqlite.db, got {p:?}");
+
+    // testing → -testing suffix (legacy path preserved)
+    let p = db_path("testing").unwrap();
+    assert!(p.ends_with("sqlite-testing.db"), "testing should be sqlite-testing.db, got {p:?}");
+
+    // custom profile → -<profile> suffix
+    let p = db_path("research").unwrap();
+    assert!(p.ends_with("sqlite-research.db"), "research should be sqlite-research.db, got {p:?}");
+}
+
+#[test]
+fn test_validate_profile() {
+    assert!(validate_profile("default").is_ok());
+    assert!(validate_profile("testing").is_ok());
+    assert!(validate_profile("research").is_ok());
+    assert!(validate_profile("my-profile").is_ok());
+    assert!(validate_profile("profile_1").is_ok());
+
+    assert!(validate_profile("").is_err());
+    assert!(validate_profile("Research").is_err(), "uppercase should be rejected");
+    assert!(validate_profile("-bad").is_err(), "must start with alnum");
+    assert!(validate_profile("bad name").is_err(), "spaces not allowed");
+    assert!(validate_profile("a/b").is_err(), "path separator not allowed");
+    assert!(validate_profile(&"a".repeat(33)).is_err(), "too long");
+}
+
+#[test]
 fn test_get_dirs() {
     #[cfg(target_os = "android")]
     set_android_data_dir("/test");
 
     get_cache_dir().unwrap();
     get_log_dir("aw-server-rust").unwrap();
-    db_path(true).unwrap();
-    db_path(false).unwrap();
+    db_path("testing").unwrap();
+    db_path("default").unwrap();
+    db_path("research").unwrap();
 }
 
 #[test]

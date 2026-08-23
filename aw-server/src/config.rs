@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use rocket::config::Config;
 use rocket::data::{Limits, ToByteUnit};
@@ -9,15 +10,41 @@ use serde::{Deserialize, Serialize};
 
 use crate::dirs;
 
-// Far from an optimal way to solve it, but works and is simple
-static mut TESTING: bool = true;
-pub fn set_testing(testing: bool) {
-    unsafe {
-        TESTING = testing;
-    }
+static PROFILE: OnceLock<String> = OnceLock::new();
+
+/// Return the current profile name (default: "default").
+pub fn get_profile() -> &'static str {
+    PROFILE.get().map(|s| s.as_str()).unwrap_or("default")
 }
+
+/// Set the profile. Idempotent for the same value; panics if called with
+/// a conflicting value (would silently redirect to a different datastore).
+pub fn set_profile(profile: String) {
+    if let Some(existing) = PROFILE.get() {
+        if existing != &profile {
+            panic!(
+                "set_profile called with conflicting value: existing={existing:?}, new={profile:?}"
+            );
+        }
+        return; // same value — idempotent
+    }
+    // Race: two threads may race to set; the loser gets Err but that's fine —
+    // both had the same value (different value is caught above by the get() check
+    // that both threads did first).
+    let _ = PROFILE.set(profile);
+}
+
+/// True when running in the legacy "testing" profile or in debug builds.
 pub fn is_testing() -> bool {
-    unsafe { TESTING }
+    get_profile() == "testing"
+}
+
+/// Backwards-compat shim: callers that still use set_testing(bool) convert
+/// true → profile "testing" and false → profile "default".
+pub fn set_testing(testing: bool) {
+    let profile = if testing { "testing" } else { "default" };
+    // Only set if not already initialised (set_profile would panic).
+    let _ = PROFILE.set(profile.to_string());
 }
 
 /// Authentication configuration, serialised as `[auth]` in config.toml.
@@ -119,24 +146,24 @@ fn default_custom_static() -> std::collections::HashMap<String, String> {
     std::collections::HashMap::new()
 }
 
-fn get_config_path(testing: bool, config_override: Option<&Path>) -> PathBuf {
+fn get_config_path(profile: &str, config_override: Option<&Path>) -> PathBuf {
     if let Some(config_path) = config_override {
         return config_path.to_path_buf();
     }
 
     let mut config_path = dirs::get_config_dir().unwrap();
-    if !testing {
+    if profile == "default" {
         config_path.push("config.toml")
     } else {
-        config_path.push("config-testing.toml")
+        config_path.push(format!("config-{profile}.toml"))
     }
 
     config_path
 }
 
-pub fn create_config(testing: bool, config_override: Option<&Path>) -> AWConfig {
-    set_testing(testing);
-    let config_path = get_config_path(testing, config_override);
+pub fn create_config(profile: &str, config_override: Option<&Path>) -> AWConfig {
+    set_profile(profile.to_string());
+    let config_path = get_config_path(profile, config_override);
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).expect("Unable to create config dir");
     }
@@ -205,13 +232,13 @@ mod tests {
 
     #[test]
     fn create_config_uses_override_path() {
-        // create_config mutates the TESTING global, so these tests must not overlap.
+        // create_config sets the PROFILE OnceLock, so these tests must not overlap.
         let _lock = TEST_LOCK.lock().unwrap();
         let paths = TestConfigPath::new("override");
         fs::create_dir_all(paths.config_path.parent().unwrap()).unwrap();
         fs::write(&paths.config_path, "address = \"0.0.0.0\"\nport = 5611\n").unwrap();
 
-        let config = create_config(false, Some(paths.config_path.as_path()));
+        let config = create_config("default", Some(paths.config_path.as_path()));
 
         assert_eq!(config.address, "0.0.0.0");
         assert_eq!(config.port, 5611);
@@ -222,7 +249,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap();
         let paths = TestConfigPath::new("missing");
 
-        let config = create_config(false, Some(paths.config_path.as_path()));
+        let config = create_config("default", Some(paths.config_path.as_path()));
 
         assert!(paths.config_path.is_file());
         assert_eq!(config.address, "127.0.0.1");

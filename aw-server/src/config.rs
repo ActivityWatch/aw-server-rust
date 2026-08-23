@@ -49,8 +49,7 @@ pub fn is_testing() -> bool {
 /// true → profile "testing" and false → profile "default".
 pub fn set_testing(testing: bool) {
     let profile = if testing { "testing" } else { "default" };
-    // Only set if not already initialised (set_profile would panic).
-    let _ = PROFILE.set(profile.to_string());
+    set_profile(profile.to_string());
 }
 
 /// Authentication configuration, serialised as `[auth]` in config.toml.

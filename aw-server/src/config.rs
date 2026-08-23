@@ -20,18 +20,24 @@ pub fn get_profile() -> &'static str {
 /// Set the profile. Idempotent for the same value; panics if called with
 /// a conflicting value (would silently redirect to a different datastore).
 pub fn set_profile(profile: String) {
-    if let Some(existing) = PROFILE.get() {
-        if existing != &profile {
-            panic!(
-                "set_profile called with conflicting value: existing={existing:?}, new={profile:?}"
-            );
+    // Use the atomic OnceLock::set result to avoid a TOCTOU race: two callers
+    // with different values could both see get()==None before either sets it,
+    // causing the loser to silently proceed under the wrong profile.
+    match PROFILE.set(profile.clone()) {
+        Ok(()) => {} // we set it atomically, done
+        Err(_) => {
+            // Already set — verify no conflict (duplicate or concurrent same-value call is fine)
+            let existing = PROFILE
+                .get()
+                .expect("set returned Err but get returned None");
+            if existing != &profile {
+                panic!(
+                    "set_profile called with conflicting value: existing={existing:?}, new={profile:?}"
+                );
+            }
+            // same value — idempotent, no action needed
         }
-        return; // same value — idempotent
     }
-    // Race: two threads may race to set; the loser gets Err but that's fine —
-    // both had the same value (different value is caught above by the get() check
-    // that both threads did first).
-    let _ = PROFILE.set(profile);
 }
 
 /// True when running in the legacy "testing" profile or in debug builds.

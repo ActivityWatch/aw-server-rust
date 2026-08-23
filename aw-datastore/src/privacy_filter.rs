@@ -113,6 +113,7 @@ impl PrivacyFilterEngine {
 
     /// Example rules for common sensitive data patterns.
     /// Not applied automatically — use `new()` with these rules to opt in.
+    #[allow(dead_code)]
     pub fn with_defaults() -> Self {
         let rules = vec![
             PrivacyFilterRule {
@@ -173,6 +174,7 @@ impl PrivacyFilterEngine {
     }
 
     /// Serialize rules to JSON string.
+    #[allow(dead_code)]
     pub fn to_json(&self) -> Result<String, String> {
         serde_json::to_string(&self.rules)
             .map_err(|e| format!("Failed to serialize privacy filter rules: {e}"))

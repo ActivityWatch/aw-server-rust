@@ -98,13 +98,18 @@ async fn main() -> Result<(), rocket::Error> {
             }
             p
         }
-        None => {
-            if opts.testing || cfg!(debug_assertions) {
-                "testing".to_string()
-            } else {
-                "default".to_string()
+        None => match std::env::var("AW_PROFILE") {
+            // aw-qt exports AW_PROFILE for the modules it spawns, so a profile
+            // set on the launcher propagates without every module growing a flag.
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                if opts.testing || cfg!(debug_assertions) {
+                    "testing".to_string()
+                } else {
+                    "default".to_string()
+                }
             }
-        }
+        },
     };
 
     dirs::validate_profile(&profile).unwrap_or_else(|e| panic!("Invalid profile name: {e}"));

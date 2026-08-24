@@ -112,11 +112,10 @@ fn root_manifest(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
 fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Info> {
     #[allow(clippy::or_fun_call)]
     let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
-    const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
     Json(Info {
         hostname,
-        version: format!("v{} (rust)", VERSION.unwrap_or("(unknown)")),
+        version: crate::version::version_string(),
         testing: config.testing,
         device_id: state.device_id.clone(),
     })

@@ -121,6 +121,7 @@ mod test {
         };
         let aw_config = aw_server::config::AWConfig {
             port,
+            testing: true,
             auth: aw_server::config::AWAuthConfig {
                 api_key: api_key.map(str::to_owned),
             },

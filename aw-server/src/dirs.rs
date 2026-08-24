@@ -13,11 +13,33 @@ lazy_static! {
     ));
 }
 
+/// Platform "appname" root for the current profile.
+///
+/// `default` and `testing` keep the bare `activitywatch` root: the legacy
+/// per-file suffixes (`sqlite-testing.db`, `config-testing.toml`, port 5666)
+/// already separate those two, and changing their root would orphan existing
+/// installs. Any other profile gets its own sibling root, which isolates
+/// config, data, cache and logs — and everything nested under them — in one
+/// place, with no per-module changes.
+#[cfg(not(target_os = "android"))]
+fn appname() -> String {
+    appname_for(crate::config::get_profile())
+}
+
+#[cfg(not(target_os = "android"))]
+fn appname_for(profile: &str) -> String {
+    if profile == "default" || profile == "testing" {
+        "activitywatch".to_string()
+    } else {
+        format!("activitywatch-{profile}")
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, ()> {
     let dir = dirs::config_dir()
         .ok_or(())?
-        .join("activitywatch")
+        .join(appname())
         .join("aw-server-rust");
     fs::create_dir_all(&dir).expect("Unable to create config dir");
     Ok(dir)
@@ -32,7 +54,7 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
 pub fn get_data_dir() -> Result<PathBuf, ()> {
     let dir = dirs::data_dir()
         .ok_or(())?
-        .join("activitywatch")
+        .join(appname())
         .join("aw-server-rust");
     fs::create_dir_all(&dir).expect("Unable to create data dir");
     Ok(dir)
@@ -47,7 +69,7 @@ pub fn get_data_dir() -> Result<PathBuf, ()> {
 pub fn get_cache_dir() -> Result<PathBuf, ()> {
     let dir = dirs::cache_dir()
         .ok_or(())?
-        .join("activitywatch")
+        .join(appname())
         .join("aw-server-rust");
     fs::create_dir_all(&dir).expect("Unable to create cache dir");
     Ok(dir)
@@ -73,10 +95,7 @@ pub fn get_log_dir(module: &str) -> Result<PathBuf, ()> {
 /// - Windows: {LOCALAPPDATA}\activitywatch\Logs\
 #[cfg(target_os = "linux")]
 fn get_user_log_dir() -> Result<PathBuf, ()> {
-    Ok(dirs::cache_dir()
-        .ok_or(())?
-        .join("activitywatch")
-        .join("log"))
+    Ok(dirs::cache_dir().ok_or(())?.join(appname()).join("log"))
 }
 
 #[cfg(target_os = "macos")]
@@ -85,14 +104,14 @@ fn get_user_log_dir() -> Result<PathBuf, ()> {
         .ok_or(())?
         .join("Library")
         .join("Logs")
-        .join("activitywatch"))
+        .join(appname()))
 }
 
 #[cfg(target_os = "windows")]
 fn get_user_log_dir() -> Result<PathBuf, ()> {
     Ok(dirs::data_local_dir()
         .ok_or(())?
-        .join("activitywatch")
+        .join(appname())
         .join("Logs"))
 }
 
@@ -144,6 +163,19 @@ pub fn db_path(profile: &str) -> Result<PathBuf, ()> {
 pub fn set_android_data_dir(path: &str) {
     let mut android_data_dir = ANDROID_DATA_DIR.lock().unwrap();
     *android_data_dir = PathBuf::from(path);
+}
+
+#[cfg(not(target_os = "android"))]
+#[test]
+fn test_appname_root_isolation() {
+    // default and testing keep the legacy bare root — existing installs
+    // must not be orphaned by this change.
+    assert_eq!(appname_for("default"), "activitywatch");
+    assert_eq!(appname_for("testing"), "activitywatch");
+
+    // any other profile gets its own sibling root
+    assert_eq!(appname_for("research"), "activitywatch-research");
+    assert_eq!(appname_for("my-profile"), "activitywatch-my-profile");
 }
 
 #[test]

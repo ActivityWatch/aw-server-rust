@@ -34,9 +34,18 @@ pub fn version_string() -> String {
 mod tests {
     use super::*;
 
+    struct VersionGuard;
+    impl Drop for VersionGuard {
+        fn drop(&mut self) {
+            *VERSION_OVERRIDE.write().unwrap() = None;
+        }
+    }
+
     // These share process-global state, so they run as one test.
     #[test]
     fn override_replaces_package_version() {
+        let _guard = VersionGuard; // resets VERSION_OVERRIDE on exit, even on panic
+
         assert!(
             version_string().ends_with(" (rust)"),
             "default should report the package version, got {:?}",

@@ -10,10 +10,17 @@
 ///
 /// Both copies then render in /timeline, so every event is shown twice.
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use aw_datastore::Datastore;
 use aw_models::{Bucket, BucketMetadata};
 use aw_sync::{sync_datastores, AccessMethod, SyncSpec};
+
+// Tests in this binary run in parallel. Use a monotonic counter to guarantee
+// each datastore gets a unique path even when two tests start within the same
+// clock tick (seen on macOS where SystemTime resolution can be coarser than
+// nanoseconds, causing path collisions and SQLite migration races).
+static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn tmp_db(name: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -21,10 +28,7 @@ fn tmp_db(name: &str) -> PathBuf {
         "aw-sync-roundtrip-{}-{}-{}.db",
         std::process::id(),
         name,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        DB_COUNTER.fetch_add(1, Ordering::Relaxed),
     ));
     p
 }

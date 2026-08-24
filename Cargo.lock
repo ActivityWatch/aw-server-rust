@@ -299,6 +299,7 @@ dependencies = [
 name = "aw-sync"
 version = "0.1.0"
 dependencies = [
+ "android_logger",
  "aw-client-rust",
  "aw-datastore",
  "aw-models",

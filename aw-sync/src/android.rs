@@ -1,10 +1,108 @@
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_void};
+use std::panic;
+use std::sync::Once;
+
 use aw_client_rust::blocking::AwClient;
 use jni::objects::{JClass, JString};
-use jni::sys::jstring;
+use jni::sys::{jint, jstring, JNI_VERSION_1_6};
 use jni::JNIEnv;
 use serde_json::json;
 
 use crate::{pull, pull_all, push_with_hostname};
+
+const ANDROID_LOG_FATAL: c_int = 7;
+const ANDROID_LOG_TAG: &str = "aw-sync";
+/// logcat truncates a single `__android_log_write` payload around 4 KiB.
+const MAX_LOG_BYTES: usize = 4000;
+
+#[link(name = "log")]
+extern "C" {
+    fn __android_log_write(prio: c_int, tag: *const c_char, text: *const c_char) -> c_int;
+}
+
+/// Write `msg` to logcat, splitting on the 4 KiB limit and stripping NULs so
+/// `CString::new` cannot fail. Never panics.
+fn android_log_fatal(msg: &str) {
+    let Ok(tag) = CString::new(ANDROID_LOG_TAG) else {
+        return;
+    };
+    let sanitized = msg.replace('\0', "\\0");
+    let mut rest = sanitized.as_str();
+    while !rest.is_empty() {
+        let mut idx = rest.len().min(MAX_LOG_BYTES);
+        while idx > 0 && !rest.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        if idx == 0 {
+            break;
+        }
+        if let Ok(text) = CString::new(&rest[..idx]) {
+            unsafe {
+                __android_log_write(ANDROID_LOG_FATAL, tag.as_ptr(), text.as_ptr());
+            }
+        }
+        rest = &rest[idx..];
+    }
+}
+
+/// Install a panic hook that writes to logcat via `android_log`.
+///
+/// The default Rust hook writes to stderr, which Android discards, so a panic
+/// in this `.so` currently surfaces only as `SIGABRT` with no message
+/// (ActivityWatch/aw-android#220).
+fn install_panic_hook() {
+    panic::set_hook(Box::new(|info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&'static str>() {
+            *s
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "Box<dyn Any>"
+        };
+        let location = match info.location() {
+            Some(loc) => format!("{}:{}:{}", loc.file(), loc.line(), loc.column()),
+            None => "unknown location".to_string(),
+        };
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+        let header = format!("Rust panic in thread '{thread_name}' at {location}: {payload}");
+
+        android_log_fatal(&header);
+        error!("{}", header);
+
+        let backtrace =
+            panic::catch_unwind(|| format!("{}", std::backtrace::Backtrace::force_capture()));
+        if let Ok(bt) = backtrace {
+            android_log_fatal("Backtrace:");
+            for line in bt.lines() {
+                android_log_fatal(line);
+            }
+        }
+    }));
+}
+
+/// Route `log` macros to logcat and install the panic hook. Safe to call more than once.
+fn init_android_logging() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Info)
+                .with_tag(ANDROID_LOG_TAG),
+        );
+        install_panic_hook();
+        info!("aw-sync: android_logger and panic hook installed");
+    });
+}
+
+/// Called automatically when `System.loadLibrary("aw_sync")` loads this `.so`,
+/// so panics are diagnosable even if a JNI entry point is never reached.
+#[no_mangle]
+pub extern "system" fn JNI_OnLoad(_vm: *mut jni::sys::JavaVM, _reserved: *mut c_void) -> jint {
+    init_android_logging();
+    JNI_VERSION_1_6
+}
 
 /// Helper function to convert Rust string to Java string
 fn rust_string_to_jstring(env: &JNIEnv, s: String) -> jstring {
@@ -27,6 +125,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPullAll(
     port: i32,
     hostname: JString,
 ) -> jstring {
+    init_android_logging();
     let hostname_str: String = match env.get_string(&hostname) {
         Ok(s) => s.into(),
         Err(e) => {
@@ -76,6 +175,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPull(
     port: i32,
     hostname: JString,
 ) -> jstring {
+    init_android_logging();
     let result: Result<String, String> = (|| {
         let client = get_client(port)?;
         let hostname_str: String = env
@@ -115,6 +215,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPush(
     port: i32,
     hostname: JString,
 ) -> jstring {
+    init_android_logging();
     let hostname_str: String = match env.get_string(&hostname) {
         Ok(s) => s.into(),
         Err(e) => {
@@ -165,6 +266,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
     port: i32,
     hostname: JString,
 ) -> jstring {
+    init_android_logging();
     let hostname_str: String = match env.get_string(&hostname) {
         Ok(s) => s.into(),
         Err(e) => {
@@ -217,6 +319,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_getSyncDir(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    init_android_logging();
     let result = crate::dirs::get_sync_dir();
 
     match result {

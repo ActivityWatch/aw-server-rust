@@ -151,6 +151,10 @@ pub mod android {
                                                  //        .parse("debug,hello::crate=error")
                                                  //        .build())
             );
+            // Default panic hook writes to stderr, which Android discards
+            // (ActivityWatch/aw-android#220). log_panics routes them through
+            // android_logger so they appear in logcat.
+            log_panics::init();
             info!("Initializing aw-server-rust...");
             debug!("Redirected aw-server-rust stdout/stderr to logcat");
         } else {

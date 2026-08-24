@@ -24,11 +24,18 @@ static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn tmp_db(name: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
+    // Combine a per-process counter (within-run uniqueness) with a timestamp
+    // (cross-run uniqueness when the PID is reused and the counter resets to 0).
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     p.push(format!(
-        "aw-sync-roundtrip-{}-{}-{}.db",
+        "aw-sync-roundtrip-{}-{}-{}-{}.db",
         std::process::id(),
         name,
         DB_COUNTER.fetch_add(1, Ordering::Relaxed),
+        ts,
     ));
     p
 }

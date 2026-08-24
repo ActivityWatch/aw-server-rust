@@ -59,6 +59,8 @@ mod import;
 mod query;
 mod settings;
 
+#[cfg(target_os = "android")]
+pub(crate) use settings::settings_datastore_key;
 pub use util::HttpErrorJson;
 
 #[get("/")]

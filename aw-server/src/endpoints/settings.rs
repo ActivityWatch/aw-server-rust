@@ -8,15 +8,57 @@ use aw_datastore::DatastoreError;
 
 use crate::endpoints::HttpErrorJson;
 
-fn parse_key(key: String) -> Result<String, HttpErrorJson> {
-    let namespace: String = "settings.".to_string();
+/// Map a settings API key to the datastore key (`settings.<key>`).
+///
+/// Dots are allowed: `GET /api/0/settings/foo.bar` stores and retrieves
+/// `settings.foo.bar`. Keys of length >= 128 are rejected (same rule as the
+/// HTTP handler). Android JNI `getSetting` uses this helper so native callers
+/// cannot silently miss a value the HTTP API would return.
+pub(crate) fn settings_datastore_key(key: &str) -> Result<String, &'static str> {
     if key.len() >= 128 {
-        Err(HttpErrorJson::new(
-            Status::BadRequest,
-            "Too long key".to_string(),
-        ))
+        Err("Too long key")
     } else {
-        Ok(namespace + key.as_str())
+        Ok(format!("settings.{}", key))
+    }
+}
+
+fn parse_key(key: String) -> Result<String, HttpErrorJson> {
+    settings_datastore_key(&key)
+        .map_err(|msg| HttpErrorJson::new(Status::BadRequest, msg.to_string()))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::settings_datastore_key;
+
+    #[test]
+    fn simple_keys_are_namespaced() {
+        assert_eq!(
+            settings_datastore_key("classes").unwrap(),
+            "settings.classes"
+        );
+        assert_eq!(
+            settings_datastore_key("startOfDay").unwrap(),
+            "settings.startOfDay"
+        );
+    }
+
+    #[test]
+    fn dotted_keys_are_namespaced_not_rejected() {
+        assert_eq!(
+            settings_datastore_key("foo.bar").unwrap(),
+            "settings.foo.bar"
+        );
+        assert_eq!(settings_datastore_key("a.b.c").unwrap(), "settings.a.b.c");
+    }
+
+    #[test]
+    fn overly_long_keys_are_rejected() {
+        assert!(settings_datastore_key(&"a".repeat(128)).is_err());
+        assert_eq!(
+            settings_datastore_key(&"a".repeat(127)).unwrap(),
+            format!("settings.{}", "a".repeat(127))
+        );
     }
 }
 

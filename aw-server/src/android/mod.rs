@@ -39,9 +39,7 @@ pub mod android {
 
     use crate::endpoints;
     use crate::endpoints::ServerState;
-    use aw_client_rust::blocking::AwClient;
-    use aw_client_rust::classes::default_classes;
-    use aw_client_rust::classes::{CategoryId, CategorySpec};
+    use aw_client_rust::classes::{classes_from_settings_str, default_classes};
     use aw_client_rust::queries::{
         build_android_canonical_events, AndroidQueryParams, QueryParamsBase,
     };
@@ -297,6 +295,36 @@ pub mod android {
         }
     }
 
+    /// Return a raw settings JSON value (the datastore body, matching GET /api/0/settings/<key>).
+    /// Missing or invalid keys return the JSON literal `null`.
+    ///
+    /// Widget/worker code must use this instead of unauthenticated HTTP: Android
+    /// enables API-key auth by default, so GET /api/0/settings/... from the
+    /// widget process 401s and silently falls back to defaults.
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_getSetting(
+        env: JNIEnv,
+        _: JClass,
+        java_key: JString,
+    ) -> jstring {
+        let key = jstring_to_string(&env, java_key);
+        // Match GET /api/0/settings/<key>: dots are valid (nested-looking
+        // keys like "foo.bar" store as settings.foo.bar). Reject empty keys
+        // and path/NUL bytes so JNI cannot smuggle a lookup the HTTP router
+        // would never pass through.
+        if key.is_empty() || key.contains('/') || key.contains('\\') || key.contains('\0') {
+            return string_to_jstring(&env, "null".to_string());
+        }
+        let setting_key = match crate::endpoints::settings_datastore_key(&key) {
+            Ok(k) => k,
+            Err(_) => return string_to_jstring(&env, "null".to_string()),
+        };
+        match openDatastore().get_key_value(&setting_key) {
+            Ok(value) => string_to_jstring(&env, value),
+            Err(_) => string_to_jstring(&env, "null".to_string()),
+        }
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_query(
         env: JNIEnv,
@@ -346,50 +374,22 @@ pub mod android {
         // Hardcoded bucket ID
         let bid_android = "aw-watcher-android".to_string();
 
-        // Get classes from server settings via HTTP API
-        let classes = match AwClient::new("127.0.0.1", 5600, "aw-android-query") {
-            Ok(client) => {
-                match client.get_setting("classes") {
-                    Ok(classes_value) => {
-                        // Parse the server-side classes from JSON value
-                        match serde_json::from_value::<Vec<aw_models::Class>>(classes_value) {
-                            Ok(server_classes) => {
-                                if server_classes.is_empty() {
-                                    info!("Server classes list is empty, using default classes");
-                                    default_classes()
-                                } else {
-                                    // Convert from aw_models::Class to CategorySpec format
-                                    server_classes
-                                        .iter()
-                                        .map(|c| {
-                                            let category_id: CategoryId = c.name.clone();
-                                            let category_spec = CategorySpec {
-                                                spec_type: c.rule.rule_type.clone(),
-                                                regex: c.rule.regex.clone().unwrap_or_default(),
-                                                ignore_case: c.rule.ignore_case.unwrap_or(false),
-                                            };
-                                            (category_id, category_spec)
-                                        })
-                                        .collect()
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Failed to parse server classes, using defaults: {:?}", e);
-                                default_classes()
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        info!("Failed to get server classes, using defaults: {:?}", e);
-                        default_classes()
-                    }
-                }
+        // Read classes from the datastore directly. Do NOT fetch them over HTTP:
+        // Android enables API-key auth by default, and androidQuery runs from the
+        // widget process which does not send a Bearer token. The previous
+        // AwClient GET /api/0/settings/classes path 401'd (or failed if the
+        // HTTP server wasn't up) and silently fell back to default_classes(),
+        // which is why the homescreen widget disagreed with the Activity view
+        // on per-category time while totals still matched.
+        // See ActivityWatch/aw-android#142.
+        let datastore = openDatastore();
+        let classes = match datastore.get_key_value("settings.classes") {
+            Ok(raw) => {
+                info!("Loaded classes from datastore settings.classes");
+                classes_from_settings_str(&raw)
             }
-            Err(e) => {
-                warn!(
-                    "Failed to create client for fetching classes, using defaults: {:?}",
-                    e
-                );
+            Err(_) => {
+                info!("settings.classes unset or unreadable, using default classes");
                 default_classes()
             }
         };
@@ -413,7 +413,6 @@ RETURN = {{"events": events, "duration": duration, "cat_events": cat_events}};"#
             build_android_canonical_events(&params)
         );
 
-        let datastore = openDatastore();
         let mut results = Vec::new();
 
         for interval in &timeperiods {

@@ -655,6 +655,29 @@ mod api_tests {
     }
 
     #[test]
+    fn test_get_setting_dotted_key() {
+        // HTTP accepts dotted keys; JNI getSetting must use the same grammar
+        // (ActivityWatch/aw-server-rust#653 Greptile: don't reject '.').
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+
+        let key = "nested.like.key";
+        let value = json!("dotted_value");
+        assert_eq!(
+            set_setting_request(&client, key, &value),
+            rocket::http::Status::Created
+        );
+
+        let res = client
+            .get(format!("/api/0/settings/{}", key))
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let deserialized: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(deserialized, value);
+    }
+
+    #[test]
     fn test_get_setting_list() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

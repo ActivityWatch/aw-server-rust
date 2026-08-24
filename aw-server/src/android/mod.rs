@@ -308,17 +308,17 @@ pub mod android {
         java_key: JString,
     ) -> jstring {
         let key = jstring_to_string(&env, java_key);
-        // Settings keys are identifiers like "classes" or "startOfDay". Reject
-        // anything that could escape the settings. namespace.
-        if key.is_empty()
-            || key.contains('.')
-            || key.contains('/')
-            || key.contains('\\')
-            || key.contains('\0')
-        {
+        // Match GET /api/0/settings/<key>: dots are valid (nested-looking
+        // keys like "foo.bar" store as settings.foo.bar). Reject empty keys
+        // and path/NUL bytes so JNI cannot smuggle a lookup the HTTP router
+        // would never pass through.
+        if key.is_empty() || key.contains('/') || key.contains('\\') || key.contains('\0') {
             return string_to_jstring(&env, "null".to_string());
         }
-        let setting_key = format!("settings.{}", key);
+        let setting_key = match crate::endpoints::settings_datastore_key(&key) {
+            Ok(k) => k,
+            Err(_) => return string_to_jstring(&env, "null".to_string()),
+        };
         match openDatastore().get_key_value(&setting_key) {
             Ok(value) => string_to_jstring(&env, value),
             Err(_) => string_to_jstring(&env, "null".to_string()),

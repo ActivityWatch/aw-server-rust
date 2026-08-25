@@ -48,7 +48,14 @@ struct Opts {
     #[clap(short = 'c', long = "config")]
     config: Option<PathBuf>,
 
+    /// Named instance profile (e.g. "default", "testing", "research").
+    /// `--testing` is an alias for `--profile testing`. Also reads AW_PROFILE,
+    /// which aw-qt exports for the modules it spawns.
+    #[clap(long)]
+    profile: Option<String>,
+
     /// Convenience option for using the default testing host and port.
+    /// Alias for `--profile testing`.
     #[clap(long)]
     testing: bool,
 
@@ -153,8 +160,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Started aw-sync...");
 
-    let profile = if opts.testing { "testing" } else { "default" };
-    aw_server::logging::setup_logger("aw-sync", profile, verbose)?;
+    let env_profile = std::env::var("AW_PROFILE").ok();
+    let profile = dirs::resolve_profile(
+        opts.profile.as_deref(),
+        opts.testing,
+        env_profile.as_deref(),
+    );
+    aw_server::dirs::validate_profile(&profile)
+        .unwrap_or_else(|e| panic!("Invalid profile name: {e}"));
+    aw_server::config::set_profile(profile.clone());
+
+    aw_server::logging::setup_logger("aw-sync", &profile, verbose)?;
+
+    if opts.testing && opts.profile.as_deref().is_some_and(|p| p != "testing") {
+        warn!("--testing and --profile {profile} both given; --profile wins, using '{profile}'");
+    }
+    if profile != "default" {
+        info!("Running aw-sync with profile '{profile}'");
+    }
 
     // if sync_dir, set env var
     if let Some(sync_dir) = opts.sync_dir {
@@ -166,10 +189,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::set_var("AW_SYNC_DIR", sync_dir);
     }
 
+    // Named profiles (and `--profile testing` without `--testing`) must use the
+    // profile's own server config / port default, not the CLI testing bool.
+    let testing = profile == "testing";
     let server_config = if util::is_loopback_host(&opts.host) {
-        util::get_server_config(opts.testing, opts.config.as_deref())?
+        util::get_server_config(testing, opts.config.as_deref())?
     } else {
-        util::ServerConfig::default_for(opts.testing)
+        util::ServerConfig::default_for(testing)
     };
     let port = opts.port.unwrap_or(server_config.port);
 

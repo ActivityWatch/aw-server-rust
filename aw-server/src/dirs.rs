@@ -22,12 +22,14 @@ lazy_static! {
 /// config, data, cache and logs — and everything nested under them — in one
 /// place, with no per-module changes.
 #[cfg(not(target_os = "android"))]
-fn appname() -> String {
+pub fn appname() -> String {
     appname_for(crate::config::get_profile())
 }
 
+/// Platform appname for a given profile. `default` and `testing` keep the
+/// bare `activitywatch` root; any other profile gets a sibling root.
 #[cfg(not(target_os = "android"))]
-fn appname_for(profile: &str) -> String {
+pub fn appname_for(profile: &str) -> String {
     if profile == "default" || profile == "testing" {
         "activitywatch".to_string()
     } else {

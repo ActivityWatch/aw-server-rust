@@ -151,18 +151,23 @@ fn default_custom_static() -> std::collections::HashMap<String, String> {
     std::collections::HashMap::new()
 }
 
+/// Config filename for a profile. `default` keeps the legacy unsuffixed
+/// `config.toml`; every other profile uses `config-{profile}.toml`.
+pub fn config_filename(profile: &str) -> String {
+    if profile == "default" {
+        "config.toml".to_string()
+    } else {
+        format!("config-{profile}.toml")
+    }
+}
+
 fn get_config_path(profile: &str, config_override: Option<&Path>) -> PathBuf {
     if let Some(config_path) = config_override {
         return config_path.to_path_buf();
     }
 
     let mut config_path = dirs::get_config_dir().unwrap();
-    if profile == "default" {
-        config_path.push("config.toml")
-    } else {
-        config_path.push(format!("config-{profile}.toml"))
-    }
-
+    config_path.push(config_filename(profile));
     config_path
 }
 
@@ -205,7 +210,7 @@ pub fn create_config(profile: &str, config_override: Option<&Path>) -> AWConfig 
 
 #[cfg(test)]
 mod tests {
-    use super::create_config;
+    use super::{config_filename, create_config};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -233,6 +238,13 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn config_filename_suffix_rule() {
+        assert_eq!(config_filename("default"), "config.toml");
+        assert_eq!(config_filename("testing"), "config-testing.toml");
+        assert_eq!(config_filename("research"), "config-research.toml");
     }
 
     #[test]

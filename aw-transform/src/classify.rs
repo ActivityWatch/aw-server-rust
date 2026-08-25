@@ -309,8 +309,7 @@ fn test_categorize_cache_correctness() {
     // Verifies that the deduplication cache produces the same result as
     // per-event categorization when many events share the same data.
     let mut base = Event::default();
-    base.data
-        .insert("app".into(), serde_json::json!("firefox"));
+    base.data.insert("app".into(), serde_json::json!("firefox"));
     base.data
         .insert("title".into(), serde_json::json!("GitHub"));
 
@@ -318,9 +317,7 @@ fn test_categorize_cache_correctness() {
     other
         .data
         .insert("app".into(), serde_json::json!("terminal"));
-    other
-        .data
-        .insert("title".into(), serde_json::json!("bash"));
+    other.data.insert("title".into(), serde_json::json!("bash"));
 
     // 50 events with same data, then 1 different event, then 50 more same
     let mut events: Vec<Event> = std::iter::repeat(base.clone())
@@ -332,15 +329,11 @@ fn test_categorize_cache_correctness() {
     let rules: Vec<(Vec<String>, Rule)> = vec![
         (
             vec!["Browser".into()],
-            Rule::Regex(
-                RegexRule::new("firefox", true, Some(vec!["app".into()])).unwrap(),
-            ),
+            Rule::Regex(RegexRule::new("firefox", true, Some(vec!["app".into()])).unwrap()),
         ),
         (
             vec!["Terminal".into()],
-            Rule::Regex(
-                RegexRule::new("terminal", true, Some(vec!["app".into()])).unwrap(),
-            ),
+            Rule::Regex(RegexRule::new("terminal", true, Some(vec!["app".into()])).unwrap()),
         ),
     ];
 

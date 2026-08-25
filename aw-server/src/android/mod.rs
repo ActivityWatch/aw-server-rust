@@ -172,6 +172,20 @@ pub mod android {
         dirs::set_android_data_dir(path);
     }
 
+    /// Report the Android app's release version from `/api/0/info` instead of
+    /// the aw-server-rust package version, which is the version of a component
+    /// rather than of the app the user installed.
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_setVersionOverride(
+        env: JNIEnv,
+        _: JClass,
+        java_version: JString,
+    ) {
+        let version = &jstring_to_string(&env, java_version);
+        debug!("Setting reported version to {}", version);
+        crate::version::set_version_override(version);
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_getBuckets(
         env: JNIEnv,

@@ -4,6 +4,7 @@
 use aw_models::Event;
 use fancy_regex::Regex;
 use lru::LruCache;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -117,25 +118,38 @@ impl From<Regex> for Rule {
 /// An event can only have one category, although the category may have a hierarchy,
 /// for instance: "Work -> ActivityWatch -> aw-server-rust"
 /// If multiple categories match, the deepest one will be chosen.
+///
+/// Performance: builds an in-memory cache keyed on the event's data JSON so that
+/// events with identical data (same app/title — very common in practice) are only
+/// matched against the rule set once. On a month's data with 50k+ events but only
+/// a few hundred distinct app/title pairs this reduces regex work by >99%.
 pub fn categorize(mut events: Vec<Event>, rules: &[(Vec<String>, Rule)]) -> Vec<Event> {
-    let mut classified_events = Vec::new();
-    for event in events.drain(..) {
-        classified_events.push(categorize_one(event, rules));
+    // Cache: serialized event data → assigned category
+    let mut category_cache: HashMap<String, Vec<String>> = HashMap::new();
+    let mut classified_events = Vec::with_capacity(events.len());
+    for mut event in events.drain(..) {
+        // Key on the full event data. serde_json::Map preserves insertion order, so
+        // events with the same fields in the same order produce the same key — which
+        // is the normal case for heartbeat-based watchers.
+        let cache_key = serde_json::to_string(&event.data).unwrap_or_default();
+        let category = category_cache
+            .entry(cache_key)
+            .or_insert_with(|| {
+                let mut cat = vec!["Uncategorized".into()];
+                for (c, rule) in rules {
+                    if rule.matches(&event) {
+                        cat = _pick_highest_ranking_category(cat, c);
+                    }
+                }
+                cat
+            })
+            .clone();
+        event
+            .data
+            .insert("$category".into(), serde_json::json!(category));
+        classified_events.push(event);
     }
     classified_events
-}
-
-fn categorize_one(mut event: Event, rules: &[(Vec<String>, Rule)]) -> Event {
-    let mut category: Vec<String> = vec!["Uncategorized".into()];
-    for (cat, rule) in rules {
-        if rule.matches(&event) {
-            category = _pick_highest_ranking_category(category, cat);
-        }
-    }
-    event
-        .data
-        .insert("$category".into(), serde_json::json!(category));
-    event
 }
 
 /// Tags a list of events
@@ -288,6 +302,70 @@ fn test_categorize_uncategorized() {
         events.first().unwrap().data.get("$category").unwrap(),
         &serde_json::json!(vec!["Uncategorized"])
     );
+}
+
+#[test]
+fn test_categorize_cache_correctness() {
+    // Verifies that the deduplication cache produces the same result as
+    // per-event categorization when many events share the same data.
+    let mut base = Event::default();
+    base.data
+        .insert("app".into(), serde_json::json!("firefox"));
+    base.data
+        .insert("title".into(), serde_json::json!("GitHub"));
+
+    let mut other = Event::default();
+    other
+        .data
+        .insert("app".into(), serde_json::json!("terminal"));
+    other
+        .data
+        .insert("title".into(), serde_json::json!("bash"));
+
+    // 50 events with same data, then 1 different event, then 50 more same
+    let mut events: Vec<Event> = std::iter::repeat(base.clone())
+        .take(50)
+        .chain(std::iter::once(other.clone()))
+        .chain(std::iter::repeat(base.clone()).take(50))
+        .collect();
+
+    let rules: Vec<(Vec<String>, Rule)> = vec![
+        (
+            vec!["Browser".into()],
+            Rule::Regex(
+                RegexRule::new("firefox", true, Some(vec!["app".into()])).unwrap(),
+            ),
+        ),
+        (
+            vec!["Terminal".into()],
+            Rule::Regex(
+                RegexRule::new("terminal", true, Some(vec!["app".into()])).unwrap(),
+            ),
+        ),
+    ];
+
+    events = categorize(events, &rules);
+
+    assert_eq!(events.len(), 101);
+    // All firefox events → Browser
+    for e in events.iter().take(50) {
+        assert_eq!(
+            e.data.get("$category").unwrap(),
+            &serde_json::json!(vec!["Browser"])
+        );
+    }
+    // The single terminal event → Terminal
+    assert_eq!(
+        events[50].data.get("$category").unwrap(),
+        &serde_json::json!(vec!["Terminal"])
+    );
+    // Remaining firefox events → Browser (cache hit path)
+    for e in events.iter().skip(51) {
+        assert_eq!(
+            e.data.get("$category").unwrap(),
+            &serde_json::json!(vec!["Browser"])
+        );
+    }
 }
 
 #[test]

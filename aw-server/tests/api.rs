@@ -182,7 +182,7 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::BadRequest);
         assert_eq!(
             res.into_string().unwrap(),
-            r#"{"message":"Invalid hostname 'my phone': hostname may not contain whitespace"}"#
+            r#"{"message":"Invalid hostname \"my phone\": hostname may not contain whitespace"}"#
         );
 
         // The rejected bucket was not created
@@ -192,6 +192,40 @@ mod api_tests {
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::NotFound);
+
+        // An already-existing bucket keeps the established "already exists" response
+        // even if the re-create payload carries a whitespace hostname. Watchers
+        // idempotently re-create their bucket on startup, so a legacy bucket stored
+        // under a spacey hostname must not start hard-failing every boot.
+        let res = client
+            .post("/api/0/buckets/existing")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(
+                r#"{
+                "id": "existing",
+                "type": "type",
+                "client": "client",
+                "hostname": "hostname"
+            }"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        let res = client
+            .post("/api/0/buckets/existing")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(
+                r#"{
+                "id": "existing",
+                "type": "type",
+                "client": "client",
+                "hostname": "my phone"
+            }"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::NotModified);
 
         // The "!local" sentinel bypasses validation (resolved server-side)
         let res = client

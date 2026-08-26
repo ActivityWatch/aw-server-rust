@@ -56,11 +56,21 @@ pub fn bucket_new(
     }
     // Reject client-supplied hostnames containing whitespace. Such hostnames come from
     // misconfigured clients and produce buckets that are awkward to address and query.
-    // The "!local" sentinel is resolved server-side below and is not validated here, so a
-    // machine whose own hostname contains a space is unaffected.
-    if bucket.hostname != "!local" && bucket.hostname.contains(char::is_whitespace) {
+    //
+    // Two deliberate exemptions keep this from breaking working setups:
+    //  - The "!local" sentinel is resolved server-side below and is not validated here,
+    //    so a machine whose own hostname contains a space is unaffected.
+    //  - Buckets that already exist are not validated, so watchers that idempotently
+    //    re-create a pre-existing bucket on startup keep getting the established
+    //    "already exists" response instead of a new hard error.
+    if bucket.hostname != "!local"
+        && bucket.hostname.contains(char::is_whitespace)
+        && state.datastore.get_bucket(&bucket.id).is_err()
+    {
+        // Format the hostname with Debug to escape control characters, so untrusted
+        // request data cannot inject newlines or escape sequences into the log.
         let err_msg = format!(
-            "Invalid hostname '{}': hostname may not contain whitespace",
+            "Invalid hostname {:?}: hostname may not contain whitespace",
             bucket.hostname
         );
         warn!("{}", err_msg);

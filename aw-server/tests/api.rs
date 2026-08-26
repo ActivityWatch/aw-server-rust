@@ -161,6 +161,55 @@ mod api_tests {
     }
 
     #[test]
+    fn test_bucket_hostname_validation() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+
+        // A client-supplied hostname containing whitespace is rejected
+        let res = client
+            .post("/api/0/buckets/spacey")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(
+                r#"{
+                "id": "spacey",
+                "type": "type",
+                "client": "client",
+                "hostname": "my phone"
+            }"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+        assert_eq!(
+            res.into_string().unwrap(),
+            r#"{"message":"Invalid hostname 'my phone': hostname may not contain whitespace"}"#
+        );
+
+        // The rejected bucket was not created
+        let res = client
+            .get("/api/0/buckets/spacey")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+
+        // The "!local" sentinel bypasses validation (resolved server-side)
+        let res = client
+            .post("/api/0/buckets/localbucket")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(
+                r#"{
+                "id": "localbucket",
+                "type": "type",
+                "client": "client",
+                "hostname": "!local"
+            }"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
+    #[test]
     fn test_events() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

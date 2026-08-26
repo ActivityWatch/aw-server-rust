@@ -54,6 +54,18 @@ pub fn bucket_new(
     if bucket.id != bucket_id {
         bucket.id = bucket_id.to_string();
     }
+    // Reject client-supplied hostnames containing whitespace. Such hostnames come from
+    // misconfigured clients and produce buckets that are awkward to address and query.
+    // The "!local" sentinel is resolved server-side below and is not validated here, so a
+    // machine whose own hostname contains a space is unaffected.
+    if bucket.hostname != "!local" && bucket.hostname.contains(char::is_whitespace) {
+        let err_msg = format!(
+            "Invalid hostname '{}': hostname may not contain whitespace",
+            bucket.hostname
+        );
+        warn!("{}", err_msg);
+        return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
+    }
     if bucket.hostname == "!local" {
         bucket.hostname = gethostname()
             .into_string()

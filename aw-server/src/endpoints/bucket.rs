@@ -6,6 +6,7 @@ use rocket::serde::json::Json;
 use chrono::DateTime;
 use chrono::Utc;
 
+use aw_datastore::DatastoreError;
 use aw_models::Bucket;
 use aw_models::BucketsExport;
 use aw_models::Event;
@@ -63,18 +64,25 @@ pub fn bucket_new(
     //  - Buckets that already exist are not validated, so watchers that idempotently
     //    re-create a pre-existing bucket on startup keep getting the established
     //    "already exists" response instead of a new hard error.
-    if bucket.hostname != "!local"
-        && bucket.hostname.contains(char::is_whitespace)
-        && state.datastore.get_bucket(&bucket.id).is_err()
-    {
-        // Format the hostname with Debug to escape control characters, so untrusted
-        // request data cannot inject newlines or escape sequences into the log.
-        let err_msg = format!(
-            "Invalid hostname {:?}: hostname may not contain whitespace",
-            bucket.hostname
-        );
-        warn!("{}", err_msg);
-        return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
+    if bucket.hostname != "!local" && bucket.hostname.contains(char::is_whitespace) {
+        // Distinguish "bucket genuinely absent" from "datastore unavailable":
+        // only the former should trigger the whitespace rejection (400). An
+        // InternalError means the datastore worker is down and must become 500,
+        // not be silently swallowed and misreported as invalid client input.
+        match state.datastore.get_bucket(&bucket.id) {
+            Ok(_) => {} // existing bucket — skip validation; create_bucket returns 304
+            Err(DatastoreError::NoSuchBucket(_)) => {
+                // Format the hostname with Debug to escape control characters, so
+                // untrusted request data cannot inject newlines into the log.
+                let err_msg = format!(
+                    "Invalid hostname {:?}: hostname may not contain whitespace",
+                    bucket.hostname
+                );
+                warn!("{}", err_msg);
+                return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
+            }
+            Err(e) => return Err(e.into()), // datastore failure → 500
+        }
     }
     if bucket.hostname == "!local" {
         bucket.hostname = gethostname()

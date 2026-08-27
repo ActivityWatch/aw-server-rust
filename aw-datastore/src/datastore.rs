@@ -318,10 +318,11 @@ impl DatastoreInstance {
                 )))
             }
         };
+        let mut new_cache = HashMap::new();
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
-                    self.buckets_cache.insert(b.id.clone(), b.clone());
+                    new_cache.insert(b.id.clone(), b);
                 }
                 Err(e) => {
                     return Err(DatastoreError::InternalError(format!(
@@ -330,6 +331,7 @@ impl DatastoreInstance {
                 }
             }
         }
+        self.buckets_cache = new_cache;
         Ok(())
     }
 
@@ -1113,39 +1115,113 @@ impl DatastoreInstance {
     }
 
     /// Migrates all buckets whose name starts with `aw-watcher-android-test` to use
-    /// `aw-watcher-android` instead.  This covers the old debug-build bucket naming
-    /// convention (e.g. `aw-watcher-android-test_hostname` → `aw-watcher-android_hostname`).
-    /// Events are left untouched; only the bucket metadata is updated.
-    /// Returns the number of buckets that were migrated.
-    /// Note: if a UNIQUE constraint violation occurs on any single row, `UPDATE OR IGNORE`
-    /// will skip conflicting rows instead of aborting the entire batch.
+    /// `aw-watcher-android` instead. This covers the old production bucket naming
+    /// convention (e.g. `aw-watcher-android-test_phone` → `aw-watcher-android_phone`).
+    ///
+    /// If the destination already exists, disjoint legacy events are moved into it.
+    /// Events that overlap a destination event stay in the legacy bucket so the
+    /// migration cannot create duplicate activity records. The legacy bucket is
+    /// deleted only after it is empty.
+    /// Returns the number of legacy buckets that were fully renamed or merged.
     pub fn migrate_test_bucket_names(
         &mut self,
         conn: &Connection,
     ) -> Result<usize, DatastoreError> {
-        info!("Migrating 'aw-watcher-android-test' bucket names to 'aw-watcher-android'");
+        const OLD_PREFIX: &str = "aw-watcher-android-test";
+        const NEW_PREFIX: &str = "aw-watcher-android";
 
-        let updated = match conn.execute(
-            "UPDATE OR IGNORE buckets SET name = 'aw-watcher-android' || SUBSTR(name, LENGTH('aw-watcher-android-test') + 1) \
-             WHERE name LIKE 'aw-watcher-android-test%'",
-            [],
-        ) {
-            Ok(n) => n,
-            Err(err) => {
-                return Err(DatastoreError::InternalError(format!(
-                    "Failed to migrate test bucket names: {err}"
-                )))
+        info!("Migrating '{OLD_PREFIX}' bucket names to '{NEW_PREFIX}'");
+        let legacy_ids: Vec<String> = self
+            .buckets_cache
+            .keys()
+            .filter(|id| id.starts_with(OLD_PREFIX))
+            .cloned()
+            .collect();
+        let mut migrated = 0;
+        let mut cache_dirty = false;
+
+        for old_id in legacy_ids {
+            let new_id = old_id.replacen(OLD_PREFIX, NEW_PREFIX, 1);
+            if let Some(new_bucket) = self.buckets_cache.get(&new_id).cloned() {
+                let old_bucket = self
+                    .buckets_cache
+                    .get(&old_id)
+                    .cloned()
+                    .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
+
+                // Move only events that do not overlap any destination event.
+                // A single overlapping cutover heartbeat must not strand years of
+                // disjoint history in the legacy bucket (ActivityWatch/aw-android#243).
+                conn.execute(
+                    "UPDATE events SET bucketrow = ?1
+                     WHERE id IN (
+                         SELECT old_event.id FROM events AS old_event
+                         WHERE old_event.bucketrow = ?2
+                           AND NOT EXISTS (
+                               SELECT 1 FROM events AS new_event
+                               WHERE new_event.bucketrow = ?1
+                                 AND old_event.starttime < new_event.endtime
+                                 AND new_event.starttime < old_event.endtime
+                           )
+                     )",
+                    [new_bucket.bid, old_bucket.bid],
+                )
+                .map_err(|err| {
+                    DatastoreError::InternalError(format!(
+                        "Failed to merge bucket '{}' into '{}': {err}",
+                        old_id, new_id
+                    ))
+                })?;
+                cache_dirty = true;
+
+                let remaining: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM events WHERE bucketrow = ?1",
+                        [old_bucket.bid],
+                        |row| row.get(0),
+                    )
+                    .map_err(|err| {
+                        DatastoreError::InternalError(format!(
+                            "Failed to count leftover events in '{}': {err}",
+                            old_id
+                        ))
+                    })?;
+                if remaining == 0 {
+                    conn.execute("DELETE FROM buckets WHERE id = ?1", [old_bucket.bid])
+                        .map_err(|err| {
+                            DatastoreError::InternalError(format!(
+                                "Failed to remove merged bucket '{}': {err}",
+                                old_id
+                            ))
+                        })?;
+                    info!("Merged legacy bucket '{}' into '{}'", old_id, new_id);
+                    migrated += 1;
+                } else {
+                    warn!(
+                        "Partially merged '{}' into '{}'; {} overlapping event(s) remain in the legacy bucket",
+                        old_id, new_id, remaining
+                    );
+                }
+            } else {
+                conn.execute(
+                    "UPDATE buckets SET name = ?1 WHERE name = ?2",
+                    [&new_id, &old_id],
+                )
+                .map_err(|err| {
+                    DatastoreError::InternalError(format!(
+                        "Failed to rename bucket '{}' to '{}': {err}",
+                        old_id, new_id
+                    ))
+                })?;
+                info!("Renamed legacy bucket '{}' to '{}'", old_id, new_id);
+                migrated += 1;
+                cache_dirty = true;
             }
-        };
-
-        if updated > 0 {
-            info!("Migrated {} 'aw-watcher-android-test' bucket(s)", updated);
-            // Refresh the in-memory cache so callers see the new names immediately.
-            self.get_stored_buckets(conn)?;
-        } else {
-            info!("No 'aw-watcher-android-test' buckets found; nothing to migrate");
         }
 
-        Ok(updated)
+        if cache_dirty {
+            self.get_stored_buckets(conn)?;
+        }
+        Ok(migrated)
     }
 }

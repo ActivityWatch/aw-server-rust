@@ -170,6 +170,35 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_migrate_test_bucket_names_keeps_overlapping_legacy_events_together() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[
+                test_event(now - Duration::hours(3), Duration::minutes(20)),
+                test_event(now, Duration::minutes(30)),
+                test_event(now + Duration::minutes(15), Duration::minutes(30)),
+            ],
+        )
+        .unwrap();
+        ds.insert_events(
+            new_id,
+            &[test_event(now + Duration::hours(2), Duration::minutes(20))],
+        )
+        .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        assert!(ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(old_id, None, None, None).unwrap().len(), 2);
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
     fn test_migrate_test_bucket_names_merges_interleaved_non_overlapping_events() {
         let ds = Datastore::new_in_memory(false);
         let old_id = "aw-watcher-android-test_phone";

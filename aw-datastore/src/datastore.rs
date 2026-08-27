@@ -1119,9 +1119,9 @@ impl DatastoreInstance {
     /// convention (e.g. `aw-watcher-android-test_phone` → `aw-watcher-android_phone`).
     ///
     /// If the destination already exists, disjoint legacy events are moved into it.
-    /// Events that overlap a destination event stay in the legacy bucket so the
-    /// migration cannot create duplicate activity records. The legacy bucket is
-    /// deleted only after it is empty.
+    /// Events that overlap a destination or another legacy event stay in the legacy
+    /// bucket so the migration cannot create overlapping activity records. The legacy
+    /// bucket is deleted only after it is empty.
     /// Returns the number of legacy buckets that were fully renamed or merged.
     pub fn migrate_test_bucket_names(
         &mut self,
@@ -1149,19 +1149,20 @@ impl DatastoreInstance {
                     .cloned()
                     .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
 
-                // Move only events that do not overlap any destination event.
-                // A single overlapping cutover heartbeat must not strand years of
-                // disjoint history in the legacy bucket (ActivityWatch/aw-android#243).
+                // Move only events that do not overlap the destination or another
+                // legacy event. A single overlapping cutover heartbeat must not strand
+                // years of disjoint history in the legacy bucket (ActivityWatch/aw-android#243).
                 conn.execute(
                     "UPDATE events SET bucketrow = ?1
                      WHERE id IN (
                          SELECT old_event.id FROM events AS old_event
                          WHERE old_event.bucketrow = ?2
                            AND NOT EXISTS (
-                               SELECT 1 FROM events AS new_event
-                               WHERE new_event.bucketrow = ?1
-                                 AND old_event.starttime < new_event.endtime
-                                 AND new_event.starttime < old_event.endtime
+                               SELECT 1 FROM events AS other_event
+                               WHERE other_event.id != old_event.id
+                                 AND other_event.bucketrow IN (?1, ?2)
+                                 AND old_event.starttime < other_event.endtime
+                                 AND other_event.starttime < old_event.endtime
                            )
                      )",
                     [new_bucket.bid, old_bucket.bid],

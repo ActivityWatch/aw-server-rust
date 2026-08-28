@@ -124,18 +124,20 @@ impl DatastoreWorker {
     }
 
     /// Replace the in-memory engine from `settings.privacy_filters`.
-    /// Parse errors keep the previous engine (a bad save should not unfilter
-    /// already-loaded rules). A missing key clears the engine so deleting the
-    /// setting actually disables filtering.
+    /// Only an absent key clears the engine, so deleting the setting actually
+    /// disables filtering. Parse errors and query errors keep the previous
+    /// engine: unfiltering on a bad save or a transient database error would
+    /// silently store the events these rules exist to keep out.
     fn reload_privacy_engine(&mut self, ds: &DatastoreInstance, conn: &Connection) {
         match ds.get_key_value(conn, PRIVACY_FILTERS_KEY) {
             Ok(json_str) => match PrivacyFilterEngine::from_json(&json_str) {
                 Ok(engine) => self.privacy_engine = engine,
                 Err(e) => warn!("Failed to parse privacy_filters setting: {e}"),
             },
-            Err(_) => {
+            Err(DatastoreError::NoSuchKey(_)) => {
                 self.privacy_engine = PrivacyFilterEngine::new(vec![]);
             }
+            Err(e) => warn!("Failed to load privacy_filters setting: {e:?}"),
         }
     }
 

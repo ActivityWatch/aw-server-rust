@@ -290,6 +290,12 @@ impl DatastoreWorker {
                     // know to retry. Rolled-back events create a gap in the timeline;
                     // watchers will resume sending heartbeats from current state, but the
                     // specific batch of events is permanently lost.
+                    //
+                    // A privacy-setting mutation may also have replaced the in-memory
+                    // engine from this transaction. The failed commit rolled SQLite back,
+                    // so restore the engine from the durable connection before processing
+                    // another event.
+                    self.reload_privacy_engine(&ds, &conn);
                     if let Some((sender, _)) = deferred_ack.take() {
                         sender.respond(Err(DatastoreError::InternalError(format!(
                             "Failed to commit datastore transaction: {err}"

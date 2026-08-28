@@ -181,10 +181,15 @@ pub fn categorize(mut events: Vec<Event>, rules: &[CategoryRule]) -> Vec<Event> 
 
 fn _pick_category(event: &Event, rules: &[CategoryRule]) -> Vec<String> {
     let mut category: Vec<String> = vec!["Uncategorized".into()];
-    // Uncategorized loses to any actual match, including a match with a very
+    // Uncategorized loses to any non-empty match, including a match with a very
     // low explicit priority. i64::MIN is only used as this sentinel.
+    // Empty category paths are skipped so they cannot replace the fallback
+    // (old depth comparison: len 0 does not beat Uncategorized's len 1).
     let mut rank = i64::MIN;
     for class in rules {
+        if class.category.is_empty() {
+            continue;
+        }
         if class.rule.matches(event) {
             let item_rank = _effective_rank(&class.category, class.priority);
             if item_rank >= rank {
@@ -442,6 +447,23 @@ fn test_categorize_negative_priority_still_beats_uncategorized() {
         ],
     );
     assert_eq!(category_of(&events), &serde_json::json!(vec!["Low"]));
+}
+
+#[test]
+fn test_categorize_empty_category_keeps_uncategorized() {
+    // Empty path used to lose to Uncategorized (depth 0 < 1). The MIN-rank
+    // sentinel must not let it replace the fallback.
+    let events = categorize(
+        vec![event_with_data("just a test")],
+        &[CategoryRule::new(
+            vec![],
+            Rule::from(Regex::new(r"test").unwrap()),
+        )],
+    );
+    assert_eq!(
+        category_of(&events),
+        &serde_json::json!(vec!["Uncategorized"])
+    );
 }
 
 #[test]

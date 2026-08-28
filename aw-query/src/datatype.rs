@@ -4,7 +4,7 @@ use std::fmt;
 use super::functions;
 use super::QueryError;
 use aw_models::Event;
-use aw_transform::classify::{RegexRule, Rule};
+use aw_transform::classify::{CategoryRule, RegexRule, Rule};
 
 use serde::{Serialize, Serializer};
 use serde_json::value::Value;
@@ -224,18 +224,48 @@ impl TryFrom<DataType> for Vec<(String, Rule)> {
     }
 }
 
-impl TryFrom<&DataType> for Vec<(Vec<String>, Rule)> {
+impl TryFrom<&DataType> for Vec<CategoryRule> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
         value.clone().try_into()
     }
 }
 
-impl TryFrom<DataType> for Vec<(Vec<String>, Rule)> {
+fn parse_optional_priority(rule: &DataType) -> Result<Option<i64>, QueryError> {
+    let obj = match rule {
+        DataType::Dict(dict) => dict,
+        _ => return Ok(None),
+    };
+    let val = match obj.get("priority").or_else(|| obj.get("weight")) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    match val {
+        DataType::Number(n) => {
+            if !n.is_finite() {
+                return Err(QueryError::InvalidFunctionParameters(
+                    "priority/weight must be a finite integer".to_string(),
+                ));
+            }
+            let as_int = *n as i64;
+            if (as_int as f64) != *n {
+                return Err(QueryError::InvalidFunctionParameters(
+                    "priority/weight must be an integer".to_string(),
+                ));
+            }
+            Ok(Some(as_int))
+        }
+        _ => Err(QueryError::InvalidFunctionParameters(
+            "priority/weight must be an integer".to_string(),
+        )),
+    }
+}
+
+impl TryFrom<DataType> for Vec<CategoryRule> {
     type Error = QueryError;
     fn try_from(value: DataType) -> Result<Self, Self::Error> {
         let tagged_lists: Vec<DataType> = value.try_into()?;
-        let mut lists: Vec<(Vec<String>, Rule)> = Vec::with_capacity(tagged_lists.len());
+        let mut lists: Vec<CategoryRule> = Vec::with_capacity(tagged_lists.len());
         for list in tagged_lists {
             match list {
                 DataType::List(ref l) => {
@@ -244,12 +274,18 @@ impl TryFrom<DataType> for Vec<(Vec<String>, Rule)> {
                         None => return Err(QueryError::InvalidFunctionParameters(
                             format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
                     };
-                    let rule: Rule = match l.get(1) {
-                        Some(rule) => rule.try_into()?,
+                    let rule_data = match l.get(1) {
+                        Some(rule) => rule,
                         None => return Err(QueryError::InvalidFunctionParameters(
                             format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
                     };
-                    lists.push((category, rule));
+                    let priority = parse_optional_priority(rule_data)?;
+                    let rule: Rule = rule_data.try_into()?;
+                    lists.push(CategoryRule {
+                        category,
+                        rule,
+                        priority,
+                    });
                 }
                 ref invalid_type => {
                     return Err(QueryError::InvalidFunctionParameters(format!(

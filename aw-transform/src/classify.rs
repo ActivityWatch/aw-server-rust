@@ -113,17 +113,52 @@ impl From<Regex> for Rule {
     }
 }
 
+/// A category matching rule passed to [`categorize`].
+///
+/// `priority` is an optional ranking score. When set, it is used instead of
+/// category depth to pick among matching rules (higher wins). When `None`,
+/// ranking falls back to depth so existing configs keep their current behavior.
+pub struct CategoryRule {
+    pub category: Vec<String>,
+    pub rule: Rule,
+    pub priority: Option<i64>,
+}
+
+impl CategoryRule {
+    pub fn new(category: Vec<String>, rule: Rule) -> Self {
+        Self {
+            category,
+            rule,
+            priority: None,
+        }
+    }
+
+    pub fn with_priority(mut self, priority: i64) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+}
+
+impl From<(Vec<String>, Rule)> for CategoryRule {
+    fn from((category, rule): (Vec<String>, Rule)) -> Self {
+        Self::new(category, rule)
+    }
+}
+
 /// Categorizes a list of events
 ///
 /// An event can only have one category, although the category may have a hierarchy,
 /// for instance: "Work -> ActivityWatch -> aw-server-rust"
-/// If multiple categories match, the deepest one will be chosen.
+/// If multiple categories match, the highest-ranking one is chosen.
+/// Ranking is the optional `priority` on the rule when present, otherwise category
+/// depth ("the deepest one will be chosen"). Equal ranks keep the later match,
+/// matching the previous depth-only `>=` comparison.
 ///
 /// Performance: builds an in-memory cache keyed on the event's data JSON so that
 /// events with identical data (same app/title — very common in practice) are only
 /// matched against the rule set once. On a month's data with 50k+ events but only
 /// a few hundred distinct app/title pairs this reduces regex work by >99%.
-pub fn categorize(mut events: Vec<Event>, rules: &[(Vec<String>, Rule)]) -> Vec<Event> {
+pub fn categorize(mut events: Vec<Event>, rules: &[CategoryRule]) -> Vec<Event> {
     // Cache: serialized event data → assigned category
     let mut category_cache: HashMap<String, Vec<String>> = HashMap::new();
     let mut classified_events = Vec::with_capacity(events.len());
@@ -134,15 +169,7 @@ pub fn categorize(mut events: Vec<Event>, rules: &[(Vec<String>, Rule)]) -> Vec<
         let cache_key = serde_json::to_string(&event.data).unwrap_or_default();
         let category = category_cache
             .entry(cache_key)
-            .or_insert_with(|| {
-                let mut cat = vec!["Uncategorized".into()];
-                for (c, rule) in rules {
-                    if rule.matches(&event) {
-                        cat = _pick_highest_ranking_category(cat, c);
-                    }
-                }
-                cat
-            })
+            .or_insert_with(|| _pick_category(&event, rules))
             .clone();
         event
             .data
@@ -150,6 +177,23 @@ pub fn categorize(mut events: Vec<Event>, rules: &[(Vec<String>, Rule)]) -> Vec<
         classified_events.push(event);
     }
     classified_events
+}
+
+fn _pick_category(event: &Event, rules: &[CategoryRule]) -> Vec<String> {
+    let mut category: Vec<String> = vec!["Uncategorized".into()];
+    // Uncategorized loses to any actual match, including a match with a very
+    // low explicit priority. i64::MIN is only used as this sentinel.
+    let mut rank = i64::MIN;
+    for class in rules {
+        if class.rule.matches(event) {
+            let item_rank = _effective_rank(&class.category, class.priority);
+            if item_rank >= rank {
+                category = class.category.clone();
+                rank = item_rank;
+            }
+        }
+    }
+    category
 }
 
 /// Tags a list of events
@@ -177,13 +221,10 @@ fn tag_one(mut event: Event, rules: &[(String, Rule)]) -> Event {
     event
 }
 
-fn _pick_highest_ranking_category(acc: Vec<String>, item: &[String]) -> Vec<String> {
-    if item.len() >= acc.len() {
-        // If tag is category with greater or equal depth than current, then choose the new one instead.
-        item.to_vec()
-    } else {
-        acc
-    }
+fn _effective_rank(category: &[String], priority: Option<i64>) -> i64 {
+    // Defaulting to depth is the shipped contract and what Erik suggested
+    // for the optional override: https://github.com/ActivityWatch/aw-server-rust/issues/597
+    priority.unwrap_or(category.len() as i64)
 }
 
 #[test]
@@ -260,16 +301,16 @@ fn test_categorize() {
         .insert("test".into(), serde_json::json!("just a test"));
 
     let mut events = vec![e];
-    let rules: Vec<(Vec<String>, Rule)> = vec![
-        (
+    let rules: Vec<CategoryRule> = vec![
+        CategoryRule::new(
             vec!["Test".into()],
             Rule::from(Regex::new(r"test").unwrap()),
         ),
-        (
+        CategoryRule::new(
             vec!["Test".into(), "Subtest".into()],
             Rule::from(Regex::new(r"test").unwrap()),
         ),
-        (
+        CategoryRule::new(
             vec!["Other".into()],
             Rule::from(Regex::new(r"nonmatching").unwrap()),
         ),
@@ -291,7 +332,7 @@ fn test_categorize_uncategorized() {
         .insert("test".into(), serde_json::json!("just a test"));
 
     let mut events = vec![e];
-    let rules: Vec<(Vec<String>, Rule)> = vec![(
+    let rules: Vec<CategoryRule> = vec![CategoryRule::new(
         vec!["Non-matching".into(), "test".into()],
         Rule::from(Regex::new(r"not going to match").unwrap()),
     )];
@@ -302,6 +343,105 @@ fn test_categorize_uncategorized() {
         events.first().unwrap().data.get("$category").unwrap(),
         &serde_json::json!(vec!["Uncategorized"])
     );
+}
+
+#[cfg(test)]
+fn event_with_data(value: &str) -> Event {
+    let mut e = Event::default();
+    e.data.insert("test".into(), serde_json::json!(value));
+    e
+}
+
+#[cfg(test)]
+fn category_of(events: &[Event]) -> &serde_json::Value {
+    events.first().unwrap().data.get("$category").unwrap()
+}
+
+#[test]
+fn test_categorize_depth_wins_without_priority() {
+    // Reported scenario from ActivityWatch/aw-server-rust#597: a deeper nested
+    // match still beats a shallower match when neither rule sets priority.
+    // Category A (depth 1) and Category B → B1 (depth 2) both match.
+    let events = categorize(
+        vec![event_with_data("just a test")],
+        &[
+            CategoryRule::new(vec!["A".into()], Rule::from(Regex::new(r"test").unwrap())),
+            CategoryRule::new(
+                vec!["B".into(), "B1".into()],
+                Rule::from(Regex::new(r"test").unwrap()),
+            ),
+        ],
+    );
+    assert_eq!(category_of(&events), &serde_json::json!(vec!["B", "B1"]));
+}
+
+#[test]
+fn test_categorize_explicit_priority_overrides_depth() {
+    // The same #597 tree, but A is given a higher priority than B1's depth.
+    // Organizational nesting no longer forces B1 to win.
+    let events = categorize(
+        vec![event_with_data("just a test")],
+        &[
+            CategoryRule::new(vec!["A".into()], Rule::from(Regex::new(r"test").unwrap()))
+                .with_priority(10),
+            CategoryRule::new(
+                vec!["B".into(), "B1".into()],
+                Rule::from(Regex::new(r"test").unwrap()),
+            ),
+        ],
+    );
+    assert_eq!(category_of(&events), &serde_json::json!(vec!["A"]));
+}
+
+#[test]
+fn test_categorize_lower_priority_loses_to_default_depth() {
+    // A deep rule can also be demoted below a shallow rule's default (depth)
+    // by setting an explicit lower priority on the deep rule.
+    let events = categorize(
+        vec![event_with_data("just a test")],
+        &[
+            CategoryRule::new(vec!["A".into()], Rule::from(Regex::new(r"test").unwrap())),
+            CategoryRule::new(
+                vec!["B".into(), "B1".into()],
+                Rule::from(Regex::new(r"test").unwrap()),
+            )
+            .with_priority(0),
+        ],
+    );
+    assert_eq!(category_of(&events), &serde_json::json!(vec!["A"]));
+}
+
+#[test]
+fn test_categorize_equal_priority_keeps_later_match() {
+    // Preserve the historical `>=` later-wins rule when ranks tie.
+    let events = categorize(
+        vec![event_with_data("just a test")],
+        &[
+            CategoryRule::new(
+                vec!["First".into()],
+                Rule::from(Regex::new(r"test").unwrap()),
+            )
+            .with_priority(5),
+            CategoryRule::new(
+                vec!["Second".into()],
+                Rule::from(Regex::new(r"test").unwrap()),
+            )
+            .with_priority(5),
+        ],
+    );
+    assert_eq!(category_of(&events), &serde_json::json!(vec!["Second"]));
+}
+
+#[test]
+fn test_categorize_negative_priority_still_beats_uncategorized() {
+    let events = categorize(
+        vec![event_with_data("just a test")],
+        &[
+            CategoryRule::new(vec!["Low".into()], Rule::from(Regex::new(r"test").unwrap()))
+                .with_priority(-100),
+        ],
+    );
+    assert_eq!(category_of(&events), &serde_json::json!(vec!["Low"]));
 }
 
 #[test]
@@ -326,12 +466,12 @@ fn test_categorize_cache_correctness() {
         .chain(std::iter::repeat(base.clone()).take(50))
         .collect();
 
-    let rules: Vec<(Vec<String>, Rule)> = vec![
-        (
+    let rules: Vec<CategoryRule> = vec![
+        CategoryRule::new(
             vec!["Browser".into()],
             Rule::Regex(RegexRule::new("firefox", true, Some(vec!["app".into()])).unwrap()),
         ),
-        (
+        CategoryRule::new(
             vec!["Terminal".into()],
             Rule::Regex(RegexRule::new("terminal", true, Some(vec!["app".into()])).unwrap()),
         ),

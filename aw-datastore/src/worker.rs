@@ -84,6 +84,12 @@ pub enum Command {
     Close(),
 }
 
+/// Key the webui writes via POST /0/settings/privacy_filters.
+/// The worker's in-memory PrivacyFilterEngine is the only thing that actually
+/// filters inserts/heartbeats, so every write/delete of this key (and startup)
+/// must reload the engine. RefreshPrivacyFilter exists for explicit reloads.
+const PRIVACY_FILTERS_KEY: &str = "settings.privacy_filters";
+
 fn _unwrap_empty_response(response: Response) -> Result<(), DatastoreError> {
     match response {
         Response::Empty() => Ok(()),
@@ -114,6 +120,22 @@ impl DatastoreWorker {
             commit: false,
             last_heartbeat: HashMap::new(),
             privacy_engine: PrivacyFilterEngine::new(vec![]),
+        }
+    }
+
+    /// Replace the in-memory engine from `settings.privacy_filters`.
+    /// Parse errors keep the previous engine (a bad save should not unfilter
+    /// already-loaded rules). A missing key clears the engine so deleting the
+    /// setting actually disables filtering.
+    fn reload_privacy_engine(&mut self, ds: &DatastoreInstance, conn: &Connection) {
+        match ds.get_key_value(conn, PRIVACY_FILTERS_KEY) {
+            Ok(json_str) => match PrivacyFilterEngine::from_json(&json_str) {
+                Ok(engine) => self.privacy_engine = engine,
+                Err(e) => warn!("Failed to parse privacy_filters setting: {e}"),
+            },
+            Err(_) => {
+                self.privacy_engine = PrivacyFilterEngine::new(vec![]);
+            }
         }
     }
 
@@ -164,6 +186,11 @@ impl DatastoreWorker {
             .expect("Failed to set synchronous=FULL");
 
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+
+        // Load persisted privacy filters before serving inserts. The engine
+        // starts empty; without this, rules saved in a previous process sit
+        // unused until something happens to send RefreshPrivacyFilter.
+        self.reload_privacy_engine(&ds, &conn);
 
         // Ensure legacy import
         if self.legacy_import {
@@ -386,7 +413,12 @@ impl DatastoreWorker {
                 Err(e) => Err(e),
             },
             Command::SetKeyValue(key, data) => match ds.insert_key_value(tx, &key, &data) {
-                Ok(()) => Ok(Response::Empty()),
+                Ok(()) => {
+                    if key == PRIVACY_FILTERS_KEY {
+                        self.reload_privacy_engine(ds, tx);
+                    }
+                    Ok(Response::Empty())
+                }
                 Err(e) => Err(e),
             },
             Command::GetKeyValue(key) => match ds.get_key_value(tx, &key) {
@@ -394,21 +426,16 @@ impl DatastoreWorker {
                 Err(e) => Err(e),
             },
             Command::DeleteKeyValue(key) => match ds.delete_key_value(tx, &key) {
-                Ok(()) => Ok(Response::Empty()),
+                Ok(()) => {
+                    if key == PRIVACY_FILTERS_KEY {
+                        self.reload_privacy_engine(ds, tx);
+                    }
+                    Ok(Response::Empty())
+                }
                 Err(e) => Err(e),
             },
             Command::RefreshPrivacyFilter() => {
-                // Reload privacy filter rules from settings
-                match ds.get_key_value(tx, "settings.privacy_filters") {
-                    Ok(json_str) => match PrivacyFilterEngine::from_json(&json_str) {
-                        Ok(engine) => self.privacy_engine = engine,
-                        Err(e) => warn!("Failed to parse privacy_filters setting: {e}"),
-                    },
-                    Err(_) => {
-                        // Settings key absent — clear rules so removing the key disables filtering
-                        self.privacy_engine = PrivacyFilterEngine::new(vec![]);
-                    }
-                }
+                self.reload_privacy_engine(ds, tx);
                 Ok(Response::Empty())
             }
             Command::RenameBucket(old_id, new_id) => match ds.rename_bucket(tx, &old_id, &new_id) {

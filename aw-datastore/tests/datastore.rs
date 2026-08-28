@@ -884,12 +884,12 @@ mod datastore_tests {
     #[test]
     fn test_privacy_filter_survives_datastore_reload() {
         let mut db_path = get_cache_dir().unwrap();
-        db_path.push("datastore-unittest-privacy-filters.db");
+        db_path.push(format!(
+            "datastore-unittest-privacy-filters-{}.db",
+            std::process::id()
+        ));
         let db_path_str = db_path.to_str().unwrap().to_string();
-        if db_path.exists() {
-            std::fs::remove_file(db_path.clone())
-                .expect("Failed to remove datastore-unittest-privacy-filters.db");
-        }
+        let _ = std::fs::remove_file(&db_path);
 
         let drop_secret =
             r#"[{"enabled":true,"field":"title","pattern":"(?i)secret","action":"drop"}]"#;
@@ -913,7 +913,10 @@ mod datastore_tests {
             ds.close();
         }
 
-        std::fs::remove_file(&db_path)
-            .expect("Failed to remove datastore-unittest-privacy-filters.db");
+        // Windows can still hold the SQLite handle after close() while the
+        // worker thread unwinds (ERROR_SHARING_VIOLATION). Cleanup is best-effort.
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 }

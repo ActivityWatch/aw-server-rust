@@ -151,14 +151,14 @@ fn default_custom_static() -> std::collections::HashMap<String, String> {
     std::collections::HashMap::new()
 }
 
-/// Config filename for a profile. `default` keeps the legacy unsuffixed
-/// `config.toml`; every other profile uses `config-{profile}.toml`.
+/// Config filename for a profile.
+///
+/// Isolated profile roots (including new-style `activitywatch-testing/`) use
+/// bare `config.toml` — the directory already isolates. Suffixed
+/// `config-testing.toml` remains only in the legacy shared-root layout so
+/// existing testing config is not orphaned.
 pub fn config_filename(profile: &str) -> String {
-    if profile == "default" {
-        "config.toml".to_string()
-    } else {
-        format!("config-{profile}.toml")
-    }
+    crate::dirs::config_filename(profile)
 }
 
 fn get_config_path(profile: &str, config_override: Option<&Path>) -> PathBuf {
@@ -210,7 +210,7 @@ pub fn create_config(profile: &str, config_override: Option<&Path>) -> AWConfig 
 
 #[cfg(test)]
 mod tests {
-    use super::{config_filename, create_config};
+    use super::create_config;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -241,10 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn config_filename_suffix_rule() {
-        assert_eq!(config_filename("default"), "config.toml");
-        assert_eq!(config_filename("testing"), "config-testing.toml");
-        assert_eq!(config_filename("research"), "config-research.toml");
+    fn config_filename_isolated_named_profiles_are_bare() {
+        // default and named isolated roots are always config.toml. Suffixed
+        // config-testing.toml is filesystem-dependent (legacy shared root) and
+        // covered in dirs.rs against fake roots.
+        assert_eq!(super::config_filename("default"), "config.toml");
+        assert_eq!(super::config_filename("research"), "config.toml");
+        assert_eq!(super::config_filename("my-profile"), "config.toml");
     }
 
     #[test]

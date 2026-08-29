@@ -22,7 +22,7 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 #[clap(version = crate_version!(), author = "Johan Bjäreholt, Erik Bjäreholt, et al.")]
 struct Opts {
     /// Named instance profile (e.g. "default", "testing", "research").
-    /// Drives the config section, database filename, and logfile suffix.
+    /// Drives the isolated directory root (and legacy testing-filename fallback).
     /// Defaults to "testing" in debug builds, "default" in release builds.
     #[clap(long)]
     profile: Option<String>,
@@ -113,6 +113,10 @@ async fn main() -> Result<(), rocket::Error> {
     };
 
     dirs::validate_profile(&profile).unwrap_or_else(|e| panic!("Invalid profile name: {e}"));
+    // set_profile must run before setup_logger: get_log_dir reads the
+    // process-global profile via appname(), and named profiles otherwise
+    // land in the shared cache dir (ActivityWatch/activitywatch#1399).
+    config::set_profile(profile.clone());
 
     logging::setup_logger("aw-server-rust", &profile, opts.verbose)
         .expect("Failed to setup logging");

@@ -33,8 +33,8 @@ pub fn resolve_profile(
 /// aw-sync's own config dir: `{appname}/aw-sync`.
 ///
 /// Uses the same profile appname as aw-server so a named profile (e.g.
-/// `research`) does not share prod's sync config. `default` and `testing`
-/// keep the bare `activitywatch` root, matching aw-server.
+/// `research`) does not share prod's sync config. `testing` follows the
+/// same new-root-plus-legacy-fallback rule as aw-server.
 // TODO: add proper config support
 #[cfg(not(target_os = "android"))]
 #[allow(dead_code)]
@@ -57,16 +57,19 @@ fn sync_config_dir(appname: &str) -> Result<PathBuf, Box<dyn Error>> {
 /// `filesDir/config.toml` (same file ConfigManager and the server use).
 #[allow(dead_code)]
 pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
-    let dir = aw_server::dirs::get_config_dir()?;
     let profile = aw_server::config::get_profile();
     // If set_profile hasn't run yet, honour the legacy testing bool so
-    // `--testing` still finds config-testing.toml.
-    let filename = aw_server::config::config_filename(if profile == "default" && testing {
+    // `--testing` still finds the testing config (legacy or new root).
+    let effective = if profile == "default" && testing {
         "testing"
     } else {
         profile
-    });
-    Ok(dir.join(filename))
+    };
+    let dir = dirs::config_dir()
+        .ok_or(())?
+        .join(aw_server::dirs::appname_for(effective))
+        .join("aw-server-rust");
+    Ok(dir.join(aw_server::config::config_filename(effective)))
 }
 
 pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
@@ -122,51 +125,51 @@ mod tests {
     #[cfg(not(target_os = "android"))]
     #[test]
     fn sync_config_dir_is_isolated_per_named_profile() {
-        let default_dir = sync_config_dir(&aw_server::dirs::appname_for("default")).unwrap();
-        let testing_dir = sync_config_dir(&aw_server::dirs::appname_for("testing")).unwrap();
-        let research_dir = sync_config_dir(&aw_server::dirs::appname_for("research")).unwrap();
+        use aw_server::dirs::appname_for_in;
+        use std::fs;
+        let root = std::env::temp_dir().join(format!(
+            "aw-sync-profile-tests-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let data = root.join("data");
+        let config = root.join("config");
+        let cache = root.join("cache");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(&cache).unwrap();
 
-        // default and testing share the bare root (legacy suffixes elsewhere)
-        assert_eq!(default_dir, testing_dir);
-        assert!(
-            default_dir.ends_with("activitywatch/aw-sync")
-                || default_dir.ends_with("activitywatch\\aw-sync"),
-            "default/testing should stay under activitywatch/aw-sync, got {default_dir:?}"
-        );
+        let default_app = appname_for_in("default", &data, &config, &cache);
+        let testing_app = appname_for_in("testing", &data, &config, &cache);
+        let research_app = appname_for_in("research", &data, &config, &cache);
 
-        assert_ne!(
-            research_dir, default_dir,
-            "research must not share prod's aw-sync config dir"
-        );
-        assert!(
-            research_dir.ends_with("activitywatch-research/aw-sync")
-                || research_dir.ends_with("activitywatch-research\\aw-sync"),
-            "research should live under activitywatch-research/aw-sync, got {research_dir:?}"
-        );
+        assert_eq!(default_app, "activitywatch");
+        // Fresh setup: testing is a sibling root, not the shared one.
+        assert_eq!(testing_app, "activitywatch-testing");
+        assert_eq!(research_app, "activitywatch-research");
+        assert_ne!(testing_app, default_app);
+        assert_ne!(research_app, default_app);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn server_config_filename_matches_aw_server_rule() {
+    fn server_config_filename_default_and_research_are_bare() {
+        // Isolated roots use config.toml. Suffixed config-testing.toml is
+        // only for the legacy shared-root layout (dirs.rs tests).
         assert_eq!(aw_server::config::config_filename("default"), "config.toml");
         assert_eq!(
-            aw_server::config::config_filename("testing"),
-            "config-testing.toml"
-        );
-        assert_eq!(
             aw_server::config::config_filename("research"),
-            "config-research.toml"
+            "config.toml"
         );
     }
 
     #[cfg(not(target_os = "android"))]
     #[test]
-    fn server_config_path_honours_testing_bool_before_set_profile() {
-        let testing = get_server_config_path(true).unwrap();
+    fn server_config_path_default_is_config_toml() {
         let production = get_server_config_path(false).unwrap();
-        assert!(
-            testing.ends_with("config-testing.toml"),
-            "testing should read config-testing.toml, got {testing:?}"
-        );
         assert!(
             production.ends_with("config.toml"),
             "default should read config.toml, got {production:?}"

@@ -273,12 +273,8 @@ fn replacement_is_capture_template(replacement: &str, re: &regex::Regex) -> bool
             }
             continue;
         }
-        if matches!(first, b'&' | b'`' | b'\'') {
-            saw_valid_ref = true;
-            i += 2;
-            continue;
-        }
         // Longest ident, matching the regex crate: `$1a` is name `1a`, not `$1` + `a`.
+        // `$&`/`$``/`$'` are Perl-only and are *not* interpolated by `regex`.
         if first.is_ascii_alphanumeric() || first == b'_' {
             let rb = rest.as_bytes();
             let mut j = 1;
@@ -658,5 +654,8 @@ mod tests {
         assert!(!replacement_is_capture_template("$2", &one));
         assert!(!replacement_is_capture_template("$host", &one));
         assert!(!replacement_is_capture_template("$1$2", &one));
+        assert!(!replacement_is_capture_template("REDACTED $'", &one));
+        assert!(!replacement_is_capture_template("REDACTED $&", &one));
+        assert!(!replacement_is_capture_template("REDACTED $`", &one));
     }
 }

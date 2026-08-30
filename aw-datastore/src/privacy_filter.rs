@@ -236,9 +236,9 @@ impl PrivacyFilterEngine {
 /// True when `replacement` is a capture template whose every `$` reference
 /// names a group that exists on `re`. `$$` is an escaped dollar.
 ///
-/// Dangling refs (`$5` on a 1-group pattern) must not opt into `replace_all`:
-/// the regex crate expands unknown groups to `""`, which would leak unmatched
-/// field text. Those replacements stay whole-field.
+/// Dangling refs (`$5` on a 1-group pattern) and empty `${}` must not opt
+/// into `replace_all`: the regex crate expands unknown / empty-named groups
+/// to `""`, which would leak unmatched field text. Those stay whole-field.
 fn replacement_is_capture_template(replacement: &str, re: &regex::Regex) -> bool {
     let n_groups = re.captures_len();
     let named: Vec<&str> = re.capture_names().flatten().collect();
@@ -295,8 +295,10 @@ fn replacement_is_capture_template(replacement: &str, re: &regex::Regex) -> bool
 }
 
 fn capture_ref_exists(name: &str, n_groups: usize, named: &[&str]) -> bool {
+    // `${}` is a named ref with an empty name, *not* `$0`. The regex crate
+    // expands it to "" (no such group), which would leak unmatched text.
     if name.is_empty() {
-        return true; // `${}` / `$0` equivalent: the whole match
+        return false;
     }
     if name.bytes().all(|b| b.is_ascii_digit()) {
         return name.parse::<usize>().ok().is_some_and(|n| n < n_groups);
@@ -635,6 +637,16 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_empty_braced_ref_stays_whole_field() {
+        // `${}` names no group; replace_all would expand it to "" and leak `=abc`.
+        let rule = redact_rule(r"(token)", "${}");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(result.data.get("title").unwrap().as_str().unwrap(), "${}");
+    }
+
+    #[test]
     fn test_replacement_is_capture_template() {
         let one = regex::Regex::new(r"(token)").unwrap();
         let named = regex::Regex::new(r"(?P<host>[^/]+)").unwrap();
@@ -657,5 +669,8 @@ mod tests {
         assert!(!replacement_is_capture_template("REDACTED $'", &one));
         assert!(!replacement_is_capture_template("REDACTED $&", &one));
         assert!(!replacement_is_capture_template("REDACTED $`", &one));
+        assert!(!replacement_is_capture_template("${}", &one));
+        assert!(!replacement_is_capture_template("https://${}/", &one));
+        assert!(replacement_is_capture_template("${0}", &one));
     }
 }

@@ -31,10 +31,10 @@ pub struct PrivacyFilterRule {
     pub action: PrivacyFilterAction,
     /// Replacement text for the redact action.
     ///
-    /// When `pattern` has capturing groups, this is a regex replacement
-    /// template (`$1`, `$2`, `$name`) applied to the matched text — the same
-    /// semantics as awatcher filters. Without capturing groups, the entire
-    /// field is replaced with this string.
+    /// Capture substitution (`$1`, `$2`, `$name`) is opt-in: it runs only
+    /// when `pattern` has capturing groups *and* this string contains a
+    /// capture template. Otherwise the entire field is replaced — so stored
+    /// rules like `(token)` + `REDACTED` keep whole-field redaction.
     pub replacement: Option<String>,
     /// Pre-compiled regex, populated lazily on first match. Not serialized.
     #[serde(skip)]
@@ -86,15 +86,19 @@ impl PrivacyFilterRule {
 
     /// Redact `source` using this rule's pattern and `replacement`.
     ///
-    /// Capturing groups enable `$1`/`$name` substitution of the matched
-    /// text (awatcher-compatible). No capturing groups → replace the whole
-    /// field with the static string.
+    /// `$1`/`$name` substitution (awatcher-compatible) runs only when the
+    /// pattern has capturing groups *and* `replacement` is a capture
+    /// template. A static replacement always replaces the whole field, even
+    /// if the pattern contains groups — otherwise existing stored rules
+    /// would silently leak unmatched sensitive text.
     fn redact_value(&self, source: &str, replacement: &str) -> String {
         let re = self
             .regex_cache
             .get_or_init(|| regex::Regex::new(&self.pattern).ok());
         match re.as_ref() {
-            Some(re) if re.captures_len() > 1 => re.replace_all(source, replacement).into_owned(),
+            Some(re) if re.captures_len() > 1 && replacement_is_capture_template(replacement) => {
+                re.replace_all(source, replacement).into_owned()
+            }
             _ => replacement.to_owned(),
         }
     }
@@ -225,6 +229,29 @@ impl PrivacyFilterEngine {
             .filter_map(|e| self.filter_event(bucket_id, e))
             .collect()
     }
+}
+
+/// True when `replacement` contains a regex capture template (`$1`, `$name`,
+/// `${name}`, `$0`). `$$` is an escaped dollar and does not count.
+fn replacement_is_capture_template(replacement: &str) -> bool {
+    let bytes = replacement.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            if bytes.get(i + 1) == Some(&b'$') {
+                i += 2;
+                continue;
+            }
+            if let Some(&next) = bytes.get(i + 1) {
+                if next.is_ascii_alphanumeric() || matches!(next, b'{' | b'_' | b'&' | b'\'' | b'`')
+                {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Resolve a dotted field path (e.g. "title", "data.url") from a serde_json Map.
@@ -481,14 +508,17 @@ mod tests {
     }
 
     #[test]
-    fn test_redact_capture_replaces_only_the_match() {
-        let rule = redact_rule(r"(secret)", "REDACTED");
-        let mut event = test_event("my secret file");
+    fn test_redact_static_replacement_with_captures_stays_whole_field() {
+        // Existing stored rules may use capturing groups with a static
+        // replacement. Partial replace_all would leak unmatched text
+        // (`token=abc token=def` → `REDACTED=abc REDACTED=def`).
+        let rule = redact_rule(r"(token)", "REDACTED");
+        let mut event = test_event("token=abc token=def");
         assert!(rule.matches("any-bucket", &event));
         let result = rule.apply(&mut event).unwrap();
         assert_eq!(
             result.data.get("title").unwrap().as_str().unwrap(),
-            "my REDACTED file"
+            "REDACTED"
         );
     }
 
@@ -530,14 +560,27 @@ mod tests {
     }
 
     #[test]
-    fn test_redact_replace_all_occurrences() {
-        let rule = redact_rule(r"(token)", "REDACTED");
+    fn test_redact_replace_all_occurrences_with_template() {
+        let rule = redact_rule(r"(token)=\S+", "$1=REDACTED");
         let mut event = test_event("token=abc token=def");
         assert!(rule.matches("any-bucket", &event));
         let result = rule.apply(&mut event).unwrap();
         assert_eq!(
             result.data.get("title").unwrap().as_str().unwrap(),
-            "REDACTED=abc REDACTED=def"
+            "token=REDACTED token=REDACTED"
         );
+    }
+
+    #[test]
+    fn test_replacement_is_capture_template() {
+        assert!(replacement_is_capture_template("$1"));
+        assert!(replacement_is_capture_template("https://$1/"));
+        assert!(replacement_is_capture_template("https://$host/"));
+        assert!(replacement_is_capture_template("${1}"));
+        assert!(replacement_is_capture_template("$0"));
+        assert!(!replacement_is_capture_template("REDACTED"));
+        assert!(!replacement_is_capture_template("token=REDACTED"));
+        assert!(!replacement_is_capture_template("$$"));
+        assert!(!replacement_is_capture_template("cost $$5"));
     }
 }

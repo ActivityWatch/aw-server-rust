@@ -246,10 +246,11 @@ enum CaptureRef {
 /// a group that exists on `re`. `$$` is an escaped dollar.
 ///
 /// Returns `None` (stay whole-field) for dangling refs, empty `${}`, `$0`
-/// (whole-match identity), and Perl-only `$&`/`$``/`$'`. Those must not opt
-/// into `replace_all`: the regex crate expands unknown / empty-named groups
-/// to `""`, and `$0` substitutes the match unchanged — both leak unmatched
-/// field text.
+/// (whole-match identity), Perl-only `$&`/`$``/`$'`, and mixed malformed
+/// templates such as `$1$` / `$1$&`. Those must not opt into `replace_all`:
+/// the regex crate expands unknown / empty-named groups to `""`, `$0`
+/// substitutes the match unchanged, and a skipped dangling `$` still leaves
+/// a valid earlier ref — all leak unmatched field text.
 fn capture_refs_in_template(replacement: &str, re: &regex::Regex) -> Option<Vec<CaptureRef>> {
     let n_groups = re.captures_len();
     let named: Vec<&str> = re.capture_names().flatten().collect();
@@ -266,8 +267,10 @@ fn capture_refs_in_template(replacement: &str, re: &regex::Regex) -> Option<Vec<
             continue;
         }
         let rest = &replacement[i + 1..];
+        // Trailing `$` is not a capture ref. Skipping it after an earlier
+        // valid `$1` would still opt into replace_all (`$1$` → leak).
         if rest.is_empty() {
-            break;
+            return None;
         }
         let first = rest.as_bytes()[0];
         if first == b'{' {
@@ -282,7 +285,6 @@ fn capture_refs_in_template(replacement: &str, re: &regex::Regex) -> Option<Vec<
             continue;
         }
         // Longest ident, matching the regex crate: `$1a` is name `1a`, not `$1` + `a`.
-        // `$&`/`$``/`$'` are Perl-only and are *not* interpolated by `regex`.
         if first.is_ascii_alphanumeric() || first == b'_' {
             let rb = rest.as_bytes();
             let mut j = 1;
@@ -294,7 +296,10 @@ fn capture_refs_in_template(replacement: &str, re: &regex::Regex) -> Option<Vec<
             i += 1 + j;
             continue;
         }
-        i += 1;
+        // Unsupported `$` form (`$&`, `$'`, `$``, `$ `). Fail closed even
+        // when an earlier `$1` was valid — mixed templates must not enable
+        // partial replacement.
+        return None;
     }
     if refs.is_empty() {
         None
@@ -712,6 +717,11 @@ mod tests {
         assert!(capture_refs_in_template("https://${}/", &one).is_none());
         assert!(capture_refs_in_template("${0}", &one).is_none());
         assert!(capture_refs_in_template("$1$0", &one).is_none());
+        assert!(capture_refs_in_template("$1$", &one).is_none());
+        assert!(capture_refs_in_template("$1$&", &one).is_none());
+        assert!(capture_refs_in_template("$1$`", &one).is_none());
+        assert!(capture_refs_in_template("$1$'", &one).is_none());
+        assert!(capture_refs_in_template("$1$$", &one).is_some());
     }
 
     #[test]
@@ -758,6 +768,40 @@ mod tests {
         assert_eq!(
             result.data.get("title").unwrap().as_str().unwrap(),
             "secret=abc"
+        );
+    }
+
+    #[test]
+    fn test_redact_trailing_dollar_stays_whole_field() {
+        // `$1$` parses `$1` then a dangling `$`. Skipping the suffix would
+        // still enable replace_all and leak `=abc`.
+        let rule = redact_rule(r"(token)", "$1$");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(result.data.get("title").unwrap().as_str().unwrap(), "$1$");
+    }
+
+    #[test]
+    fn test_redact_perl_amp_suffix_stays_whole_field() {
+        // `$1$&` mixes a valid capture with a Perl-only form. Fail closed.
+        let rule = redact_rule(r"(token)", "$1$&");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(result.data.get("title").unwrap().as_str().unwrap(), "$1$&");
+    }
+
+    #[test]
+    fn test_redact_escaped_dollar_after_capture_still_replaces() {
+        // `$1$$` is group 1 plus a literal `$` — a well-formed template.
+        let rule = redact_rule(r"(token)=\S+", "$1$$");
+        let mut event = test_event("token=abc extra");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "token$ extra"
         );
     }
 }

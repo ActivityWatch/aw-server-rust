@@ -29,7 +29,12 @@ pub struct PrivacyFilterRule {
     pub pattern: String,
     /// What to do when matched
     pub action: PrivacyFilterAction,
-    /// Replacement text for the redact action
+    /// Replacement text for the redact action.
+    ///
+    /// When `pattern` has capturing groups, this is a regex replacement
+    /// template (`$1`, `$2`, `$name`) applied to the matched text — the same
+    /// semantics as awatcher filters. Without capturing groups, the entire
+    /// field is replaced with this string.
     pub replacement: Option<String>,
     /// Pre-compiled regex, populated lazily on first match. Not serialized.
     #[serde(skip)]
@@ -79,6 +84,21 @@ impl PrivacyFilterRule {
         }
     }
 
+    /// Redact `source` using this rule's pattern and `replacement`.
+    ///
+    /// Capturing groups enable `$1`/`$name` substitution of the matched
+    /// text (awatcher-compatible). No capturing groups → replace the whole
+    /// field with the static string.
+    fn redact_value(&self, source: &str, replacement: &str) -> String {
+        let re = self
+            .regex_cache
+            .get_or_init(|| regex::Regex::new(&self.pattern).ok());
+        match re.as_ref() {
+            Some(re) if re.captures_len() > 1 => re.replace_all(source, replacement).into_owned(),
+            _ => replacement.to_owned(),
+        }
+    }
+
     /// Apply this rule's action to an event.
     /// Returns None if dropped, Some(event) if kept (possibly redacted).
     pub fn apply<'a>(&self, event: &'a mut Event) -> Option<&'a mut Event> {
@@ -87,11 +107,14 @@ impl PrivacyFilterRule {
             PrivacyFilterAction::Redact => {
                 if let Some(ref replacement) = self.replacement {
                     if let Some(ref field_path) = self.field {
-                        set_field(
-                            &mut event.data,
-                            field_path,
-                            Value::String(replacement.clone()),
-                        );
+                        let current = resolve_field(&event.data, field_path)
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+                        let new_value = match current.as_deref() {
+                            Some(source) => self.redact_value(source, replacement),
+                            None => replacement.clone(),
+                        };
+                        set_field(&mut event.data, field_path, Value::String(new_value));
                     }
                 }
                 Some(event)
@@ -418,5 +441,103 @@ mod tests {
         assert!(rule.matches("any-bucket", &event));
         let result = rule.apply(&mut event);
         assert!(result.is_none(), "Drop action should return None");
+    }
+
+    fn redact_rule(pattern: &str, replacement: &str) -> PrivacyFilterRule {
+        PrivacyFilterRule {
+            enabled: true,
+            bucket_prefix: None,
+            field: Some("title".to_string()),
+            pattern: pattern.to_string(),
+            action: PrivacyFilterAction::Redact,
+            replacement: Some(replacement.to_string()),
+            regex_cache: OnceLock::new(),
+        }
+    }
+
+    #[test]
+    fn test_redact_without_captures_replaces_whole_field() {
+        let rule = redact_rule(r"(?i).*banking.*", "REDACTED");
+        let mut event = test_event("Online Banking - My Account Balance");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "REDACTED"
+        );
+    }
+
+    #[test]
+    fn test_redact_with_capture_groups_like_awatcher() {
+        // awatcher: match `org\.kde\.(.*)`, replace `$1` → `dolphin`
+        let rule = redact_rule(r"(.*) - Mozilla Firefox", "$1");
+        let mut event = test_event("GitHub - Mozilla Firefox");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "GitHub"
+        );
+    }
+
+    #[test]
+    fn test_redact_capture_replaces_only_the_match() {
+        let rule = redact_rule(r"(secret)", "REDACTED");
+        let mut event = test_event("my secret file");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "my REDACTED file"
+        );
+    }
+
+    #[test]
+    fn test_redact_strips_url_path_keep_host() {
+        let rule = redact_rule(r"https://([^/]+)/.*", "https://$1/");
+        let mut event = test_event("https://bank.example/account?token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "https://bank.example/"
+        );
+    }
+
+    #[test]
+    fn test_redact_named_capture_like_awatcher() {
+        let rule = redact_rule(r"https://(?P<host>[^/]+)/.*", "https://$host/");
+        let mut event = test_event("https://bank.example/account?token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "https://bank.example/"
+        );
+    }
+
+    #[test]
+    fn test_redact_awatcher_vscode_dirty_indicator() {
+        // awatcher README: match-title = "● (.*)", replace-title = "$1"
+        let rule = redact_rule(r"● (.*)", "$1");
+        let mut event = test_event("● file_config.rs - awatcher - Visual Studio Code");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "file_config.rs - awatcher - Visual Studio Code"
+        );
+    }
+
+    #[test]
+    fn test_redact_replace_all_occurrences() {
+        let rule = redact_rule(r"(token)", "REDACTED");
+        let mut event = test_event("token=abc token=def");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "REDACTED=abc REDACTED=def"
+        );
     }
 }

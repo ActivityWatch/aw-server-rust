@@ -96,7 +96,9 @@ impl PrivacyFilterRule {
             .regex_cache
             .get_or_init(|| regex::Regex::new(&self.pattern).ok());
         match re.as_ref() {
-            Some(re) if re.captures_len() > 1 && replacement_is_capture_template(replacement) => {
+            Some(re)
+                if re.captures_len() > 1 && replacement_is_capture_template(replacement, re) =>
+            {
                 re.replace_all(source, replacement).into_owned()
             }
             _ => replacement.to_owned(),
@@ -231,27 +233,79 @@ impl PrivacyFilterEngine {
     }
 }
 
-/// True when `replacement` contains a regex capture template (`$1`, `$name`,
-/// `${name}`, `$0`). `$$` is an escaped dollar and does not count.
-fn replacement_is_capture_template(replacement: &str) -> bool {
+/// True when `replacement` is a capture template whose every `$` reference
+/// names a group that exists on `re`. `$$` is an escaped dollar.
+///
+/// Dangling refs (`$5` on a 1-group pattern) must not opt into `replace_all`:
+/// the regex crate expands unknown groups to `""`, which would leak unmatched
+/// field text. Those replacements stay whole-field.
+fn replacement_is_capture_template(replacement: &str, re: &regex::Regex) -> bool {
+    let n_groups = re.captures_len();
+    let named: Vec<&str> = re.capture_names().flatten().collect();
     let bytes = replacement.as_bytes();
     let mut i = 0;
+    let mut saw_valid_ref = false;
     while i < bytes.len() {
-        if bytes[i] == b'$' {
-            if bytes.get(i + 1) == Some(&b'$') {
-                i += 2;
-                continue;
-            }
-            if let Some(&next) = bytes.get(i + 1) {
-                if next.is_ascii_alphanumeric() || matches!(next, b'{' | b'_' | b'&' | b'\'' | b'`')
-                {
-                    return true;
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'$') {
+            i += 2;
+            continue;
+        }
+        let rest = &replacement[i + 1..];
+        if rest.is_empty() {
+            break;
+        }
+        let first = rest.as_bytes()[0];
+        if first == b'{' {
+            match rest[1..].find('}') {
+                Some(end) => {
+                    let name = &rest[1..1 + end];
+                    if !capture_ref_exists(name, n_groups, &named) {
+                        return false;
+                    }
+                    saw_valid_ref = true;
+                    i += 2 + end + 1; // ${ name }
                 }
+                None => return false,
             }
+            continue;
+        }
+        if matches!(first, b'&' | b'`' | b'\'') {
+            saw_valid_ref = true;
+            i += 2;
+            continue;
+        }
+        // Longest ident, matching the regex crate: `$1a` is name `1a`, not `$1` + `a`.
+        if first.is_ascii_alphanumeric() || first == b'_' {
+            let rb = rest.as_bytes();
+            let mut j = 1;
+            while j < rb.len() && (rb[j].is_ascii_alphanumeric() || rb[j] == b'_') {
+                j += 1;
+            }
+            let name = &rest[..j];
+            if !capture_ref_exists(name, n_groups, &named) {
+                return false;
+            }
+            saw_valid_ref = true;
+            i += 1 + j;
+            continue;
         }
         i += 1;
     }
-    false
+    saw_valid_ref
+}
+
+fn capture_ref_exists(name: &str, n_groups: usize, named: &[&str]) -> bool {
+    if name.is_empty() {
+        return true; // `${}` / `$0` equivalent: the whole match
+    }
+    if name.bytes().all(|b| b.is_ascii_digit()) {
+        return name.parse::<usize>().ok().is_some_and(|n| n < n_groups);
+    }
+    named.iter().any(|n| *n == name)
 }
 
 /// Resolve a dotted field path (e.g. "title", "data.url") from a serde_json Map.
@@ -572,15 +626,37 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_dangling_capture_ref_stays_whole_field() {
+        // `$5` is not group 1; replace_all would expand it to "" and leak `=abc`.
+        let rule = redact_rule(r"(token)", "REDACTED $5");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "REDACTED $5"
+        );
+    }
+
+    #[test]
     fn test_replacement_is_capture_template() {
-        assert!(replacement_is_capture_template("$1"));
-        assert!(replacement_is_capture_template("https://$1/"));
-        assert!(replacement_is_capture_template("https://$host/"));
-        assert!(replacement_is_capture_template("${1}"));
-        assert!(replacement_is_capture_template("$0"));
-        assert!(!replacement_is_capture_template("REDACTED"));
-        assert!(!replacement_is_capture_template("token=REDACTED"));
-        assert!(!replacement_is_capture_template("$$"));
-        assert!(!replacement_is_capture_template("cost $$5"));
+        let one = regex::Regex::new(r"(token)").unwrap();
+        let named = regex::Regex::new(r"(?P<host>[^/]+)").unwrap();
+        let two = regex::Regex::new(r"(a)(b)").unwrap();
+
+        assert!(replacement_is_capture_template("$1", &one));
+        assert!(replacement_is_capture_template("https://$1/", &one));
+        assert!(replacement_is_capture_template("${1}", &one));
+        assert!(replacement_is_capture_template("$0", &one));
+        assert!(replacement_is_capture_template("https://$host/", &named));
+        assert!(replacement_is_capture_template("$1$2", &two));
+        assert!(!replacement_is_capture_template("REDACTED", &one));
+        assert!(!replacement_is_capture_template("token=REDACTED", &one));
+        assert!(!replacement_is_capture_template("$$", &one));
+        assert!(!replacement_is_capture_template("cost $$5", &one));
+        assert!(!replacement_is_capture_template("REDACTED $5", &one));
+        assert!(!replacement_is_capture_template("$2", &one));
+        assert!(!replacement_is_capture_template("$host", &one));
+        assert!(!replacement_is_capture_template("$1$2", &one));
     }
 }

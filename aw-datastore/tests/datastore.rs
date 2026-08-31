@@ -60,6 +60,171 @@ mod datastore_tests {
         bucket
     }
 
+    fn create_named_test_bucket(ds: &Datastore, id: &str) -> Bucket {
+        let mut bucket = test_bucket();
+        bucket.id = id.to_string();
+        ds.create_bucket(&bucket).unwrap();
+        bucket
+    }
+
+    fn test_event(timestamp: chrono::DateTime<Utc>, duration: Duration) -> Event {
+        Event {
+            id: None,
+            timestamp,
+            duration,
+            data: json_map! {"key": json!("value")},
+        }
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_renames_bucket_and_preserves_events() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        let event = test_event(Utc::now(), Duration::seconds(30));
+        ds.insert_events(old_id, std::slice::from_ref(&event))
+            .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 1);
+        assert!(!ds.get_buckets().unwrap().contains_key(old_id));
+        assert!(ds.get_buckets().unwrap().contains_key(new_id));
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_merges_non_overlapping_buckets() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[test_event(now - Duration::hours(2), Duration::minutes(30))],
+        )
+        .unwrap();
+        ds.insert_events(new_id, &[test_event(now, Duration::minutes(30))])
+            .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 1);
+        assert!(!ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_keeps_overlapping_buckets_separate() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(old_id, &[test_event(now, Duration::minutes(30))])
+            .unwrap();
+        ds.insert_events(
+            new_id,
+            &[test_event(
+                now + Duration::minutes(15),
+                Duration::minutes(30),
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        assert!(ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(old_id, None, None, None).unwrap().len(), 1);
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_moves_disjoint_events_when_some_overlap() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[
+                test_event(now - Duration::hours(2), Duration::minutes(30)),
+                test_event(now, Duration::minutes(30)),
+            ],
+        )
+        .unwrap();
+        ds.insert_events(
+            new_id,
+            &[test_event(
+                now + Duration::minutes(15),
+                Duration::minutes(30),
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        assert!(ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(old_id, None, None, None).unwrap().len(), 1);
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_keeps_overlapping_legacy_events_together() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[
+                test_event(now - Duration::hours(3), Duration::minutes(20)),
+                test_event(now, Duration::minutes(30)),
+                test_event(now + Duration::minutes(15), Duration::minutes(30)),
+            ],
+        )
+        .unwrap();
+        ds.insert_events(
+            new_id,
+            &[test_event(now + Duration::hours(2), Duration::minutes(20))],
+        )
+        .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        assert!(ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(old_id, None, None, None).unwrap().len(), 2);
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_merges_interleaved_non_overlapping_events() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[
+                test_event(now - Duration::hours(2), Duration::minutes(20)),
+                test_event(now, Duration::minutes(20)),
+            ],
+        )
+        .unwrap();
+        ds.insert_events(
+            new_id,
+            &[test_event(now - Duration::hours(1), Duration::minutes(20))],
+        )
+        .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 1);
+        assert!(!ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 3);
+    }
+
     #[test]
     fn test_bucket_create_delete() {
         // Setup datastore

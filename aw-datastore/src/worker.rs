@@ -142,6 +142,10 @@ impl DatastoreWorker {
             }
         };
 
+        // Set busy timeout to handle concurrent access on systems with strict file locking (e.g., Windows)
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .expect("Failed to set busy timeout");
+
         // WAL turns each commit into a single sequential WAL append+fsync where
         // delete mode paid two fsyncs plus journal-file churn, and lets future
         // reader connections proceed while a commit is in flight.

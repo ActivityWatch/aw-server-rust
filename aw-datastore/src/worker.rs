@@ -229,6 +229,13 @@ impl DatastoreWorker {
                         continue;
                     }
                 };
+            // Snapshot BEFORE the request loop. SetKeyValue/DeleteKeyValue
+            // reload the engine from the still-open transaction so a later
+            // insert in the same batch is filtered. If commit fails we restore
+            // this snapshot — not "keep current" (that is the rolled-back
+            // view) and not a durable re-query (a read error would leave the
+            // uncommitted engine in place: fail-open after a rolled-back delete).
+            let privacy_engine_at_tx_start = self.privacy_engine.clone();
             tx.set_drop_behavior(DropBehavior::Commit);
 
             self.uncommitted_events = 0;
@@ -293,11 +300,10 @@ impl DatastoreWorker {
                     // watchers will resume sending heartbeats from current state, but the
                     // specific batch of events is permanently lost.
                     //
-                    // A privacy-setting mutation may also have replaced the in-memory
-                    // engine from this transaction. The failed commit rolled SQLite back,
-                    // so restore the engine from the durable connection before processing
-                    // another event.
-                    self.reload_privacy_engine(&ds, &conn);
+                    // Restore the pre-transaction engine. Reloading from the durable
+                    // connection is not enough: if that read fails, keep-on-error would
+                    // preserve the uncommitted engine (empty after a rolled-back delete).
+                    self.privacy_engine = privacy_engine_at_tx_start;
                     if let Some((sender, _)) = deferred_ack.take() {
                         sender.respond(Err(DatastoreError::InternalError(format!(
                             "Failed to commit datastore transaction: {err}"

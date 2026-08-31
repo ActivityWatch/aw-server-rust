@@ -110,10 +110,26 @@ fn rust_string_to_jstring(env: &JNIEnv, s: String) -> jstring {
     output.into_raw()
 }
 
-/// Helper function to get AwClient from port
+/// Helper function to get AwClient from port.
+///
+/// Android enables API-key auth whenever `config.toml` has `[auth].api_key`.
+/// The desktop CLI path (`main.rs`) already forwards that key; this JNI path
+/// used `AwClient::new()` and 401'd on `GET /api/0/buckets` (aw-android#247).
 fn get_client(port: i32) -> Result<AwClient, String> {
     let host = "127.0.0.1";
-    AwClient::new(host, port as u16, "aw-sync-android")
+    let api_key = match crate::util::get_server_config(false, None) {
+        Ok(cfg) => {
+            if cfg.api_key.is_some() {
+                info!("using API key from config.toml for local client");
+            }
+            cfg.api_key
+        }
+        Err(e) => {
+            warn!("failed to read server config for API key: {}", e);
+            None
+        }
+    };
+    AwClient::new_with_api_key(host, port as u16, "aw-sync-android", api_key)
         .map_err(|e| format!("Failed to create client: {}", e))
 }
 

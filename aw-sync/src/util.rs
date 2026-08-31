@@ -6,13 +6,11 @@ use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
-#[cfg(not(target_os = "android"))]
 pub struct ServerConfig {
     pub port: u16,
     pub api_key: Option<String>,
 }
 
-#[cfg(not(target_os = "android"))]
 impl ServerConfig {
     pub fn default_for(testing: bool) -> Self {
         Self {
@@ -23,7 +21,10 @@ impl ServerConfig {
 }
 
 /// Returns the settings aw-sync needs from the selected aw-server config.
-#[cfg(not(target_os = "android"))]
+///
+/// Also used on Android: the embedded server writes `config.toml` under
+/// `filesDir`, and `get_client()` in `android.rs` must send the same
+/// `[auth].api_key` or `/api/0/buckets` returns 401 (aw-android#247).
 pub fn get_server_config(
     testing: bool,
     config_override: Option<&Path>,
@@ -118,6 +119,27 @@ mod tests {
         assert!(production.api_key.is_none());
         assert_eq!(testing.port, 5666);
         assert!(testing.api_key.is_none());
+    }
+
+    #[test]
+    fn commented_or_empty_api_key_is_absent() {
+        let config_path = std::env::temp_dir().join(format!(
+            "aw-sync-config-commented-{}-{}.toml",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(
+            &config_path,
+            "port = 5600\n[auth]\n#api_key = \"secret\"\napi_key = \"\"\n",
+        )
+        .unwrap();
+
+        let config = get_server_config(false, Some(&config_path)).unwrap();
+        fs::remove_file(config_path).unwrap();
+        assert!(config.api_key.is_none());
     }
 
     #[test]

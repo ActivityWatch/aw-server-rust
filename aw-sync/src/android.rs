@@ -1,6 +1,7 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic;
+use std::path::Path;
 use std::sync::Once;
 
 use aw_client_rust::blocking::AwClient;
@@ -110,10 +111,72 @@ fn rust_string_to_jstring(env: &JNIEnv, s: String) -> jstring {
     output.into_raw()
 }
 
-/// Helper function to get AwClient from port
+/// Point this library's `ANDROID_DATA_DIR` at the app filesDir.
+///
+/// `libaw_sync.so` and `libaw_server.so` are separate cdylibs, so
+/// `RustInterface.setDataDir` does not update the copy compiled into this
+/// `.so`. SyncInterface.kt already sets `XDG_DATA_HOME=$filesDir/data`, which
+/// is the path that works for debug (`applicationIdSuffix ".debug"`) and
+/// work-profile installs — the hardcoded default is only the release user-0
+/// path.
+fn apply_android_data_dir_from_env() {
+    let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") else {
+        return;
+    };
+    let Some(files_dir) = crate::dirs::files_dir_from_xdg_data_home(Path::new(&xdg_data)) else {
+        warn!(
+            "XDG_DATA_HOME={} is not $filesDir/data; leaving android data dir unchanged",
+            xdg_data
+        );
+        return;
+    };
+    let path = files_dir.to_string_lossy();
+    info!("android data dir from XDG_DATA_HOME: {}", path);
+    aw_server::dirs::set_android_data_dir(&path);
+}
+
+/// Mirror of `RustInterface.setDataDir`. Prefer this explicit path; the XDG
+/// fallback in `get_client` covers current Kotlin that does not call it.
+#[no_mangle]
+pub extern "C" fn Java_net_activitywatch_android_SyncInterface_setDataDir(
+    mut env: JNIEnv,
+    _class: JClass,
+    java_dir: JString,
+) {
+    init_android_logging();
+    match env.get_string(&java_dir) {
+        Ok(s) => {
+            let path: String = s.into();
+            info!("Setting android data dir as {}", path);
+            aw_server::dirs::set_android_data_dir(&path);
+        }
+        Err(e) => {
+            error!("setDataDir: failed to read path: {}", e);
+        }
+    }
+}
+
+/// Helper function to get AwClient from port.
+///
+/// Android enables API-key auth whenever `config.toml` has `[auth].api_key`.
+/// The desktop CLI path (`main.rs`) already forwards that key; this JNI path
+/// used `AwClient::new()` and 401'd on `GET /api/0/buckets` (aw-android#247).
 fn get_client(port: i32) -> Result<AwClient, String> {
+    apply_android_data_dir_from_env();
     let host = "127.0.0.1";
-    AwClient::new(host, port as u16, "aw-sync-android")
+    let api_key = match crate::util::get_server_config(false, None) {
+        Ok(cfg) => {
+            if cfg.api_key.is_some() {
+                info!("using API key from config.toml for local client");
+            }
+            cfg.api_key
+        }
+        Err(e) => {
+            warn!("failed to read server config for API key: {}", e);
+            None
+        }
+    };
+    AwClient::new_with_api_key(host, port as u16, "aw-sync-android", api_key)
         .map_err(|e| format!("Failed to create client: {}", e))
 }
 

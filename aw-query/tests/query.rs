@@ -414,7 +414,7 @@ mod query_tests {
         let code = format!(
             r#"
             events = query_bucket("{}");
-            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "priority": 10 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "priority": 25 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
             return  events;"#,
             "testid"
         );
@@ -429,7 +429,7 @@ mod query_tests {
         let code = format!(
             r#"
             events = query_bucket("{}");
-            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "weight": 10 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "weight": 25 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
             return  events;"#,
             "testid"
         );

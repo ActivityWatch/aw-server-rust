@@ -115,9 +115,11 @@ impl From<Regex> for Rule {
 
 /// A category matching rule passed to [`categorize`].
 ///
-/// `priority` is an optional ranking score. When set, it is used instead of
-/// category depth to pick among matching rules (higher wins). When `None`,
-/// ranking falls back to depth so existing configs keep their current behavior.
+/// `priority` is an optional integer ranking score. When set, it is used
+/// instead of the depth-derived default to pick among matching rules (higher
+/// wins). When `None`, ranking falls back to `depth * 10` so existing configs
+/// keep their current ordering, while explicit values can slot between levels
+/// (depth 1 → 10, depth 2 → 20).
 pub struct CategoryRule {
     pub category: Vec<String>,
     pub rule: Rule,
@@ -150,9 +152,10 @@ impl From<(Vec<String>, Rule)> for CategoryRule {
 /// An event can only have one category, although the category may have a hierarchy,
 /// for instance: "Work -> ActivityWatch -> aw-server-rust"
 /// If multiple categories match, the highest-ranking one is chosen.
-/// Ranking is the optional `priority` on the rule when present, otherwise category
-/// depth ("the deepest one will be chosen"). Equal ranks keep the later match,
-/// matching the previous depth-only `>=` comparison.
+/// Ranking is the optional integer `priority` on the rule when present,
+/// otherwise `depth * 10` ("the deepest one will be chosen", with room to
+/// slot values between levels). Equal ranks keep the later match, matching
+/// the previous depth-only `>=` comparison.
 ///
 /// Performance: builds an in-memory cache keyed on the event's data JSON so that
 /// events with identical data (same app/title — very common in practice) are only
@@ -227,9 +230,11 @@ fn tag_one(mut event: Event, rules: &[(String, Rule)]) -> Event {
 }
 
 fn _effective_rank(category: &[String], priority: Option<i64>) -> i64 {
-    // Defaulting to depth is the shipped contract and what Erik suggested
-    // for the optional override: https://github.com/ActivityWatch/aw-server-rust/issues/597
-    priority.unwrap_or(category.len() as i64)
+    // Integer-only. Default is depth * 10 so explicit priorities can slot
+    // between nesting levels (depth 1 → 10, depth 2 → 20). Relative order of
+    // unprioritized rules is unchanged.
+    // https://github.com/ActivityWatch/aw-server-rust/pull/663#issuecomment-5481349757
+    priority.unwrap_or((category.len() as i64) * 10)
 }
 
 #[test]
@@ -382,13 +387,13 @@ fn test_categorize_depth_wins_without_priority() {
 
 #[test]
 fn test_categorize_explicit_priority_overrides_depth() {
-    // The same #597 tree, but A is given a higher priority than B1's depth.
-    // Organizational nesting no longer forces B1 to win.
+    // The same #597 tree, but A is given a higher priority than B1's default
+    // (depth 2 → 20). Organizational nesting no longer forces B1 to win.
     let events = categorize(
         vec![event_with_data("just a test")],
         &[
             CategoryRule::new(vec!["A".into()], Rule::from(Regex::new(r"test").unwrap()))
-                .with_priority(10),
+                .with_priority(25),
             CategoryRule::new(
                 vec!["B".into(), "B1".into()],
                 Rule::from(Regex::new(r"test").unwrap()),
@@ -399,9 +404,40 @@ fn test_categorize_explicit_priority_overrides_depth() {
 }
 
 #[test]
+fn test_categorize_inter_level_priority() {
+    // depth * 10 leaves integers between levels: 15 beats a depth-1 default
+    // (10) but loses to a depth-2 default (20).
+    let between = categorize(
+        vec![event_with_data("just a test")],
+        &[
+            CategoryRule::new(vec!["A".into()], Rule::from(Regex::new(r"test").unwrap())),
+            CategoryRule::new(vec!["A2".into()], Rule::from(Regex::new(r"test").unwrap()))
+                .with_priority(15),
+        ],
+    );
+    assert_eq!(category_of(&between), &serde_json::json!(vec!["A2"]));
+
+    let still_loses_to_deeper = categorize(
+        vec![event_with_data("just a test")],
+        &[
+            CategoryRule::new(vec!["A2".into()], Rule::from(Regex::new(r"test").unwrap()))
+                .with_priority(15),
+            CategoryRule::new(
+                vec!["B".into(), "B1".into()],
+                Rule::from(Regex::new(r"test").unwrap()),
+            ),
+        ],
+    );
+    assert_eq!(
+        category_of(&still_loses_to_deeper),
+        &serde_json::json!(vec!["B", "B1"])
+    );
+}
+
+#[test]
 fn test_categorize_lower_priority_loses_to_default_depth() {
-    // A deep rule can also be demoted below a shallow rule's default (depth)
-    // by setting an explicit lower priority on the deep rule.
+    // A deep rule can also be demoted below a shallow rule's default
+    // (depth * 10) by setting an explicit lower priority on the deep rule.
     let events = categorize(
         vec![event_with_data("just a test")],
         &[

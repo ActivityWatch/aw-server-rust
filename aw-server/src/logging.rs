@@ -5,11 +5,15 @@ use fern::colors::{Color, ColoredLevelConfig};
 
 use crate::dirs;
 
-pub fn setup_logger(module: &str, testing: bool, verbose: bool) -> Result<(), fern::InitError> {
+pub fn setup_logger(module: &str, profile: &str, verbose: bool) -> Result<(), fern::InitError> {
+    let testing = profile == "testing";
     let mut logfile_path: PathBuf =
         dirs::get_log_dir(module).expect("Unable to get log dir to store logs in");
     fs::create_dir_all(logfile_path.clone()).expect("Unable to create folder for logs");
-    let filename = if !testing {
+    // Isolated profile roots (including new-style testing) use a bare filename
+    // — the directory already isolates. The `-testing` infix stays only in
+    // the legacy shared-root layout so existing log files keep matching.
+    let filename = if dirs::legacy_testing_suffix(profile).is_empty() {
         format!("{}_%Y-%m-%dT%H-%M-%S%z.log", module)
     } else {
         format!("{}-testing_%Y-%m-%dT%H-%M-%S%z.log", module)
@@ -94,6 +98,6 @@ mod tests {
     #[ignore]
     #[test]
     fn test_setup_logger() {
-        setup_logger("aw-server-rust", true, true).unwrap();
+        setup_logger("aw-server-rust", "testing", true).unwrap();
     }
 }

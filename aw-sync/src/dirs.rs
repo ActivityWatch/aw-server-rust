@@ -65,11 +65,23 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
     } else {
         profile
     };
-    let dir = dirs::config_dir()
-        .ok_or(())?
-        .join(aw_server::dirs::appname_for(effective))
-        .join("aw-server-rust");
-    Ok(dir.join(aw_server::config::config_filename(effective)))
+    let filename = aw_server::config::config_filename(effective);
+    // Desktop: honour profile isolation (`activitywatch-<profile>/aw-server-rust`).
+    // Android: stay on filesDir — sibling XDG roots do not exist there, and
+    // master already reads this path for the embedded server's api_key (#666).
+    #[cfg(not(target_os = "android"))]
+    {
+        let dir = dirs::config_dir()
+            .ok_or(())?
+            .join(aw_server::dirs::appname_for(effective))
+            .join("aw-server-rust");
+        Ok(dir.join(filename))
+    }
+    #[cfg(target_os = "android")]
+    {
+        let dir = aw_server::dirs::get_config_dir()?;
+        Ok(dir.join(filename))
+    }
 }
 
 pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {

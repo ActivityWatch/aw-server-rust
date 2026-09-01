@@ -99,6 +99,14 @@ fn legacy_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
         .join("ActivityWatchSync"))
 }
 
+#[cfg(not(target_os = "android"))]
+fn dir_has_entries(path: &Path) -> bool {
+    fs::read_dir(path)
+        .ok()
+        .and_then(|mut it| it.next())
+        .is_some()
+}
+
 /// Prefer an existing `~/ActivityWatchSync` so folder-sync setups
 /// (Syncthing/Dropbox/etc watching that path) keep working. New installs
 /// with no legacy dir use the documented data-dir location.
@@ -106,9 +114,16 @@ fn legacy_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
 /// Do not auto-rename: a failed cross-device `rename` would leave the daemon
 /// writing a fresh empty tree, and a successful one would disconnect any
 /// external transport still pointed at the old path.
+///
+/// An empty leftover `~/ActivityWatchSync` must not displace live data
+/// already in the documented directory (backup restore of an empty folder,
+/// old docs creating the path after a new install has started syncing).
 #[cfg(not(target_os = "android"))]
 fn resolve_sync_dir(legacy: &Path, documented: &Path) -> PathBuf {
-    if legacy.exists() {
+    if !legacy.exists() {
+        return documented.to_path_buf();
+    }
+    if dir_has_entries(legacy) || !dir_has_entries(documented) {
         legacy.to_path_buf()
     } else {
         documented.to_path_buf()
@@ -122,7 +137,7 @@ pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
     }
     // Desktop: keep sync data out of the user's home directory and follow the
     // documented data-dir convention (ActivityWatch/activitywatch#1418).
-    // If the previous default already exists, keep using it — aw-sync's
+    // If the previous default already has content, keep using it — aw-sync's
     // transport is an external folder synchronizer watching that path.
     #[cfg(not(target_os = "android"))]
     {
@@ -304,6 +319,22 @@ mod tests {
         fs::write(documented.join("new.db"), b"2").unwrap();
 
         assert_eq!(resolve_sync_dir(&legacy, &documented), legacy);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn empty_legacy_does_not_displace_populated_documented() {
+        // A restored/recreated empty ~/ActivityWatchSync must not hide
+        // remote databases already in the documented data dir.
+        let root = unique_root();
+        let legacy = root.join("ActivityWatchSync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&documented).unwrap();
+        fs::write(documented.join("test.db"), b"sqlite").unwrap();
+
+        assert_eq!(resolve_sync_dir(&legacy, &documented), documented);
         let _ = fs::remove_dir_all(&root);
     }
 }

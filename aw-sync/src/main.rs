@@ -60,7 +60,7 @@ struct Opts {
     testing: bool,
 
     /// Full path to sync directory.
-    /// If not specified, use AW_SYNC_DIR, then an existing ~/ActivityWatchSync,
+    /// If not specified, use AW_SYNC_DIR, then a non-empty ~/ActivityWatchSync,
     /// otherwise the platform data dir (`.../activitywatch/aw-sync`).
     #[clap(long)]
     sync_dir: Option<PathBuf>,

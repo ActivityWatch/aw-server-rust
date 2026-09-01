@@ -12,7 +12,7 @@ Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch
 
 ## Usage
 
-This will start a daemon which pulls and pushes events with the sync directory every 5 minutes (platform data dir by default; `~/ActivityWatchSync` if that already exists):
+This will start a daemon which pulls and pushes events with the sync directory every 5 minutes (platform data dir by default; `~/ActivityWatchSync` if that already has content):
 
 ```sh
 # Basic sync daemon (syncs all buckets every 5 minutes)
@@ -46,7 +46,7 @@ For more options, see `aw-sync --help`. Some notable options:
 
 Once you have aw-sync running, you need to set up syncing with the sync directory using your preferred syncing tool.
 
-The default sync directory is the platform data dir (`~/.local/share/activitywatch/aw-sync` on Linux, `~/Library/Application Support/activitywatch/aw-sync` on macOS, `%APPDATA%/activitywatch/aw-sync` on Windows). If `~/ActivityWatchSync` already exists (the previous default), that path is kept so existing Syncthing/Dropbox setups keep working. Override with `--sync-dir` or `AW_SYNC_DIR`.
+The default sync directory is the platform data dir (`~/.local/share/activitywatch/aw-sync` on Linux, `~/Library/Application Support/activitywatch/aw-sync` on macOS, `%APPDATA%/activitywatch/aw-sync` on Windows). If `~/ActivityWatchSync` already has content (the previous default), that path is kept so existing Syncthing/Dropbox setups keep working. An empty leftover of that path does not displace live data in the documented directory. Override with `--sync-dir` or `AW_SYNC_DIR`.
 
 ### Running from source
 
@@ -94,7 +94,7 @@ We will use some helper scripts to do the following:
 
 1. `./test-sync-push.sh`
     - Creates a sync directory **for you to set up sync** with Syncthing/Dropbox/Gdrive/rclone/whatever
-      - Platform data dir by default; `~/ActivityWatchSync` if that already exists
+      - Platform data dir by default; `~/ActivityWatchSync` if that already has content
     - Creates a datastore for the current host in the sync folder
     - Sync all local buckets of interest (window & afk buckets, by default) to the sync dir
 

@@ -60,7 +60,8 @@ struct Opts {
     testing: bool,
 
     /// Full path to sync directory.
-    /// If not specified, use AW_SYNC_DIR env var, or default to ~/ActivityWatchSync
+    /// If not specified, use AW_SYNC_DIR, then an existing ~/ActivityWatchSync,
+    /// otherwise the platform data dir (`.../activitywatch/aw-sync`).
     #[clap(long)]
     sync_dir: Option<PathBuf>,
 
@@ -187,18 +188,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         info!("Using sync dir: {}", &sync_dir.display());
         std::env::set_var("AW_SYNC_DIR", sync_dir);
-    }
-
-    // One-time: relocate a legacy ~/ActivityWatchSync into the documented data
-    // dir so existing synced data is preserved and new installs stop writing
-    // into the home directory (ActivityWatch/activitywatch#1418). No-op when the
-    // default location is not in effect (AW_SYNC_DIR / --sync-dir set) or when
-    // there is no legacy data to move.
-    #[cfg(not(target_os = "android"))]
-    {
-        if let Err(e) = dirs::migrate_legacy_sync_dir() {
-            warn!("Legacy sync-dir migration skipped: {e}");
-        }
     }
 
     // Named profiles (and `--profile testing` without `--testing`) must use the

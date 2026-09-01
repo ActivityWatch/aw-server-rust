@@ -1,9 +1,7 @@
 use dirs::home_dir;
 use std::error::Error;
 use std::fs;
-#[cfg(any(target_os = "android", test))]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve the instance profile.
 /// `--profile` wins, then `AW_PROFILE`, then `--testing` → `"testing"`, else `"default"`.
@@ -88,12 +86,33 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
 /// mirroring aw-server's data-dir convention (`data_dir()/activitywatch/<component>`)
 /// and aw-sync's own config dir (`config_dir()/activitywatch/aw-sync`).
 #[cfg(not(target_os = "android"))]
-#[allow(dead_code)]
 fn default_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
     Ok(dirs::data_dir()
         .ok_or("Unable to read user data dir")?
         .join("activitywatch")
         .join("aw-sync"))
+}
+
+fn legacy_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(home_dir()
+        .ok_or("Unable to read home_dir")?
+        .join("ActivityWatchSync"))
+}
+
+/// Prefer an existing `~/ActivityWatchSync` so folder-sync setups
+/// (Syncthing/Dropbox/etc watching that path) keep working. New installs
+/// with no legacy dir use the documented data-dir location.
+///
+/// Do not auto-rename: a failed cross-device `rename` would leave the daemon
+/// writing a fresh empty tree, and a successful one would disconnect any
+/// external transport still pointed at the old path.
+#[cfg(not(target_os = "android"))]
+fn resolve_sync_dir(legacy: &Path, documented: &Path) -> PathBuf {
+    if legacy.exists() {
+        legacy.to_path_buf()
+    } else {
+        documented.to_path_buf()
+    }
 }
 
 pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
@@ -103,87 +122,17 @@ pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
     }
     // Desktop: keep sync data out of the user's home directory and follow the
     // documented data-dir convention (ActivityWatch/activitywatch#1418).
+    // If the previous default already exists, keep using it — aw-sync's
+    // transport is an external folder synchronizer watching that path.
     #[cfg(not(target_os = "android"))]
     {
-        default_sync_dir()
+        Ok(resolve_sync_dir(&legacy_sync_dir()?, &default_sync_dir()?))
     }
     // Android is already app-scoped; keep the historical location there.
     #[cfg(target_os = "android")]
     {
-        let home_dir = home_dir().ok_or("Unable to read home_dir")?;
-        Ok(home_dir.join("ActivityWatchSync"))
+        legacy_sync_dir()
     }
-}
-
-/// One-time migration from the legacy `~/ActivityWatchSync` location to the
-/// documented data dir, so existing synced data is preserved while new installs
-/// stop writing into the home directory (ActivityWatch/activitywatch#1418).
-///
-/// No-op when an explicit location is in effect (`AW_SYNC_DIR` / `--sync-dir`),
-/// when no legacy dir exists, or after the migration has already run. If both the
-/// legacy and the new location already contain data, it refuses to merge and
-/// leaves both in place (a manual merge is safer than an automated one).
-#[cfg(not(target_os = "android"))]
-#[allow(dead_code)] // called by the aw-sync binary; unused in the lib copy
-pub fn migrate_legacy_sync_dir() -> Result<(), Box<dyn Error>> {
-    // Respect an explicit override: the user chose a location, don't relocate data.
-    if std::env::var("AW_SYNC_DIR").is_ok() {
-        return Ok(());
-    }
-    let legacy = home_dir()
-        .ok_or("Unable to read home_dir")?
-        .join("ActivityWatchSync");
-    let new = default_sync_dir()?;
-    migrate_legacy_sync_dir_to(&legacy, &new)
-}
-
-/// Core migration: move `legacy` to `new` when `legacy` exists and `new` is absent
-/// or empty. Refuses to merge two non-empty locations and never destroys data:
-/// a failed rename leaves the source in place.
-#[cfg(not(target_os = "android"))]
-#[allow(dead_code)]
-fn migrate_legacy_sync_dir_to(legacy: &PathBuf, new: &PathBuf) -> Result<(), Box<dyn Error>> {
-    if !legacy.exists() {
-        return Ok(());
-    }
-    if new.exists() && is_non_empty(new)? {
-        warn!(
-            "Sync data exists in both legacy {:?} and documented {:?}; not auto-merging. \
-             Move what you need and delete the rest manually.",
-            legacy, new
-        );
-        return Ok(());
-    }
-    // `fs::rename` replaces an empty dir target on Unix but fails on Windows,
-    // so drop an empty target first.
-    if new.exists() {
-        fs::remove_dir(new)?;
-    }
-    if let Some(parent) = new.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    match fs::rename(legacy, new) {
-        Ok(()) => {
-            info!("Migrated legacy sync dir {:?} -> {:?}", legacy, new);
-            Ok(())
-        }
-        // Cross-device rename (EXDEV) or other failure: leave the data where it
-        // is rather than risk losing it.
-        Err(e) => {
-            warn!(
-                "Could not migrate legacy sync dir {:?} to {:?} ({e}); move it manually \
-                 if you want the documented location.",
-                legacy, new
-            );
-            Ok(())
-        }
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-#[allow(dead_code)]
-fn is_non_empty(dir: &PathBuf) -> Result<bool, Box<dyn Error>> {
-    Ok(fs::read_dir(dir)?.next().is_some())
 }
 
 /// SyncInterface.kt sets `XDG_DATA_HOME=$filesDir/data` before `loadLibrary`.
@@ -309,7 +258,7 @@ mod tests {
     #[cfg(not(target_os = "android"))]
     fn unique_root() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "aw-sync-migrate-{}-{}",
+            "aw-sync-resolve-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -320,52 +269,41 @@ mod tests {
 
     #[cfg(not(target_os = "android"))]
     #[test]
-    fn migrates_legacy_sync_dir_into_documented_location() {
+    fn prefers_existing_legacy_sync_dir() {
         let root = unique_root();
         let legacy = root.join("ActivityWatchSync");
-        let new = root.join("data").join("activitywatch").join("aw-sync");
-        fs::create_dir_all(legacy.join("host1").join("device1")).unwrap();
-        fs::write(
-            legacy.join("host1").join("device1").join("test.db"),
-            b"sqlite",
-        )
-        .unwrap();
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("test.db"), b"sqlite").unwrap();
 
-        migrate_legacy_sync_dir_to(&legacy, &new).unwrap();
-
-        assert!(new.join("host1").join("device1").join("test.db").exists());
-        assert!(!legacy.exists());
+        assert_eq!(resolve_sync_dir(&legacy, &documented), legacy);
         let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(not(target_os = "android"))]
     #[test]
-    fn migration_is_noop_without_legacy_dir() {
+    fn uses_documented_dir_when_no_legacy() {
         let root = unique_root();
         let legacy = root.join("ActivityWatchSync");
-        let new = root.join("data").join("activitywatch").join("aw-sync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
 
-        migrate_legacy_sync_dir_to(&legacy, &new).unwrap();
-
-        assert!(!new.exists());
+        assert_eq!(resolve_sync_dir(&legacy, &documented), documented);
         let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(not(target_os = "android"))]
     #[test]
-    fn migration_refuses_to_merge_two_non_empty_dirs() {
+    fn prefers_legacy_even_if_documented_also_exists() {
+        // Don't silently switch away from a live folder-sync path.
         let root = unique_root();
         let legacy = root.join("ActivityWatchSync");
-        let new = root.join("data").join("activitywatch").join("aw-sync");
-        fs::create_dir_all(legacy.join("a")).unwrap();
-        fs::write(legacy.join("a").join("x.db"), b"1").unwrap();
-        fs::create_dir_all(new.join("b")).unwrap();
-        fs::write(new.join("b").join("y.db"), b"2").unwrap();
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("legacy.db"), b"1").unwrap();
+        fs::create_dir_all(&documented).unwrap();
+        fs::write(documented.join("new.db"), b"2").unwrap();
 
-        migrate_legacy_sync_dir_to(&legacy, &new).unwrap();
-
-        assert!(legacy.join("a").join("x.db").exists());
-        assert!(new.join("b").join("y.db").exists());
+        assert_eq!(resolve_sync_dir(&legacy, &documented), legacy);
         let _ = fs::remove_dir_all(&root);
     }
 }

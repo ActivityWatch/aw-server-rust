@@ -128,8 +128,13 @@ fn dir_has_entries(path: &Path) -> Option<bool> {
 /// documented dir while Syncthing/Dropbox still watch the old path.
 #[cfg(not(target_os = "android"))]
 fn resolve_sync_dir(legacy: &Path, documented: &Path) -> PathBuf {
-    if !legacy.exists() {
-        return documented.to_path_buf();
+    // exists() maps metadata errors to false, which would silently switch
+    // onto the documented dir while Syncthing/Dropbox still watch the
+    // legacy path. Fail closed: only leave legacy when we *know* it is absent.
+    match legacy.try_exists() {
+        Ok(false) => return documented.to_path_buf(),
+        Ok(true) => {}
+        Err(_) => return legacy.to_path_buf(),
     }
     match dir_has_entries(legacy) {
         // Has content, or unreadable: keep the transport-attached path.
@@ -368,6 +373,34 @@ mod tests {
         fs::write(documented.join("test.db"), b"sqlite").unwrap();
 
         assert_eq!(resolve_sync_dir(&legacy, &documented), legacy);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn metadata_error_on_legacy_keeps_legacy() {
+        // Path::exists() treats a metadata error as absence. try_exists()
+        // must fail closed onto the legacy path so we don't abandon a
+        // Syncthing/Dropbox root whose parent we cannot stat.
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_root();
+        let parent = root.join("hidden");
+        let legacy = parent.join("ActivityWatchSync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("test.db"), b"sqlite").unwrap();
+        fs::create_dir_all(&documented).unwrap();
+        fs::write(documented.join("new.db"), b"2").unwrap();
+
+        let mut perms = fs::metadata(&parent).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&parent, perms).unwrap();
+
+        let chosen = resolve_sync_dir(&legacy, &documented);
+        let _ = fs::set_permissions(&parent, fs::Permissions::from_mode(0o755));
+
+        assert_eq!(chosen, legacy);
         let _ = fs::remove_dir_all(&root);
     }
 }

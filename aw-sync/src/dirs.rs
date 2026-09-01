@@ -99,12 +99,17 @@ fn legacy_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
         .join("ActivityWatchSync"))
 }
 
+/// Whether `path` has at least one directory entry.
+///
+/// `None` means the path could not be enumerated (permission error, not a
+/// directory, I/O). Callers must not treat that as empty: an unreadable
+/// `~/ActivityWatchSync` is still the live transport root.
 #[cfg(not(target_os = "android"))]
-fn dir_has_entries(path: &Path) -> bool {
-    fs::read_dir(path)
-        .ok()
-        .and_then(|mut it| it.next())
-        .is_some()
+fn dir_has_entries(path: &Path) -> Option<bool> {
+    match fs::read_dir(path) {
+        Ok(mut it) => Some(it.next().is_some()),
+        Err(_) => None,
+    }
 }
 
 /// Prefer an existing `~/ActivityWatchSync` so folder-sync setups
@@ -118,15 +123,24 @@ fn dir_has_entries(path: &Path) -> bool {
 /// An empty leftover `~/ActivityWatchSync` must not displace live data
 /// already in the documented directory (backup restore of an empty folder,
 /// old docs creating the path after a new install has started syncing).
+/// A legacy path that exists but cannot be enumerated is kept: treating a
+/// read error as emptiness would silently switch the daemon onto the
+/// documented dir while Syncthing/Dropbox still watch the old path.
 #[cfg(not(target_os = "android"))]
 fn resolve_sync_dir(legacy: &Path, documented: &Path) -> PathBuf {
     if !legacy.exists() {
         return documented.to_path_buf();
     }
-    if dir_has_entries(legacy) || !dir_has_entries(documented) {
-        legacy.to_path_buf()
-    } else {
-        documented.to_path_buf()
+    match dir_has_entries(legacy) {
+        // Has content, or unreadable: keep the transport-attached path.
+        Some(true) | None => legacy.to_path_buf(),
+        Some(false) => {
+            if dir_has_entries(documented) == Some(true) {
+                documented.to_path_buf()
+            } else {
+                legacy.to_path_buf()
+            }
+        }
     }
 }
 
@@ -335,6 +349,25 @@ mod tests {
         fs::write(documented.join("test.db"), b"sqlite").unwrap();
 
         assert_eq!(resolve_sync_dir(&legacy, &documented), documented);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn unreadable_legacy_keeps_legacy_even_if_documented_populated() {
+        // read_dir error must not be treated as "empty" — that would switch
+        // the daemon onto the documented dir while Syncthing still watches
+        // the legacy path. A regular file at the legacy path is a portable
+        // stand-in for permission/IO failure.
+        let root = unique_root();
+        let legacy = root.join("ActivityWatchSync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&legacy, b"not-a-directory").unwrap();
+        fs::create_dir_all(&documented).unwrap();
+        fs::write(documented.join("test.db"), b"sqlite").unwrap();
+
+        assert_eq!(resolve_sync_dir(&legacy, &documented), legacy);
         let _ = fs::remove_dir_all(&root);
     }
 }

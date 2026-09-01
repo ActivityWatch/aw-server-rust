@@ -14,7 +14,6 @@ Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch
 
 ## Usage
 
-The command that actually pulls and pushes today is a one-shot pass. Share the sync directory first (see below), then:
 
 ```sh
 # Pull every 3-level peer and push this device, then exit
@@ -47,7 +46,7 @@ For more options, see `aw-sync --help`. Some notable options:
 
 Share the sync directory with Syncthing, Dropbox, Drive, or rsync **before** running aw-sync. aw-sync only reads and writes files in that folder; it does not transport them between devices.
 
-Default directory: the platform data dir (`~/.local/share/activitywatch/aw-sync` on Linux, `~/Library/Application Support/activitywatch/aw-sync` on macOS, `%APPDATA%/activitywatch/aw-sync` on Windows). If `~/ActivityWatchSync` already exists (the previous default), that path is kept so existing Syncthing/Dropbox setups keep working. Override with `--sync-dir` or `AW_SYNC_DIR`.
+Default directory: the platform data dir (`~/.local/share/activitywatch/aw-sync` on Linux, `~/Library/Application Support/activitywatch/aw-sync` on macOS, `%APPDATA%/activitywatch/aw-sync` on Windows). If `~/ActivityWatchSync` already has content (the previous default), that path is kept so existing Syncthing/Dropbox setups keep working. An empty leftover of that path does not displace live data in the documented directory. Override with `--sync-dir` or `AW_SYNC_DIR`.
 
 Working paths (bare `aw-sync sync`, Android) write:
 
@@ -102,7 +101,7 @@ We will use some helper scripts to do the following:
 
 1. `./test-sync-push.sh`
     - Creates a sync directory **for you to set up sync** with Syncthing/Dropbox/Gdrive/rclone/whatever
-      - Platform data dir by default; `~/ActivityWatchSync` if that already exists
+      - Platform data dir by default; `~/ActivityWatchSync` if that already has content
     - Creates a datastore for the current host in the sync folder
     - Sync all local buckets of interest (window & afk buckets, by default) to the sync dir
 

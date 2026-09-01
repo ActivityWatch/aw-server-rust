@@ -47,15 +47,15 @@ For more options, see `aw-sync --help`. Some notable options:
 
 Share the sync directory with Syncthing, Dropbox, Drive, or rsync **before** running aw-sync. aw-sync only reads and writes files in that folder; it does not transport them between devices.
 
-Default directory: `~/ActivityWatchSync` (`--sync-dir` or `AW_SYNC_DIR`).
+Default directory: the platform data dir (`~/.local/share/activitywatch/aw-sync` on Linux, `~/Library/Application Support/activitywatch/aw-sync` on macOS, `%APPDATA%/activitywatch/aw-sync` on Windows). If `~/ActivityWatchSync` already exists (the previous default), that path is kept so existing Syncthing/Dropbox setups keep working. Override with `--sync-dir` or `AW_SYNC_DIR`.
 
 Working paths (bare `aw-sync sync`, Android) write:
 
 ```txt
-~/ActivityWatchSync/{hostname}/{device_id}/test.db
+{sync_dir}/{hostname}/{device_id}/test.db
 ```
 
-The default daemon still writes `~/ActivityWatchSync/{device_id}/test.db` (two levels). `aw-sync sync` and the Android app cannot see that file.
+The default daemon still writes `{sync_dir}/{device_id}/test.db` (two levels). `aw-sync sync` and the Android app cannot see that file.
 
 ### Running from source
 
@@ -102,7 +102,7 @@ We will use some helper scripts to do the following:
 
 1. `./test-sync-push.sh`
     - Creates a sync directory **for you to set up sync** with Syncthing/Dropbox/Gdrive/rclone/whatever
-      - By default `~/ActivityWatchSync`
+      - Platform data dir by default; `~/ActivityWatchSync` if that already exists
     - Creates a datastore for the current host in the sync folder
     - Sync all local buckets of interest (window & afk buckets, by default) to the sync dir
 
@@ -114,7 +114,7 @@ We will use some helper scripts to do the following:
 
 4. You should now have all events synced to a local testing instance!
     - You can browse [127.0.0.1:5667](http://127.0.0.1:5667) to view testing instance, where you'll see events from synced all hosts.
-    - You can now set up syncing for `~/ActivityWatchSync` on more devices, and on each one use the script `./test-sync.sh` to push their events into the sync folder, then run `./test-import-sync.sh` on the device where you have the testing instance to update the data there.
+    - You can now set up syncing for the sync directory on more devices, and on each one use the script `./test-sync.sh` to push their events into the sync folder, then run `./test-import-sync.sh` on the device where you have the testing instance to update the data there.
 
 5. To view data from all devices at once, go into [127.0.0.1:5667/#/settings](127.0.0.1:5667/#/settings) and check the "Use multidevice query" checkbox (near the bottom, under "developer settings").
     - You can now navigate back to the activity view for any device, where you should see data from multiple devices being included in (most of) the visualizations.

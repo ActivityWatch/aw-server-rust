@@ -118,7 +118,7 @@ pub fn fill_env(env: &mut VarEnv) {
 mod qfunctions {
     use aw_datastore::Datastore;
     use aw_models::Event;
-    use aw_transform::classify::Rule;
+    use aw_transform::classify::{CategoryRule, Rule};
 
     use super::validate;
     use crate::DataType;
@@ -290,7 +290,7 @@ mod qfunctions {
         validate::args_length(&args, 2)?;
         let mut args = args.into_iter();
         let events: Vec<Event> = args.next().unwrap().try_into()?;
-        let rules: Vec<(Vec<String>, Rule)> = args.next().unwrap().try_into()?;
+        let rules: Vec<CategoryRule> = args.next().unwrap().try_into()?;
         // Run categorize
         let mut flooded_events = aw_transform::classify::categorize(events, &rules);
         // Put events back into DataType::Event container

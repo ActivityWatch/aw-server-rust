@@ -391,6 +391,57 @@ mod query_tests {
     }
 
     #[test]
+    fn test_categorize_priority_overrides_depth() {
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // Without priority, the deeper rule wins (existing contract).
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$" }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            return  events;"#,
+            "testid"
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(
+            events.first().unwrap().data.get("$category").unwrap(),
+            &serde_json::json!(vec!["B", "B1"])
+        );
+
+        // With an explicit priority on A, organizational depth no longer wins.
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "priority": 25 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            return  events;"#,
+            "testid"
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(
+            events.first().unwrap().data.get("$category").unwrap(),
+            &serde_json::json!(vec!["A"])
+        );
+
+        // `weight` is accepted as an alias for `priority`.
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "weight": 25 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            return  events;"#,
+            "testid"
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(
+            events.first().unwrap().data.get("$category").unwrap(),
+            &serde_json::json!(vec!["A"])
+        );
+    }
+
+    #[test]
     fn test_tag() {
         let ds = setup_datastore_populated();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
@@ -547,6 +598,22 @@ mod query_tests {
             return  events;"#;
         let res = aw_query::query(code, &interval, &ds);
         assert_err_type!(res, QueryError::RegexCompileError(_));
+
+        // Test categorize rule with non-integer priority
+        let code = r#"
+            events = [];
+            events = categorize(events, [[["test"], { "type": "regex", "regex": "test", "priority": 1.5 }]]);
+            return  events;"#;
+        let res = aw_query::query(code, &interval, &ds);
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
+
+        // Test categorize rule with non-numeric priority
+        let code = r#"
+            events = [];
+            events = categorize(events, [[["test"], { "type": "regex", "regex": "test", "priority": "high" }]]);
+            return  events;"#;
+        let res = aw_query::query(code, &interval, &ds);
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
     }
 
     #[test]

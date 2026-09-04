@@ -832,4 +832,91 @@ mod datastore_tests {
 
         let _ = fs::remove_file(&db_path);
     }
+
+    fn privacy_event(title: &str) -> Event {
+        Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(1),
+            data: json_map! {"title": json!(title), "app": json!("Firefox")},
+        }
+    }
+
+    /// Saving privacy_filters used to persist the JSON and never load it into
+    /// the worker's engine (ActivityWatch/aw-server-rust#659). A drop rule
+    /// must actually drop a matching insert without an explicit refresh call.
+    #[test]
+    fn test_privacy_filter_applies_after_setting_saved() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+
+        let drop_secret =
+            r#"[{"enabled":true,"field":"title","pattern":"(?i)secret","action":"drop"}]"#;
+        ds.set_key_value("settings.privacy_filters", drop_secret)
+            .unwrap();
+
+        ds.insert_events(
+            &bucket.id,
+            &[privacy_event("my secret file"), privacy_event("readme.md")],
+        )
+        .unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "drop rule should discard the matching event"
+        );
+        assert_eq!(events[0].data.get("title").unwrap(), "readme.md");
+
+        ds.delete_key_value("settings.privacy_filters").unwrap();
+        ds.insert_events(&bucket.id, &[privacy_event("another secret")])
+            .unwrap();
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "deleting the setting should stop filtering"
+        );
+    }
+
+    /// Rules must load at worker startup, not only after a later SetKeyValue.
+    #[test]
+    fn test_privacy_filter_survives_datastore_reload() {
+        let mut db_path = get_cache_dir().unwrap();
+        db_path.push(format!(
+            "datastore-unittest-privacy-filters-{}.db",
+            std::process::id()
+        ));
+        let db_path_str = db_path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&db_path);
+
+        let drop_secret =
+            r#"[{"enabled":true,"field":"title","pattern":"(?i)secret","action":"drop"}]"#;
+        {
+            let ds = Datastore::new(db_path_str.clone(), false);
+            create_test_bucket(&ds);
+            ds.set_key_value("settings.privacy_filters", drop_secret)
+                .unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+        }
+        {
+            let ds = Datastore::new(db_path_str, false);
+            ds.insert_events("testid", &[privacy_event("top secret notes")])
+                .unwrap();
+            let events = ds.get_events("testid", None, None, None).unwrap();
+            assert!(
+                events.is_empty(),
+                "persisted drop rule must apply after reopen, got {events:?}"
+            );
+            ds.close();
+        }
+
+        // Windows can still hold the SQLite handle after close() while the
+        // worker thread unwinds (ERROR_SHARING_VIOLATION). Cleanup is best-effort.
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
 }

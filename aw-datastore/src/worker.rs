@@ -84,6 +84,12 @@ pub enum Command {
     Close(),
 }
 
+/// Key the webui writes via POST /0/settings/privacy_filters.
+/// The worker's in-memory PrivacyFilterEngine is the only thing that actually
+/// filters inserts/heartbeats, so every write/delete of this key (and startup)
+/// must reload the engine. RefreshPrivacyFilter exists for explicit reloads.
+const PRIVACY_FILTERS_KEY: &str = "settings.privacy_filters";
+
 fn _unwrap_empty_response(response: Response) -> Result<(), DatastoreError> {
     match response {
         Response::Empty() => Ok(()),
@@ -114,6 +120,24 @@ impl DatastoreWorker {
             commit: false,
             last_heartbeat: HashMap::new(),
             privacy_engine: PrivacyFilterEngine::new(vec![]),
+        }
+    }
+
+    /// Replace the in-memory engine from `settings.privacy_filters`.
+    /// Only an absent key clears the engine, so deleting the setting actually
+    /// disables filtering. Parse errors and query errors keep the previous
+    /// engine: unfiltering on a bad save or a transient database error would
+    /// silently store the events these rules exist to keep out.
+    fn reload_privacy_engine(&mut self, ds: &DatastoreInstance, conn: &Connection) {
+        match ds.get_key_value(conn, PRIVACY_FILTERS_KEY) {
+            Ok(json_str) => match PrivacyFilterEngine::from_json(&json_str) {
+                Ok(engine) => self.privacy_engine = engine,
+                Err(e) => warn!("Failed to parse privacy_filters setting: {e}"),
+            },
+            Err(DatastoreError::NoSuchKey(_)) => {
+                self.privacy_engine = PrivacyFilterEngine::new(vec![]);
+            }
+            Err(e) => warn!("Failed to load privacy_filters setting: {e:?}"),
         }
     }
 
@@ -165,6 +189,11 @@ impl DatastoreWorker {
 
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
 
+        // Load persisted privacy filters before serving inserts. The engine
+        // starts empty; without this, rules saved in a previous process sit
+        // unused until something happens to send RefreshPrivacyFilter.
+        self.reload_privacy_engine(&ds, &conn);
+
         // Ensure legacy import
         if self.legacy_import {
             let transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
@@ -200,6 +229,13 @@ impl DatastoreWorker {
                         continue;
                     }
                 };
+            // Snapshot BEFORE the request loop. SetKeyValue/DeleteKeyValue
+            // reload the engine from the still-open transaction so a later
+            // insert in the same batch is filtered. If commit fails we restore
+            // this snapshot — not "keep current" (that is the rolled-back
+            // view) and not a durable re-query (a read error would leave the
+            // uncommitted engine in place: fail-open after a rolled-back delete).
+            let privacy_engine_at_tx_start = self.privacy_engine.clone();
             tx.set_drop_behavior(DropBehavior::Commit);
 
             self.uncommitted_events = 0;
@@ -263,6 +299,11 @@ impl DatastoreWorker {
                     // know to retry. Rolled-back events create a gap in the timeline;
                     // watchers will resume sending heartbeats from current state, but the
                     // specific batch of events is permanently lost.
+                    //
+                    // Restore the pre-transaction engine. Reloading from the durable
+                    // connection is not enough: if that read fails, keep-on-error would
+                    // preserve the uncommitted engine (empty after a rolled-back delete).
+                    self.privacy_engine = privacy_engine_at_tx_start;
                     if let Some((sender, _)) = deferred_ack.take() {
                         sender.respond(Err(DatastoreError::InternalError(format!(
                             "Failed to commit datastore transaction: {err}"
@@ -386,7 +427,12 @@ impl DatastoreWorker {
                 Err(e) => Err(e),
             },
             Command::SetKeyValue(key, data) => match ds.insert_key_value(tx, &key, &data) {
-                Ok(()) => Ok(Response::Empty()),
+                Ok(()) => {
+                    if key == PRIVACY_FILTERS_KEY {
+                        self.reload_privacy_engine(ds, tx);
+                    }
+                    Ok(Response::Empty())
+                }
                 Err(e) => Err(e),
             },
             Command::GetKeyValue(key) => match ds.get_key_value(tx, &key) {
@@ -394,21 +440,16 @@ impl DatastoreWorker {
                 Err(e) => Err(e),
             },
             Command::DeleteKeyValue(key) => match ds.delete_key_value(tx, &key) {
-                Ok(()) => Ok(Response::Empty()),
+                Ok(()) => {
+                    if key == PRIVACY_FILTERS_KEY {
+                        self.reload_privacy_engine(ds, tx);
+                    }
+                    Ok(Response::Empty())
+                }
                 Err(e) => Err(e),
             },
             Command::RefreshPrivacyFilter() => {
-                // Reload privacy filter rules from settings
-                match ds.get_key_value(tx, "settings.privacy_filters") {
-                    Ok(json_str) => match PrivacyFilterEngine::from_json(&json_str) {
-                        Ok(engine) => self.privacy_engine = engine,
-                        Err(e) => warn!("Failed to parse privacy_filters setting: {e}"),
-                    },
-                    Err(_) => {
-                        // Settings key absent — clear rules so removing the key disables filtering
-                        self.privacy_engine = PrivacyFilterEngine::new(vec![]);
-                    }
-                }
+                self.reload_privacy_engine(ds, tx);
                 Ok(Response::Empty())
             }
             Command::RenameBucket(old_id, new_id) => match ds.rename_bucket(tx, &old_id, &new_id) {

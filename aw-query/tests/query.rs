@@ -170,6 +170,14 @@ mod query_tests {
         let code = String::from("return  True==1;");
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidType(_));
+
+        // None comparison, consistent with the PartialEq impl on DataType.
+        // print() returns None, so this compares two None values.
+        let code = String::from(r#"a=print("a"); b=print("b"); return a==b;"#);
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            aw_query::DataType::Bool(b) => assert!(b),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        };
     }
 
     #[test]

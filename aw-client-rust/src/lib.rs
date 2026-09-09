@@ -54,6 +54,20 @@ fn build_client(api_key: Option<String>) -> Result<reqwest::Client, Box<dyn Erro
         .build()?)
 }
 
+/// Build the name used for the single-instance lock.
+///
+/// `localhost` is normalized to `127.0.0.1` so that a client given either spelling
+/// takes the same lock, and so the name matches aw-client-python, which defaults
+/// its server hostname to `127.0.0.1`.
+fn single_instance_name(name: &str, host: &str, port: u16) -> String {
+    let host = if host == "localhost" {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    format!("{}-at-{}-on-{}", name, host, port)
+}
+
 impl AwClient {
     async fn send_success(
         request: reqwest::RequestBuilder,
@@ -74,9 +88,8 @@ impl AwClient {
         let baseurl = reqwest::Url::parse(&format!("http://{}:{}", host, port))?;
         let hostname = get_hostname();
         let client = build_client(api_key)?;
-        //TODO: change localhost string to 127.0.0.1 for feature parity
-        let single_instance_name = format!("{}-at-{}-on-{}", name, host, port);
-        let single_instance = single_instance::SingleInstance::new(single_instance_name.as_str())?;
+        let instance_name = single_instance_name(name, host, port);
+        let single_instance = single_instance::SingleInstance::new(instance_name.as_str())?;
 
         Ok(AwClient {
             client,
@@ -293,5 +306,32 @@ impl AwClient {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::single_instance_name;
+
+    #[test]
+    fn test_single_instance_name_normalizes_localhost() {
+        // Both spellings must take the same lock, otherwise two instances of the
+        // same watcher can run against the same server.
+        assert_eq!(
+            single_instance_name("aw-watcher-afk", "localhost", 5600),
+            single_instance_name("aw-watcher-afk", "127.0.0.1", 5600),
+        );
+        assert_eq!(
+            single_instance_name("aw-watcher-afk", "localhost", 5600),
+            "aw-watcher-afk-at-127.0.0.1-on-5600",
+        );
+    }
+
+    #[test]
+    fn test_single_instance_name_keeps_other_hosts() {
+        assert_eq!(
+            single_instance_name("aw-watcher-afk", "192.168.1.2", 5600),
+            "aw-watcher-afk-at-192.168.1.2-on-5600",
+        );
     }
 }

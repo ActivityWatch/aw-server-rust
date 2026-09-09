@@ -12,7 +12,7 @@ phf = { version = "0.11", features = ["macros"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 aw-models = { path = "../aw-models" }
-tokio = { version = "1.28.2", features = ["rt"] }
+tokio = { version = "1.28.2", features = ["rt", "net", "time"] }
 log = "0.4"
 libc = "0.2"
 thiserror = "1.0"

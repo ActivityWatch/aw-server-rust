@@ -16,8 +16,8 @@ use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::{json, Map};
 use single_instance::SingleInstance;
-use std::net::TcpStream;
 use std::time::Duration;
+use tokio::net::TcpStream;
 
 pub use aw_models::{Bucket, BucketMetadata, Event};
 
@@ -274,44 +274,114 @@ impl AwClient {
         Self::send_success(self.client.get(url)).await?.json().await
     }
 
-    // TODO: make async
-    pub fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
-        let socket_addrs = self.baseurl.socket_addrs(|| None)?;
-        let socket_addr = socket_addrs
-            .first()
-            .ok_or("Unable to resolve baseurl into socket address")?;
+    /// Wait up to ten seconds for a TCP connection, including DNS and retries.
+    /// Requires a Tokio runtime with networking and time enabled.
+    pub async fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
+        wait_for_server(&self.baseurl, Duration::from_secs(10)).await
+    }
+}
 
-        // Check if server is running with exponential backoff
+async fn wait_for_server(url: &reqwest::Url, max_wait: Duration) -> Result<(), Box<dyn Error>> {
+    // URL hosts include brackets around IPv6 literals; DNS lookup takes the bare address.
+    let host = url
+        .host_str()
+        .ok_or("Missing server hostname")?
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let port = url.port_or_known_default().ok_or("Missing server port")?;
+    let attempts = async {
+        let addresses: Vec<_> = tokio::net::lookup_host((host, port)).await?.collect();
+        if addresses.is_empty() {
+            return Err("Unable to resolve baseurl into socket address".into());
+        }
         let mut retry_delay = Duration::from_millis(100);
-        let max_wait = Duration::from_secs(10);
-        let mut total_wait = Duration::from_secs(0);
-
-        while total_wait < max_wait {
-            match TcpStream::connect_timeout(socket_addr, retry_delay) {
-                Ok(_) => break,
-                Err(_) => {
-                    std::thread::sleep(retry_delay);
-                    total_wait += retry_delay;
-                    retry_delay *= 2;
+        loop {
+            for address in &addresses {
+                if matches!(
+                    tokio::time::timeout(retry_delay, TcpStream::connect(address)).await,
+                    Ok(Ok(_))
+                ) {
+                    return Ok(());
                 }
             }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(1));
         }
-
-        if total_wait >= max_wait {
-            return Err(format!(
-                "Local server {} not running after 10 seconds of retrying",
-                socket_addr
+    };
+    tokio::time::timeout(max_wait, attempts)
+        .await
+        .map_err(|_| -> Box<dyn Error> {
+            format!(
+                "Local server {host}:{port} not running after {} seconds of retrying",
+                max_wait.as_secs_f64()
             )
-            .into());
-        }
-
-        Ok(())
-    }
+            .into()
+        })?
 }
 
 #[cfg(test)]
 mod tests {
     use super::single_instance_name;
+
+    #[test]
+    fn test_wait_for_start_success() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap()))
+                .unwrap();
+            super::wait_for_server(&url, std::time::Duration::from_secs(1))
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_wait_for_start_retries_without_blocking_executor() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // Reserve a port without listening, then start the server on this same runtime.
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let url =
+                reqwest::Url::parse(&format!("http://{}/", socket.local_addr().unwrap())).unwrap();
+            let server = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                let listener = socket.listen(8).unwrap();
+                listener.accept().await.unwrap();
+            });
+            super::wait_for_server(&url, std::time::Duration::from_secs(2))
+                .await
+                .unwrap();
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_wait_for_start_deadline() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let url =
+                reqwest::Url::parse(&format!("http://{}/", socket.local_addr().unwrap())).unwrap();
+            let started = std::time::Instant::now();
+            let budget = std::time::Duration::from_millis(150);
+            let error = super::wait_for_server(&url, budget).await.unwrap_err();
+            assert!(error.to_string().contains("not running after 0.15 seconds"));
+            assert!(started.elapsed() >= budget);
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        });
+    }
 
     #[test]
     fn test_single_instance_name_normalizes_localhost() {

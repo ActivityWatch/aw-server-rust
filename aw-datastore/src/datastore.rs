@@ -439,20 +439,14 @@ impl DatastoreInstance {
                 }
                 Ok(())
             }
-            // FIXME: This match is ugly, is it possible to write it in a cleaner way?
-            Err(err) => match err {
-                rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _ } => match sqlerr.code {
-                    rusqlite::ErrorCode::ConstraintViolation => {
-                        Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string()))
-                    }
-                    _ => Err(DatastoreError::InternalError(format!(
-                        "Failed to execute create_bucket SQL statement: {err}"
-                    ))),
-                },
-                _ => Err(DatastoreError::InternalError(format!(
-                    "Failed to execute create_bucket SQL statement: {err}"
-                ))),
-            },
+            Err(rusqlite::Error::SqliteFailure(sqlerr, _))
+                if sqlerr.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string()))
+            }
+            Err(err) => Err(DatastoreError::InternalError(format!(
+                "Failed to execute create_bucket SQL statement: {err}"
+            ))),
         }
     }
 

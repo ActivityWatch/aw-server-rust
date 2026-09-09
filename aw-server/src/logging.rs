@@ -76,12 +76,7 @@ pub fn setup_logger(module: &str, profile: &str, verbose: bool) -> Result<(), fe
         // No color and lower log levels to logfile
         .chain(
             fern::Dispatch::new()
-                .format(|out, message, _record| {
-                    out.finish(format_args!(
-                        // TODO: Strip color info
-                        "{message}",
-                    ))
-                })
+                .format(|out, message, _record| out.finish(format_args!("{message}")))
                 .chain(fern::log_file(logfile_path)?),
         )
         .apply()?;

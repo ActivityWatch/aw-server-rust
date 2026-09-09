@@ -60,7 +60,7 @@ fn build_client(api_key: Option<String>) -> Result<reqwest::Client, Box<dyn Erro
 /// takes the same lock, and so the name matches aw-client-python, which defaults
 /// its server hostname to `127.0.0.1`.
 fn single_instance_name(name: &str, host: &str, port: u16) -> String {
-    let host = if host == "localhost" {
+    let host = if host.eq_ignore_ascii_case("localhost") {
         "127.0.0.1"
     } else {
         host
@@ -395,6 +395,16 @@ mod tests {
             single_instance_name("aw-watcher-afk", "localhost", 5600),
             "aw-watcher-afk-at-127.0.0.1-on-5600",
         );
+
+        // Hostnames are case-insensitive, so case variants must take the same
+        // lock rather than each getting one of their own.
+        for variant in ["LOCALHOST", "LocalHost", "localHost"] {
+            assert_eq!(
+                single_instance_name("aw-watcher-afk", variant, 5600),
+                "aw-watcher-afk-at-127.0.0.1-on-5600",
+                "host spelling {variant:?} should normalize"
+            );
+        }
     }
 
     #[test]

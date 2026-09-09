@@ -27,8 +27,10 @@ impl HttpErrorJson {
 
 impl<'r> Responder<'r, 'static> for HttpErrorJson {
     fn respond_to(self, _: &Request) -> response::Result<'static> {
-        // TODO: Fix unwrap
-        let body = serde_json::to_string(&self).unwrap();
+        let body = serde_json::to_string(&self).map_err(|err| {
+            error!("Failed to serialize error response: {err}");
+            Status::InternalServerError
+        })?;
         Response::build()
             .status(self.status)
             .sized_body(body.len(), Cursor::new(body))
@@ -49,7 +51,10 @@ impl From<BucketsExport> for BucketsExportRocket {
 
 impl<'r> Responder<'r, 'static> for BucketsExportRocket {
     fn respond_to(self, _: &Request) -> response::Result<'static> {
-        let body = serde_json::to_string(&self.inner).unwrap();
+        let body = serde_json::to_string(&self.inner).map_err(|err| {
+            error!("Failed to serialize bucket export: {err}");
+            Status::InternalServerError
+        })?;
         let header_content = match self.inner.buckets.len() == 1 {
             true => format!(
                 "attachment; filename=aw-bucket-export_{}.json",
@@ -57,7 +62,6 @@ impl<'r> Responder<'r, 'static> for BucketsExportRocket {
             ),
             false => "attachment; filename=aw-buckets-export.json".to_string(),
         };
-        // TODO: Fix unwrap
         Response::build()
             .status(Status::Ok)
             .header(Header::new("Content-Disposition", header_content))

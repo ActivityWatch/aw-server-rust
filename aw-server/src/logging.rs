@@ -61,22 +61,32 @@ pub fn setup_logger(module: &str, profile: &str, verbose: bool) -> Result<(), fe
     }
 
     dispatch
-        // Formatting
-        .format(move |out, message, record| {
-            out.finish(format_args!(
-                "[{}][{}][{}]: {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                colors.color(record.level()),
-                record.target(),
-                message,
-            ))
-        })
-        // Color and higher log levels to stdout
-        .chain(fern::Dispatch::new().chain(std::io::stdout()))
-        // No color and lower log levels to logfile
+        // Colored output to stdout
         .chain(
             fern::Dispatch::new()
-                .format(|out, message, _record| out.finish(format_args!("{message}")))
+                .format(move |out, message, record| {
+                    out.finish(format_args!(
+                        "[{}][{}][{}]: {}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                        colors.color(record.level()),
+                        record.target(),
+                        message,
+                    ))
+                })
+                .chain(std::io::stdout()),
+        )
+        // Uncolored output to logfile, so the file doesn't contain ANSI escapes
+        .chain(
+            fern::Dispatch::new()
+                .format(|out, message, record| {
+                    out.finish(format_args!(
+                        "[{}][{}][{}]: {}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                        record.level(),
+                        record.target(),
+                        message,
+                    ))
+                })
                 .chain(fern::log_file(logfile_path)?),
         )
         .apply()?;

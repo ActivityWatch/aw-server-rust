@@ -227,10 +227,7 @@ pub fn bucket_export(
         buckets: HashMap::new(),
     };
     let mut bucket = datastore.get_bucket(bucket_id)?;
-    /* TODO: Replace expect with http error */
-    let events = datastore
-        .get_events(bucket_id, None, None, None)
-        .expect("Failed to get events for bucket");
+    let events = datastore.get_events(bucket_id, None, None, None)?;
     bucket.events = Some(TryVec::new(events));
     export.buckets.insert(bucket_id.into(), bucket);
 

@@ -4,7 +4,7 @@ use std::fmt;
 use super::functions;
 use super::QueryError;
 use aw_models::Event;
-use aw_transform::classify::{CategoryRule, RegexRule, Rule};
+use aw_transform::classify::{CategoryRule, RegexFieldsRule, RegexRule, Rule};
 
 use serde::{Serialize, Serializer};
 use serde_json::value::Value;
@@ -469,6 +469,70 @@ impl TryFrom<&DataType> for Rule {
                 }
             };
             Ok(Self::Regex(regex_rule))
+        } else if rtype == "regex_fields" {
+            // Reject stale `regex` or `select_keys` members that would be silently ignored
+            // on older backends, guarding against the identified rollout hazard.
+            if obj.contains_key("regex") {
+                return Err(QueryError::InvalidFunctionParameters(
+                    "regex_fields rule must not contain a 'regex' member (use 'fields' instead)"
+                        .to_string(),
+                ));
+            }
+            if obj.contains_key("select_keys") {
+                return Err(QueryError::InvalidFunctionParameters(
+                    "regex_fields rule must not contain 'select_keys' (use 'fields' instead)"
+                        .to_string(),
+                ));
+            }
+            let fields_val = match obj.get("fields") {
+                Some(f) => f,
+                None => {
+                    return Err(QueryError::InvalidFunctionParameters(
+                        "regex_fields rule is missing the 'fields' map".to_string(),
+                    ))
+                }
+            };
+            let fields_dict = match fields_val {
+                DataType::Dict(d) => d,
+                _ => {
+                    return Err(QueryError::InvalidFunctionParameters(
+                        "regex_fields 'fields' must be a dict".to_string(),
+                    ))
+                }
+            };
+            let mut field_map = std::collections::HashMap::with_capacity(fields_dict.len());
+            for (k, v) in fields_dict {
+                let pattern = match v {
+                    DataType::String(s) => s.clone(),
+                    _ => {
+                        return Err(QueryError::InvalidFunctionParameters(format!(
+                            "regex_fields: pattern for field '{k}' must be a string"
+                        )))
+                    }
+                };
+                field_map.insert(k.clone(), pattern);
+            }
+            let ignore_case_val = match obj.get("ignore_case") {
+                Some(case_val) => case_val,
+                None => &DataType::Bool(false),
+            };
+            let ignore_case = match ignore_case_val {
+                DataType::Bool(b) => *b,
+                _ => {
+                    return Err(QueryError::InvalidFunctionParameters(
+                        "regex_fields: ignore_case must be a bool".to_string(),
+                    ))
+                }
+            };
+            let rule = match RegexFieldsRule::new(field_map, ignore_case) {
+                Ok(r) => r,
+                Err(err) => {
+                    return Err(QueryError::RegexCompileError(format!(
+                        "Failed to compile regex_fields patterns: {err:?}"
+                    )))
+                }
+            };
+            Ok(Self::RegexFields(rule))
         } else {
             Err(QueryError::InvalidFunctionParameters(format!(
                 "Unknown rule type '{rtype}'"

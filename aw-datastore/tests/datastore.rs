@@ -226,6 +226,15 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_key_values_empty_result() {
+        let ds = Datastore::new_in_memory(false);
+
+        let values = ds.get_key_values("settings.%").unwrap();
+
+        assert!(values.is_empty());
+    }
+
+    #[test]
     fn test_bucket_create_delete() {
         // Setup datastore
         let ds = Datastore::new_in_memory(false);

@@ -63,7 +63,8 @@ impl DataType {
     pub fn query_eq(&self, other: &DataType) -> Result<bool, QueryError> {
         match (self, other) {
             // TODO: Comparisons of bool == num, bool == str
-            (DataType::None(), DataType::None()) => Ok(false),
+            // None is equal to itself, matching the PartialEq impl below.
+            (DataType::None(), DataType::None()) => Ok(true),
             (DataType::Bool(b1), DataType::Bool(b2)) => Ok(b1 == b2),
             (DataType::Number(n1), DataType::Number(n2)) => Ok(n1 == n2),
             (DataType::String(s1), DataType::String(s2)) => Ok(s1 == s2),

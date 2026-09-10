@@ -92,6 +92,18 @@ impl AwClient {
     proxy_method!(get_settings, aw_models::Settings,);
 
     pub fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
-        self.client.wait_for_start()
+        block_on(self.client.wait_for_start())
     }
+}
+
+#[test]
+fn test_wait_for_start_blocking_wrapper() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = AwClient::new(
+        "127.0.0.1",
+        listener.local_addr().unwrap().port(),
+        "test-wait-for-start-blocking",
+    )
+    .unwrap();
+    client.wait_for_start().unwrap();
 }

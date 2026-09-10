@@ -213,6 +213,41 @@ pub struct DatastoreInstance {
     pub db_version: i32,
 }
 
+/// Parse an event from a row selected as `id, starttime, endtime, data`.
+///
+/// When `clip` is set to `(starttime_filter_ns, endtime_filter_ns)`, the event is
+/// clamped to that query range.
+fn parse_event_row(row: &rusqlite::Row, clip: Option<(i64, i64)>) -> rusqlite::Result<Event> {
+    let id = row.get(0)?;
+    let mut starttime_ns: i64 = row.get(1)?;
+    let mut endtime_ns: i64 = row.get(2)?;
+    let data_str: String = row.get(3)?;
+
+    if let Some((starttime_filter_ns, endtime_filter_ns)) = clip {
+        if starttime_ns < starttime_filter_ns {
+            starttime_ns = starttime_filter_ns
+        }
+        if endtime_ns > endtime_filter_ns {
+            endtime_ns = endtime_filter_ns
+        }
+    }
+    let duration_ns = endtime_ns - starttime_ns;
+
+    let time_seconds: i64 = starttime_ns / 1_000_000_000;
+    let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
+    let data: serde_json::map::Map<String, Value> =
+        serde_json::from_str(&data_str).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
+        })?;
+
+    Ok(Event {
+        id: Some(id),
+        timestamp: DateTime::from_timestamp(time_seconds, time_subnanos).unwrap(),
+        duration: Duration::nanoseconds(duration_ns),
+        data,
+    })
+}
+
 impl DatastoreInstance {
     pub fn new(
         conn: &Connection,
@@ -404,20 +439,14 @@ impl DatastoreInstance {
                 }
                 Ok(())
             }
-            // FIXME: This match is ugly, is it possible to write it in a cleaner way?
-            Err(err) => match err {
-                rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _ } => match sqlerr.code {
-                    rusqlite::ErrorCode::ConstraintViolation => {
-                        Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string()))
-                    }
-                    _ => Err(DatastoreError::InternalError(format!(
-                        "Failed to execute create_bucket SQL statement: {err}"
-                    ))),
-                },
-                _ => Err(DatastoreError::InternalError(format!(
-                    "Failed to execute create_bucket SQL statement: {err}"
-                ))),
-            },
+            Err(rusqlite::Error::SqliteFailure(sqlerr, _))
+                if sqlerr.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string()))
+            }
+            Err(err) => Err(DatastoreError::InternalError(format!(
+                "Failed to execute create_bucket SQL statement: {err}"
+            ))),
         }
     }
 
@@ -722,25 +751,8 @@ impl DatastoreInstance {
             }
         };
 
-        // TODO: Refactor to share row-parsing logic with get_events
         let row = match stmt.query_row([&bucket.bid.unwrap(), &event_id], |row| {
-            let id = row.get(0)?;
-            let starttime_ns: i64 = row.get(1)?;
-            let endtime_ns: i64 = row.get(2)?;
-            let data_str: String = row.get(3)?;
-
-            let time_seconds: i64 = starttime_ns / 1_000_000_000;
-            let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
-            let duration_ns = endtime_ns - starttime_ns;
-            let data: serde_json::map::Map<String, Value> =
-                serde_json::from_str(&data_str).unwrap();
-
-            Ok(Event {
-                id: Some(id),
-                timestamp: DateTime::from_timestamp(time_seconds, time_subnanos).unwrap(),
-                duration: Duration::nanoseconds(duration_ns),
-                data,
-            })
+            parse_event_row(row, None)
         }) {
             Ok(rows) => rows,
             Err(err) => {
@@ -810,32 +822,10 @@ impl DatastoreInstance {
                 &limit,
             ],
             |row| {
-                let id = row.get(0)?;
-                let mut starttime_ns: i64 = row.get(1)?;
-                let mut endtime_ns: i64 = row.get(2)?;
-                let data_str: String = row.get(3)?;
-
-                if clip_to_query_range {
-                    if starttime_ns < starttime_filter_ns {
-                        starttime_ns = starttime_filter_ns
-                    }
-                    if endtime_ns > endtime_filter_ns {
-                        endtime_ns = endtime_filter_ns
-                    }
-                }
-                let duration_ns = endtime_ns - starttime_ns;
-
-                let time_seconds: i64 = starttime_ns / 1_000_000_000;
-                let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
-                let data: serde_json::map::Map<String, Value> =
-                    serde_json::from_str(&data_str).unwrap();
-
-                Ok(Event {
-                    id: Some(id),
-                    timestamp: DateTime::from_timestamp(time_seconds, time_subnanos).unwrap(),
-                    duration: Duration::nanoseconds(duration_ns),
-                    data,
-                })
+                parse_event_row(
+                    row,
+                    clip_to_query_range.then_some((starttime_filter_ns, endtime_filter_ns)),
+                )
             },
         ) {
             Ok(rows) => rows,

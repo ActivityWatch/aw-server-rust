@@ -5,6 +5,24 @@ use fern::colors::{Color, ColoredLevelConfig};
 
 use crate::dirs;
 
+/// Render a single log line.
+///
+/// `level` is taken as a `Display` so the caller decides whether it is colored:
+/// stdout passes a colorized level, the logfile passes the plain one.
+fn format_log_line(
+    level: &dyn std::fmt::Display,
+    target: &str,
+    message: &std::fmt::Arguments,
+) -> String {
+    format!(
+        "[{}][{}][{}]: {}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        level,
+        target,
+        message,
+    )
+}
+
 pub fn setup_logger(module: &str, profile: &str, verbose: bool) -> Result<(), fern::InitError> {
     let testing = profile == "testing";
     let mut logfile_path: PathBuf =
@@ -61,25 +79,24 @@ pub fn setup_logger(module: &str, profile: &str, verbose: bool) -> Result<(), fe
     }
 
     dispatch
-        // Formatting
-        .format(move |out, message, record| {
-            out.finish(format_args!(
-                "[{}][{}][{}]: {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                colors.color(record.level()),
-                record.target(),
-                message,
-            ))
-        })
-        // Color and higher log levels to stdout
-        .chain(fern::Dispatch::new().chain(std::io::stdout()))
-        // No color and lower log levels to logfile
+        // Colored output to stdout
         .chain(
             fern::Dispatch::new()
-                .format(|out, message, _record| {
+                .format(move |out, message, record| {
                     out.finish(format_args!(
-                        // TODO: Strip color info
-                        "{message}",
+                        "{}",
+                        format_log_line(&colors.color(record.level()), record.target(), message)
+                    ))
+                })
+                .chain(std::io::stdout()),
+        )
+        // Uncolored output to logfile, so the file doesn't contain ANSI escapes
+        .chain(
+            fern::Dispatch::new()
+                .format(|out, message, record| {
+                    out.finish(format_args!(
+                        "{}",
+                        format_log_line(&record.level(), record.target(), message)
                     ))
                 })
                 .chain(fern::log_file(logfile_path)?),
@@ -90,7 +107,8 @@ pub fn setup_logger(module: &str, profile: &str, verbose: bool) -> Result<(), fe
 
 #[cfg(test)]
 mod tests {
-    use super::setup_logger;
+    use super::{format_log_line, setup_logger};
+    use fern::colors::{Color, ColoredLevelConfig};
 
     /* disable this test.
      * This is due to it failing in GitHub actions, claiming that the logger
@@ -99,5 +117,37 @@ mod tests {
     #[test]
     fn test_setup_logger() {
         setup_logger("aw-server-rust", "testing", true).unwrap();
+    }
+
+    /* The formatting is tested directly rather than through setup_logger, which
+     * installs the global logger and so can only ever run once per process. */
+    #[test]
+    fn test_format_log_line_is_plain_for_logfile() {
+        let line = format_log_line(&log::Level::Info, "aw_server::test", &format_args!("hello"));
+
+        assert!(
+            !line.contains('\u{1b}'),
+            "logfile lines must not contain ANSI escapes, got {line:?}"
+        );
+        assert!(
+            line.ends_with("[INFO][aw_server::test]: hello"),
+            "unexpected log line: {line:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_log_line_is_colored_for_stdout() {
+        let colors = ColoredLevelConfig::new().info(Color::Green);
+        let line = format_log_line(
+            &colors.color(log::Level::Info),
+            "aw_server::test",
+            &format_args!("hello"),
+        );
+
+        assert!(
+            line.contains('\u{1b}'),
+            "stdout lines should keep their color, got {line:?}"
+        );
+        assert!(line.ends_with("[aw_server::test]: hello"));
     }
 }

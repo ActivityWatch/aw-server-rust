@@ -1,9 +1,7 @@
 use dirs::home_dir;
 use std::error::Error;
 use std::fs;
-#[cfg(any(target_os = "android", test))]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve the instance profile.
 /// `--profile` wins, then `AW_PROFILE`, then `--testing` → `"testing"`, else `"default"`.
@@ -84,13 +82,91 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
     }
 }
 
+/// The documented default sync data location: `data_dir()/activitywatch/aw-sync`,
+/// mirroring aw-server's data-dir convention (`data_dir()/activitywatch/<component>`)
+/// and aw-sync's own config dir (`config_dir()/activitywatch/aw-sync`).
+#[cfg(not(target_os = "android"))]
+fn default_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(dirs::data_dir()
+        .ok_or("Unable to read user data dir")?
+        .join("activitywatch")
+        .join("aw-sync"))
+}
+
+fn legacy_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(home_dir()
+        .ok_or("Unable to read home_dir")?
+        .join("ActivityWatchSync"))
+}
+
+/// Whether `path` has at least one directory entry.
+///
+/// `None` means the path could not be enumerated (permission error, not a
+/// directory, I/O). Callers must not treat that as empty: an unreadable
+/// `~/ActivityWatchSync` is still the live transport root.
+#[cfg(not(target_os = "android"))]
+fn dir_has_entries(path: &Path) -> Option<bool> {
+    match fs::read_dir(path) {
+        Ok(mut it) => Some(it.next().is_some()),
+        Err(_) => None,
+    }
+}
+
+/// Prefer an existing `~/ActivityWatchSync` so folder-sync setups
+/// (Syncthing/Dropbox/etc watching that path) keep working. New installs
+/// with no legacy dir use the documented data-dir location.
+///
+/// Do not auto-rename: a failed cross-device `rename` would leave the daemon
+/// writing a fresh empty tree, and a successful one would disconnect any
+/// external transport still pointed at the old path.
+///
+/// An empty leftover `~/ActivityWatchSync` must not displace live data
+/// already in the documented directory (backup restore of an empty folder,
+/// old docs creating the path after a new install has started syncing).
+/// A legacy path that exists but cannot be enumerated is kept: treating a
+/// read error as emptiness would silently switch the daemon onto the
+/// documented dir while Syncthing/Dropbox still watch the old path.
+#[cfg(not(target_os = "android"))]
+fn resolve_sync_dir(legacy: &Path, documented: &Path) -> PathBuf {
+    // exists() maps metadata errors to false, which would silently switch
+    // onto the documented dir while Syncthing/Dropbox still watch the
+    // legacy path. Fail closed: only leave legacy when we *know* it is absent.
+    match legacy.try_exists() {
+        Ok(false) => return documented.to_path_buf(),
+        Ok(true) => {}
+        Err(_) => return legacy.to_path_buf(),
+    }
+    match dir_has_entries(legacy) {
+        // Has content, or unreadable: keep the transport-attached path.
+        Some(true) | None => legacy.to_path_buf(),
+        Some(false) => {
+            if dir_has_entries(documented) == Some(true) {
+                documented.to_path_buf()
+            } else {
+                legacy.to_path_buf()
+            }
+        }
+    }
+}
+
 pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
     // if AW_SYNC_DIR is set, use that
     if let Ok(dir) = std::env::var("AW_SYNC_DIR") {
         return Ok(PathBuf::from(dir));
     }
-    let home_dir = home_dir().ok_or("Unable to read home_dir")?;
-    Ok(home_dir.join("ActivityWatchSync"))
+    // Desktop: keep sync data out of the user's home directory and follow the
+    // documented data-dir convention (ActivityWatch/activitywatch#1418).
+    // If the previous default already has content, keep using it — aw-sync's
+    // transport is an external folder synchronizer watching that path.
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(resolve_sync_dir(&legacy_sync_dir()?, &default_sync_dir()?))
+    }
+    // Android is already app-scoped; keep the historical location there.
+    #[cfg(target_os = "android")]
+    {
+        legacy_sync_dir()
+    }
 }
 
 /// SyncInterface.kt sets `XDG_DATA_HOME=$filesDir/data` before `loadLibrary`.
@@ -211,5 +287,120 @@ mod tests {
         assert!(files_dir_from_xdg_data_home(Path::new("/")).is_none());
         assert!(files_dir_from_xdg_data_home(Path::new("data")).is_none());
         assert!(files_dir_from_xdg_data_home(Path::new("/tmp/config")).is_none());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn unique_root() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "aw-sync-resolve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn prefers_existing_legacy_sync_dir() {
+        let root = unique_root();
+        let legacy = root.join("ActivityWatchSync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("test.db"), b"sqlite").unwrap();
+
+        assert_eq!(resolve_sync_dir(&legacy, &documented), legacy);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn uses_documented_dir_when_no_legacy() {
+        let root = unique_root();
+        let legacy = root.join("ActivityWatchSync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+
+        assert_eq!(resolve_sync_dir(&legacy, &documented), documented);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn prefers_legacy_even_if_documented_also_exists() {
+        // Don't silently switch away from a live folder-sync path.
+        let root = unique_root();
+        let legacy = root.join("ActivityWatchSync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("legacy.db"), b"1").unwrap();
+        fs::create_dir_all(&documented).unwrap();
+        fs::write(documented.join("new.db"), b"2").unwrap();
+
+        assert_eq!(resolve_sync_dir(&legacy, &documented), legacy);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn empty_legacy_does_not_displace_populated_documented() {
+        // A restored/recreated empty ~/ActivityWatchSync must not hide
+        // remote databases already in the documented data dir.
+        let root = unique_root();
+        let legacy = root.join("ActivityWatchSync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&documented).unwrap();
+        fs::write(documented.join("test.db"), b"sqlite").unwrap();
+
+        assert_eq!(resolve_sync_dir(&legacy, &documented), documented);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn unreadable_legacy_keeps_legacy_even_if_documented_populated() {
+        // read_dir error must not be treated as "empty" — that would switch
+        // the daemon onto the documented dir while Syncthing still watches
+        // the legacy path. A regular file at the legacy path is a portable
+        // stand-in for permission/IO failure.
+        let root = unique_root();
+        let legacy = root.join("ActivityWatchSync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&legacy, b"not-a-directory").unwrap();
+        fs::create_dir_all(&documented).unwrap();
+        fs::write(documented.join("test.db"), b"sqlite").unwrap();
+
+        assert_eq!(resolve_sync_dir(&legacy, &documented), legacy);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn metadata_error_on_legacy_keeps_legacy() {
+        // Path::exists() treats a metadata error as absence. try_exists()
+        // must fail closed onto the legacy path so we don't abandon a
+        // Syncthing/Dropbox root whose parent we cannot stat.
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_root();
+        let parent = root.join("hidden");
+        let legacy = parent.join("ActivityWatchSync");
+        let documented = root.join("data").join("activitywatch").join("aw-sync");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("test.db"), b"sqlite").unwrap();
+        fs::create_dir_all(&documented).unwrap();
+        fs::write(documented.join("new.db"), b"2").unwrap();
+
+        let mut perms = fs::metadata(&parent).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&parent, perms).unwrap();
+
+        let chosen = resolve_sync_dir(&legacy, &documented);
+        let _ = fs::set_permissions(&parent, fs::Permissions::from_mode(0o755));
+
+        assert_eq!(chosen, legacy);
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -12,7 +12,7 @@ Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch
 
 ## Usage
 
-This will start a daemon which pulls and pushes events with the sync directory (`~/ActivityWatchSync` by default) every 5 minutes:
+This will start a daemon which pulls and pushes events with the sync directory every 5 minutes (platform data dir by default; `~/ActivityWatchSync` if that already has content):
 
 ```sh
 # Basic sync daemon (syncs all buckets every 5 minutes)
@@ -46,7 +46,7 @@ For more options, see `aw-sync --help`. Some notable options:
 
 Once you have aw-sync running, you need to set up syncing with the sync directory using your preferred syncing tool.
 
-The default sync directory is `~/ActivityWatchSync`, but you can change it using the `--sync-dir` option or by setting the `AW_SYNC_DIR` environment variable.
+The default sync directory is the platform data dir (`~/.local/share/activitywatch/aw-sync` on Linux, `~/Library/Application Support/activitywatch/aw-sync` on macOS, `%APPDATA%/activitywatch/aw-sync` on Windows). If `~/ActivityWatchSync` already has content (the previous default), that path is kept so existing Syncthing/Dropbox setups keep working. An empty leftover of that path does not displace live data in the documented directory. Override with `--sync-dir` or `AW_SYNC_DIR`.
 
 ### Running from source
 
@@ -94,7 +94,7 @@ We will use some helper scripts to do the following:
 
 1. `./test-sync-push.sh`
     - Creates a sync directory **for you to set up sync** with Syncthing/Dropbox/Gdrive/rclone/whatever
-      - By default `~/ActivityWatchSync`
+      - Platform data dir by default; `~/ActivityWatchSync` if that already has content
     - Creates a datastore for the current host in the sync folder
     - Sync all local buckets of interest (window & afk buckets, by default) to the sync dir
 
@@ -106,7 +106,7 @@ We will use some helper scripts to do the following:
 
 4. You should now have all events synced to a local testing instance!
     - You can browse [127.0.0.1:5667](http://127.0.0.1:5667) to view testing instance, where you'll see events from synced all hosts.
-    - You can now set up syncing for `~/ActivityWatchSync` on more devices, and on each one use the script `./test-sync.sh` to push their events into the sync folder, then run `./test-import-sync.sh` on the device where you have the testing instance to update the data there.
+    - You can now set up syncing for the sync directory on more devices, and on each one use the script `./test-sync.sh` to push their events into the sync folder, then run `./test-import-sync.sh` on the device where you have the testing instance to update the data there.
 
 5. To view data from all devices at once, go into [127.0.0.1:5667/#/settings](127.0.0.1:5667/#/settings) and check the "Use multidevice query" checkbox (near the bottom, under "developer settings").
     - You can now navigate back to the activity view for any device, where you should see data from multiple devices being included in (most of) the visualizations.

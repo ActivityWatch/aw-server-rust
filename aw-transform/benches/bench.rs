@@ -1,5 +1,5 @@
 use chrono::Duration;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
@@ -50,5 +50,35 @@ fn bench_filter_period_intersect(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_filter_period_intersect);
+fn bench_merge_events_by_keys(c: &mut Criterion) {
+    let mut group = c.benchmark_group("merge_events_by_keys");
+    for distinct in [100, 50_000] {
+        let mut events = create_events(50_000);
+        for (i, event) in events.iter_mut().enumerate() {
+            event.data = json_map! {
+                "app": "browser",
+                "title": format!("Page {}", i % distinct),
+                "url": "https://example.com/a/long/path"
+            };
+        }
+        group.bench_with_input(
+            BenchmarkId::new("distinct", distinct),
+            &events,
+            |b, events| {
+                b.iter_batched(
+                    || (events.clone(), vec!["app".into(), "title".into()]),
+                    |(events, keys)| merge_events_by_keys(events, keys),
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_filter_period_intersect,
+    bench_merge_events_by_keys
+);
 criterion_main!(benches);

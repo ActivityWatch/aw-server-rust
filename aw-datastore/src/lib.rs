@@ -18,6 +18,7 @@ macro_rules! json_map {
 }
 
 mod datastore;
+mod export;
 mod legacy_import;
 mod privacy_filter;
 mod worker;

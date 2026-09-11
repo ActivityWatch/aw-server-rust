@@ -40,6 +40,7 @@ uuid = { version = "1.3", features = ["serde", "v4"] }
 clap = { version = "4.1", features = ["derive", "cargo"] }
 log-panics = { version = "2", features = ["with-backtrace"]}
 subtle = "2"
+tempfile = "3"
 rust-embed = { version = "8.0.0", features = ["interpolate-folder-path", "debug-embed"] }
 aw-datastore = { path = "../aw-datastore", default-features = false }
 aw-models = { path = "../aw-models" }

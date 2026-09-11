@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::thread;
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+};
 
 use chrono::DateTime;
 use chrono::Duration;
@@ -41,8 +45,9 @@ impl fmt::Debug for Datastore {
  */
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Response {
+    Export(File, Option<String>),
     Empty(),
     Bucket(Bucket),
     BucketMap(HashMap<String, Bucket>),
@@ -54,8 +59,9 @@ pub enum Response {
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Command {
+    Export(Option<String>, File),
     CreateBucket(Bucket),
     DeleteBucket(String),
     GetBucket(String),
@@ -284,6 +290,15 @@ impl DatastoreWorker {
         tx: &Transaction,
     ) -> Result<Response, DatastoreError> {
         match request {
+            Command::Export(bucket_id, mut file) => {
+                let mut writer = BufWriter::new(&mut file);
+                let name = ds.write_export(tx, bucket_id.as_deref(), &mut writer)?;
+                writer.flush().map_err(|err| {
+                    DatastoreError::InternalError(format!("Failed to flush export: {err}"))
+                })?;
+                drop(writer);
+                Ok(Response::Export(file, name))
+            }
             Command::CreateBucket(bucket) => match ds.create_bucket(tx, bucket) {
                 Ok(_) => {
                     self.commit = true;
@@ -521,6 +536,20 @@ impl Datastore {
             e => Err(DatastoreError::InternalError(format!(
                 "Invalid response: {e:?}"
             ))),
+        }
+    }
+
+    /// Write a consistent export to an empty temporary file. The file is
+    /// returned only after serialization and flushing succeed. Event rows are
+    /// serialized individually, including this worker's uncommitted writes.
+    pub fn export_to_file(
+        &self,
+        bucket_id: Option<&str>,
+        file: File,
+    ) -> Result<(File, Option<String>), DatastoreError> {
+        match self.request(Command::Export(bucket_id.map(str::to_owned), file))? {
+            Response::Export(file, name) => Ok((file, name)),
+            _ => panic!("Invalid response"),
         }
     }
 

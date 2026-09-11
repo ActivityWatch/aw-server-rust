@@ -217,7 +217,10 @@ pub struct DatastoreInstance {
 ///
 /// When `clip` is set to `(starttime_filter_ns, endtime_filter_ns)`, the event is
 /// clamped to that query range.
-fn parse_event_row(row: &rusqlite::Row, clip: Option<(i64, i64)>) -> rusqlite::Result<Event> {
+pub(crate) fn parse_event_row(
+    row: &rusqlite::Row,
+    clip: Option<(i64, i64)>,
+) -> rusqlite::Result<Event> {
     let id = row.get(0)?;
     let mut starttime_ns: i64 = row.get(1)?;
     let mut endtime_ns: i64 = row.get(2)?;
@@ -489,6 +492,21 @@ impl DatastoreInstance {
 
     pub fn get_buckets(&self) -> HashMap<String, Bucket> {
         self.buckets_cache.clone()
+    }
+
+    /// Serialize an export one event at a time using the caller's connection.
+    /// Returns the bucket ID for a single-bucket export (for download naming).
+    pub fn write_export(
+        &self,
+        conn: &Connection,
+        bucket_id: Option<&str>,
+        writer: impl std::io::Write,
+    ) -> Result<Option<String>, DatastoreError> {
+        crate::export::write_export(conn, &self.buckets_cache, bucket_id, writer)?;
+        Ok(bucket_id.map(str::to_owned).or_else(|| {
+            (self.buckets_cache.len() == 1)
+                .then(|| self.buckets_cache.keys().next().unwrap().clone())
+        }))
     }
 
     pub fn insert_events(

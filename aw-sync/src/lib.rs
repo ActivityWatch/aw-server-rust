@@ -18,8 +18,6 @@ mod accessmethod;
 pub use accessmethod::AccessMethod;
 
 mod dirs;
-// Shared with the binary (main.rs); some items are only used there.
-#[allow(dead_code)]
 mod util;
 
 #[cfg(target_os = "android")]

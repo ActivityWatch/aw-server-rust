@@ -1,3 +1,6 @@
+// The public dir helpers use `Result<_, ()>` and are part of the crate API.
+#![allow(clippy::result_unit_err)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

@@ -25,11 +25,8 @@ pub fn split_url_event(event: &mut Event) {
     use url::Url;
 
     let uri_str = match event.data.get("url") {
-        None => return,
-        Some(val) => match val {
-            Value::String(s) => s.clone(),
-            _ => return,
-        },
+        Some(Value::String(s)) => s.clone(),
+        _ => return,
     };
     let uri = match Url::parse(&uri_str) {
         Ok(uri) => uri,

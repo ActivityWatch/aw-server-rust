@@ -22,8 +22,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Rebuild if the webui directory changes
     println!("cargo:rerun-if-env-changed=AW_WEBUI_DIR");
-    if webui_var.is_ok() {
-        println!("cargo:rerun-if-changed={}", webui_var.unwrap());
+    if let Ok(dir) = webui_var {
+        println!("cargo:rerun-if-changed={dir}");
     }
 
     Ok(())

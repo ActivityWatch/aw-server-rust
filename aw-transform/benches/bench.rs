@@ -83,9 +83,36 @@ fn bench_union_no_overlap(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_merge_events_by_keys(c: &mut Criterion) {
+    let mut group = c.benchmark_group("merge_events_by_keys");
+    for distinct in [100, 50_000] {
+        let mut events = create_events(50_000);
+        for (i, event) in events.iter_mut().enumerate() {
+            event.data = json_map! {
+                "app": "browser",
+                "title": format!("Page {}", i % distinct),
+                "url": "https://example.com/a/long/path"
+            };
+        }
+        group.bench_with_input(
+            BenchmarkId::new("distinct", distinct),
+            &events,
+            |b, events| {
+                b.iter_batched(
+                    || (events.clone(), vec!["app".into(), "title".into()]),
+                    |(events, keys)| merge_events_by_keys(events, keys),
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_filter_period_intersect,
-    bench_union_no_overlap
+    bench_union_no_overlap,
+    bench_merge_events_by_keys
 );
 criterion_main!(benches);

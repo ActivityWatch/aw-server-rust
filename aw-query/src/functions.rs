@@ -6,10 +6,13 @@ use aw_datastore::Datastore;
 pub type QueryFn =
     fn(args: Vec<DataType>, env: &VarEnv, ds: &Datastore) -> Result<DataType, QueryError>;
 
+pub type ReadOnlyQueryFn =
+    fn(args: &[&DataType], env: &VarEnv, ds: &Datastore) -> Result<DataType, QueryError>;
+
 pub fn fill_env(env: &mut VarEnv) {
     env.insert(
         "print".to_string(),
-        DataType::Function("print".to_string(), qfunctions::print),
+        DataType::ReadOnlyFunction("print".to_string(), qfunctions::print),
     );
     env.insert(
         "query_bucket".to_string(),
@@ -35,7 +38,7 @@ pub fn fill_env(env: &mut VarEnv) {
     );
     env.insert(
         "sum_durations".to_string(),
-        DataType::Function("sum_durations".to_string(), qfunctions::sum_durations),
+        DataType::ReadOnlyFunction("sum_durations".to_string(), qfunctions::sum_durations),
     );
     env.insert(
         "limit_events".to_string(),
@@ -43,7 +46,7 @@ pub fn fill_env(env: &mut VarEnv) {
     );
     env.insert(
         "contains".to_string(),
-        DataType::Function("contains".to_string(), qfunctions::contains),
+        DataType::ReadOnlyFunction("contains".to_string(), qfunctions::contains),
     );
     env.insert(
         "flood".to_string(),
@@ -126,7 +129,7 @@ mod qfunctions {
     use crate::VarEnv;
 
     pub fn print(
-        args: Vec<DataType>,
+        args: &[&DataType],
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
@@ -236,17 +239,17 @@ mod qfunctions {
     }
 
     pub fn contains(
-        args: Vec<DataType>,
+        args: &[&DataType],
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
-        validate::args_length(&args, 2)?;
-        match args.first().unwrap() {
-            DataType::List(ref list) => Ok(DataType::Bool(list.contains(&args[1]))),
+        validate::args_length(args, 2)?;
+        match args[0] {
+            DataType::List(list) => Ok(DataType::Bool(list.contains(args[1]))),
             DataType::Dict(ref dict) => {
                 let s = match &args[1] {
-                    DataType::String(s) => s.to_string(),
+                    DataType::String(s) => s.as_str(),
                     _ => {
                         return Err(QueryError::InvalidFunctionParameters(format!(
                             "function contains got second argument {:?}, expected type String",
@@ -254,7 +257,7 @@ mod qfunctions {
                         )))
                     }
                 };
-                Ok(DataType::Bool(dict.contains_key(&s)))
+                Ok(DataType::Bool(dict.contains_key(s)))
             }
             _ => Err(QueryError::InvalidFunctionParameters(format!(
                 "function contains got first argument {:?}, expected type List or Dict",
@@ -381,18 +384,28 @@ mod qfunctions {
     }
 
     pub fn sum_durations(
-        args: Vec<DataType>,
+        args: &[&DataType],
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
-        validate::args_length(&args, 1)?;
-        let mut events: Vec<Event> = args.into_iter().next().unwrap().try_into()?;
-
-        // Sort by duration
+        validate::args_length(args, 1)?;
+        let events = match args[0] {
+            DataType::List(events) => events,
+            invalid_type => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                    "Expected function parameter of type List, got {invalid_type:?}"
+                )))
+            }
+        };
         let mut sum_durations = chrono::Duration::zero();
-        for event in events.drain(..) {
-            sum_durations += event.duration;
+        for event in events {
+            match event {
+                DataType::Event(event) => sum_durations += event.duration,
+                invalid_type => return Err(QueryError::InvalidFunctionParameters(format!(
+                    "Expected function parameter of type List of Events, list contains {invalid_type:?}"
+                ))),
+            }
         }
         Ok(DataType::Number(
             (sum_durations.num_milliseconds() as f64) / 1000.0,
@@ -601,7 +614,7 @@ mod validate {
     use crate::{DataType, QueryError, VarEnv};
     use aw_models::TimeInterval;
 
-    pub fn args_length(args: &[DataType], len: usize) -> Result<(), QueryError> {
+    pub fn args_length<T>(args: &[T], len: usize) -> Result<(), QueryError> {
         if args.len() != len {
             return Err(QueryError::InvalidFunctionParameters(format!(
                 "Expected {} parameters in function, got {}",

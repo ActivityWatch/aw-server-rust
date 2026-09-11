@@ -102,11 +102,26 @@ mod query_benchmarks {
             })
         });
     }
+
+    pub fn bench_read_only_references(c: &mut Criterion) {
+        let ds = setup_datastore();
+        create_bucket(&ds, BUCKETNAME.to_string());
+        insert_events(&ds, BUCKETNAME, 50_000);
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+        let code = format!(
+            "events = query_bucket(\"testbucket\"); total = 0; {} return total;",
+            "total = total + sum_durations(events);".repeat(20)
+        );
+        c.bench_function("read-only references 50000 events", |b| {
+            b.iter(|| aw_query::query(&code, &interval, &ds).unwrap())
+        });
+    }
 }
 
 criterion_group!(
     benches,
     query_benchmarks::bench_assign,
-    query_benchmarks::bench_many_events
+    query_benchmarks::bench_many_events,
+    query_benchmarks::bench_read_only_references
 );
 criterion_main!(benches);

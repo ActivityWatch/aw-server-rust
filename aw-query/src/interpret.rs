@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use crate::functions;
 
@@ -213,6 +213,41 @@ fn interpret_expr(
             Ok(DataType::None())
         }
         Function(fname, e) => {
+            // Borrow variables only when every argument is an atom. Evaluating
+            // arbitrary arguments may assign to the environment, including the
+            // function binding itself, so those retain the owned evaluation path.
+            if let Expr_::List(exprs) = &e.node {
+                if exprs.iter().all(|expr| {
+                    matches!(
+                        expr.node,
+                        Expr_::Var(_) | Expr_::Bool(_) | Expr_::Number(_) | Expr_::String(_)
+                    )
+                }) {
+                    if let Some(DataType::ReadOnlyFunction(_, fun)) = env.get(&fname) {
+                        let args: Result<Vec<Cow<'_, DataType>>, QueryError> = exprs
+                            .iter()
+                            .map(|expr| {
+                                Ok(match &expr.node {
+                                    Expr_::Var(name) => {
+                                        Cow::Borrowed(env.get(name).ok_or_else(|| {
+                                            QueryError::VariableNotDefined(name.clone())
+                                        })?)
+                                    }
+                                    Expr_::Bool(value) => Cow::Owned(DataType::Bool(*value)),
+                                    Expr_::Number(value) => Cow::Owned(DataType::Number(*value)),
+                                    Expr_::String(value) => {
+                                        Cow::Owned(DataType::String(value.clone()))
+                                    }
+                                    _ => unreachable!(),
+                                })
+                            })
+                            .collect();
+                        let args = args?;
+                        let refs: Vec<_> = args.iter().map(|arg| arg.as_ref()).collect();
+                        return fun(&refs, env, ds);
+                    }
+                }
+            }
             let args = match interpret_expr(env, ds, *e)? {
                 DataType::List(l) => l,
                 _ => unreachable!(),
@@ -221,11 +256,14 @@ fn interpret_expr(
                 Some(v) => v,
                 None => return Err(QueryError::VariableNotDefined(fname.clone())),
             };
-            let (_name, fun) = match var {
-                DataType::Function(name, fun) => (name, fun),
-                _data => return Err(QueryError::InvalidType(fname.to_string())),
-            };
-            fun(args, env, ds)
+            match var {
+                DataType::Function(_, fun) => fun(args, env, ds),
+                DataType::ReadOnlyFunction(_, fun) => {
+                    let refs: Vec<_> = args.iter().collect();
+                    fun(&refs, env, ds)
+                }
+                _ => Err(QueryError::InvalidType(fname.to_string())),
+            }
         }
         List(list) => {
             let mut l = Vec::new();
@@ -243,5 +281,123 @@ fn interpret_expr(
             }
             Ok(DataType::Dict(dict))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(code: &str, env: &mut VarEnv, ds: &Datastore) -> DataType {
+        let program = crate::parser::parse(crate::lexer::Lexer::new(code)).unwrap();
+        for expr in program.stmts {
+            interpret_expr(env, ds, expr).unwrap();
+        }
+        env.remove("RETURN").unwrap_or(DataType::None())
+    }
+
+    #[test]
+    fn read_only_arguments_borrow_the_original_value_and_support_aliases() {
+        fn check(args: &[&DataType], env: &VarEnv, _: &Datastore) -> Result<DataType, QueryError> {
+            assert!(std::ptr::eq(args[0], env.get("events").unwrap()));
+            Ok(DataType::Bool(true))
+        }
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        env.insert(
+            "check".into(),
+            DataType::ReadOnlyFunction("check".into(), check),
+        );
+        env.insert(
+            "events".into(),
+            DataType::List(vec![DataType::Event(aw_models::Event::default())]),
+        );
+        assert_eq!(
+            run("alias = check; return alias(events);", &mut env, &ds),
+            DataType::Bool(true)
+        );
+        assert!(env.contains_key("events"));
+    }
+
+    #[test]
+    fn side_effecting_arguments_keep_snapshots_and_resolve_the_function_after_evaluation() {
+        fn check(args: &[&DataType], env: &VarEnv, _: &Datastore) -> Result<DataType, QueryError> {
+            assert_eq!(args[0], &DataType::List(vec![DataType::Number(1.0)]));
+            assert_eq!(env["items"], DataType::List(vec![DataType::Number(2.0)]));
+            Ok(DataType::Bool(true))
+        }
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        env.insert(
+            "check".into(),
+            DataType::ReadOnlyFunction("check".into(), check),
+        );
+        // Assignment nodes are supported by the interpreter, although the
+        // current parser only emits them at statement level.
+        let expr = |node| Expr {
+            span: crate::lexer::Span {
+                lo: 0,
+                hi: 0,
+                line: 1,
+            },
+            node,
+        };
+        for rebind in [false, true] {
+            env.insert("items".into(), DataType::List(vec![DataType::Number(1.0)]));
+            env.insert(
+                "f".into(),
+                if rebind {
+                    DataType::Number(0.0)
+                } else {
+                    env["check"].clone()
+                },
+            );
+            let mut args = vec![
+                expr(Expr_::Var("items".into())),
+                expr(Expr_::Assign(
+                    "items".into(),
+                    Box::new(expr(Expr_::List(vec![expr(Expr_::Number(2.0))]))),
+                )),
+            ];
+            if rebind {
+                args.push(expr(Expr_::Assign(
+                    "f".into(),
+                    Box::new(expr(Expr_::Var("check".into()))),
+                )));
+            }
+            let call = expr(Expr_::Function(
+                "f".into(),
+                Box::new(expr(Expr_::List(args))),
+            ));
+            assert_eq!(
+                interpret_expr(&mut env, &ds, call).unwrap(),
+                DataType::Bool(true)
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_builtins_keep_values_available_and_accept_computed_arguments() {
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
+        let mut event = aw_models::Event::default();
+        event.duration = chrono::Duration::seconds(3);
+        env.insert(
+            "events".into(),
+            DataType::List(vec![DataType::Event(event)]),
+        );
+        assert_eq!(run("total = sum_durations; a = total(events); b = total(events + events); return a + b;", &mut env, &ds), DataType::Number(9.0));
+        assert_eq!(
+            run(
+                "values = [1, 2]; f = contains; a = f(values, 2); return [a, values];",
+                &mut env,
+                &ds
+            ),
+            DataType::List(vec![
+                DataType::Bool(true),
+                DataType::List(vec![DataType::Number(1.0), DataType::Number(2.0)])
+            ])
+        );
     }
 }

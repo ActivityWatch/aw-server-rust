@@ -34,26 +34,6 @@ mod datastore_tests {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
-    use std::fs;
-    use std::path::PathBuf;
-    pub fn get_cache_dir() -> Result<PathBuf, ()> {
-        #[cfg(not(target_os = "android"))]
-        {
-            let dir = dirs::cache_dir()
-                .ok_or(())?
-                .join("activitywatch")
-                .join("aw-server-rust");
-            fs::create_dir_all(&dir).expect("Unable to create cache dir");
-            Ok(dir)
-        }
-
-        #[cfg(target_os = "android")]
-        {
-            panic!("not implemented on Android");
-        }
-    }
-
     fn create_test_bucket(ds: &Datastore) -> Bucket {
         let bucket = test_bucket();
         ds.create_bucket(&bucket).unwrap();
@@ -73,6 +53,54 @@ mod datastore_tests {
             timestamp,
             duration,
             data: json_map! {"key": json!("value")},
+        }
+    }
+
+    #[test]
+    fn interval_access_paths_preserve_overlaps_ties_and_clipping() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+        let epoch = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        let events: Vec<_> = [
+            (0, 1),
+            (1, 999),
+            (900, 5),
+            (900, 1),
+            (900, 1),
+            (901, 0),
+            (1000, 1),
+        ]
+        .into_iter()
+        .map(|(start, duration)| {
+            test_event(
+                epoch + Duration::seconds(start),
+                Duration::seconds(duration),
+            )
+        })
+        .collect();
+        ds.insert_events(&bucket.id, &events).unwrap();
+        for (start, end) in [(0, 10), (500, 510), (900, 905), (1100, 1200)] {
+            let start = Some(epoch + Duration::seconds(start));
+            let end = Some(epoch + Duration::seconds(end));
+            // Limited reads always use the original starttime-first index;
+            // unrestricted reads may use the endtime-first path.
+            let original = ds.get_events(&bucket.id, start, end, Some(100)).unwrap();
+            let selective = ds.get_events(&bucket.id, start, end, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(&original).unwrap(),
+                serde_json::to_value(&selective).unwrap()
+            );
+            assert_eq!(
+                ds.get_event_count(&bucket.id, start, end).unwrap(),
+                original.len() as i64
+            );
+            for limit in [0, 1, 3] {
+                let limited = ds.get_events(&bucket.id, start, end, Some(limit)).unwrap();
+                assert_eq!(
+                    serde_json::to_value(limited).unwrap(),
+                    serde_json::to_value(&original[..original.len().min(limit as usize)]).unwrap()
+                );
+            }
         }
     }
 
@@ -646,8 +674,8 @@ mod datastore_tests {
 
     #[test]
     fn test_migration_v4_to_v5() {
-        let mut db_path = get_cache_dir().unwrap();
-        db_path.push("datastore-unittest-migration-v4.db");
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("datastore-unittest-migration-v4.db");
         let db_path_str = db_path.to_str().unwrap().to_string();
 
         if db_path.exists() {
@@ -712,7 +740,7 @@ mod datastore_tests {
             let version: i32 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 5);
+            assert_eq!(version, 6);
             let old_indexes: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN
@@ -731,6 +759,15 @@ mod datastore_tests {
                 )
                 .unwrap();
             assert_eq!(new_index, 1, "composite index should exist");
+            let end_index: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'index'
+                 AND name = 'events_bucketrow_endtime_starttime_index'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(end_index, 1);
         }
 
         std::fs::remove_file(&db_path)
@@ -740,8 +777,8 @@ mod datastore_tests {
     #[test]
     fn test_datastore_reload() {
         // Create tmp datastore path
-        let mut db_path = get_cache_dir().unwrap();
-        db_path.push("datastore-unittest.db");
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("datastore-unittest.db");
         let db_path_str = db_path.to_str().unwrap().to_string();
 
         if db_path.exists() {
@@ -805,7 +842,8 @@ mod datastore_tests {
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
     fn test_encrypted_datastore_roundtrip() {
         use std::fs;
-        let dir = get_cache_dir().unwrap();
+        let test_dir = tempfile::tempdir().unwrap();
+        let dir = test_dir.path();
         let db_path = dir.join("test-encrypted.db").to_str().unwrap().to_string();
         // Clean up from previous runs
         let _ = fs::remove_file(&db_path);

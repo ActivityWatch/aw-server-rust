@@ -370,6 +370,7 @@ impl DatastoreInstance {
         Ok(())
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn ensure_legacy_import(&mut self, conn: &Connection) -> Result<bool, ()> {
         use super::legacy_import::legacy_import;
         if !self.first_init {
@@ -784,7 +785,7 @@ impl DatastoreInstance {
         };
         let endtime_filter_ns: i64 = match endtime_opt {
             Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => std::i64::MAX,
+            None => i64::MAX,
         };
         if starttime_filter_ns > endtime_filter_ns {
             warn!("Starttime in event query was lower than endtime!");
@@ -889,7 +890,7 @@ impl DatastoreInstance {
         };
         let endtime_filter_ns: i64 = match endtime_opt {
             Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => std::i64::MAX,
+            None => i64::MAX,
         };
         if starttime_filter_ns >= endtime_filter_ns {
             warn!("Endtime in event query was same or lower than starttime!");

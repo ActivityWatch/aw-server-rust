@@ -8,7 +8,7 @@ pub fn sort_by_timestamp(mut events: Vec<Event>) -> Vec<Event> {
 
 /// Sort a list of events by duration with the highest duration first
 pub fn sort_by_duration(mut events: Vec<Event>) -> Vec<Event> {
-    events.sort_by(|e1, e2| e2.duration.cmp(&e1.duration));
+    events.sort_by_key(|e| std::cmp::Reverse(e.duration));
     events
 }
 

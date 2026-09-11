@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Err("Sync dir must be absolute")?
         }
 
-        info!("Using sync dir: {}", &sync_dir.display());
+        info!("Using sync dir: {}", sync_dir.display());
         std::env::set_var("AW_SYNC_DIR", sync_dir);
     }
 
@@ -244,7 +244,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             {
                 let sync_dir = dirs::get_sync_dir()?;
                 if let Some(db_path) = &sync_db {
-                    info!("Using sync db: {}", &db_path.display());
+                    info!("Using sync db: {}", db_path.display());
 
                     if !db_path.is_absolute() {
                         Err("Sync db path must be absolute")?
@@ -311,7 +311,7 @@ fn daemon(
 
     let sync_dir = dirs::get_sync_dir()?;
     if let Some(db_path) = &sync_db {
-        info!("Using sync db: {}", &db_path.display());
+        info!("Using sync db: {}", db_path.display());
 
         if !db_path.is_absolute() {
             Err("Sync db path must be absolute")?

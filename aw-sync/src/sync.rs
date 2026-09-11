@@ -299,7 +299,7 @@ pub fn sync_datastores(
         // of the local bucket, so /timeline renders every event twice.
         // See https://github.com/orgs/ActivityWatch/discussions/1373
         .filter(|tup| {
-            if is_synced_bucket(&tup.1) {
+            if is_synced_bucket(tup.1) {
                 debug!(" - Skipping already-synced bucket '{}'", tup.1.id);
                 false
             } else {
@@ -443,7 +443,7 @@ fn sync_one(
             if chunk.first().unwrap().timestamp != boundary_ts {
                 // Safe to pop all boundary_ts events: the `if` guard ensures at least one
                 // earlier event (with a different timestamp) remains in the chunk.
-                while chunk.last().map_or(false, |e| e.timestamp == boundary_ts) {
+                while chunk.last().is_some_and(|e| e.timestamp == boundary_ts) {
                     chunk.pop();
                 }
                 fetch_end = Some(boundary_ts);

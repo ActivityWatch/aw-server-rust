@@ -6,11 +6,15 @@ use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+// Only used by the binary (main.rs) and the Android entrypoint, so these are
+// dead code in the plain library build.
+#[allow(dead_code)]
 pub struct ServerConfig {
     pub port: u16,
     pub api_key: Option<String>,
 }
 
+#[allow(dead_code)]
 impl ServerConfig {
     pub fn default_for(testing: bool) -> Self {
         Self {
@@ -25,6 +29,7 @@ impl ServerConfig {
 /// Also used on Android: the embedded server writes `config.toml` under
 /// `filesDir`, and `get_client()` in `android.rs` must send the same
 /// `[auth].api_key` or `/api/0/buckets` returns 401 (aw-android#247).
+#[allow(dead_code)]
 pub fn get_server_config(
     testing: bool,
     config_override: Option<&Path>,
@@ -59,6 +64,7 @@ pub fn get_server_config(
 
 /// Local config must never be read for a caller-selected remote target.
 #[cfg(not(target_os = "android"))]
+#[allow(dead_code)]
 pub fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host
@@ -68,6 +74,7 @@ pub fn is_loopback_host(host: &str) -> bool {
 
 /// Add URL brackets around bare IPv6 literals.
 #[cfg(not(target_os = "android"))]
+#[allow(dead_code)]
 pub fn host_for_url(host: &str) -> String {
     match host.parse::<IpAddr>() {
         Ok(IpAddr::V6(_)) => format!("[{host}]"),

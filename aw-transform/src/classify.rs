@@ -15,6 +15,7 @@ static REGEX_CACHE: OnceLock<Mutex<LruCache<String, Arc<Regex>>>> = OnceLock::ne
 pub enum Rule {
     None,
     Regex(RegexRule),
+    RegexFields(RegexFieldsRule),
 }
 
 impl RuleTrait for Rule {
@@ -22,6 +23,7 @@ impl RuleTrait for Rule {
         match self {
             Rule::None => false,
             Rule::Regex(rule) => rule.matches(event),
+            Rule::RegexFields(rule) => rule.matches(event),
         }
     }
 }
@@ -33,6 +35,75 @@ trait RuleTrait {
 pub struct RegexRule {
     regex: Arc<Regex>,
     select_keys: Option<Vec<String>>,
+}
+
+/// A rule that matches events by testing each named field against its own regex pattern,
+/// requiring ALL field patterns to match (logical AND). Each pattern uses whole-field
+/// anchoring (`\A(?:...)\z`), so it must match the entire field value.
+pub struct RegexFieldsRule {
+    /// Map from field name to compiled whole-field regex.
+    field_patterns: HashMap<String, Regex>,
+}
+
+impl RegexFieldsRule {
+    /// Construct from a map of field names to pattern strings.
+    ///
+    /// `ignore_case` applies to every pattern. Pattern strings are wrapped in
+    /// `\A(?:...)\z` so they anchor to the entire field value.
+    pub fn new(
+        fields: HashMap<String, String>,
+        ignore_case: bool,
+    ) -> Result<RegexFieldsRule, fancy_regex::Error> {
+        if fields.is_empty() {
+            return Err(fancy_regex::Error::ParseError(
+                0,
+                fancy_regex::ParseError::GeneralParseError(
+                    "regex_fields: fields map must not be empty".to_string(),
+                ),
+            ));
+        }
+        let mut field_patterns = HashMap::with_capacity(fields.len());
+        for (field, pattern) in fields {
+            if field.is_empty() {
+                return Err(fancy_regex::Error::ParseError(
+                    0,
+                    fancy_regex::ParseError::GeneralParseError(
+                        "regex_fields: field names must not be empty".to_string(),
+                    ),
+                ));
+            }
+            if pattern.is_empty() {
+                return Err(fancy_regex::Error::ParseError(
+                    0,
+                    fancy_regex::ParseError::GeneralParseError(format!(
+                        "regex_fields: pattern for field '{field}' must not be empty"
+                    )),
+                ));
+            }
+            // Wrap with case flag and whole-field anchors. \A and \z are unaffected by
+            // the multiline flag, so they reliably anchor to string start/end even when
+            // the value contains embedded newlines.
+            let anchored = if ignore_case {
+                format!("(?i)\\A(?:{pattern})\\z")
+            } else {
+                format!("\\A(?:{pattern})\\z")
+            };
+            field_patterns.insert(field, Regex::new(&anchored)?);
+        }
+        Ok(RegexFieldsRule { field_patterns })
+    }
+}
+
+impl RuleTrait for RegexFieldsRule {
+    fn matches(&self, event: &Event) -> bool {
+        // Every named field must exist, be a string, and satisfy its pattern.
+        self.field_patterns.iter().all(|(field, regex)| {
+            match event.data.get(field).and_then(|v| v.as_str()) {
+                Some(value) => regex.is_match(value).unwrap_or(false),
+                None => false,
+            }
+        })
+    }
 }
 
 impl RegexRule {
@@ -639,4 +710,132 @@ fn test_valid_regex_patterns_are_accepted() {
             result.err()
         );
     }
+}
+
+#[test]
+fn test_regex_fields_rule_and_semantics() {
+    // Event where app matches but title does not — should NOT match
+    let mut e_app_only = Event::default();
+    e_app_only
+        .data
+        .insert("app".into(), serde_json::json!("mstsc.exe"));
+    e_app_only
+        .data
+        .insert("title".into(), serde_json::json!("other.example.com"));
+
+    // Event where both app and title match — should match
+    let mut e_both = Event::default();
+    e_both
+        .data
+        .insert("app".into(), serde_json::json!("mstsc.exe"));
+    e_both
+        .data
+        .insert("title".into(), serde_json::json!("office.example.com"));
+
+    // Event where Winbox app and same title — should NOT match the mstsc rule
+    let mut e_winbox = Event::default();
+    e_winbox
+        .data
+        .insert("app".into(), serde_json::json!("winbox.exe"));
+    e_winbox
+        .data
+        .insert("title".into(), serde_json::json!("office.example.com"));
+
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("app".to_string(), r"mstsc\.exe".to_string());
+    fields.insert("title".to_string(), r"office\.example\.com".to_string());
+    let rule = Rule::RegexFields(RegexFieldsRule::new(fields, false).unwrap());
+
+    assert!(!rule.matches(&e_app_only), "title miss should not match");
+    assert!(rule.matches(&e_both), "both fields matching should match");
+    assert!(!rule.matches(&e_winbox), "wrong app should not match");
+}
+
+#[test]
+fn test_regex_fields_rule_whole_field_anchoring() {
+    // Pattern "office" (no wildcards) should NOT match "office.example.com"
+    // because whole-field anchoring requires the entire value to match.
+    let mut e = Event::default();
+    e.data.insert("app".into(), serde_json::json!("mstsc.exe"));
+    e.data
+        .insert("title".into(), serde_json::json!("office.example.com"));
+
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("app".to_string(), "mstsc".to_string()); // partial — should NOT match "mstsc.exe"
+    fields.insert("title".to_string(), "office.example.com".to_string()); // exact
+    let rule = Rule::RegexFields(RegexFieldsRule::new(fields, false).unwrap());
+
+    // "mstsc" whole-field pattern does not match "mstsc.exe"
+    assert!(
+        !rule.matches(&e),
+        "partial app pattern should not match full value"
+    );
+}
+
+#[test]
+fn test_regex_fields_rule_ignore_case() {
+    let mut e = Event::default();
+    e.data.insert("app".into(), serde_json::json!("MSTSC.EXE"));
+    e.data
+        .insert("title".into(), serde_json::json!("Office.Example.Com"));
+
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("app".to_string(), r"mstsc\.exe".to_string());
+    fields.insert("title".to_string(), r"office\.example\.com".to_string());
+
+    let rule_case = Rule::RegexFields(RegexFieldsRule::new(fields.clone(), false).unwrap());
+    let rule_nocase = Rule::RegexFields(RegexFieldsRule::new(fields, true).unwrap());
+
+    assert!(
+        !rule_case.matches(&e),
+        "case-sensitive should not match uppercase values"
+    );
+    assert!(
+        rule_nocase.matches(&e),
+        "case-insensitive should match uppercase values"
+    );
+}
+
+#[test]
+fn test_regex_fields_rule_missing_field() {
+    // When the event is missing a required field, the rule should not match.
+    let mut e = Event::default();
+    e.data.insert("app".into(), serde_json::json!("mstsc.exe"));
+    // "title" is absent
+
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("app".to_string(), r"mstsc\.exe".to_string());
+    fields.insert("title".to_string(), r".*".to_string()); // would match anything if present
+    let rule = Rule::RegexFields(RegexFieldsRule::new(fields, false).unwrap());
+
+    assert!(
+        !rule.matches(&e),
+        "missing field should cause rule to not match"
+    );
+}
+
+#[test]
+fn test_regex_fields_rule_empty_fields_error() {
+    let result = RegexFieldsRule::new(std::collections::HashMap::new(), false);
+    assert!(result.is_err(), "empty fields map must return an error");
+}
+
+#[test]
+fn test_regex_fields_rule_embedded_newline() {
+    // Field value with embedded newline: anchors must not cross it.
+    let mut e = Event::default();
+    e.data
+        .insert("title".into(), serde_json::json!("first\nsecond"));
+
+    // Pattern "first" should NOT match "first\nsecond" (whole-field).
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("title".to_string(), "first".to_string());
+    let rule = Rule::RegexFields(RegexFieldsRule::new(fields, false).unwrap());
+    assert!(!rule.matches(&e));
+
+    // Pattern r"first\nsecond" should match "first\nsecond".
+    let mut fields2 = std::collections::HashMap::new();
+    fields2.insert("title".to_string(), r"first\nsecond".to_string());
+    let rule2 = Rule::RegexFields(RegexFieldsRule::new(fields2, false).unwrap());
+    assert!(rule2.matches(&e));
 }

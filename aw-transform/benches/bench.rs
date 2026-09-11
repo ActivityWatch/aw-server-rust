@@ -1,5 +1,5 @@
 use chrono::Duration;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
@@ -50,5 +50,42 @@ fn bench_filter_period_intersect(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_filter_period_intersect);
+fn bench_union_no_overlap(c: &mut Criterion) {
+    let mut group = c.benchmark_group("union_no_overlap");
+    for n in [1_000, 8_000, 32_000] {
+        let now = chrono::Utc::now();
+        let first: Vec<_> = (0..n)
+            .map(|i| {
+                Event::new(
+                    now + Duration::seconds(i * 4 + 1),
+                    Duration::seconds(1),
+                    json_map! {"app": "foreground"},
+                )
+            })
+            .collect();
+        let second: Vec<_> = (0..n)
+            .map(|i| {
+                Event::new(
+                    now + Duration::seconds(i * 4),
+                    Duration::seconds(3),
+                    json_map! {"app": "background"},
+                )
+            })
+            .collect();
+        group.bench_function(BenchmarkId::new("overlapping", n), |b| {
+            b.iter_batched(
+                || (first.clone(), second.clone()),
+                |(a, b)| union_no_overlap(a, b),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_filter_period_intersect,
+    bench_union_no_overlap
+);
 criterion_main!(benches);

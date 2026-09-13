@@ -30,8 +30,9 @@ fn _get_db_version(conn: &Connection) -> i32 {
  * 3: see: https://github.com/ActivityWatch/aw-server-rust/pull/52
  * 4: Added 'key_value' table for storing key - value pairs
  * 5: Replaced single-column events indexes with a composite index
+ * 6: Added an endtime-first index for recent interval reads
  */
-static NEWEST_DB_VERSION: i32 = 5;
+static NEWEST_DB_VERSION: i32 = 6;
 
 fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;
@@ -55,6 +56,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 5 {
         _migrate_v4_to_v5(conn);
+    }
+
+    if version < 6 {
+        _migrate_v5_to_v6(conn);
     }
 
     first_init
@@ -207,10 +212,59 @@ fn _migrate_v4_to_v5(conn: &Connection) {
     .expect("Failed to run v5 migration transaction");
 }
 
+fn _migrate_v5_to_v6(conn: &Connection) {
+    conn.execute_batch(
+        "BEGIN EXCLUSIVE TRANSACTION;
+         CREATE INDEX IF NOT EXISTS events_bucketrow_endtime_starttime_index
+             ON events(bucketrow, endtime, starttime DESC);
+         PRAGMA user_version = 6;
+         COMMIT;",
+    )
+    .expect("Failed to run v6 migration transaction");
+}
+
+// Both indexes can bound only one of the two interval predicates. Use the
+// bucket's time span as a cheap selectivity estimate; this affects performance,
+// never which rows qualify. Limited queries retain their ordered starttime scan
+// so LIMIT can stop early without sorting all matching rows.
+fn prefer_endtime_index(bucket: &Bucket, start: i64, end: i64, limit: Option<u64>) -> bool {
+    if limit.is_some() {
+        return false;
+    }
+    match (
+        bucket
+            .metadata
+            .start
+            .and_then(|dt| dt.timestamp_nanos_opt()),
+        bucket.metadata.end.and_then(|dt| dt.timestamp_nanos_opt()),
+    ) {
+        (Some(first), Some(last)) => {
+            let first = i128::from(first);
+            let last = i128::from(last);
+            // Clamp unbounded ranges to the bucket span, so a full-bucket
+            // export keeps its ordered scan. Require a substantial advantage
+            // to offset sorting the endtime index's matching rows.
+            let start_scan = (i128::from(end).min(last) - first).max(0);
+            let end_scan = (last - i128::from(start).max(first)).max(0);
+            end_scan * 4 < start_scan
+        }
+        _ => false,
+    }
+}
+
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
     first_init: bool,
     pub db_version: i32,
+}
+
+fn _datetime_from_nanos(ns: i64) -> DateTime<Utc> {
+    // Euclidean division so a negative (pre-epoch) timestamp still yields a
+    // subnanos remainder in [0, 1_000_000_000) instead of a negative value
+    // that wraps to a bogus u32 and makes `from_timestamp` return None.
+    let seconds = ns.div_euclid(1_000_000_000);
+    let subnanos = ns.rem_euclid(1_000_000_000) as u32;
+    DateTime::from_timestamp(seconds, subnanos).unwrap()
 }
 
 /// Parse an event from a row selected as `id, starttime, endtime, data`.
@@ -548,12 +602,12 @@ impl DatastoreInstance {
     }
 
     pub fn delete_events_by_id(
-        &self,
+        &mut self,
         conn: &Connection,
         bucket_id: &str,
         event_ids: Vec<i64>,
     ) -> Result<(), DatastoreError> {
-        let bucket = self.get_bucket(bucket_id)?;
+        let mut bucket = self.get_bucket(bucket_id)?;
         let mut stmt = match conn.prepare_cached(
             "
                 DELETE FROM events
@@ -577,6 +631,46 @@ impl DatastoreInstance {
                 }
             };
         }
+        // Deletion can shrink (or empty) the bucket's time span. prefer_endtime_index
+        // estimates selectivity from these cached bounds, so refresh them here -
+        // otherwise a bucket trimmed down after this call keeps the stale, wider
+        // span and can misjudge which index actually wins.
+        self.refresh_bucket_bounds(conn, &mut bucket)?;
+        Ok(())
+    }
+
+    /// Recompute a bucket's cached start/end bounds from the events table and
+    /// update the bucket cache. Used after deletions, which unlike inserts can
+    /// shrink the bucket's span rather than only extend it.
+    fn refresh_bucket_bounds(
+        &mut self,
+        conn: &Connection,
+        bucket: &mut Bucket,
+    ) -> Result<(), DatastoreError> {
+        let mut stmt = match conn
+            .prepare_cached("SELECT min(starttime), max(endtime) FROM events WHERE bucketrow = ?1")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to prepare refresh_bucket_bounds SQL statement: {err}"
+                )))
+            }
+        };
+        let (start_ns, end_ns): (Option<i64>, Option<i64>) = match stmt
+            .query_row([&bucket.bid.unwrap() as &dyn ToSql], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            }) {
+            Ok(bounds) => bounds,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to query refresh_bucket_bounds SQL statement: {err:?}"
+                )))
+            }
+        };
+        bucket.metadata.start = start_ns.map(_datetime_from_nanos);
+        bucket.metadata.end = end_ns.map(_datetime_from_nanos);
+        self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
         Ok(())
     }
 
@@ -796,17 +890,19 @@ impl DatastoreInstance {
             None => -1,
         };
 
-        let mut stmt = match conn.prepare_cached(
-            "
-                SELECT id, starttime, endtime, data
-                FROM events
-                WHERE bucketrow = ?1
-                    AND endtime >= ?2
-                    AND starttime <= ?3
-                ORDER BY starttime DESC
-                LIMIT ?4
-            ;",
-        ) {
+        let sql =
+            if prefer_endtime_index(&bucket, starttime_filter_ns, endtime_filter_ns, limit_opt) {
+                "SELECT id, starttime, endtime, data
+             FROM events INDEXED BY events_bucketrow_endtime_starttime_index
+             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3
+             ORDER BY starttime DESC, endtime ASC, id ASC LIMIT ?4"
+            } else {
+                "SELECT id, starttime, endtime, data
+             FROM events INDEXED BY events_bucketrow_starttime_endtime_index
+             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3
+             ORDER BY starttime DESC, endtime ASC, id ASC LIMIT ?4"
+            };
+        let mut stmt = match conn.prepare_cached(sql) {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -897,13 +993,14 @@ impl DatastoreInstance {
             return Ok(0);
         }
 
-        let mut stmt = match conn.prepare_cached(
-            "
-            SELECT count(*) FROM events
-            WHERE bucketrow = ?1
-                AND endtime >= ?2
-                AND starttime <= ?3",
-        ) {
+        let sql = if prefer_endtime_index(&bucket, starttime_filter_ns, endtime_filter_ns, None) {
+            "SELECT count(*) FROM events INDEXED BY events_bucketrow_endtime_starttime_index
+             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3"
+        } else {
+            "SELECT count(*) FROM events INDEXED BY events_bucketrow_starttime_endtime_index
+             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3"
+        };
+        let mut stmt = match conn.prepare_cached(sql) {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(

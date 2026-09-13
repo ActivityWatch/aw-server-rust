@@ -31,5 +31,11 @@ aw-transform = { path = "../aw-transform" }
 regex = "1"
 
 [dev-dependencies]
+criterion = "0.5.1"
+tempfile = "3"
 # Used by migration tests to construct databases with old schema versions
 rusqlite = { version = "0.30", features = ["chrono", "serde_json"] }
+
+[[bench]]
+name = "interval_reads"
+harness = false

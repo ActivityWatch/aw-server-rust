@@ -14,6 +14,7 @@ use serde_json::Number;
 
 #[derive(Clone, Serialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum DataType {
     None(),
     Bool(bool),

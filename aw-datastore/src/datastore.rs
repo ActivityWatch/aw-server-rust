@@ -248,6 +248,131 @@ fn parse_event_row(row: &rusqlite::Row, clip: Option<(i64, i64)>) -> rusqlite::R
     })
 }
 
+/// Legacy-bucket events that overlap no other event in either bucket, so they can
+/// be moved into the destination bucket without creating overlapping records.
+///
+/// Two events overlap when `a.starttime < b.endtime AND b.starttime < a.endtime`
+/// (strict, matching the datastore's overlap semantics elsewhere). Events are
+/// read once ordered by `starttime`. A sweep keeps still-open events in a
+/// min-heap keyed by `endtime`. A positive-duration event overlaps every
+/// still-open event, so those are marked in O(1) via an epoch counter rather
+/// than scanning the heap (which would be quadratic for stacked histories).
+/// Zero-duration events are the only case that still scans, and they never stay
+/// in the open set. The pass is O(n log n).
+fn movable_legacy_event_ids(
+    conn: &Connection,
+    legacy_bid: Option<i64>,
+    destination_bid: Option<i64>,
+) -> rusqlite::Result<Vec<i64>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    struct Span {
+        id: i64,
+        starttime: i64,
+        endtime: i64,
+        legacy: bool,
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT id, starttime, endtime, bucketrow FROM events
+         WHERE bucketrow IN (?1, ?2)
+         ORDER BY starttime ASC, id ASC",
+    )?;
+    let spans = stmt
+        .query_map(params![legacy_bid, destination_bid], |row| {
+            let bucketrow: Option<i64> = row.get(3)?;
+            Ok(Span {
+                id: row.get(0)?,
+                starttime: row.get(1)?,
+                endtime: row.get(2)?,
+                legacy: bucketrow == legacy_bid,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<Span>>>()?;
+
+    let mut overlaps = vec![false; spans.len()];
+    // Open events: (endtime, index, epoch-at-push). Epoch marks the whole
+    // concurrent set in O(1) when a later positive-duration event overlaps it.
+    let mut open: BinaryHeap<Reverse<(i64, usize, u32)>> = BinaryHeap::new();
+    let mut epoch: u32 = 0;
+    for (i, span) in spans.iter().enumerate() {
+        // Events that ended at or before this start can never overlap this or
+        // any later event (later events start no earlier than this one).
+        while let Some(Reverse((endtime, j, pushed_epoch))) = open.peek().copied() {
+            if endtime <= span.starttime {
+                open.pop();
+                if pushed_epoch < epoch {
+                    overlaps[j] = true;
+                }
+            } else {
+                break;
+            }
+        }
+        if !open.is_empty() {
+            if span.endtime > span.starttime {
+                // Positive duration: every remaining open event `j` has
+                // `j.starttime <= span.starttime < span.endtime` and
+                // `span.starttime < j.endtime`, so they all overlap.
+                overlaps[i] = true;
+                epoch += 1;
+            } else {
+                // Zero-duration: overlaps open events that started strictly
+                // earlier, but not same-start positive-duration events
+                // (`j.starttime < span.endtime` fails when starttimes match).
+                let mut overlapped = false;
+                for Reverse((_, j, _)) in open.iter() {
+                    if spans[*j].starttime < span.starttime {
+                        overlaps[*j] = true;
+                        overlapped = true;
+                    }
+                }
+                if overlapped {
+                    overlaps[i] = true;
+                }
+            }
+        }
+        open.push(Reverse((span.endtime, i, epoch)));
+    }
+    while let Some(Reverse((_, j, pushed_epoch))) = open.pop() {
+        if pushed_epoch < epoch {
+            overlaps[j] = true;
+        }
+    }
+
+    Ok(spans
+        .iter()
+        .zip(overlaps.iter())
+        .filter(|(span, overlapping)| span.legacy && !**overlapping)
+        .map(|(span, _)| span.id)
+        .collect())
+}
+
+/// Reassign the given events to `bucket_bid`, in batches so the statement stays
+/// well under SQLite's bound-parameter limit.
+fn move_events_to_bucket(
+    conn: &Connection,
+    bucket_bid: Option<i64>,
+    event_ids: &[i64],
+) -> rusqlite::Result<()> {
+    const BATCH: usize = 500;
+    for chunk in event_ids.chunks(BATCH) {
+        let placeholders = (0..chunk.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("UPDATE events SET bucketrow = ?1 WHERE id IN ({placeholders})");
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut values: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() + 1);
+        values.push(&bucket_bid);
+        for id in chunk {
+            values.push(id);
+        }
+        stmt.execute(values.as_slice())?;
+    }
+    Ok(())
+}
+
 impl DatastoreInstance {
     pub fn new(
         conn: &Connection,
@@ -1143,22 +1268,21 @@ impl DatastoreInstance {
                 // Move only events that do not overlap the destination or another
                 // legacy event. A single overlapping cutover heartbeat must not strand
                 // years of disjoint history in the legacy bucket (ActivityWatch/aw-android#243).
-                conn.execute(
-                    "UPDATE events SET bucketrow = ?1
-                     WHERE id IN (
-                         SELECT old_event.id FROM events AS old_event
-                         WHERE old_event.bucketrow = ?2
-                           AND NOT EXISTS (
-                               SELECT 1 FROM events AS other_event
-                               WHERE other_event.id != old_event.id
-                                 AND other_event.bucketrow IN (?1, ?2)
-                                 AND old_event.starttime < other_event.endtime
-                                 AND other_event.starttime < old_event.endtime
-                           )
-                     )",
-                    [new_bucket.bid, old_bucket.bid],
-                )
-                .map_err(|err| {
+                //
+                // Overlaps are found with one sorted scan over both buckets instead of a
+                // correlated `NOT EXISTS` subquery per legacy event: that subquery had no
+                // lower bound on `starttime`, so it scanned every earlier event again for
+                // each row (O(n^2)). With a couple of years of Android history it kept the
+                // single datastore worker busy for hours, which blanked the web UI and
+                // produced ANRs in every main-thread datastore call (aw-android#261).
+                let movable = movable_legacy_event_ids(conn, old_bucket.bid, new_bucket.bid)
+                    .map_err(|err| {
+                        DatastoreError::InternalError(format!(
+                            "Failed to find mergeable events in '{}': {err}",
+                            old_id
+                        ))
+                    })?;
+                move_events_to_bucket(conn, new_bucket.bid, &movable).map_err(|err| {
                     DatastoreError::InternalError(format!(
                         "Failed to merge bucket '{}' into '{}': {err}",
                         old_id, new_id

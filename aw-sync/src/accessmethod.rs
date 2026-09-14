@@ -24,16 +24,23 @@ pub trait AccessMethod: std::fmt::Debug {
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
 }
 
+/// Every method here returns a `Result`, so a datastore failure must be reported
+/// through it rather than unwrapped.
+///
+/// These used to `unwrap()`, which on Android turns any datastore error (a
+/// dead worker thread, a locked or corrupt database, a disappearing sync file)
+/// into a panic that unwinds out of the JNI `extern "C"` frame and aborts the
+/// whole app — see ActivityWatch/aw-android#220.
 impl AccessMethod for Datastore {
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
-        Ok(Datastore::get_buckets(self).unwrap())
+        Datastore::get_buckets(self).map_err(|e| format!("{e:?}"))
     }
     fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
         Datastore::get_bucket(self, bucket_id)
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
         Datastore::create_bucket(self, bucket)?;
-        self.force_commit().unwrap();
+        self.force_commit()?;
         Ok(())
     }
     fn get_events(
@@ -43,20 +50,20 @@ impl AccessMethod for Datastore {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
-        Ok(Datastore::get_events(self, bucket_id, start, end, limit).unwrap())
+        Datastore::get_events(self, bucket_id, start, end, limit).map_err(|e| format!("{e:?}"))
     }
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
-        Datastore::heartbeat(self, bucket_id, event, duration).unwrap();
-        self.force_commit().unwrap();
+        Datastore::heartbeat(self, bucket_id, event, duration).map_err(|e| format!("{e:?}"))?;
+        self.force_commit().map_err(|e| format!("{e:?}"))?;
         Ok(())
     }
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
-        Datastore::insert_events(self, bucket_id, &events[..]).unwrap();
-        self.force_commit().unwrap();
+        Datastore::insert_events(self, bucket_id, &events[..]).map_err(|e| format!("{e:?}"))?;
+        self.force_commit().map_err(|e| format!("{e:?}"))?;
         Ok(())
     }
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
-        Ok(Datastore::get_event_count(self, bucket_id, None, None).unwrap())
+        Datastore::get_event_count(self, bucket_id, None, None).map_err(|e| format!("{e:?}"))
     }
 }
 

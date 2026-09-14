@@ -217,14 +217,25 @@ pub fn get_remotes() -> Result<Vec<String>, Box<dyn Error>> {
 }
 
 /// Returns a list of all remote dbs
+///
+/// I/O errors are propagated rather than unwrapped (a panic here aborts the app
+/// on Android, ActivityWatch/aw-android#220) and rather than skipped: silently
+/// dropping a host directory we failed to read would report a successful sync
+/// that quietly omitted that host's data.
 fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let dbs = fs::read_dir(sync_directory)?
-        .map(|res| res.ok().unwrap().path())
-        .filter(|p| p.is_dir())
-        .flat_map(|d| fs::read_dir(d).unwrap())
-        .map(|res| res.ok().unwrap().path())
-        .filter(|path| path.extension().unwrap_or_else(|| OsStr::new("")) == "db")
-        .collect();
+    let mut dbs = Vec::new();
+    for entry in fs::read_dir(sync_directory)? {
+        let hostdir = entry?.path();
+        if !hostdir.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&hostdir)? {
+            let path = entry?.path();
+            if path.extension().unwrap_or_else(|| OsStr::new("")) == "db" {
+                dbs.push(path);
+            }
+        }
+    }
     Ok(dbs)
 }
 
@@ -233,19 +244,12 @@ pub fn find_remotes_nonlocal(
     sync_directory: &Path,
     device_id: &str,
     sync_db: Option<&PathBuf>,
-) -> Vec<PathBuf> {
-    let remotes_all = find_remotes(sync_directory).unwrap();
-    remotes_all
+) -> std::io::Result<Vec<PathBuf>> {
+    let remotes_all = find_remotes(sync_directory)?;
+    Ok(remotes_all
         .into_iter()
         // Filter out own remote
-        .filter(|path| {
-            !(path
-                .clone()
-                .into_os_string()
-                .into_string()
-                .unwrap()
-                .contains(device_id))
-        })
+        .filter(|path| !path.to_string_lossy().contains(device_id))
         // If sync_db is Some, return only remotes in that path
         .filter(|path| {
             if let Some(sync_db) = sync_db {
@@ -254,5 +258,5 @@ pub fn find_remotes_nonlocal(
                 true
             }
         })
-        .collect()
+        .collect())
 }

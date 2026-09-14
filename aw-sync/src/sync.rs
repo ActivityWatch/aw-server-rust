@@ -94,7 +94,7 @@ pub fn sync_run(
         .iter()
         .map(|p| p.as_path())
         .map(create_datastore)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     if !ds_remotes.is_empty() {
         info!(
@@ -154,7 +154,7 @@ pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|p| p.as_path())
         .map(create_datastore)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     log_buckets(client)?;
     log_buckets(&ds_localremote)?;
@@ -179,15 +179,22 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
         info!("Creating new database file: {}", dbfile.display());
     }
 
-    let ds_localremote = create_datastore(&dbfile);
+    let ds_localremote = create_datastore(&dbfile)?;
     Ok(ds_localremote)
 }
 
-pub fn create_datastore(path: &Path) -> Datastore {
-    // to_string_lossy rather than unwrap: a non-UTF-8 path is a sync-folder
-    // problem to be reported by the datastore, not a reason to abort the
-    // process (which is what a panic here does on Android, aw-android#220).
-    Datastore::new(path.to_string_lossy().into_owned(), false)
+/// Open (or create) the sqlite datastore at `path`.
+///
+/// `Datastore::new` takes a `String`, so a non-UTF-8 path cannot be passed
+/// through faithfully. Report that as an error rather than unwrapping (a panic
+/// here aborts the app on Android, aw-android#220) and rather than lossily
+/// converting it, which would silently open a *different* file than the caller
+/// asked for.
+pub fn create_datastore(path: &Path) -> Result<Datastore, String> {
+    let pathstr = path
+        .to_str()
+        .ok_or_else(|| format!("Sync database path is not valid UTF-8: {}", path.display()))?;
+    Ok(Datastore::new(pathstr.to_string(), false))
 }
 
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
@@ -344,27 +351,25 @@ pub fn sync_datastores(
         .map(|tup| {
             // TODO: Refuse to sync buckets without hostname/device ID set, or if set to 'unknown'
             if tup.1.hostname == "unknown" {
-                // Only the push path has a source device ID to substitute; on
-                // pull there is nothing to fill in, so leave it as-is rather
-                // than unwrapping a None and aborting the app.
-                match src_did {
-                    Some(did) => {
-                        warn!(
-                            " ! Bucket hostname/device ID was invalid, setting to device ID/hostname"
-                        );
-                        tup.1.hostname = did.to_string();
-                    }
-                    None => {
-                        warn!(
-                            " ! Bucket '{}' has an unknown hostname and no source device ID to substitute",
-                            tup.1.id
-                        );
-                    }
-                }
+                // Only the push path carries a source device ID to substitute.
+                // On pull there is none, and continuing would give the bucket a
+                // `-synced-from-unknown` destination ID shared by every remote
+                // with that bucket ID, mixing events from unrelated devices.
+                // Refuse the sync instead (the previous code unwrapped the None
+                // here, which on Android aborts the whole app).
+                let did = src_did.ok_or_else(|| {
+                    format!(
+                        "Bucket '{}' has an unknown hostname/device ID and there is no source \
+                         device ID to substitute; refusing to sync it without provenance",
+                        tup.1.id
+                    )
+                })?;
+                warn!(" ! Bucket hostname/device ID was invalid, setting to device ID/hostname");
+                tup.1.hostname = did.to_string();
             }
-            tup.1.clone()
+            Ok(tup.1.clone())
         })
-        .collect();
+        .collect::<Result<Vec<Bucket>, String>>()?;
 
     // Log warning for buckets requested but not found
     if let Some(buckets) = &sync_spec.buckets {

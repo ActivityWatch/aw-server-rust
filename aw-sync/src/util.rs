@@ -218,20 +218,24 @@ pub fn get_remotes() -> Result<Vec<String>, Box<dyn Error>> {
 
 /// Returns a list of all remote dbs
 ///
-/// Unreadable entries are skipped rather than unwrapped: an entry that vanished
-/// or a subdirectory we cannot open must not take the process down, which on
-/// Android it would (ActivityWatch/aw-android#220).
+/// I/O errors are propagated rather than unwrapped (a panic here aborts the app
+/// on Android, ActivityWatch/aw-android#220) and rather than skipped: silently
+/// dropping a host directory we failed to read would report a successful sync
+/// that quietly omitted that host's data.
 fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let dbs = fs::read_dir(sync_directory)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|p| p.is_dir())
-        .filter_map(|d| fs::read_dir(d).ok())
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().unwrap_or_else(|| OsStr::new("")) == "db")
-        .collect();
+    let mut dbs = Vec::new();
+    for entry in fs::read_dir(sync_directory)? {
+        let hostdir = entry?.path();
+        if !hostdir.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&hostdir)? {
+            let path = entry?.path();
+            if path.extension().unwrap_or_else(|| OsStr::new("")) == "db" {
+                dbs.push(path);
+            }
+        }
+    }
     Ok(dbs)
 }
 

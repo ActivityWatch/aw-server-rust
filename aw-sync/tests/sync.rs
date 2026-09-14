@@ -111,7 +111,8 @@ mod sync_tests {
         // so every request fails.
         let ds_broken = create_datastore(Path::new(
             "/nonexistent-directory-for-aw-sync-tests/test.db",
-        ));
+        ))
+        .expect("path is valid UTF-8");
 
         let result = aw_sync::sync_datastores(
             &state.ds_src,
@@ -156,6 +157,49 @@ mod sync_tests {
             err.contains("$aw.sync.origin"),
             "error should name the offending field, got: {err}"
         );
+    }
+
+    /// A pulled bucket whose hostname is the "unknown" sentinel has no provenance,
+    /// and pull passes no source device ID to substitute. Continuing would map
+    /// every such bucket from every remote onto one `-synced-from-unknown`
+    /// destination, mixing events from unrelated devices — so refuse the sync.
+    /// (The old code unwrapped the `None` here, i.e. aborted the app on Android.)
+    #[test]
+    fn test_unknown_hostname_on_pull_returns_error() {
+        let state = init_teststate();
+        let bucket: Bucket = serde_json::from_str(
+            r#"{
+            "id": "bucket-unknown-host",
+            "type": "test",
+            "hostname": "unknown",
+            "client": "test"
+        }"#,
+        )
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        let result = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull: no source device ID is passed
+            None,
+            &SyncSpec::default(),
+        );
+        let err = result.expect_err("an unknown hostname on pull must return Err");
+        assert!(
+            err.contains("bucket-unknown-host"),
+            "error should name the bucket, got: {err}"
+        );
+
+        // On push the source device ID is known, so the same bucket syncs fine.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            true,
+            Some("device-0"),
+            &SyncSpec::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -449,7 +493,7 @@ mod sync_tests {
         let mut datastores: Vec<Datastore> = Vec::new();
         for n in 0..2 {
             let dspath = sync_directory.join(format!("test-remote-{n}.db"));
-            let ds_ = create_datastore(&dspath);
+            let ds_ = create_datastore(&dspath).expect("test db path is valid UTF-8");
             let ds = &ds_ as &dyn AccessMethod;
 
             // Create a bucket

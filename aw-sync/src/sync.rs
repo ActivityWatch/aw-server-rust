@@ -317,6 +317,9 @@ const BATCH_SIZE: usize = 5;
 /// already-synced events (ActivityWatch/aw-android#253). Bounded so a full
 /// historical bucket is never loaded into memory on Android.
 const EDIT_RECONCILE_LOOKBACK: Duration = Duration::days(7);
+/// Hard cap on the lookback fetch (newest first). Time bound alone is not a
+/// memory bound if a bucket is extremely dense.
+const EDIT_RECONCILE_EVENT_CAP: u64 = 20_000;
 
 /// Whether a bucket holds data synced from another host, rather than data
 /// collected on this host.
@@ -473,11 +476,25 @@ fn reconcile_updated_events(
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
 
+    // end=None on purpose: an end bound would clip the dest-latest event's
+    // duration and break (timestamp, duration) identity. Skip source rows
+    // that end after `resume` in the loop instead; those belong to the
+    // incremental copy. Cap both fetches so a dense 7-day window cannot OOM.
     let source_events = ds_from
-        .get_events(bucket_from.id.as_str(), Some(lookback_start), None, None)
+        .get_events(
+            bucket_from.id.as_str(),
+            Some(lookback_start),
+            None,
+            Some(EDIT_RECONCILE_EVENT_CAP),
+        )
         .unwrap();
     let dest_events = ds_to
-        .get_events(bucket_to.id.as_str(), Some(lookback_start), None, None)
+        .get_events(
+            bucket_to.id.as_str(),
+            Some(lookback_start),
+            None,
+            Some(EDIT_RECONCILE_EVENT_CAP),
+        )
         .unwrap();
 
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
@@ -492,6 +509,9 @@ fn reconcile_updated_events(
 
     for src in source_events {
         if src.timestamp < lookback_start {
+            continue;
+        }
+        if src.timestamp + src.duration > resume {
             continue;
         }
         let Some(dsts) = dest_by_identity.get(&event_identity(&src)) else {

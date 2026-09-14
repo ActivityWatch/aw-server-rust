@@ -277,6 +277,41 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_migrate_test_bucket_names_heavy_overlap_is_linear() {
+        // Stacked histories must not reintroduce a quadratic open-set scan.
+        // Each event starts 1s later and outlives every later start, so the
+        // open heap grows to n; scanning it per event would be ~n².
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let n = 20_000;
+        let start = Utc::now();
+        let span = Duration::seconds(n as i64);
+        let legacy: Vec<Event> = (0..n)
+            .map(|i| test_event(start + Duration::seconds(i as i64), span))
+            .collect();
+        for chunk in legacy.chunks(5_000) {
+            ds.insert_events(old_id, chunk).unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "heavy-overlap merge took {elapsed:?}; open-set scan is quadratic"
+        );
+        assert_eq!(
+            ds.get_event_count(old_id, None, None).unwrap(),
+            n as i64,
+            "every stacked event overlaps another, so none should move"
+        );
+        assert_eq!(ds.get_event_count(new_id, None, None).unwrap(), 0);
+    }
+
+    #[test]
     fn test_migrate_test_bucket_names_merges_interleaved_non_overlapping_events() {
         let ds = Datastore::new_in_memory(false);
         let old_id = "aw-watcher-android-test_phone";

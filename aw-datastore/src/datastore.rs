@@ -253,9 +253,12 @@ fn parse_event_row(row: &rusqlite::Row, clip: Option<(i64, i64)>) -> rusqlite::R
 ///
 /// Two events overlap when `a.starttime < b.endtime AND b.starttime < a.endtime`
 /// (strict, matching the datastore's overlap semantics elsewhere). Events are
-/// read once ordered by `starttime`; a sweep keeps the still-open events in a
-/// min-heap keyed by `endtime`, so each overlapping pair is examined exactly once
-/// and the whole pass is O(n log n) instead of one index scan per legacy event.
+/// read once ordered by `starttime`. A sweep keeps still-open events in a
+/// min-heap keyed by `endtime`. A positive-duration event overlaps every
+/// still-open event, so those are marked in O(1) via an epoch counter rather
+/// than scanning the heap (which would be quadratic for stacked histories).
+/// Zero-duration events are the only case that still scans, and they never stay
+/// in the open set. The pass is O(n log n).
 fn movable_legacy_event_ids(
     conn: &Connection,
     legacy_bid: Option<i64>,
@@ -289,28 +292,52 @@ fn movable_legacy_event_ids(
         .collect::<rusqlite::Result<Vec<Span>>>()?;
 
     let mut overlaps = vec![false; spans.len()];
-    // Open events: those whose endtime is still ahead of the sweep position.
-    let mut open: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
+    // Open events: (endtime, index, epoch-at-push). Epoch marks the whole
+    // concurrent set in O(1) when a later positive-duration event overlaps it.
+    let mut open: BinaryHeap<Reverse<(i64, usize, u32)>> = BinaryHeap::new();
+    let mut epoch: u32 = 0;
     for (i, span) in spans.iter().enumerate() {
         // Events that ended at or before this start can never overlap this or
         // any later event (later events start no earlier than this one).
-        while let Some(Reverse((endtime, _))) = open.peek() {
-            if *endtime <= span.starttime {
+        while let Some(Reverse((endtime, j, pushed_epoch))) = open.peek().copied() {
+            if endtime <= span.starttime {
                 open.pop();
+                if pushed_epoch < epoch {
+                    overlaps[j] = true;
+                }
             } else {
                 break;
             }
         }
-        // Every remaining open event `j` satisfies `span.starttime < j.endtime`;
-        // the overlap is real when `j.starttime < span.endtime` as well, which
-        // only fails for a zero-duration event sharing the same starttime.
-        for Reverse((_, j)) in open.iter() {
-            if spans[*j].starttime < span.endtime {
-                overlaps[*j] = true;
+        if !open.is_empty() {
+            if span.endtime > span.starttime {
+                // Positive duration: every remaining open event `j` has
+                // `j.starttime <= span.starttime < span.endtime` and
+                // `span.starttime < j.endtime`, so they all overlap.
                 overlaps[i] = true;
+                epoch += 1;
+            } else {
+                // Zero-duration: overlaps open events that started strictly
+                // earlier, but not same-start positive-duration events
+                // (`j.starttime < span.endtime` fails when starttimes match).
+                let mut overlapped = false;
+                for Reverse((_, j, _)) in open.iter() {
+                    if spans[*j].starttime < span.starttime {
+                        overlaps[*j] = true;
+                        overlapped = true;
+                    }
+                }
+                if overlapped {
+                    overlaps[i] = true;
+                }
             }
         }
-        open.push(Reverse((span.endtime, i)));
+        open.push(Reverse((span.endtime, i, epoch)));
+    }
+    while let Some(Reverse((_, j, pushed_epoch))) = open.pop() {
+        if pushed_epoch < epoch {
+            overlaps[j] = true;
+        }
     }
 
     Ok(spans

@@ -216,6 +216,138 @@ fn historical_title_edit_reaches_peer() {
 }
 
 #[test]
+fn same_identity_siblings_survive_noop_sync() {
+    // Datastore does not require (timestamp, duration) to be unique. A
+    // per-source-row pass against a frozen dest snapshot treated every other
+    // sibling as stale and deleted them all, including on a no-op second sync.
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-identity-sib", "phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    let t1 = t0 + Duration::minutes(40);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(20), "alpha"),
+            event_at(t0, Duration::minutes(20), "bravo"),
+            event_at(t1, Duration::minutes(3), "later window"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+    sync_push(&src, &dest);
+
+    let got = titles(&dest, &bucket);
+    assert_eq!(
+        got.len(),
+        3,
+        "noop reconcile must not drop same-identity siblings: {got:?}"
+    );
+    assert!(got.contains(&(t0, "alpha".to_string())));
+    assert!(got.contains(&(t0, "bravo".to_string())));
+    assert!(got.contains(&(t1, "later window".to_string())));
+}
+
+#[test]
+fn same_identity_sibling_edit_keeps_the_other() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-identity-edit", "phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    let t1 = t0 + Duration::minutes(40);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(20), "alpha"),
+            event_at(t0, Duration::minutes(20), "bravo"),
+            event_at(t1, Duration::minutes(3), "later window"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+
+    let target = src
+        .get_events(&bucket, None, None, None)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.data.get("title").and_then(|v| v.as_str()) == Some("alpha"))
+        .unwrap();
+    src.delete_events_by_id(&bucket, vec![target.id.unwrap()])
+        .unwrap();
+    let mut data = target.data.clone();
+    data.insert("title".to_string(), json!("alpha-edited"));
+    src.insert_events(
+        &bucket,
+        &[Event {
+            id: None,
+            timestamp: target.timestamp,
+            duration: target.duration,
+            data,
+        }],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+
+    let got = titles(&dest, &bucket);
+    assert_eq!(
+        got.len(),
+        3,
+        "editing one sibling must not drop the other: {got:?}"
+    );
+    assert!(got.contains(&(t0, "alpha-edited".to_string())));
+    assert!(
+        got.contains(&(t0, "bravo".to_string())),
+        "same timestamp+duration sibling must keep its title: {got:?}"
+    );
+    assert!(got.contains(&(t1, "later window".to_string())));
+}
+
+#[test]
+fn far_behind_dest_still_copies_post_cursor_backlog() {
+    // Reconcile must not load the post-cursor source backlog (end=resume).
+    // Those events belong to the bounded incremental copy.
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-far-behind", "phone");
+    let t_old = Utc::now() - Duration::days(10);
+    let t_cursor = t_old + Duration::hours(2);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t_old, Duration::minutes(20), "sanitized.mp4"),
+            event_at(t_cursor, Duration::minutes(5), "cursor window"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+
+    edit_title(&src, &bucket, t_old, "Real Video Title");
+    let mut later = Vec::new();
+    for i in 0..12 {
+        later.push(event_at(
+            t_cursor + Duration::days(1) + Duration::minutes(i),
+            Duration::minutes(1),
+            &format!("later-{i}"),
+        ));
+    }
+    src.insert_events(&bucket, &later).unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+
+    let got = titles(&dest, &bucket);
+    assert_eq!(
+        got.len(),
+        14,
+        "lookback edit plus paginated backlog: {got:?}"
+    );
+    assert!(got.contains(&(t_old, "Real Video Title".to_string())));
+    assert!(got.contains(&(t_cursor, "cursor window".to_string())));
+    assert!(got.contains(&(later[0].timestamp, "later-0".to_string())));
+    assert!(got.contains(&(later[11].timestamp, "later-11".to_string())));
+}
+
+#[test]
 fn same_timestamp_sibling_is_not_clobbered() {
     let (src, dest) = memory_pair();
     let bucket = create_bucket(&src, "aw-watcher-android-sibling", "phone");

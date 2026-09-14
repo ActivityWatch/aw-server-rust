@@ -390,21 +390,34 @@ fn reconcile_updated_events(
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
 
-    // end=None on purpose: an end bound would clip the dest-latest event's
-    // duration and break (timestamp, duration) identity. Skip source rows
-    // that start at/after `resume` in the loop instead; those belong to the
-    // incremental copy. The 7-day lookback is the memory bound; do not also
-    // cap by count, which would silently skip older in-window edits.
+    // Bound both fetches to the lookback window ending at `resume`.
+    // end=None would load every newer source event when dest is far behind,
+    // exhausting Android RAM and bypassing the paginated incremental copy.
+    // get_events clips to the query range; dest-latest ends at `resume`, so
+    // that clip is a no-op on its (timestamp, duration) identity. Title edits
+    // keep duration; duration-only updates stay on the heartbeat path. Do not
+    // also cap by count — a newest-first cap silently skips older in-window
+    // edits.
     let source_events = ds_from
-        .get_events(bucket_from.id.as_str(), Some(lookback_start), None, None)
+        .get_events(
+            bucket_from.id.as_str(),
+            Some(lookback_start),
+            Some(resume),
+            None,
+        )
         .unwrap();
     let dest_events = ds_to
-        .get_events(bucket_to.id.as_str(), Some(lookback_start), None, None)
+        .get_events(
+            bucket_to.id.as_str(),
+            Some(lookback_start),
+            Some(resume),
+            None,
+        )
         .unwrap();
 
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for event in dest_events {
-        if event.timestamp >= lookback_start {
+        if event.timestamp >= lookback_start && event.timestamp < resume {
             dest_by_identity
                 .entry(event_identity(&event))
                 .or_default()
@@ -412,40 +425,59 @@ fn reconcile_updated_events(
         }
     }
 
+    let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for src in source_events {
-        if src.timestamp < lookback_start {
-            continue;
-        }
         // Skip events that start at/after the dest cursor; the incremental
         // copy owns those. Do not use end>resume: the dest-latest event starts
         // before resume and must still be title-reconciled.
-        if src.timestamp >= resume {
+        if src.timestamp < lookback_start || src.timestamp >= resume {
             continue;
         }
-        let Some(dsts) = dest_by_identity.get(&event_identity(&src)) else {
-            continue;
+        src_by_identity
+            .entry(event_identity(&src))
+            .or_default()
+            .push(src);
+    }
+
+    for (identity, srcs) in src_by_identity {
+        let mut dsts = match dest_by_identity.remove(&identity) {
+            Some(dsts) if !dsts.is_empty() => dsts,
+            _ => continue,
         };
-        let stale: Vec<i64> = dsts
-            .iter()
-            .filter(|dst| dst.data != src.data)
-            .filter_map(|dst| dst.id)
-            .collect();
-        if stale.is_empty() {
+        let mut to_insert = Vec::new();
+        for src in srcs {
+            if let Some(idx) = dsts.iter().position(|dst| dst.data == src.data) {
+                // Still present on dest — keep it, including same-identity
+                // siblings a later source row must not treat as stale.
+                dsts.remove(idx);
+            } else {
+                to_insert.push(src);
+            }
+        }
+        if to_insert.is_empty() && dsts.is_empty() {
             continue;
         }
-        let ts = src.timestamp;
+        let ts = identity.0;
         // Insert before delete so a crash cannot drop the row. A later pass
         // sees matching data, skips insert, and still removes remaining stale ids.
-        if !dsts.iter().any(|dst| dst.data == src.data) {
-            let mut replacement = src;
-            replacement.id = None;
+        if !to_insert.is_empty() {
+            let replacements: Vec<Event> = to_insert
+                .into_iter()
+                .map(|mut src| {
+                    src.id = None;
+                    src
+                })
+                .collect();
             ds_to
-                .insert_events(bucket_to.id.as_str(), vec![replacement])
+                .insert_events(bucket_to.id.as_str(), replacements)
                 .unwrap();
         }
-        ds_to
-            .delete_events_by_id(bucket_to.id.as_str(), stale)
-            .unwrap();
+        let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
+        if !stale.is_empty() {
+            ds_to
+                .delete_events_by_id(bucket_to.id.as_str(), stale)
+                .unwrap();
+        }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
 }

@@ -77,7 +77,7 @@ pub fn sync_run(
         sync_spec.path.as_path(),
         device_id,
         sync_spec.path_db.as_ref(),
-    );
+    )?;
 
     // Log if remotes found
     // TODO: Only log remotes of interest
@@ -108,14 +108,14 @@ pub fn sync_run(
     if mode == SyncMode::Pull || mode == SyncMode::Both {
         info!("Pulling...");
         for ds_from in &ds_remotes {
-            sync_datastores(ds_from, client, false, None, sync_spec);
+            sync_datastores(ds_from, client, false, None, sync_spec)?;
         }
     }
 
     // Push local server buckets to sync folder
     if mode == SyncMode::Push || mode == SyncMode::Both {
         info!("Pushing...");
-        sync_datastores(client, &ds_localremote, true, Some(device_id), sync_spec);
+        sync_datastores(client, &ds_localremote, true, Some(device_id), sync_spec)?;
     }
 
     // Close open database connections
@@ -146,7 +146,7 @@ pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
     let device_id = info.device_id.as_str();
     let ds_localremote = setup_local_remote(sync_directory, device_id)?;
 
-    let remote_dbfiles = crate::util::find_remotes_nonlocal(sync_directory, device_id, None);
+    let remote_dbfiles = crate::util::find_remotes_nonlocal(sync_directory, device_id, None)?;
     info!("Found remotes: {:?}", remote_dbfiles);
 
     // TODO: Check for compatible remote db version before opening
@@ -156,10 +156,10 @@ pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
         .map(create_datastore)
         .collect();
 
-    log_buckets(client);
-    log_buckets(&ds_localremote);
+    log_buckets(client)?;
+    log_buckets(&ds_localremote)?;
     for ds_from in &ds_remotes {
-        log_buckets(ds_from);
+        log_buckets(ds_from)?;
     }
 
     Ok(())
@@ -184,16 +184,23 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
 }
 
 pub fn create_datastore(path: &Path) -> Datastore {
-    let pathstr = path.as_os_str().to_str().unwrap();
-    Datastore::new(pathstr.to_string(), false)
+    // to_string_lossy rather than unwrap: a non-UTF-8 path is a sync-folder
+    // problem to be reported by the datastore, not a reason to abort the
+    // process (which is what a panic here does on Android, aw-android#220).
+    Datastore::new(path.to_string_lossy().into_owned(), false)
 }
 
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
+///
+/// Returns an error rather than panicking on a datastore failure or on bucket
+/// metadata of an unexpected shape: this runs inside a JNI call on Android,
+/// where an unwind out of the `extern "C"` frame aborts the app
+/// (ActivityWatch/aw-android#220).
 fn get_or_create_sync_bucket(
     bucket_from: &Bucket,
     ds_to: &dyn AccessMethod,
     is_push: bool,
-) -> Bucket {
+) -> Result<Bucket, String> {
     // On pull/import: derive the origin from $aw.sync.origin metadata (preferred) or the
     // hostname (legacy fallback for buckets that predate the metadata field).  On push-staging
     // the bucket keeps its original ID and we do NOT stamp $aw.sync.origin — staging copies
@@ -201,15 +208,21 @@ fn get_or_create_sync_bucket(
     let (new_id, sync_origin) = if is_push {
         (bucket_from.id.clone(), None)
     } else {
-        let orig_bucketid = bucket_from.id.split("-synced-from-").next().unwrap();
-        let fallback = serde_json::to_value(&bucket_from.hostname).unwrap();
-        let origin = bucket_from
-            .data
-            .get("$aw.sync.origin")
-            .unwrap_or(&fallback)
-            .as_str()
-            .unwrap()
-            .to_string();
+        // `split` always yields at least one item, so this cannot be None.
+        let orig_bucketid = bucket_from
+            .id
+            .split("-synced-from-")
+            .next()
+            .unwrap_or(bucket_from.id.as_str());
+        let origin = match bucket_from.data.get("$aw.sync.origin") {
+            Some(value) => value.as_str().map(str::to_string).ok_or_else(|| {
+                format!(
+                    "Bucket '{}' has a non-string $aw.sync.origin: {}",
+                    bucket_from.id, value
+                )
+            })?,
+            None => bucket_from.hostname.clone(),
+        };
         (
             format!("{orig_bucketid}-synced-from-{origin}"),
             Some(origin),
@@ -217,7 +230,7 @@ fn get_or_create_sync_bucket(
     };
 
     match ds_to.get_bucket(new_id.as_str()) {
-        Ok(bucket) => bucket,
+        Ok(bucket) => Ok(bucket),
         Err(DatastoreError::NoSuchBucket(_)) => {
             let mut bucket_new = bucket_from.clone();
             bucket_new.id = new_id.clone();
@@ -233,13 +246,14 @@ fn get_or_create_sync_bucket(
                 // never look like synced-from-remote buckets.
                 bucket_new.data.remove("$aw.sync.origin");
             }
-            ds_to.create_bucket(&bucket_new).unwrap();
-            match ds_to.get_bucket(new_id.as_str()) {
-                Ok(bucket) => bucket,
-                Err(e) => panic!("{e:?}"),
-            }
+            ds_to
+                .create_bucket(&bucket_new)
+                .map_err(|e| format!("Failed to create bucket '{new_id}': {e:?}"))?;
+            ds_to
+                .get_bucket(new_id.as_str())
+                .map_err(|e| format!("Failed to read back bucket '{new_id}': {e:?}"))
         }
-        Err(e) => panic!("{e:?}"),
+        Err(e) => Err(format!("Failed to get bucket '{new_id}': {e:?}")),
     }
 }
 
@@ -277,20 +291,26 @@ fn is_synced_bucket(bucket: &Bucket) -> bool {
 /// is_push: a bool indicating if we're pushing local buckets to the sync dir
 ///          (as opposed to pulling from remotes)
 /// src_did: source device ID
+///
+/// Returns an error instead of panicking: this is the step the abort in
+/// ActivityWatch/aw-android#220 happens in (the sync directory and its
+/// datastore are already created by the time the process dies), and on Android
+/// it runs inside a JNI `extern "C"` frame where an unwind is an abort rather
+/// than a caught exception.
 pub fn sync_datastores(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     is_push: bool,
     src_did: Option<&str>,
     sync_spec: &SyncSpec,
-) {
+) -> Result<(), String> {
     // FIXME: "-synced" should only be appended when synced to the local database, not to the
     // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
 
     let mut buckets_from: Vec<Bucket> = ds_from
         .get_buckets()
-        .unwrap()
+        .map_err(|e| format!("Failed to list buckets in {ds_from:?}: {e}"))?
         .iter_mut()
         // Never sync a bucket that is itself a copy synced from another host.
         // A host must only ever offer data it collected itself. Without this,
@@ -324,8 +344,23 @@ pub fn sync_datastores(
         .map(|tup| {
             // TODO: Refuse to sync buckets without hostname/device ID set, or if set to 'unknown'
             if tup.1.hostname == "unknown" {
-                warn!(" ! Bucket hostname/device ID was invalid, setting to device ID/hostname");
-                tup.1.hostname = src_did.unwrap().to_string();
+                // Only the push path has a source device ID to substitute; on
+                // pull there is nothing to fill in, so leave it as-is rather
+                // than unwrapping a None and aborting the app.
+                match src_did {
+                    Some(did) => {
+                        warn!(
+                            " ! Bucket hostname/device ID was invalid, setting to device ID/hostname"
+                        );
+                        tup.1.hostname = did.to_string();
+                    }
+                    None => {
+                        warn!(
+                            " ! Bucket '{}' has an unknown hostname and no source device ID to substitute",
+                            tup.1.id
+                        );
+                    }
+                }
             }
             tup.1.clone()
         })
@@ -344,9 +379,11 @@ pub fn sync_datastores(
     buckets_from.sort_by_key(|b| b.metadata.end);
 
     for bucket_from in buckets_from {
-        let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push);
-        sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec);
+        let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push)?;
+        sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec)?;
     }
+
+    Ok(())
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -356,17 +393,15 @@ fn sync_one(
     bucket_from: Bucket,
     bucket_to: Bucket,
     sync_spec: &SyncSpec,
-) {
-    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
+) -> Result<(), String> {
+    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
     // Sync events
     // FIXME: This should use bucket_to.metadata.end, but it doesn't because it doesn't work
     // for empty buckets (Should be None, is Some(unknown_time))
     // let resume_sync_at = bucket_to.metadata.end;
-    let most_recent_events = ds_to
-        .get_events(bucket_to.id.as_str(), None, None, Some(1))
-        .unwrap();
+    let most_recent_events = ds_to.get_events(bucket_to.id.as_str(), None, None, Some(1))?;
     // If the destination bucket already has events, resume from where it left off.
     // Otherwise (first sync of this bucket), fall back to sync_spec.start, if specified.
     let resume_sync_at = most_recent_events
@@ -402,14 +437,12 @@ fn sync_one(
     let mut pages_written = 0u32;
 
     loop {
-        let raw = ds_from
-            .get_events(
-                bucket_from.id.as_str(),
-                resume_sync_at,
-                fetch_end,
-                Some(BATCH_SIZE as u64),
-            )
-            .unwrap();
+        let raw = ds_from.get_events(
+            bucket_from.id.as_str(),
+            resume_sync_at,
+            fetch_end,
+            Some(BATCH_SIZE as u64),
+        )?;
 
         if raw.is_empty() {
             break;
@@ -439,8 +472,15 @@ fn sync_one(
             // Note: we must drop the boundary event itself, not just its duplicates. Keeping
             // one copy in this chunk while also setting `fetch_end = Some(boundary_ts)` (inclusive)
             // would cause that event to be fetched again next page, producing a duplicate row.
-            let boundary_ts = chunk.last().unwrap().timestamp;
-            if chunk.first().unwrap().timestamp != boundary_ts {
+            // `raw` was non-empty and `chunk` is a 1:1 map of it, so both ends exist.
+            let (Some(oldest), Some(newest)) = (chunk.last(), chunk.first()) else {
+                return Err(format!(
+                    "Empty event page while syncing bucket '{}'",
+                    bucket_from.id
+                ));
+            };
+            let boundary_ts = oldest.timestamp;
+            if newest.timestamp != boundary_ts {
                 // Safe to pop all boundary_ts events: the `if` guard ensures at least one
                 // earlier event (with a different timestamp) remains in the chunk.
                 while chunk.last().is_some_and(|e| e.timestamp == boundary_ts) {
@@ -461,9 +501,7 @@ fn sync_one(
             pages_written += 1;
             for batch in chunk.chunks(BATCH_SIZE) {
                 print!("({}/…)\r", events_sent);
-                ds_to
-                    .insert_events(bucket_to.id.as_str(), batch.to_vec())
-                    .unwrap();
+                ds_to.insert_events(bucket_to.id.as_str(), batch.to_vec())?;
             }
         } else {
             // Last (oldest) page: process oldest-first to preserve ID ordering.
@@ -476,7 +514,7 @@ fn sync_one(
             // compare against the wrong row — insert directly instead.
             if !chunk.is_empty() && pages_written == 0 {
                 let oldest = chunk.remove(0);
-                ds_to.heartbeat(bucket_to.id.as_str(), oldest, 0.0).unwrap();
+                ds_to.heartbeat(bucket_to.id.as_str(), oldest, 0.0)?;
                 events_sent += 1;
             }
 
@@ -485,9 +523,7 @@ fn sync_one(
                 events_sent += chunk.len();
                 for batch in chunk.chunks(BATCH_SIZE) {
                     print!("({}/…)\r", events_sent);
-                    ds_to
-                        .insert_events(bucket_to.id.as_str(), batch.to_vec())
-                        .unwrap();
+                    ds_to.insert_events(bucket_to.id.as_str(), batch.to_vec())?;
                 }
             }
 
@@ -495,25 +531,33 @@ fn sync_one(
         }
     }
 
-    let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
+    let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str())?;
     let new_events_count = eventcount_to_new - eventcount_to_old;
-    assert!(new_events_count >= 0);
+    if new_events_count < 0 {
+        return Err(format!(
+            "Event count of bucket '{}' shrank during sync ({eventcount_to_old} -> {eventcount_to_new})",
+            bucket_to.id
+        ));
+    }
     if new_events_count > 0 {
         info!("  = Synced {} new events", new_events_count);
     } else {
         info!("  ✓ Already up to date!");
     }
+
+    Ok(())
 }
 
-fn log_buckets(ds: &dyn AccessMethod) {
+fn log_buckets(ds: &dyn AccessMethod) -> Result<(), String> {
     // Logs all buckets and some metadata for a given datastore
-    let buckets = ds.get_buckets().unwrap();
+    let buckets = ds.get_buckets()?;
     info!("Buckets in {:?}:", ds);
     for bucket in buckets.values() {
         info!(" - {}", bucket.id.as_str());
         info!(
             "   eventcount: {:?}",
-            ds.get_event_count(bucket.id.as_str()).unwrap()
+            ds.get_event_count(bucket.id.as_str())?
         );
     }
+    Ok(())
 }

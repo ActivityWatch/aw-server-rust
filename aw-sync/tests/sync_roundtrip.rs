@@ -84,10 +84,10 @@ fn round_trip() -> (Datastore, Datastore) {
         .unwrap();
 
     // 1. HOSTA pushes to its own folder in the sync dir.
-    sync_datastores(&a_local, &a_export, true, Some("device-A"), &spec);
+    sync_datastores(&a_local, &a_export, true, Some("device-A"), &spec).unwrap();
 
     // 2. HOSTB pulls HOSTA's export. This copy is correct and expected.
-    sync_datastores(&a_export, &b_local, false, None, &spec);
+    sync_datastores(&a_export, &b_local, false, None, &spec).unwrap();
     assert!(
         bucket_ids(&b_local).contains(&"aw-watcher-window_HOSTA-synced-from-HOSTA".to_string()),
         "precondition: HOSTB should hold HOSTA's data as a synced-from-HOSTA bucket, got {:?}",
@@ -95,10 +95,10 @@ fn round_trip() -> (Datastore, Datastore) {
     );
 
     // 3. HOSTB pushes its own data to the sync folder.
-    sync_datastores(&b_local, &b_export, true, Some("device-B"), &spec);
+    sync_datastores(&b_local, &b_export, true, Some("device-B"), &spec).unwrap();
 
     // 4. HOSTA pulls HOSTB's export.
-    sync_datastores(&b_export, &a_local, false, None, &spec);
+    sync_datastores(&b_export, &a_local, false, None, &spec).unwrap();
 
     (a_local, b_export)
 }
@@ -154,7 +154,7 @@ fn test_synced_from_is_a_reserved_id_token() {
         .create_bucket(&bucket("aw-watcher-afk_HOSTA", "HOSTA"))
         .unwrap();
 
-    sync_datastores(&local, &export, true, Some("device-A"), &spec);
+    sync_datastores(&local, &export, true, Some("device-A"), &spec).unwrap();
 
     assert_eq!(
         bucket_ids(&export),

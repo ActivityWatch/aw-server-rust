@@ -195,8 +195,14 @@ pub mod android {
         env: JNIEnv,
         _: JClass,
     ) -> jstring {
-        let buckets = openDatastore().get_buckets().unwrap();
-        string_to_jstring(&env, json!(buckets).to_string())
+        // Return an error object instead of unwrapping: if the datastore worker
+        // is gone (it panicked, e.g. the database could not be opened), the
+        // request fails with SendError/RecvError and a panic here unwinds across
+        // the JNI boundary on whatever thread called getBuckets — usually main.
+        match openDatastore().get_buckets() {
+            Ok(buckets) => string_to_jstring(&env, json!(buckets).to_string()),
+            Err(e) => create_error_object(&env, format!("Failed to get buckets: {e:?}")),
+        }
     }
 
     #[no_mangle]

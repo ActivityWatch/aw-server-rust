@@ -9,6 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -312,6 +313,11 @@ const BATCH_SIZE: usize = 5000;
 #[cfg(test)]
 const BATCH_SIZE: usize = 5;
 
+/// How far before the resume cursor to look for owner-originated edits of
+/// already-synced events (ActivityWatch/aw-android#253). Bounded so a full
+/// historical bucket is never loaded into memory on Android.
+const EDIT_RECONCILE_LOOKBACK: Duration = Duration::days(7);
+
 /// Whether a bucket holds data synced from another host, rather than data
 /// collected on this host.
 ///
@@ -432,6 +438,75 @@ pub fn sync_datastores(
     Ok(())
 }
 
+/// Replace dest events whose timestamp still exists on the source but whose
+/// data or duration changed.
+///
+/// WebUI/Android title edits are delete+insert at the same timestamp. The
+/// resume cursor starts at the destination's latest event end, so those
+/// replacements are outside the incremental fetch window. Under the
+/// single-writer model the source is authoritative for its own buckets, so a
+/// timestamp match with different data is an owner-originated edit, not a
+/// conflict.
+///
+/// Must run *before* the incremental copy: a latest-event title edit is also
+/// re-fetched as a start-clipped fragment, and heartbeat() refuses to merge
+/// different data, which would insert a duplicate unless dest already holds
+/// the new payload.
+fn reconcile_updated_events(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    bucket_from: &Bucket,
+    bucket_to: &Bucket,
+    resume_sync_at: Option<DateTime<Utc>>,
+) {
+    let Some(resume) = resume_sync_at else {
+        return;
+    };
+    let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
+
+    let source_events = ds_from
+        .get_events(bucket_from.id.as_str(), Some(lookback_start), None, None)
+        .unwrap();
+    let dest_events = ds_to
+        .get_events(bucket_to.id.as_str(), Some(lookback_start), None, None)
+        .unwrap();
+
+    let dest_by_ts: HashMap<DateTime<Utc>, Event> = dest_events
+        .into_iter()
+        .filter(|e| e.timestamp >= lookback_start)
+        .map(|e| (e.timestamp, e))
+        .collect();
+
+    for src in source_events {
+        if src.timestamp < lookback_start {
+            continue;
+        }
+        let Some(dst) = dest_by_ts.get(&src.timestamp) else {
+            continue;
+        };
+        if dst.data == src.data && dst.duration == src.duration {
+            continue;
+        }
+        let Some(dst_id) = dst.id else {
+            warn!(
+                "Cannot reconcile event at {:?} — dest event has no id",
+                src.timestamp
+            );
+            continue;
+        };
+        ds_to
+            .delete_events_by_id(bucket_to.id.as_str(), vec![dst_id])
+            .unwrap();
+        let ts = src.timestamp;
+        let mut replacement = src;
+        replacement.id = None;
+        ds_to
+            .insert_events(bucket_to.id.as_str(), vec![replacement])
+            .unwrap();
+        info!("   ~ Reconciled edited event at {:?}", ts);
+    }
+}
+
 /// Syncs a single bucket from one datastore to another
 fn sync_one(
     ds_from: &dyn AccessMethod,
@@ -460,6 +535,8 @@ fn sync_one(
     } else {
         info!("   + Starting from beginning");
     }
+
+    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at);
 
     // Fetch events in bounded chunks to avoid OOM on devices with limited RAM (e.g. Android).
     // get_events returns events in descending order (newest first), so we paginate backwards

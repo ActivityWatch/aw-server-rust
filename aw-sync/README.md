@@ -80,7 +80,7 @@ We also avoid having to implement complex features such as conflict resolution, 
 - It doesn't support Android, yet.
 - It mirrors events to all devices,
   - If you have a lot of devices you'll get a lot of duplicates, taking up a lot of space and potentially impacting performance.
-- It doesn't support modifying/deleting events, yet.
+- Event deletion is not synced. Owner-originated edits (same timestamp, new data) are reconciled within 7 days of the destination resume cursor; older edits are skipped to keep peak memory bounded.
 
 ---
 

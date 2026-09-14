@@ -216,6 +216,56 @@ fn historical_title_edit_reaches_peer() {
 }
 
 #[test]
+fn same_timestamp_sibling_is_not_clobbered() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-sibling", "phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    let t1 = t0 + Duration::minutes(40);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(20), "sanitized.mp4"),
+            event_at(t0, Duration::minutes(5), "unrelated sibling"),
+            event_at(t1, Duration::minutes(3), "later window"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+    let target = src
+        .get_events(&bucket, None, None, None)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.data.get("title").and_then(|v| v.as_str()) == Some("sanitized.mp4"))
+        .unwrap();
+    src.delete_events_by_id(&bucket, vec![target.id.unwrap()])
+        .unwrap();
+    let mut data = target.data.clone();
+    data.insert("title".to_string(), json!("Real Video Title"));
+    src.insert_events(
+        &bucket,
+        &[Event {
+            id: None,
+            timestamp: target.timestamp,
+            duration: target.duration,
+            data,
+        }],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+
+    let got = titles(&dest, &bucket);
+    assert_eq!(got.len(), 3);
+    assert!(got.contains(&(t0, "Real Video Title".to_string())));
+    assert!(
+        got.contains(&(t0, "unrelated sibling".to_string())),
+        "a same-timestamp event with a different duration must keep its title: {got:?}"
+    );
+    assert!(got.contains(&(t1, "later window".to_string())));
+}
+
+#[test]
 fn edits_older_than_lookback_are_not_reconciled() {
     // Peak-memory bound: only the 7 days before the resume cursor are compared.
     let (src, dest) = memory_pair();

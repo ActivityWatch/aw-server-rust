@@ -355,20 +355,29 @@ pub fn sync_datastores(
     }
 }
 
-/// Replace dest events whose timestamp still exists on the source but whose
-/// data or duration changed.
+fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
+    (
+        event.timestamp,
+        event.duration.num_nanoseconds().unwrap_or(0),
+    )
+}
+
+/// Replace dest events whose timestamp+duration still exist on the source but
+/// whose data changed.
 ///
-/// WebUI/Android title edits are delete+insert at the same timestamp. The
-/// resume cursor starts at the destination's latest event end, so those
-/// replacements are outside the incremental fetch window. Under the
+/// WebUI/Android title edits are delete+insert at the same timestamp and
+/// duration. The resume cursor starts at the destination's latest event end,
+/// so those replacements are outside the incremental fetch window. Under the
 /// single-writer model the source is authoritative for its own buckets, so a
-/// timestamp match with different data is an owner-originated edit, not a
-/// conflict.
+/// same-identity row with different data is an owner-originated edit, not a
+/// conflict. Identity includes duration so two events that share a timestamp
+/// are not collapsed into one HashMap slot.
 ///
-/// Must run *before* the incremental copy: a latest-event title edit is also
-/// re-fetched as a start-clipped fragment, and heartbeat() refuses to merge
-/// different data, which would insert a duplicate unless dest already holds
-/// the new payload.
+/// Duration-only updates of the live last event stay on the incremental
+/// heartbeat path. Must run *before* that copy: a latest-event title edit is
+/// also re-fetched as a start-clipped fragment, and heartbeat() refuses to
+/// merge different data, which would insert a duplicate unless dest already
+/// holds the new payload.
 fn reconcile_updated_events(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
@@ -388,22 +397,26 @@ fn reconcile_updated_events(
         .get_events(bucket_to.id.as_str(), Some(lookback_start), None, None)
         .unwrap();
 
-    let dest_by_ts: HashMap<DateTime<Utc>, Event> = dest_events
-        .into_iter()
-        .filter(|e| e.timestamp >= lookback_start)
-        .map(|e| (e.timestamp, e))
-        .collect();
+    let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
+    for event in dest_events {
+        if event.timestamp >= lookback_start {
+            dest_by_identity
+                .entry(event_identity(&event))
+                .or_default()
+                .push(event);
+        }
+    }
 
     for src in source_events {
         if src.timestamp < lookback_start {
             continue;
         }
-        let Some(dst) = dest_by_ts.get(&src.timestamp) else {
+        let Some(dsts) = dest_by_identity.get(&event_identity(&src)) else {
             continue;
         };
-        if dst.data == src.data && dst.duration == src.duration {
+        let Some(dst) = dsts.iter().find(|dst| dst.data != src.data) else {
             continue;
-        }
+        };
         let Some(dst_id) = dst.id else {
             warn!(
                 "Cannot reconcile event at {:?} — dest event has no id",

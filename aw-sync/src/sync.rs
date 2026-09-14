@@ -428,7 +428,10 @@ fn reconcile_updated_events(
         if src.timestamp < lookback_start {
             continue;
         }
-        if src.timestamp + src.duration > resume {
+        // Skip events that start at/after the dest cursor; the incremental
+        // copy owns those. Do not use end>resume: the dest-latest event starts
+        // before resume and must still be title-reconciled.
+        if src.timestamp >= resume {
             continue;
         }
         let Some(dsts) = dest_by_identity.get(&event_identity(&src)) else {

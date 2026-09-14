@@ -520,24 +520,26 @@ fn reconcile_updated_events(
         let Some(dsts) = dest_by_identity.get(&event_identity(&src)) else {
             continue;
         };
-        let Some(dst) = dsts.iter().find(|dst| dst.data != src.data) else {
+        let stale: Vec<i64> = dsts
+            .iter()
+            .filter(|dst| dst.data != src.data)
+            .filter_map(|dst| dst.id)
+            .collect();
+        if stale.is_empty() {
             continue;
-        };
-        let Some(dst_id) = dst.id else {
-            warn!(
-                "Cannot reconcile event at {:?} — dest event has no id",
-                src.timestamp
-            );
-            continue;
-        };
-        ds_to
-            .delete_events_by_id(bucket_to.id.as_str(), vec![dst_id])
-            .unwrap();
+        }
         let ts = src.timestamp;
-        let mut replacement = src;
-        replacement.id = None;
+        // Insert before delete so a crash cannot drop the row. A later pass
+        // sees matching data, skips insert, and still removes remaining stale ids.
+        if !dsts.iter().any(|dst| dst.data == src.data) {
+            let mut replacement = src;
+            replacement.id = None;
+            ds_to
+                .insert_events(bucket_to.id.as_str(), vec![replacement])
+                .unwrap();
+        }
         ds_to
-            .insert_events(bucket_to.id.as_str(), vec![replacement])
+            .delete_events_by_id(bucket_to.id.as_str(), stale)
             .unwrap();
         info!("   ~ Reconciled edited event at {:?}", ts);
     }

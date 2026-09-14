@@ -199,6 +199,84 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_migrate_test_bucket_names_zero_duration_event_at_shared_start_stays() {
+        // Strict overlap semantics: a zero-duration legacy event that starts exactly
+        // where a destination event starts is inside that event's open interval.
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[test_event(now + Duration::minutes(1), Duration::zero())],
+        )
+        .unwrap();
+        ds.insert_events(new_id, &[test_event(now, Duration::minutes(30))])
+            .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        assert_eq!(ds.get_events(old_id, None, None, None).unwrap().len(), 1);
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_merges_large_history_quickly() {
+        // Regression for ActivityWatch/aw-android#261: the merge used a correlated
+        // overlap subquery per legacy event (O(n^2)), which took hours on a phone
+        // with a couple of years of history and wedged the datastore worker. The
+        // sorted sweep must handle six-figure histories in seconds.
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let legacy_count = 100_000;
+        let destination_count = 10_000;
+        let start = Utc::now() - Duration::days(400);
+        let step = Duration::minutes(5);
+        let legacy: Vec<Event> = (0..legacy_count)
+            .map(|i| test_event(start + step * i, step - Duration::seconds(1)))
+            .collect();
+        for chunk in legacy.chunks(10_000) {
+            ds.insert_events(old_id, chunk).unwrap();
+        }
+        let cutover = start + step * legacy_count;
+        // One overlapping cutover event must stay behind while the rest merges.
+        ds.insert_events(
+            old_id,
+            &[test_event(
+                cutover - Duration::minutes(2),
+                Duration::minutes(4),
+            )],
+        )
+        .unwrap();
+        let destination: Vec<Event> = (0..destination_count)
+            .map(|i| test_event(cutover + step * i, step - Duration::seconds(1)))
+            .collect();
+        ds.insert_events(new_id, &destination).unwrap();
+
+        let started = std::time::Instant::now();
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "merge took {elapsed:?}; the overlap scan regressed to quadratic time"
+        );
+        assert_eq!(
+            ds.get_event_count(old_id, None, None).unwrap(),
+            2,
+            "only the overlapping cutover pair stays in the legacy bucket"
+        );
+        // Everything except the legacy event that the cutover overlaps moved over.
+        assert_eq!(
+            ds.get_event_count(new_id, None, None).unwrap(),
+            (legacy_count - 1 + destination_count) as i64,
+        );
+    }
+
+    #[test]
     fn test_migrate_test_bucket_names_merges_interleaved_non_overlapping_events() {
         let ds = Datastore::new_in_memory(false);
         let old_id = "aw-watcher-android-test_phone";

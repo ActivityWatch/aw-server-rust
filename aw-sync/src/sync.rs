@@ -548,6 +548,19 @@ fn sync_one(
         info!("  = Synced {} new events", new_events_count);
     } else {
         info!("  ✓ Already up to date!");
+        // Resume-from-newest is one-way: events older than dest's newest are never
+        // fetched. If a short recent slice was imported first, a later pull of the
+        // complete history reports "up to date" while dest is missing most of it.
+        // Warn loudly so that case is diagnosable (ActivityWatch/aw-server-rust#683).
+        if resume_sync_at.is_some() {
+            let src_count = ds_from.get_event_count(bucket_from.id.as_str())?;
+            if src_count > eventcount_to_new {
+                warn!(
+                    "  ! Source bucket '{}' has {src_count} events but destination '{}' has {eventcount_to_new} after a resume-from-newest pull. Older history in the source was not imported. Delete the destination bucket and re-pull to recover.",
+                    bucket_from.id, bucket_to.id
+                );
+            }
+        }
     }
 
     Ok(())

@@ -224,6 +224,7 @@ dependencies = [
  "aw-models",
  "aw-transform",
  "chrono",
+ "criterion",
  "dirs",
  "log",
  "mpsc_requests",
@@ -231,6 +232,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "zeroize",
 ]
 

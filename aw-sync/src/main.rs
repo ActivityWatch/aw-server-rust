@@ -296,6 +296,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// One daemon/sync cycle using the host-layout that Android and
+/// `aw-sync sync` (no advanced flags) already write and scan.
+fn run_host_layout_sync(client: &AwClient, mode: sync::SyncMode) -> Result<(), Box<dyn Error>> {
+    if mode == sync::SyncMode::Pull || mode == sync::SyncMode::Both {
+        info!("Pulling from all hosts");
+        sync_wrapper::pull_all(client)?;
+    }
+    if mode == sync::SyncMode::Push || mode == sync::SyncMode::Both {
+        info!("Pushing local data");
+        sync_wrapper::push(client)?;
+    }
+    Ok(())
+}
+
 fn daemon(
     client: &AwClient,
     start_date: Option<DateTime<Utc>>,
@@ -309,27 +323,45 @@ fn daemon(
         let _ = tx.send(());
     })?;
 
-    let sync_dir = dirs::get_sync_dir()?;
-    if let Some(db_path) = &sync_db {
-        info!("Using sync db: {}", db_path.display());
+    // Default daemon (what aw-qt and the bundled binary run) must use the
+    // same `{sync_dir}/{hostname}/{device_id}/` layout as `aw-sync sync`
+    // and Android. Driving `sync_run` against the sync root writes a
+    // 2-level `{device_id}/test.db` that neither peers nor `find_remotes`
+    // on a 3-level tree can see — so the daemon silently never pulls
+    // (ActivityWatch/aw-server-rust#682).
+    let use_host_layout = start_date.is_none() && buckets.is_none() && sync_db.is_none();
 
-        if !db_path.is_absolute() {
-            Err("Sync db path must be absolute")?
-        }
-        if !db_path.starts_with(&sync_dir) {
-            Err("Sync db path must be in sync directory")?
-        }
-    }
+    let sync_spec = if use_host_layout {
+        info!("Daemon using host-layout sync (compatible with `aw-sync sync` and Android)");
+        None
+    } else {
+        let sync_dir = dirs::get_sync_dir()?;
+        if let Some(db_path) = &sync_db {
+            info!("Using sync db: {}", db_path.display());
 
-    let sync_spec = sync::SyncSpec {
-        path: sync_dir,
-        buckets,
-        path_db: sync_db,
-        start: start_date,
+            if !db_path.is_absolute() {
+                Err("Sync db path must be absolute")?
+            }
+            if !db_path.starts_with(&sync_dir) {
+                Err("Sync db path must be in sync directory")?
+            }
+        }
+
+        Some(sync::SyncSpec {
+            path: sync_dir,
+            buckets,
+            path_db: sync_db,
+            start: start_date,
+        })
     };
 
     loop {
-        if let Err(e) = sync::sync_run(client, &sync_spec, mode) {
+        let cycle_result = if let Some(spec) = &sync_spec {
+            sync::sync_run(client, spec, mode)
+        } else {
+            run_host_layout_sync(client, mode)
+        };
+        if let Err(e) = cycle_result {
             error!("Error during sync cycle: {}", e);
             return Err(e);
         }

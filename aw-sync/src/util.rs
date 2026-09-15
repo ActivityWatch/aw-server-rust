@@ -168,55 +168,45 @@ mod tests {
     }
 }
 
-/// Check if a directory contains a .db file
-fn contains_db_file(dir: &std::path::Path) -> bool {
-    fs::read_dir(dir)
-        .ok()
-        .map(|entries| {
-            entries.filter_map(Result::ok).any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .map(|ext| ext == "db")
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// Check if a directory contains a subdirectory that contains a .db file
-fn contains_subdir_with_db_file(dir: &std::path::Path) -> bool {
-    fs::read_dir(dir)
-        .ok()
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .any(|entry| entry.path().is_dir() && contains_db_file(&entry.path()))
-        })
-        .unwrap_or(false)
-}
-
-/// Return all remotes in the sync folder
-/// Only returns folders that match ./{host}/{device_id}/*.db
-// TODO: share logic with find_remotes and find_remotes_nonlocal
+/// Return hostnames that have a 3-level `{host}/{device_id}/*.db` tree.
+///
+/// Shares the walker with `find_remotes` so daemon/`sync_run` and
+/// `aw-sync sync`/Android agree on what a remote looks like
+/// (ActivityWatch/aw-server-rust#682). Legacy 2-level
+/// `{device_id}/test.db` entries at the sync root have no hostname and
+/// are not returned — `sync_wrapper` cannot pull them.
 pub fn get_remotes() -> Result<Vec<String>, Box<dyn Error>> {
     let sync_root_dir = crate::dirs::get_sync_dir()?;
     fs::create_dir_all(&sync_root_dir)?;
-    let hostnames = fs::read_dir(sync_root_dir)?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir() && contains_subdir_with_db_file(&entry.path()))
-        .filter_map(|entry| {
-            entry
-                .path()
-                .file_name()
-                .and_then(|os_str| os_str.to_str().map(String::from))
-        })
+    let mut hostnames: Vec<String> = find_remotes(&sync_root_dir)?
+        .into_iter()
+        .filter_map(|db| hostname_from_db(&sync_root_dir, &db))
         .collect();
+    hostnames.sort();
+    hostnames.dedup();
     info!("Found remotes: {:?}", hostnames);
     Ok(hostnames)
 }
 
-/// Returns a list of all remote dbs
+/// `{sync_root}/{hostname}/{device_id}/file.db` → Some(hostname).
+/// `{sync_root}/{device_id}/file.db` (legacy 2-level) → None.
+fn hostname_from_db(sync_root: &Path, db: &Path) -> Option<String> {
+    let rel = db.strip_prefix(sync_root).ok()?;
+    let mut comps = rel.components();
+    let host = comps.next()?.as_os_str().to_str()?.to_string();
+    let _device_id = comps.next()?;
+    let _file = comps.next()?;
+    if comps.next().is_some() {
+        return None;
+    }
+    Some(host)
+}
+
+/// Returns a list of all remote dbs two or three levels below `sync_directory`.
+///
+/// Two layouts exist in the wild:
+/// - `{dir}/{device_id}/test.db` (legacy `sync_run` against the sync root)
+/// - `{dir}/{hostname}/{device_id}/test.db` (`sync_wrapper` / Android)
 ///
 /// I/O errors are propagated rather than unwrapped (a panic here aborts the app
 /// on Android, ActivityWatch/aw-android#220) and rather than skipped: silently
@@ -224,19 +214,25 @@ pub fn get_remotes() -> Result<Vec<String>, Box<dyn Error>> {
 /// that quietly omitted that host's data.
 fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut dbs = Vec::new();
-    for entry in fs::read_dir(sync_directory)? {
-        let hostdir = entry?.path();
-        if !hostdir.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&hostdir)? {
-            let path = entry?.path();
-            if path.extension().unwrap_or_else(|| OsStr::new("")) == "db" {
-                dbs.push(path);
+    collect_db_files(sync_directory, 0, &mut dbs)?;
+    Ok(dbs)
+}
+
+/// Collect `.db` files in directories at depth 1 or 2 (file paths at 2 or 3
+/// components relative to `dir`).
+fn collect_db_files(dir: &Path, dir_depth: u32, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    const MAX_DIR_DEPTH: u32 = 2;
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if dir_depth < MAX_DIR_DEPTH {
+                collect_db_files(&path, dir_depth + 1, out)?;
             }
+        } else if dir_depth >= 1 && path.extension().unwrap_or_else(|| OsStr::new("")) == "db" {
+            out.push(path);
         }
     }
-    Ok(dbs)
+    Ok(())
 }
 
 /// Returns a list of all remotes, excluding local ones
@@ -259,4 +255,78 @@ pub fn find_remotes_nonlocal(
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod remote_layout_tests {
+    use super::{find_remotes, hostname_from_db};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_sync_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aw-sync-find-remotes-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch_db(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn find_remotes_sees_wrapper_and_legacy_layouts() {
+        let root = temp_sync_dir();
+        let three_level = root.join("poco").join("device-android").join("test.db");
+        let two_level = root.join("device-desktop").join("test.db");
+        touch_db(&three_level);
+        touch_db(&two_level);
+        fs::write(root.join("orphan.db"), b"").unwrap();
+
+        let mut found = find_remotes(&root).unwrap();
+        found.sort();
+        let mut expected = vec![two_level, three_level];
+        expected.sort();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn hostname_from_db_only_for_three_level_layout() {
+        let root = Path::new("/tmp/ActivityWatchSync");
+        assert_eq!(
+            hostname_from_db(
+                root,
+                &root.join("poco").join("device-android").join("test.db")
+            )
+            .as_deref(),
+            Some("poco")
+        );
+        assert_eq!(
+            hostname_from_db(root, &root.join("device-desktop").join("test.db")),
+            None
+        );
+        assert_eq!(hostname_from_db(root, &root.join("orphan.db")), None);
+    }
+
+    #[test]
+    fn find_remotes_from_host_dir_still_sees_device_dbs() {
+        // `sync_wrapper::pull` calls find_remotes on `{sync_dir}/{host}`.
+        let root = temp_sync_dir();
+        let host_dir = root.join("erb-m2.localdomain");
+        let db = host_dir.join("d7bc68e7").join("test.db");
+        touch_db(&db);
+
+        let found = find_remotes(&host_dir).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(found, vec![db]);
+    }
 }

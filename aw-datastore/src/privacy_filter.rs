@@ -29,7 +29,14 @@ pub struct PrivacyFilterRule {
     pub pattern: String,
     /// What to do when matched
     pub action: PrivacyFilterAction,
-    /// Replacement text for the redact action
+    /// Replacement text for the redact action.
+    ///
+    /// Capture substitution (`$1`, `$2`, `$name`) is opt-in: it runs only
+    /// when `pattern` has capturing groups *and* this string contains a
+    /// capture template whose referenced groups participate in the match.
+    /// `$0` and unmatched alternation groups stay whole-field. Static
+    /// replacements always replace the entire field — so stored rules like
+    /// `(token)` + `REDACTED` do not leak unmatched text.
     pub replacement: Option<String>,
     /// Pre-compiled regex, populated lazily on first match. Not serialized.
     #[serde(skip)]
@@ -79,6 +86,28 @@ impl PrivacyFilterRule {
         }
     }
 
+    /// Redact `source` using this rule's pattern and `replacement`.
+    ///
+    /// `$1`/`$name` substitution (awatcher-compatible) runs only when the
+    /// pattern has capturing groups *and* `replacement` is a capture
+    /// template whose every referenced group participates in every match.
+    /// `$0` and unmatched alternation/optional groups stay whole-field —
+    /// otherwise `replace_all` would leak unmatched sensitive text.
+    fn redact_value(&self, source: &str, replacement: &str) -> String {
+        let re = self
+            .regex_cache
+            .get_or_init(|| regex::Regex::new(&self.pattern).ok());
+        match re.as_ref() {
+            Some(re) if re.captures_len() > 1 => match capture_refs_in_template(replacement, re) {
+                Some(refs) if referenced_captures_present(re, source, &refs) => {
+                    re.replace_all(source, replacement).into_owned()
+                }
+                _ => replacement.to_owned(),
+            },
+            _ => replacement.to_owned(),
+        }
+    }
+
     /// Apply this rule's action to an event.
     /// Returns None if dropped, Some(event) if kept (possibly redacted).
     pub fn apply<'a>(&self, event: &'a mut Event) -> Option<&'a mut Event> {
@@ -87,11 +116,14 @@ impl PrivacyFilterRule {
             PrivacyFilterAction::Redact => {
                 if let Some(ref replacement) = self.replacement {
                     if let Some(ref field_path) = self.field {
-                        set_field(
-                            &mut event.data,
-                            field_path,
-                            Value::String(replacement.clone()),
-                        );
+                        let current = resolve_field(&event.data, field_path)
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+                        let new_value = match current.as_deref() {
+                            Some(source) => self.redact_value(source, replacement),
+                            None => replacement.clone(),
+                        };
+                        set_field(&mut event.data, field_path, Value::String(new_value));
                     }
                 }
                 Some(event)
@@ -202,6 +234,120 @@ impl PrivacyFilterEngine {
             .filter_map(|e| self.filter_event(bucket_id, e))
             .collect()
     }
+}
+
+/// A `$` reference in a replacement template: `$1` / `${1}` or `$name` / `${name}`.
+enum CaptureRef {
+    Index(usize),
+    Name(String),
+}
+
+/// Parse `replacement` as a capture template whose every `$` reference names
+/// a group that exists on `re`. `$$` is an escaped dollar.
+///
+/// Returns `None` (stay whole-field) for dangling refs, empty `${}`, `$0`
+/// (whole-match identity), Perl-only `$&`/`$``/`$'`, and mixed malformed
+/// templates such as `$1$` / `$1$&`. Those must not opt into `replace_all`:
+/// the regex crate expands unknown / empty-named groups to `""`, `$0`
+/// substitutes the match unchanged, and a skipped dangling `$` still leaves
+/// a valid earlier ref — all leak unmatched field text.
+fn capture_refs_in_template(replacement: &str, re: &regex::Regex) -> Option<Vec<CaptureRef>> {
+    let n_groups = re.captures_len();
+    let named: Vec<&str> = re.capture_names().flatten().collect();
+    let bytes = replacement.as_bytes();
+    let mut i = 0;
+    let mut refs = Vec::new();
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'$') {
+            i += 2;
+            continue;
+        }
+        let rest = &replacement[i + 1..];
+        // Trailing `$` is not a capture ref. Skipping it after an earlier
+        // valid `$1` would still opt into replace_all (`$1$` → leak).
+        if rest.is_empty() {
+            return None;
+        }
+        let first = rest.as_bytes()[0];
+        if first == b'{' {
+            match rest[1..].find('}') {
+                Some(end) => {
+                    let name = &rest[1..1 + end];
+                    refs.push(resolve_capture_ref(name, n_groups, &named)?);
+                    i += 2 + end + 1; // ${ name }
+                }
+                None => return None,
+            }
+            continue;
+        }
+        // Longest ident, matching the regex crate: `$1a` is name `1a`, not `$1` + `a`.
+        if first.is_ascii_alphanumeric() || first == b'_' {
+            let rb = rest.as_bytes();
+            let mut j = 1;
+            while j < rb.len() && (rb[j].is_ascii_alphanumeric() || rb[j] == b'_') {
+                j += 1;
+            }
+            let name = &rest[..j];
+            refs.push(resolve_capture_ref(name, n_groups, &named)?);
+            i += 1 + j;
+            continue;
+        }
+        // Unsupported `$` form (`$&`, `$'`, `$``, `$ `). Fail closed even
+        // when an earlier `$1` was valid — mixed templates must not enable
+        // partial replacement.
+        return None;
+    }
+    if refs.is_empty() {
+        None
+    } else {
+        Some(refs)
+    }
+}
+
+fn resolve_capture_ref(name: &str, n_groups: usize, named: &[&str]) -> Option<CaptureRef> {
+    // `${}` is a named ref with an empty name, *not* `$0`. The regex crate
+    // expands it to "" (no such group), which would leak unmatched text.
+    if name.is_empty() {
+        return None;
+    }
+    if name.bytes().all(|b| b.is_ascii_digit()) {
+        let n = name.parse::<usize>().ok()?;
+        // Group 0 is the whole match. `$0` / `${0}` would take replace_all
+        // and persist the match plus unmatched field text unchanged.
+        if n > 0 && n < n_groups {
+            return Some(CaptureRef::Index(n));
+        }
+        return None;
+    }
+    named
+        .contains(&name)
+        .then(|| CaptureRef::Name(name.to_owned()))
+}
+
+/// True when every referenced group participates in every match.
+///
+/// Alternation / optional groups exist on the regex but may be `None` for a
+/// particular match (`$2` with `(token)|(secret)` matching `token=abc`).
+/// `replace_all` expands those to `""` and leaks unmatched field text.
+fn referenced_captures_present(re: &regex::Regex, source: &str, refs: &[CaptureRef]) -> bool {
+    let mut any = false;
+    for caps in re.captures_iter(source) {
+        any = true;
+        for r in refs {
+            let present = match r {
+                CaptureRef::Index(n) => caps.get(*n).is_some(),
+                CaptureRef::Name(name) => caps.name(name).is_some(),
+            };
+            if !present {
+                return false;
+            }
+        }
+    }
+    any
 }
 
 /// Resolve a dotted field path (e.g. "title", "data.url") from a serde_json Map.
@@ -418,5 +564,244 @@ mod tests {
         assert!(rule.matches("any-bucket", &event));
         let result = rule.apply(&mut event);
         assert!(result.is_none(), "Drop action should return None");
+    }
+
+    fn redact_rule(pattern: &str, replacement: &str) -> PrivacyFilterRule {
+        PrivacyFilterRule {
+            enabled: true,
+            bucket_prefix: None,
+            field: Some("title".to_string()),
+            pattern: pattern.to_string(),
+            action: PrivacyFilterAction::Redact,
+            replacement: Some(replacement.to_string()),
+            regex_cache: OnceLock::new(),
+        }
+    }
+
+    #[test]
+    fn test_redact_without_captures_replaces_whole_field() {
+        let rule = redact_rule(r"(?i).*banking.*", "REDACTED");
+        let mut event = test_event("Online Banking - My Account Balance");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "REDACTED"
+        );
+    }
+
+    #[test]
+    fn test_redact_with_capture_groups_like_awatcher() {
+        // awatcher: match `org\.kde\.(.*)`, replace `$1` → `dolphin`
+        let rule = redact_rule(r"(.*) - Mozilla Firefox", "$1");
+        let mut event = test_event("GitHub - Mozilla Firefox");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "GitHub"
+        );
+    }
+
+    #[test]
+    fn test_redact_static_replacement_with_captures_stays_whole_field() {
+        // Existing stored rules may use capturing groups with a static
+        // replacement. Partial replace_all would leak unmatched text
+        // (`token=abc token=def` → `REDACTED=abc REDACTED=def`).
+        let rule = redact_rule(r"(token)", "REDACTED");
+        let mut event = test_event("token=abc token=def");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "REDACTED"
+        );
+    }
+
+    #[test]
+    fn test_redact_strips_url_path_keep_host() {
+        let rule = redact_rule(r"https://([^/]+)/.*", "https://$1/");
+        let mut event = test_event("https://bank.example/account?token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "https://bank.example/"
+        );
+    }
+
+    #[test]
+    fn test_redact_named_capture_like_awatcher() {
+        let rule = redact_rule(r"https://(?P<host>[^/]+)/.*", "https://$host/");
+        let mut event = test_event("https://bank.example/account?token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "https://bank.example/"
+        );
+    }
+
+    #[test]
+    fn test_redact_awatcher_vscode_dirty_indicator() {
+        // awatcher README: match-title = "● (.*)", replace-title = "$1"
+        let rule = redact_rule(r"● (.*)", "$1");
+        let mut event = test_event("● file_config.rs - awatcher - Visual Studio Code");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "file_config.rs - awatcher - Visual Studio Code"
+        );
+    }
+
+    #[test]
+    fn test_redact_replace_all_occurrences_with_template() {
+        let rule = redact_rule(r"(token)=\S+", "$1=REDACTED");
+        let mut event = test_event("token=abc token=def");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "token=REDACTED token=REDACTED"
+        );
+    }
+
+    #[test]
+    fn test_redact_dangling_capture_ref_stays_whole_field() {
+        // `$5` is not group 1; replace_all would expand it to "" and leak `=abc`.
+        let rule = redact_rule(r"(token)", "REDACTED $5");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "REDACTED $5"
+        );
+    }
+
+    #[test]
+    fn test_redact_empty_braced_ref_stays_whole_field() {
+        // `${}` names no group; replace_all would expand it to "" and leak `=abc`.
+        let rule = redact_rule(r"(token)", "${}");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(result.data.get("title").unwrap().as_str().unwrap(), "${}");
+    }
+
+    #[test]
+    fn test_replacement_is_capture_template() {
+        let one = regex::Regex::new(r"(token)").unwrap();
+        let named = regex::Regex::new(r"(?P<host>[^/]+)").unwrap();
+        let two = regex::Regex::new(r"(a)(b)").unwrap();
+
+        assert!(capture_refs_in_template("$1", &one).is_some());
+        assert!(capture_refs_in_template("https://$1/", &one).is_some());
+        assert!(capture_refs_in_template("${1}", &one).is_some());
+        assert!(capture_refs_in_template("$0", &one).is_none());
+        assert!(capture_refs_in_template("https://$host/", &named).is_some());
+        assert!(capture_refs_in_template("$1$2", &two).is_some());
+        assert!(capture_refs_in_template("REDACTED", &one).is_none());
+        assert!(capture_refs_in_template("token=REDACTED", &one).is_none());
+        assert!(capture_refs_in_template("$$", &one).is_none());
+        assert!(capture_refs_in_template("cost $$5", &one).is_none());
+        assert!(capture_refs_in_template("REDACTED $5", &one).is_none());
+        assert!(capture_refs_in_template("$2", &one).is_none());
+        assert!(capture_refs_in_template("$host", &one).is_none());
+        assert!(capture_refs_in_template("$1$2", &one).is_none());
+        assert!(capture_refs_in_template("REDACTED $'", &one).is_none());
+        assert!(capture_refs_in_template("REDACTED $&", &one).is_none());
+        assert!(capture_refs_in_template("REDACTED $`", &one).is_none());
+        assert!(capture_refs_in_template("${}", &one).is_none());
+        assert!(capture_refs_in_template("https://${}/", &one).is_none());
+        assert!(capture_refs_in_template("${0}", &one).is_none());
+        assert!(capture_refs_in_template("$1$0", &one).is_none());
+        assert!(capture_refs_in_template("$1$", &one).is_none());
+        assert!(capture_refs_in_template("$1$&", &one).is_none());
+        assert!(capture_refs_in_template("$1$`", &one).is_none());
+        assert!(capture_refs_in_template("$1$'", &one).is_none());
+        assert!(capture_refs_in_template("$1$$", &one).is_some());
+    }
+
+    #[test]
+    fn test_redact_group_zero_stays_whole_field() {
+        // `$0` is the whole match. replace_all would substitute it unchanged
+        // and leave unmatched sensitive text (`token=abc` stays `token=abc`).
+        let rule = redact_rule(r"(token)", "$0");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(result.data.get("title").unwrap().as_str().unwrap(), "$0");
+    }
+
+    #[test]
+    fn test_redact_braced_group_zero_stays_whole_field() {
+        let rule = redact_rule(r"(token)", "${0}");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(result.data.get("title").unwrap().as_str().unwrap(), "${0}");
+    }
+
+    #[test]
+    fn test_redact_unmatched_alternation_capture_stays_whole_field() {
+        // `$2` exists on `(token)|(secret)` but does not participate when
+        // the first alternative matches. replace_all expands it to "" and
+        // leaves `=abc`. Fail closed: whole-field redaction.
+        let rule = redact_rule(r"(token)|(secret)", "$2");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(result.data.get("title").unwrap().as_str().unwrap(), "$2");
+    }
+
+    #[test]
+    fn test_redact_participating_alternation_capture_still_replaces() {
+        // Same pattern, but `$2` *does* participate. Match span is still
+        // only `secret`; leftover `=abc` is the opt-in replace_all contract
+        // (same as `$1=REDACTED` keeping the space between tokens).
+        let rule = redact_rule(r"(token)|(secret)", "$2");
+        let mut event = test_event("secret=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "secret=abc"
+        );
+    }
+
+    #[test]
+    fn test_redact_trailing_dollar_stays_whole_field() {
+        // `$1$` parses `$1` then a dangling `$`. Skipping the suffix would
+        // still enable replace_all and leak `=abc`.
+        let rule = redact_rule(r"(token)", "$1$");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(result.data.get("title").unwrap().as_str().unwrap(), "$1$");
+    }
+
+    #[test]
+    fn test_redact_perl_amp_suffix_stays_whole_field() {
+        // `$1$&` mixes a valid capture with a Perl-only form. Fail closed.
+        let rule = redact_rule(r"(token)", "$1$&");
+        let mut event = test_event("token=abc");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(result.data.get("title").unwrap().as_str().unwrap(), "$1$&");
+    }
+
+    #[test]
+    fn test_redact_escaped_dollar_after_capture_still_replaces() {
+        // `$1$$` is group 1 plus a literal `$` — a well-formed template.
+        let rule = redact_rule(r"(token)=\S+", "$1$$");
+        let mut event = test_event("token=abc extra");
+        assert!(rule.matches("any-bucket", &event));
+        let result = rule.apply(&mut event).unwrap();
+        assert_eq!(
+            result.data.get("title").unwrap().as_str().unwrap(),
+            "token$ extra"
+        );
     }
 }

@@ -14,6 +14,7 @@ use serde_json::Number;
 
 #[derive(Clone, Serialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum DataType {
     None(),
     Bool(bool),
@@ -24,14 +25,12 @@ pub enum DataType {
     Dict(HashMap<String, DataType>),
     #[serde(serialize_with = "serialize_function")]
     Function(String, functions::QueryFn),
+    #[serde(serialize_with = "serialize_function")]
+    ReadOnlyFunction(String, functions::ReadOnlyQueryFn),
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn serialize_function<S>(
-    _element: &str,
-    _fun: &functions::QueryFn,
-    _serializer: S,
-) -> Result<S::Ok, S::Error>
+fn serialize_function<S, F>(_element: &str, _fun: &F, _serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -53,6 +52,7 @@ impl fmt::Debug for DataType {
             DataType::List(l) => write!(f, "List({l:?})"),
             DataType::Dict(d) => write!(f, "Dict({d:?})"),
             DataType::Function(name, _fun) => write!(f, "Function({name})"),
+            DataType::ReadOnlyFunction(name, _fun) => write!(f, "Function({name})"),
         }
     }
 }

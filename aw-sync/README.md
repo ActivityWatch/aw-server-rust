@@ -30,6 +30,9 @@ aw-sync daemon --mode pull
 
 # Sync all buckets once and exit
 aw-sync sync --start-date "2024-01-01"
+
+# Doctor: why is pull empty / which peers exist in the folder?
+aw-sync status
 ```
 
 For more options, see `aw-sync --help`. Some notable options:

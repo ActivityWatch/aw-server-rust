@@ -26,6 +26,7 @@ use aw_client_rust::blocking::AwClient;
 
 mod accessmethod;
 mod dirs;
+mod status;
 mod sync;
 mod sync_wrapper;
 mod util;
@@ -132,6 +133,11 @@ enum Commands {
     },
     /// List buckets and their sync status.
     List {},
+    /// Doctor: classify every entry in the sync folder and say why pull is empty.
+    ///
+    /// Walks both the 2-level (`{device_id}/*.db`) and 3-level
+    /// (`{hostname}/{device_id}/*.db`) layouts. Does not create staging files.
+    Status {},
 }
 
 fn parse_start_date(arg: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
@@ -286,6 +292,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // List all buckets
         Commands::List {} => sync::list_buckets(&client)?,
+        Commands::Status {} => status::run_status(&client, &opts.host, port, &profile)?,
     }
 
     // Needed to give the datastores some time to commit before program is shut down.

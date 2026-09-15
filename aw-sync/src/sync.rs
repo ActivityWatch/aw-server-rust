@@ -89,12 +89,29 @@ pub fn sync_run(
         );
     }
 
+    // Finding zero peers in a configured sync dir is the interesting case —
+    // ActivityWatch/aw-server-rust#684. Do not stay silent.
+    if mode == SyncMode::Pull || mode == SyncMode::Both {
+        for line in crate::util::pull_discovery_warnings(
+            sync_spec.path.as_path(),
+            device_id,
+            &remote_dbfiles,
+        ) {
+            warn!("{line}");
+        }
+    }
+
     // TODO: Check for compatible remote db version before opening
-    let ds_remotes: Vec<Datastore> = remote_dbfiles
-        .iter()
-        .map(|p| p.as_path())
-        .map(create_datastore)
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut ds_remotes = Vec::new();
+    for path in &remote_dbfiles {
+        match create_datastore(path) {
+            Ok(ds) => ds_remotes.push(ds),
+            Err(e) => {
+                warn!("Failed to open remote db {}: {e}", path.display());
+                return Err(e.into());
+            }
+        }
+    }
 
     if !ds_remotes.is_empty() {
         info!(

@@ -29,6 +29,49 @@ mod api_tests {
     }
 
     #[test]
+    fn export_includes_pending_writes_and_preserves_headers_and_missing_bucket_errors() {
+        let server = setup_testserver();
+        let datastore = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "live", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        datastore.create_bucket(&bucket).unwrap();
+        let event = aw_models::Event::default();
+        let inserted = datastore.insert_events("live", &[event]).unwrap();
+        // No force_commit: exports must see writes acknowledged by the worker.
+        let client = Client::untracked(server).unwrap();
+        for path in ["/api/0/export", "/api/0/buckets/live/export"] {
+            let response = client
+                .get(path)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .dispatch();
+            assert_eq!(response.status(), Status::Ok);
+            assert_eq!(response.content_type(), Some(ContentType::JSON));
+            assert_eq!(
+                response.headers().get_one("Content-Disposition"),
+                Some("attachment; filename=aw-bucket-export_live.json")
+            );
+            let body: Value = serde_json::from_str(&response.into_string().unwrap()).unwrap();
+            assert_eq!(
+                body["buckets"]["live"]["events"],
+                serde_json::to_value(&inserted).unwrap()
+            );
+        }
+        let response = client
+            .get("/api/0/buckets/missing/export")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(response.status(), Status::NotFound);
+        let body: Value = serde_json::from_str(&response.into_string().unwrap()).unwrap();
+        assert!(body["message"].as_str().unwrap().contains("does not exist"));
+    }
+
+    #[test]
     fn test_bucket() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

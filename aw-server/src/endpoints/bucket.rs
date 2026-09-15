@@ -8,9 +8,7 @@ use chrono::Utc;
 
 use aw_datastore::DatastoreError;
 use aw_models::Bucket;
-use aw_models::BucketsExport;
 use aw_models::Event;
-use aw_models::TryVec;
 
 use rocket::http::Status;
 use rocket::State;
@@ -222,16 +220,7 @@ pub fn bucket_export(
     bucket_id: &str,
     state: &State<ServerState>,
 ) -> Result<BucketsExportRocket, HttpErrorJson> {
-    let datastore = &state.datastore;
-    let mut export = BucketsExport {
-        buckets: HashMap::new(),
-    };
-    let mut bucket = datastore.get_bucket(bucket_id)?;
-    let events = datastore.get_events(bucket_id, None, None, None)?;
-    bucket.events = Some(TryVec::new(events));
-    export.buckets.insert(bucket_id.into(), bucket);
-
-    Ok(export.into())
+    BucketsExportRocket::new(&state.datastore, Some(bucket_id))
 }
 
 #[delete("/<bucket_id>")]

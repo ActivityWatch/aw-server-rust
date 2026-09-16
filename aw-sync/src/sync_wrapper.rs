@@ -19,6 +19,12 @@ pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
             skipped.reason.clone(),
         ));
     }
+    let found: Vec<_> = selection.selected.iter().map(|d| d.path.clone()).collect();
+    // No get_info() here: an empty-dir pass must stay a local filesystem
+    // check (the #682 case). Own-vs-peer classification is optional for
+    // the warning text; "" leaves entries unclassified rather than
+    // hanging if the server is down.
+    report.capture_warnings(crate::util::pull_discovery_warnings(&sync_root, "", &found));
     if selection.selected.is_empty() {
         info!("No remote databases found in {:?}", sync_root);
         report.finish();
@@ -44,6 +50,9 @@ pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
                     e.to_string(),
                 ));
                 report.finish();
+                // Persist the aggregate (earlier peers + this failure), not
+                // only the phase-local report from the failing `sync_run`.
+                crate::report::persist_last_report_warn(&report);
                 return Err(e);
             }
         }

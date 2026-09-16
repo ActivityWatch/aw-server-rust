@@ -94,15 +94,14 @@ pub fn sync_run(
     }
 
     // Finding zero peers in a configured sync dir is the interesting case —
-    // ActivityWatch/aw-server-rust#684. Do not stay silent.
+    // ActivityWatch/aw-server-rust#682 / #695. Do not stay silent: keep the
+    // warnings on the report, not just in the log.
     if mode == SyncMode::Pull || mode == SyncMode::Both {
-        for line in crate::util::pull_discovery_warnings(
+        report.capture_warnings(crate::util::pull_discovery_warnings(
             sync_spec.path.as_path(),
             device_id,
             &remote_dbfiles,
-        ) {
-            warn!("{line}");
-        }
+        ));
         for skipped in &selection.skipped {
             report.peers.push(PeerReport::skipped(
                 skipped.db.device_id.clone(),

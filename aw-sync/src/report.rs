@@ -45,6 +45,10 @@ pub struct SyncReport {
     pub peers: Vec<PeerReport>,
     /// Buckets written to this device's staging db on push.
     pub pushed: Vec<BucketReport>,
+    /// Discovery / layout diagnostics from this pass. Empty-peer pulls must
+    /// still leave a record (ActivityWatch/aw-server-rust#682 / #695).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +84,7 @@ impl SyncReport {
             mode,
             peers: vec![],
             pushed: vec![],
+            warnings: vec![],
         }
     }
 
@@ -96,6 +101,16 @@ impl SyncReport {
         }
         self.peers.extend(other.peers);
         self.pushed.extend(other.pushed);
+        self.warnings.extend(other.warnings);
+    }
+
+    /// Log and keep discovery warnings on the report so a later `status` can
+    /// show why a pass imported nobody.
+    pub fn capture_warnings(&mut self, warnings: impl IntoIterator<Item = String>) {
+        for line in warnings {
+            warn!("{line}");
+            self.warnings.push(line);
+        }
     }
 
     pub fn events_new(&self) -> i64 {
@@ -182,6 +197,7 @@ impl SyncReport {
             "peers_failed": self.peers_failed(),
             "peers": self.peers,
             "pushed": self.pushed,
+            "warnings": self.warnings,
         })
         .to_string()
     }
@@ -245,10 +261,18 @@ impl fmt::Display for SyncReport {
             self.events_pushed(),
             self.events_new()
         )?;
-        if !self.peers.is_empty() {
+        if self.peers.is_empty() {
+            writeln!(f, "peers:    []")?;
+        } else {
             writeln!(f, "peers:")?;
             for peer in &self.peers {
                 writeln!(f, "  {}", format_peer_line(peer))?;
+            }
+        }
+        if !self.warnings.is_empty() {
+            writeln!(f, "warnings:")?;
+            for line in &self.warnings {
+                writeln!(f, "  ! {line}")?;
             }
         }
         if !self.pushed.is_empty() {
@@ -312,7 +336,23 @@ pub fn persist_last_report_to(report: &SyncReport, path: &Path) -> Result<(), Bo
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    // Unique temp name so overlapping daemon/manual/Android writers cannot
+    // truncate each other's `.json.tmp`.
+    let tmp = {
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("last-sync-report.json");
+        path.with_file_name(format!(
+            "{}.tmp.{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ))
+    };
     fs::write(&tmp, serde_json::to_string_pretty(report)?)?;
     fs::rename(&tmp, path)?;
     Ok(())
@@ -425,5 +465,101 @@ mod tests {
         let text = report.to_string();
         assert!(text.contains("Last pass"));
         assert!(text.contains("skipped  duplicate device_id abc"));
+    }
+
+    /// ActivityWatch/aw-server-rust#682 / #695: a pass that finds zero peers
+    /// must still produce a report saying so — `peers: []` plus the discovery
+    /// warnings. Logging them and discarding the report was the silent failure.
+    #[test]
+    fn zero_peer_pass_reports_empty_peers_and_captures_discovery_warnings() {
+        let root = std::env::temp_dir().join(format!(
+            "aw-sync-zero-peers-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        let mut report = SyncReport::new(SyncMode::Pull);
+        report.capture_warnings(crate::util::pull_discovery_warnings(
+            &root,
+            "local-device",
+            &[],
+        ));
+        report.finish();
+
+        assert!(
+            report.peers.is_empty(),
+            "zero remotes → peers: [], got {:?}",
+            report.peers
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Found 0 remote db files")),
+            "discovery warnings must live on the report, got {:?}",
+            report.warnings
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("sync directory is empty")),
+            "empty-dir diagnosis must be captured: {:?}",
+            report.warnings
+        );
+
+        let path = temp_report_path();
+        persist_last_report_to(&report, &path).unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        let loaded = load_last_report_from(&path).unwrap().unwrap();
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(loaded.peers.is_empty());
+        assert!(
+            body.contains("\"peers\": []"),
+            "persisted JSON must say peers: [], got {body}"
+        );
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains("Found 0 remote db files")),
+            "loaded report dropped discovery warnings: {:?}",
+            loaded.warnings
+        );
+        let text = loaded.to_string();
+        assert!(text.contains("peers:    []"), "display: {text}");
+        assert!(
+            text.contains("Found 0 remote db files"),
+            "display must surface the warning: {text}"
+        );
+        let json = loaded.to_jni_json();
+        assert!(json.contains("\"peers\":[]") || json.contains("\"peers\": []"));
+        assert!(json.contains("Found 0 remote db files"));
+    }
+
+    #[test]
+    fn old_report_without_warnings_field_still_loads() {
+        let path = temp_report_path();
+        fs::write(
+            &path,
+            r#"{
+                "started": "2026-09-16T08:00:00Z",
+                "finished": "2026-09-16T08:00:01Z",
+                "mode": "pull",
+                "peers": [],
+                "pushed": []
+            }"#,
+        )
+        .unwrap();
+        let loaded = load_last_report_from(&path).unwrap().unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(loaded.peers.is_empty());
+        assert!(loaded.warnings.is_empty());
     }
 }

@@ -72,7 +72,16 @@ pub fn sync_run(
     let device_id = info.device_id.as_str();
 
     // FIXME: Bad device_id assumption?
-    let ds_localremote = setup_local_remote(sync_spec.path.as_path(), device_id)?;
+    // Only stage a local db when this pass actually pushes. Pull-only
+    // `sync_run` is how `sync_wrapper::pull` walks a *peer's* host folder;
+    // creating `{peer_host}/{our_device_id}/test.db` there breaks the
+    // "each device only writes files it owns" invariant (see
+    // ActivityWatch/aw-server-rust#682).
+    let ds_localremote = if mode == SyncMode::Push || mode == SyncMode::Both {
+        Some(setup_local_remote(sync_spec.path.as_path(), device_id)?)
+    } else {
+        None
+    };
     let remote_dbfiles = crate::util::find_remotes_nonlocal(
         sync_spec.path.as_path(),
         device_id,
@@ -130,16 +139,18 @@ pub fn sync_run(
     }
 
     // Push local server buckets to sync folder
-    if mode == SyncMode::Push || mode == SyncMode::Both {
+    if let Some(ds_localremote) = &ds_localremote {
         info!("Pushing...");
-        sync_datastores(client, &ds_localremote, true, Some(device_id), sync_spec)?;
+        sync_datastores(client, ds_localremote, true, Some(device_id), sync_spec)?;
     }
 
     // Close open database connections
     for ds_from in &ds_remotes {
         ds_from.close();
     }
-    ds_localremote.close();
+    if let Some(ds_localremote) = &ds_localremote {
+        ds_localremote.close();
+    }
 
     // Dropping also works to close the database connections, weirdly enough.
     // Probably because once the database is dropped, the thread will stop,

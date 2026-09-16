@@ -35,16 +35,36 @@ type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, 
 /// the open never creates `-wal`/`-shm` and never takes a lock — which is
 /// why a pull can read a peer file in a directory this device does not own.
 /// Do not drop it to "see the WAL": that reintroduces sidecars in peers'
-/// folders. See [`Datastore::open_read_only`].
+/// folders, and a plain `mode=ro` connection then rejects `BEGIN IMMEDIATE`.
+/// See [`Datastore::open_read_only`].
+///
+/// The connection can live across a multi-page pull. Syncthing/Dropbox write
+/// a temp file and rename, so an open handle keeps the old inode on POSIX
+/// (a consistent snapshot) and blocks the rename on Windows (the syncer
+/// retries). Only in-place rewriting (`rsync --inplace`, a naive `cp` over
+/// the file) defeats it. Copy-then-open is the belt-and-braces option if
+/// that ever bites; not needed now.
+///
+/// Windows path shapes (drive letter, UNC) are detected from the path, not
+/// `cfg!(windows)`, so a `\\server\share\peer.db` sync dir produces
+/// SQLite's UNC form `file:////server/share/…` instead of treating `server`
+/// as a URI authority.
 fn sqlite_readonly_uri(path: &str) -> String {
     let mut encoded = path
         .replace('%', "%25")
         .replace('?', "%3F")
         .replace('#', "%23");
-    if cfg!(windows) {
+    let looks_windows = encoded.contains('\\')
+        || encoded.starts_with("//")
+        || (encoded.len() >= 2 && encoded.as_bytes().get(1) == Some(&b':'));
+    if looks_windows {
         encoded = encoded.replace('\\', "/");
         if encoded.len() >= 2 && encoded.as_bytes().get(1) == Some(&b':') {
             return format!("file:///{encoded}?mode=ro&immutable=1");
+        }
+        if encoded.starts_with("//") {
+            // SQLite UNC form is file:////server/share/file.db (four slashes).
+            return format!("file://{encoded}?mode=ro&immutable=1");
         }
     }
     format!("file:{encoded}?mode=ro&immutable=1")
@@ -846,5 +866,34 @@ impl Datastore {
             // Worker already gone means there is nothing left to close
             Err(e) => warn!("Error closing database: {e:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod sqlite_readonly_uri_tests {
+    use super::sqlite_readonly_uri;
+
+    #[test]
+    fn posix_absolute() {
+        assert_eq!(
+            sqlite_readonly_uri("/var/lib/activitywatch/peer.db"),
+            "file:/var/lib/activitywatch/peer.db?mode=ro&immutable=1"
+        );
+    }
+
+    #[test]
+    fn windows_drive_letter() {
+        assert_eq!(
+            sqlite_readonly_uri(r"C:\Users\bob\peer.db"),
+            "file:///C:/Users/bob/peer.db?mode=ro&immutable=1"
+        );
+    }
+
+    #[test]
+    fn windows_unc() {
+        assert_eq!(
+            sqlite_readonly_uri(r"\\server\share\peer.db"),
+            "file:////server/share/peer.db?mode=ro&immutable=1"
+        );
     }
 }

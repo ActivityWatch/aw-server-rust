@@ -45,29 +45,26 @@ type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, 
 /// the file) defeats it. Copy-then-open is the belt-and-braces option if
 /// that ever bites; not needed now.
 ///
-/// Windows path shapes (drive letter, UNC) are detected from the path, not
-/// `cfg!(windows)`, so a `\\server\share\peer.db` sync dir produces
-/// SQLite's UNC form `file:////server/share/…` instead of treating `server`
-/// as a URI authority.
+/// Windows path normalisation (backslash → slash, drive-letter, UNC) is
+/// gated on `cfg!(windows)`, not path shape. A backslash is a legal POSIX
+/// filename character; rewriting it on Linux/macOS would make the probe
+/// target a different file.
 fn sqlite_readonly_uri(path: &str) -> String {
     let encoded = path
         .replace('%', "%25")
         .replace('?', "%3F")
         .replace('#', "%23");
-    // A bare backslash is not evidence of a Windows path — it's a valid POSIX
-    // filename character, and rewriting it to `/` would corrupt the path. Only
-    // an unambiguous Windows shape (drive letter, or a UNC prefix using either
-    // slash direction) triggers backslash normalization.
-    let has_drive_letter = encoded.len() >= 2 && encoded.as_bytes().get(1) == Some(&b':');
-    let is_unc = encoded.starts_with("\\\\") || encoded.starts_with("//");
-    if has_drive_letter {
+    if cfg!(windows) {
         let encoded = encoded.replace('\\', "/");
-        return format!("file:///{encoded}?mode=ro&immutable=1");
-    }
-    if is_unc {
-        // SQLite UNC form is file:////server/share/file.db (four slashes).
-        let encoded = encoded.replace('\\', "/");
-        return format!("file://{encoded}?mode=ro&immutable=1");
+        let has_drive_letter = encoded.len() >= 2 && encoded.as_bytes().get(1) == Some(&b':');
+        let is_unc = encoded.starts_with("//");
+        if has_drive_letter {
+            return format!("file:///{encoded}?mode=ro&immutable=1");
+        }
+        if is_unc {
+            // SQLite UNC form is file:////server/share/file.db (four slashes).
+            return format!("file://{encoded}?mode=ro&immutable=1");
+        }
     }
     format!("file:{encoded}?mode=ro&immutable=1")
 }
@@ -884,6 +881,19 @@ mod sqlite_readonly_uri_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
+    fn posix_path_with_literal_backslash_is_not_rewritten() {
+        // A backslash is a valid POSIX filename character. Windows
+        // normalisation is cfg!(windows)-gated so this path is passed
+        // through untouched on Linux/macOS.
+        assert_eq!(
+            sqlite_readonly_uri(r"/home/erik/we\ird.db"),
+            r"file:/home/erik/we\ird.db?mode=ro&immutable=1"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn windows_drive_letter() {
         assert_eq!(
             sqlite_readonly_uri(r"C:\Users\bob\peer.db"),
@@ -892,20 +902,11 @@ mod sqlite_readonly_uri_tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn windows_unc() {
         assert_eq!(
             sqlite_readonly_uri(r"\\server\share\peer.db"),
             "file:////server/share/peer.db?mode=ro&immutable=1"
-        );
-    }
-
-    #[test]
-    fn posix_path_with_literal_backslash_is_not_rewritten() {
-        // A backslash is a valid POSIX filename character. It must not be
-        // mistaken for a Windows path separator and rewritten to `/`.
-        assert_eq!(
-            sqlite_readonly_uri(r"/home/erik/we\ird.db"),
-            r"file:/home/erik/we\ird.db?mode=ro&immutable=1"
         );
     }
 }

@@ -72,7 +72,12 @@ pub fn sync_run(
     let device_id = info.device_id.as_str();
 
     // FIXME: Bad device_id assumption?
-    let ds_localremote = setup_local_remote(sync_spec.path.as_path(), device_id)?;
+    // Only stage a local db when this pass actually pushes. Pull-only
+    // `sync_run` is how `sync_wrapper::pull` walks a *peer's* host folder;
+    // creating `{peer_host}/{our_device_id}/test.db` there breaks the
+    // "each device only writes files it owns" invariant (see
+    // ActivityWatch/aw-server-rust#682).
+    let ds_localremote = maybe_setup_local_remote(sync_spec.path.as_path(), device_id, mode)?;
     let remote_dbfiles = crate::util::find_remotes_nonlocal(
         sync_spec.path.as_path(),
         device_id,
@@ -130,16 +135,18 @@ pub fn sync_run(
     }
 
     // Push local server buckets to sync folder
-    if mode == SyncMode::Push || mode == SyncMode::Both {
+    if let Some(ds_localremote) = &ds_localremote {
         info!("Pushing...");
-        sync_datastores(client, &ds_localremote, true, Some(device_id), sync_spec)?;
+        sync_datastores(client, ds_localremote, true, Some(device_id), sync_spec)?;
     }
 
     // Close open database connections
     for ds_from in &ds_remotes {
         ds_from.close();
     }
-    ds_localremote.close();
+    if let Some(ds_localremote) = &ds_localremote {
+        ds_localremote.close();
+    }
 
     // Dropping also works to close the database connections, weirdly enough.
     // Probably because once the database is dropped, the thread will stop,
@@ -180,6 +187,18 @@ pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn maybe_setup_local_remote(
+    path: &Path,
+    device_id: &str,
+    mode: SyncMode,
+) -> Result<Option<Datastore>, Box<dyn Error>> {
+    if mode == SyncMode::Push || mode == SyncMode::Both {
+        Ok(Some(setup_local_remote(path, device_id)?))
+    } else {
+        Ok(None)
+    }
 }
 
 fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn Error>> {
@@ -595,4 +614,50 @@ fn log_buckets(ds: &dyn AccessMethod) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pull_only_staging_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "aw-sync-pull-only-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn pull_does_not_create_local_staging_db() {
+        let dir = temp_dir();
+        let staged = maybe_setup_local_remote(&dir, "device-local", SyncMode::Pull).unwrap();
+        assert!(staged.is_none());
+        assert!(
+            !dir.join("device-local").exists(),
+            "pull-only must not create {{peer}}/{{our_device_id}}/"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn push_creates_local_staging_dir() {
+        let dir = temp_dir();
+        let staged = maybe_setup_local_remote(&dir, "device-local", SyncMode::Push).unwrap();
+        assert!(staged.is_some());
+        // Datastore::new opens sqlite on a worker thread, so test.db may not
+        // exist yet; the directory is created synchronously and is the leak
+        // pull-only used to leave in a peer folder.
+        assert!(dir.join("device-local").is_dir());
+        if let Some(ds) = staged {
+            ds.close();
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

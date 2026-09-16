@@ -50,22 +50,24 @@ type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, 
 /// SQLite's UNC form `file:////server/share/…` instead of treating `server`
 /// as a URI authority.
 fn sqlite_readonly_uri(path: &str) -> String {
-    let mut encoded = path
+    let encoded = path
         .replace('%', "%25")
         .replace('?', "%3F")
         .replace('#', "%23");
-    let looks_windows = encoded.contains('\\')
-        || encoded.starts_with("//")
-        || (encoded.len() >= 2 && encoded.as_bytes().get(1) == Some(&b':'));
-    if looks_windows {
-        encoded = encoded.replace('\\', "/");
-        if encoded.len() >= 2 && encoded.as_bytes().get(1) == Some(&b':') {
-            return format!("file:///{encoded}?mode=ro&immutable=1");
-        }
-        if encoded.starts_with("//") {
-            // SQLite UNC form is file:////server/share/file.db (four slashes).
-            return format!("file://{encoded}?mode=ro&immutable=1");
-        }
+    // A bare backslash is not evidence of a Windows path — it's a valid POSIX
+    // filename character, and rewriting it to `/` would corrupt the path. Only
+    // an unambiguous Windows shape (drive letter, or a UNC prefix using either
+    // slash direction) triggers backslash normalization.
+    let has_drive_letter = encoded.len() >= 2 && encoded.as_bytes().get(1) == Some(&b':');
+    let is_unc = encoded.starts_with("\\\\") || encoded.starts_with("//");
+    if has_drive_letter {
+        let encoded = encoded.replace('\\', "/");
+        return format!("file:///{encoded}?mode=ro&immutable=1");
+    }
+    if is_unc {
+        // SQLite UNC form is file:////server/share/file.db (four slashes).
+        let encoded = encoded.replace('\\', "/");
+        return format!("file://{encoded}?mode=ro&immutable=1");
     }
     format!("file:{encoded}?mode=ro&immutable=1")
 }
@@ -894,6 +896,16 @@ mod sqlite_readonly_uri_tests {
         assert_eq!(
             sqlite_readonly_uri(r"\\server\share\peer.db"),
             "file:////server/share/peer.db?mode=ro&immutable=1"
+        );
+    }
+
+    #[test]
+    fn posix_path_with_literal_backslash_is_not_rewritten() {
+        // A backslash is a valid POSIX filename character. It must not be
+        // mistaken for a Windows path separator and rewritten to `/`.
+        assert_eq!(
+            sqlite_readonly_uri(r"/home/erik/we\ird.db"),
+            r"file:/home/erik/we\ird.db?mode=ro&immutable=1"
         );
     }
 }

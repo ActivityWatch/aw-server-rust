@@ -24,12 +24,16 @@ mod privacy_filter;
 mod worker;
 
 pub use self::datastore::DatastoreInstance;
+pub use self::datastore::NEWEST_DB_VERSION;
 pub use self::worker::Datastore;
 
 #[derive(Clone)]
 pub enum DatastoreMethod {
     Memory(),
     File(String),
+    /// Existing file, opened `mode=ro&immutable=1`. Never migrates, never
+    /// creates `-wal`/`-shm`. Used by aw-sync when reading a peer's db.
+    FileReadOnly(String),
     /// Encrypted SQLite file using SQLCipher. Only available with the
     /// `encryption` or `encryption-vendored` feature flags.
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
@@ -41,6 +45,7 @@ impl fmt::Debug for DatastoreMethod {
         match self {
             DatastoreMethod::Memory() => write!(f, "Memory()"),
             DatastoreMethod::File(p) => write!(f, "File({p:?})"),
+            DatastoreMethod::FileReadOnly(p) => write!(f, "FileReadOnly({p:?})"),
             #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
             DatastoreMethod::FileEncrypted(p, _) => write!(f, "FileEncrypted({p:?}, <redacted>)"),
         }

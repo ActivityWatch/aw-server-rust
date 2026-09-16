@@ -12,6 +12,7 @@ use chrono::Utc;
 
 use rusqlite::Connection;
 use rusqlite::DropBehavior;
+use rusqlite::OpenFlags;
 use rusqlite::Transaction;
 use rusqlite::TransactionBehavior;
 
@@ -25,6 +26,41 @@ use crate::DatastoreMethod;
 
 type RequestSender = mpsc_requests::RequestSender<Command, Result<Response, DatastoreError>>;
 type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>;
+
+/// SQLite URI for a side-effect-free open: no `-wal`/`-shm`, no locks that
+/// fight a file syncer. `?`/`#`/`%` in the path are encoded so they cannot
+/// be parsed as the query string.
+fn sqlite_readonly_uri(path: &str) -> String {
+    let mut encoded = path
+        .replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('#', "%23");
+    if cfg!(windows) {
+        encoded = encoded.replace('\\', "/");
+        if encoded.len() >= 2 && encoded.as_bytes().get(1) == Some(&b':') {
+            return format!("file:///{encoded}?mode=ro&immutable=1");
+        }
+    }
+    format!("file:{encoded}?mode=ro&immutable=1")
+}
+
+fn open_readonly_connection(path: &str) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        sqlite_readonly_uri(path),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+}
+
+/// Read `user_version` without mutating the file.
+fn probe_user_version(path: &str) -> Result<i32, DatastoreError> {
+    let conn = open_readonly_connection(path).map_err(|e| {
+        DatastoreError::InternalError(format!("read-only open failed for {path}: {e}"))
+    })?;
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| {
+            DatastoreError::InternalError(format!("user_version read failed for {path}: {e}"))
+        })
+}
 
 #[derive(Clone)]
 pub struct Datastore {
@@ -148,6 +184,8 @@ impl DatastoreWorker {
     }
 
     fn work_loop(&mut self, method: DatastoreMethod) {
+        let read_only = matches!(&method, DatastoreMethod::FileReadOnly(_));
+
         // Open SQLite connection
         let mut conn = match &method {
             DatastoreMethod::Memory() => {
@@ -155,6 +193,9 @@ impl DatastoreWorker {
             }
             DatastoreMethod::File(path) => {
                 Connection::open(path).expect("Failed to create datastore")
+            }
+            DatastoreMethod::FileReadOnly(path) => {
+                open_readonly_connection(path).expect("Failed to open datastore read-only")
             }
             #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
             DatastoreMethod::FileEncrypted(path, key) => {
@@ -176,24 +217,22 @@ impl DatastoreWorker {
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .expect("Failed to set busy timeout");
 
-        // WAL turns each commit into a single sequential WAL append+fsync where
-        // delete mode paid two fsyncs plus journal-file churn, and lets future
-        // reader connections proceed while a commit is in flight.
-        // synchronous=FULL is set explicitly (rather than relying on the
-        // default) so a commit remains durable on disk the moment it returns;
-        // with NORMAL the WAL is only synced at checkpoints, which would
-        // silently widen the loss window on power failure.
-        // In-memory databases ignore the request (journal_mode stays "memory").
-        let journal_mode: String = conn
-            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
-            .expect("Failed to query journal_mode");
-        if !matches!(&method, DatastoreMethod::Memory()) && journal_mode != "wal" {
-            warn!("Failed to enable WAL (journal_mode={journal_mode}), continuing without it");
+        // WAL / synchronous=FULL are writes. Skip them on a peer file: a pull
+        // must not create `-wal`/`-shm` in a directory this device does not
+        // own (ActivityWatch/aw-server-rust#693). In-memory databases ignore
+        // the request (journal_mode stays "memory").
+        if !read_only {
+            let journal_mode: String = conn
+                .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+                .expect("Failed to query journal_mode");
+            if !matches!(&method, DatastoreMethod::Memory()) && journal_mode != "wal" {
+                warn!("Failed to enable WAL (journal_mode={journal_mode}), continuing without it");
+            }
+            conn.pragma_update(None, "synchronous", "FULL")
+                .expect("Failed to set synchronous=FULL");
         }
-        conn.pragma_update(None, "synchronous", "FULL")
-            .expect("Failed to set synchronous=FULL");
 
-        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        let mut ds = DatastoreInstance::new(&conn, !read_only).unwrap();
 
         // Load persisted privacy filters before serving inserts. The engine
         // starts empty; without this, rules saved in a previous process sit
@@ -506,6 +545,27 @@ impl Datastore {
     pub fn new(dbpath: String, legacy_import: bool) -> Self {
         let method = DatastoreMethod::File(dbpath);
         Datastore::_new_internal(method, legacy_import)
+    }
+
+    /// Open an existing database without writing to it.
+    ///
+    /// Uses `file:…?mode=ro&immutable=1`, never runs migrations, never sets
+    /// `journal_mode`/`synchronous`. Returns `OldDbVersion` when
+    /// `user_version != NEWEST_DB_VERSION` so a caller can skip that peer
+    /// (ActivityWatch/aw-server-rust#693).
+    pub fn open_read_only(dbpath: String) -> Result<Self, DatastoreError> {
+        let version = probe_user_version(&dbpath)?;
+        if version != crate::NEWEST_DB_VERSION {
+            return Err(DatastoreError::OldDbVersion(format!(
+                "Tried to open a database with an incompatible database version! \
+                 Database has version {version} while the supported version is {}",
+                crate::NEWEST_DB_VERSION
+            )));
+        }
+        Ok(Datastore::_new_internal(
+            DatastoreMethod::FileReadOnly(dbpath),
+            false,
+        ))
     }
 
     pub fn new_in_memory(legacy_import: bool) -> Self {

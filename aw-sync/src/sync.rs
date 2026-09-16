@@ -176,6 +176,7 @@ pub fn sync_run(
         match sync_datastores(client, ds_localremote, true, Some(device_id), sync_spec) {
             Ok(buckets) => report.pushed = buckets,
             Err(e) => {
+                report.record_push_failure(&e);
                 report.finish();
                 crate::report::persist_last_report_warn(&report);
                 return Err(e.into());

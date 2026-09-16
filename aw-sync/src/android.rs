@@ -354,7 +354,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
             match push_with_hostname(&client, &hostname_str) {
                 Ok(push_report) => report.merge(push_report),
                 Err(e) => {
-                    report.warnings.push(format!("push failed: {e}"));
+                    report.record_push_failure(&e);
                     report.finish();
                     crate::report::persist_last_report_warn(&report);
                     return Err(format!("Push phase failed: {}", e));

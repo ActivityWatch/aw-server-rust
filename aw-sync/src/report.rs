@@ -113,6 +113,15 @@ impl SyncReport {
         }
     }
 
+    /// Record a push abort so the persisted report is not a silent success.
+    ///
+    /// The caller still returns the `Err`. Without this, `aw-sync status` shows
+    /// an empty pass (no peers, no pushed buckets, no warnings) and looks like
+    /// a no-op rather than a failure.
+    pub fn record_push_failure(&mut self, err: impl fmt::Display) {
+        self.warnings.push(format!("push failed: {err}"));
+    }
+
     pub fn events_new(&self) -> i64 {
         self.peers
             .iter()
@@ -541,6 +550,50 @@ mod tests {
         let json = loaded.to_jni_json();
         assert!(json.contains("\"peers\":[]") || json.contains("\"peers\": []"));
         assert!(json.contains("Found 0 remote db files"));
+    }
+
+    /// A push abort must leave a warning on disk. The #695 contract is that
+    /// a failed pass is visible afterwards; an empty report looks like success.
+    #[test]
+    fn push_failure_persisted_report_is_not_a_silent_success() {
+        let mut report = SyncReport::new(SyncMode::Push);
+        report.record_push_failure("disk full");
+        report.finish();
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "push failed: disk full"),
+            "push abort must be on the report, got {:?}",
+            report.warnings
+        );
+
+        let path = temp_report_path();
+        persist_last_report_to(&report, &path).unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        let loaded = load_last_report_from(&path).unwrap().unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert!(loaded.peers.is_empty());
+        assert!(loaded.pushed.is_empty());
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains("push failed: disk full")),
+            "loaded report dropped the push failure: {:?}",
+            loaded.warnings
+        );
+        assert!(
+            body.contains("push failed: disk full"),
+            "persisted JSON must name the push failure, got {body}"
+        );
+        let text = loaded.to_string();
+        assert!(
+            text.contains("push failed: disk full"),
+            "display must surface the push failure: {text}"
+        );
     }
 
     #[test]

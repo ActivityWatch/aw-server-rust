@@ -298,7 +298,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 match sync_wrapper::push(&client) {
                     Ok(push_report) => report.merge(push_report),
                     Err(e) => {
-                        report.warnings.push(format!("push failed: {e}"));
+                        report.record_push_failure(&e);
                         report.finish();
                         info!("{}", report.summary_message());
                         aw_sync_persist(&report);

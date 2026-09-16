@@ -113,12 +113,23 @@ pub fn sync_run(
     }
 
     // Peer files are opened read-only: never migrate, never flip WAL
-    // (ActivityWatch/aw-server-rust#693). Version mismatch is skipped, not fatal.
+    // (ActivityWatch/aw-server-rust#693). Version mismatch is skipped, not fatal —
+    // but it must be *visible*: record it on the report so status/JNI do not
+    // present an all-incompatible pass as a clean empty one.
     let mut ds_remotes = Vec::new();
     for db in &selection.selected {
         match open_peer_datastore(&db.path) {
-            Ok(Some(ds)) => ds_remotes.push((db.clone(), ds)),
-            Ok(None) => {}
+            Ok(OpenedPeer::Ready(ds)) => ds_remotes.push((db.clone(), ds)),
+            Ok(OpenedPeer::Incompatible(msg)) => {
+                if mode == SyncMode::Pull || mode == SyncMode::Both {
+                    report.peers.push(PeerReport::skipped(
+                        db.device_id.clone(),
+                        db.hostname.clone(),
+                        db.path.clone(),
+                        format!("incompatible database version: {msg}"),
+                    ));
+                }
+            }
             Err(e) => {
                 warn!("Failed to open remote db {}: {e}", db.path.display());
                 if mode == SyncMode::Pull || mode == SyncMode::Both {
@@ -234,7 +245,7 @@ pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
 
     let mut ds_remotes = Vec::new();
     for path in &remote_dbfiles {
-        if let Some(ds) = open_peer_datastore(path)? {
+        if let OpenedPeer::Ready(ds) = open_peer_datastore(path)? {
             ds_remotes.push(ds);
         }
     }
@@ -297,15 +308,21 @@ pub fn create_datastore(path: &Path) -> Result<Datastore, String> {
 
 /// Open a *peer* database for pull: read-only, no migration, no WAL sidecars.
 ///
-/// Returns `Ok(None)` when `user_version` does not match this binary so the
-/// caller can skip that peer and keep walking (ActivityWatch/aw-server-rust#693).
-fn open_peer_datastore(path: &Path) -> Result<Option<Datastore>, String> {
+/// Returns `OpenedPeer::Incompatible` when `user_version` does not match this
+/// binary so the caller can skip that peer and keep walking, keeping the
+/// version-mismatch reason for reporting (ActivityWatch/aw-server-rust#693).
+enum OpenedPeer {
+    Ready(Datastore),
+    Incompatible(String),
+}
+
+fn open_peer_datastore(path: &Path) -> Result<OpenedPeer, String> {
     let pathstr = utf8_db_path(path)?;
     match Datastore::open_read_only(pathstr.to_string()) {
-        Ok(ds) => Ok(Some(ds)),
+        Ok(ds) => Ok(OpenedPeer::Ready(ds)),
         Err(DatastoreError::OldDbVersion(msg)) => {
             warn!("Skipping peer db {}: {msg}", path.display());
-            Ok(None)
+            Ok(OpenedPeer::Incompatible(msg))
         }
         Err(e) => Err(format!(
             "Failed to open remote db {}: {e:?}",

@@ -289,34 +289,6 @@ mod tests {
     }
 }
 
-/// Check if a directory contains a .db file
-fn contains_db_file(dir: &std::path::Path) -> bool {
-    fs::read_dir(dir)
-        .ok()
-        .map(|entries| {
-            entries.filter_map(Result::ok).any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .map(|ext| ext == "db")
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// Check if a directory contains a subdirectory that contains a .db file
-fn contains_subdir_with_db_file(dir: &std::path::Path) -> bool {
-    fs::read_dir(dir)
-        .ok()
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .any(|entry| entry.path().is_dir() && contains_db_file(&entry.path()))
-        })
-        .unwrap_or(false)
-}
-
 /// A peer database discovered under `{sync_root}/{hostname}/{device_id}/*.db`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteDb {
@@ -328,19 +300,18 @@ pub(crate) struct RemoteDb {
 
 /// List every `{hostname}/{device_id}/*.db` under `sync_root`.
 ///
-/// Unlike [`get_remotes`], this returns the device_id and file size so callers
-/// can collapse duplicate folders for one device before importing. I/O errors
-/// are propagated rather than skipped: dropping a host directory we failed to
-/// read would report a successful sync that quietly omitted that host's data.
+/// Returns device_id and file size so callers can collapse duplicate folders
+/// for one device before importing. I/O errors are propagated rather than
+/// skipped: dropping a host directory we failed to read would report a
+/// successful sync that quietly omitted that host's data.
 ///
-/// 3-level-only by design. `pull_all` used to go through [`get_remotes`] and
-/// then `find_remotes` on each host folder; now it uses this walker, so a
-/// leftover 2-level root db (`{sync_root}/{device_id}/test.db`, no hostname
-/// folder) is **not** a pull candidate. That is the correct outcome: the
-/// 1.19 GB root orphan from ActivityWatch/aw-server-rust#682 must never be
-/// imported by a peer. Do not "fix" this by broadening the walk — the
-/// advanced `sync_run` path still uses [`find_remotes`] (2-level, relative
-/// to whatever directory it is given).
+/// 3-level-only by design. This is the `pull_all` walker. A leftover 2-level
+/// root db (`{sync_root}/{device_id}/test.db`, no hostname folder) is **not**
+/// a pull candidate. That is the correct outcome: the 1.19 GB root orphan
+/// from ActivityWatch/aw-server-rust#682 must never be imported by a peer.
+/// Do not "fix" this by broadening the walk — the advanced `sync_run` path
+/// still uses [`find_remotes`] (2-level, relative to whatever directory it
+/// is given). Two walkers, two code paths; that is intentional.
 pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>> {
     let mut dbs = Vec::new();
     if !sync_root.exists() {
@@ -421,31 +392,6 @@ pub(crate) fn select_remote_dbs_by_device_id(dbs: Vec<RemoteDb>) -> Vec<RemoteDb
             .then_with(|| a.path.cmp(&b.path))
     });
     selected
-}
-
-/// Return hostnames that have a `{host}/{device_id}/*.db` tree.
-///
-/// `pull_all` no longer calls this — it uses [`list_remote_dbs`] +
-/// [`select_remote_dbs_by_device_id`]. Kept only so hostname-only callers
-/// (if any remain) do not break; do not put pull back on this path, it
-/// cannot distinguish duplicate `device_id` folders.
-// TODO: share logic with find_remotes and find_remotes_nonlocal
-#[allow(dead_code)] // pull_all now uses list_remote_dbs; no remaining in-crate caller
-pub fn get_remotes() -> Result<Vec<String>, Box<dyn Error>> {
-    let sync_root_dir = crate::dirs::get_sync_dir()?;
-    fs::create_dir_all(&sync_root_dir)?;
-    let hostnames = fs::read_dir(sync_root_dir)?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir() && contains_subdir_with_db_file(&entry.path()))
-        .filter_map(|entry| {
-            entry
-                .path()
-                .file_name()
-                .and_then(|os_str| os_str.to_str().map(String::from))
-        })
-        .collect();
-    info!("Found remotes: {:?}", hostnames);
-    Ok(hostnames)
 }
 
 /// 2-level walker: `{sync_directory}/{x}/*.db`.

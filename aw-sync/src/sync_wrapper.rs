@@ -22,7 +22,14 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
             .collect::<Vec<_>>()
     );
     for remote in selected {
-        pull_db(client, &remote.hostname, &remote.path)?;
+        let walk_root = if remote.hostname.is_empty() {
+            // 2-level leftover: `{sync_root}/{device_id}/test.db`. Walk from
+            // the sync root so `find_remotes` can see it.
+            sync_root.clone()
+        } else {
+            sync_root.join(&remote.hostname)
+        };
+        pull_db(client, &walk_root, &remote.path)?;
     }
     Ok(())
 }
@@ -58,15 +65,13 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
         .max_by_key(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
         .ok_or_else(|| format!("No db found in sync folder {:?}", sync_dir))?;
 
-    pull_db(client, host, &db.path())
+    pull_db(client, &sync_dir, &db.path())
 }
 
-fn pull_db(client: &AwClient, host: &str, db_path: &Path) -> Result<(), Box<dyn Error>> {
+fn pull_db(client: &AwClient, walk_root: &Path, db_path: &Path) -> Result<(), Box<dyn Error>> {
     client.wait_for_start()?;
-    let sync_root_dir = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
-    let sync_dir = sync_root_dir.join(host);
     let sync_spec = SyncSpec {
-        path: sync_dir,
+        path: walk_root.to_path_buf(),
         path_db: Some(db_path.to_path_buf()),
         buckets: None, // Sync all buckets by default
         start: None,

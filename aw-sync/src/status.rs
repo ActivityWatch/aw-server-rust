@@ -1,7 +1,8 @@
 //! `aw-sync status` — a doctor command for the sync folder.
 //!
-//! Read-only: never creates staging databases. 3-level peers are the
-//! `RemoteDb` list `pull_all` uses; classification of leftovers sits on top.
+//! Read-only: never creates staging databases. Peers are the `RemoteDb`
+//! list `pull_all` uses (2-level leftovers and 3-level hosts); unrecognised
+//! entries sit on top.
 
 use std::collections::{BTreeMap, HashSet};
 use std::error::Error;

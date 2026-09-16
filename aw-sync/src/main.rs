@@ -135,8 +135,8 @@ enum Commands {
     List {},
     /// Doctor: classify every entry in the sync folder and say why pull is empty.
     ///
-    /// 3-level peers come from the same `RemoteDb` walker `pull_all` uses;
-    /// 2-level leftovers and unrecognised entries sit on top of that list.
+    /// Peers come from the same `RemoteDb` walker `pull_all` uses (2-level
+    /// leftovers and 3-level hosts). Unrecognised entries sit on top.
     /// Does not create staging files.
     Status {},
 }
@@ -338,13 +338,14 @@ fn daemon(
     // on a 3-level tree can see — so the daemon silently never pulls
     // (ActivityWatch/aw-server-rust#682).
     //
-    // Host-layout pull goes through `list_remote_dbs`, which is 3-level-only.
-    // A leftover `{device_id}/test.db` at the sync root is not a pull
-    // candidate. That is intentional: the 1.19 GB root orphan from #682
-    // must not be imported by a peer. The advanced `--buckets` /
-    // `--start-date` / `--sync-db` path still uses `find_remotes` (2-level
-    // relative to the given directory). Do not broaden either walker to
-    // "fix" the orphan.
+    // Host-layout pull goes through `list_remote_dbs`, which now sees both
+    // 3-level peers and leftover 2-level `{device_id}/*.db` (hostname
+    // unknown). Same-device duplicates pick newest data, not size — so a
+    // large leftover does not shadow a current 3-level file. On first
+    // push, an own leftover 2-level db is renamed into the 3-level path
+    // instead of starting empty. The advanced `--buckets` / `--start-date`
+    // / `--sync-db` path still uses `find_remotes` (2-level relative to
+    // the given directory).
     let use_host_layout = start_date.is_none() && buckets.is_none() && sync_db.is_none();
 
     let sync_spec = if use_host_layout {

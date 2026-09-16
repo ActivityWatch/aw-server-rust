@@ -197,6 +197,16 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
     // FIXME: Don't run twice if already exists
     fs::create_dir_all(path)?;
 
+    // Host-layout push uses `path` = `{sync_root}/{hostname}`. If this device
+    // still has a leftover 2-level `{sync_root}/{device_id}/test.db` and no
+    // 3-level dest yet, rename it into place instead of creating an empty
+    // staging db (which would re-export the entire history).
+    if let (Some(sync_root), Some(hostname)) =
+        (path.parent(), path.file_name().and_then(|s| s.to_str()))
+    {
+        crate::util::promote_legacy_own_db(sync_root, hostname, device_id)?;
+    }
+
     let remotedir = path.join(device_id);
     fs::create_dir_all(&remotedir)?;
 

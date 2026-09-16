@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 // Only used by the binary (main.rs) and the Android entrypoint, so these are
 // dead code in the plain library build.
@@ -194,6 +195,28 @@ mod tests {
         path
     }
 
+    fn write_two_level_db(
+        root: &std::path::Path,
+        device_id: &str,
+        size: usize,
+    ) -> std::path::PathBuf {
+        let dir = root.join(device_id);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        fs::write(&path, vec![0u8; size]).unwrap();
+        path
+    }
+
+    fn set_mtime(path: &std::path::Path, secs_ago: u64) {
+        let t = SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
     #[test]
     fn list_remote_dbs_walks_hostname_device_layout() {
         let root = temp_sync_root();
@@ -212,22 +235,26 @@ mod tests {
     }
 
     #[test]
-    fn list_remote_dbs_skips_legacy_two_level_root_dbs() {
+    fn list_remote_dbs_includes_legacy_two_level_root_dbs() {
         // `{sync_root}/{device_id}/test.db` is the leftover daemon layout
-        // from #682. pull_all must not import it.
+        // from #682. Not-yet-upgraded peers still write it, so pull_all
+        // must see it (hostname unknown) and dedupe against any 3-level
+        // entry for the same device_id.
         let root = temp_sync_root();
         let three = write_remote_db(&root, "poco_f8_ultra", "device-1", 64);
-        let two_level_dir = root.join("device-orphan");
-        fs::create_dir_all(&two_level_dir).unwrap();
-        let orphan = two_level_dir.join("test.db");
-        fs::write(&orphan, vec![0u8; 128]).unwrap();
+        let orphan = write_two_level_db(&root, "device-orphan", 128);
 
         let listed = super::list_remote_dbs(&root).unwrap();
         fs::remove_dir_all(&root).unwrap();
 
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].path, three);
-        assert!(listed.iter().all(|d| d.path != orphan));
+        assert_eq!(listed.len(), 2);
+        assert!(listed
+            .iter()
+            .any(|d| d.path == three && !d.hostname.is_empty()));
+        let two = listed.iter().find(|d| d.path == orphan).unwrap();
+        assert!(two.hostname.is_empty());
+        assert_eq!(two.device_id, "device-orphan");
+        assert_eq!(two.size, 128);
     }
 
     #[test]
@@ -259,15 +286,115 @@ mod tests {
             device_id: "aaa".into(),
             path: std::path::PathBuf::from("/sync/host-a/aaa/test.db"),
             size: 10,
+            mtime: SystemTime::UNIX_EPOCH,
         };
         let b = super::RemoteDb {
             hostname: "host-b".into(),
             device_id: "bbb".into(),
             path: std::path::PathBuf::from("/sync/host-b/bbb/test.db"),
             size: 1,
+            mtime: SystemTime::UNIX_EPOCH,
         };
         let selected = super::select_remote_dbs_by_device_id(vec![a.clone(), b.clone()]);
         assert_eq!(selected, vec![a, b]);
+    }
+
+    #[test]
+    fn select_remote_dbs_mixed_layout_prefers_newest_not_largest() {
+        // Same device_id at 2-level (the leftover, large) and 3-level
+        // (current, small). Size would pick the leftover forever; newest
+        // data (mtime) picks the 3-level file that is still being written.
+        let root = temp_sync_root();
+        let two = write_two_level_db(&root, "device-1", 128);
+        let three = write_remote_db(&root, "poco_f8_ultra", "device-1", 8);
+        set_mtime(&two, 3600);
+        set_mtime(&three, 1);
+
+        let selected =
+            super::select_remote_dbs_by_device_id(super::list_remote_dbs(&root).unwrap());
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, three);
+        assert_eq!(selected[0].hostname, "poco_f8_ultra");
+    }
+
+    #[test]
+    fn select_remote_dbs_two_level_only_peer_is_kept() {
+        // A daemon peer that has not upgraded still writes 2-level only.
+        let root = temp_sync_root();
+        let two = write_two_level_db(&root, "device-peer", 64);
+        let other = write_remote_db(&root, "host-b", "device-other", 8);
+
+        let selected =
+            super::select_remote_dbs_by_device_id(super::list_remote_dbs(&root).unwrap());
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(selected.len(), 2);
+        assert!(selected
+            .iter()
+            .any(|d| d.path == two && d.hostname.is_empty()));
+        assert!(selected.iter().any(|d| d.path == other));
+    }
+
+    #[test]
+    fn promote_legacy_own_db_renames_into_host_layout() {
+        let root = temp_sync_root();
+        let src = write_two_level_db(&root, "device-1", 32);
+        let wal = {
+            let mut p = src.as_os_str().to_os_string();
+            p.push("-wal");
+            let p = std::path::PathBuf::from(p);
+            fs::write(&p, b"wal").unwrap();
+            p
+        };
+
+        let promoted = super::promote_legacy_own_db(&root, "erb-m2", "device-1").unwrap();
+        let dest = root.join("erb-m2").join("device-1").join("test.db");
+        let dest_wal = {
+            let mut p = dest.as_os_str().to_os_string();
+            p.push("-wal");
+            std::path::PathBuf::from(p)
+        };
+
+        assert!(promoted);
+        assert!(dest.exists());
+        assert!(!src.exists());
+        assert!(dest_wal.exists());
+        assert!(!wal.exists());
+        // Empty leftover directory is kept — nothing is deleted.
+        assert!(root.join("device-1").exists());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn promote_legacy_own_db_is_noop_when_dest_exists() {
+        let root = temp_sync_root();
+        let src = write_two_level_db(&root, "device-1", 32);
+        let dest = write_remote_db(&root, "erb-m2", "device-1", 8);
+
+        let promoted = super::promote_legacy_own_db(&root, "erb-m2", "device-1").unwrap();
+        assert!(!promoted);
+        assert!(src.exists());
+        assert!(dest.exists());
+        assert_eq!(fs::read(&src).unwrap().len(), 32);
+        assert_eq!(fs::read(&dest).unwrap().len(), 8);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn promote_legacy_own_db_is_noop_when_src_missing() {
+        let root = temp_sync_root();
+        let promoted = super::promote_legacy_own_db(&root, "erb-m2", "device-1").unwrap();
+        assert!(!promoted);
+        assert!(!root
+            .join("erb-m2")
+            .join("device-1")
+            .join("test.db")
+            .exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -289,29 +416,43 @@ mod tests {
     }
 }
 
-/// A peer database discovered under `{sync_root}/{hostname}/{device_id}/*.db`.
+/// A peer database discovered under the sync root.
+///
+/// - 3-level: `{sync_root}/{hostname}/{device_id}/*.db` (`hostname` is the folder)
+/// - 2-level leftover: `{sync_root}/{device_id}/*.db` (`hostname` is empty —
+///   the folder name is the device_id, so the hostname is unknown)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteDb {
     pub hostname: String,
     pub device_id: String,
     pub path: PathBuf,
     pub size: u64,
+    pub mtime: SystemTime,
 }
 
-/// List every `{hostname}/{device_id}/*.db` under `sync_root`.
+impl RemoteDb {
+    fn is_two_level(&self) -> bool {
+        self.hostname.is_empty()
+    }
+}
+
+fn file_size_and_mtime(meta: Option<fs::Metadata>) -> (u64, SystemTime) {
+    match meta {
+        Some(m) => (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)),
+        None => (0, SystemTime::UNIX_EPOCH),
+    }
+}
+
+/// List peer databases under `sync_root`.
 ///
-/// Returns device_id and file size so callers can collapse duplicate folders
-/// for one device before importing. I/O errors are propagated rather than
-/// skipped: dropping a host directory we failed to read would report a
+/// Walks both layouts:
+/// - 3-level `{hostname}/{device_id}/*.db` (Android / `aw-sync sync` / upgraded daemon)
+/// - 2-level `{device_id}/*.db` (legacy daemon, still written by not-yet-upgraded peers)
+///
+/// 2-level entries have an empty `hostname`. Callers collapse by `device_id`
+/// via [`select_remote_dbs_by_device_id`]. I/O errors are propagated rather
+/// than skipped: dropping a host directory we failed to read would report a
 /// successful sync that quietly omitted that host's data.
-///
-/// 3-level-only by design. This is the `pull_all` walker. A leftover 2-level
-/// root db (`{sync_root}/{device_id}/test.db`, no hostname folder) is **not**
-/// a pull candidate. That is the correct outcome: the 1.19 GB root orphan
-/// from ActivityWatch/aw-server-rust#682 must never be imported by a peer.
-/// Do not "fix" this by broadening the walk — the advanced `sync_run` path
-/// still uses [`find_remotes`] (2-level, relative to whatever directory it
-/// is given). Two walkers, two code paths; that is intentional.
 pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>> {
     let mut dbs = Vec::new();
     if !sync_root.exists() {
@@ -323,30 +464,44 @@ pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>
         if !host_path.is_dir() {
             continue;
         }
-        let Some(hostname) = host_ent.file_name().to_str().map(str::to_string) else {
+        let Some(first_name) = host_ent.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        for device_ent in fs::read_dir(&host_path)? {
-            let device_ent = device_ent?;
-            let device_path = device_ent.path();
-            if !device_path.is_dir() {
+        for child_ent in fs::read_dir(&host_path)? {
+            let child_ent = child_ent?;
+            let child_path = child_ent.path();
+            if child_path.is_file() && child_path.extension().and_then(|e| e.to_str()) == Some("db")
+            {
+                // 2-level: `{sync_root}/{device_id}/*.db`
+                let (size, mtime) = file_size_and_mtime(child_ent.metadata().ok());
+                dbs.push(RemoteDb {
+                    hostname: String::new(),
+                    device_id: first_name.clone(),
+                    path: child_path,
+                    size,
+                    mtime,
+                });
                 continue;
             }
-            let Some(device_id) = device_ent.file_name().to_str().map(str::to_string) else {
+            if !child_path.is_dir() {
+                continue;
+            }
+            let Some(device_id) = child_ent.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            for file_ent in fs::read_dir(&device_path)? {
+            for file_ent in fs::read_dir(&child_path)? {
                 let file_ent = file_ent?;
                 let path = file_ent.path();
                 if !(path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("db")) {
                     continue;
                 }
-                let size = file_ent.metadata().map(|m| m.len()).unwrap_or(0);
+                let (size, mtime) = file_size_and_mtime(file_ent.metadata().ok());
                 dbs.push(RemoteDb {
-                    hostname: hostname.clone(),
+                    hostname: first_name.clone(),
                     device_id: device_id.clone(),
                     path,
                     size,
+                    mtime,
                 });
             }
         }
@@ -354,12 +509,16 @@ pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>
     Ok(dbs)
 }
 
-/// Keep one database per `device_id`, preferring the largest file.
+/// Keep one database per `device_id`.
 ///
-/// A hostname change (or sanitization) can leave the same device writing under
-/// two folder names. Importing both is unsafe: provenance is derived from the
-/// bucket hostname, so both land in the same destination bucket, and resume
-/// then silently drops the older history. See ActivityWatch/aw-server-rust#683.
+/// Same-layout duplicates (two 3-level hostname folders after sanitization)
+/// still pick the largest file so resume-from-newest cannot drop history
+/// (ActivityWatch/aw-server-rust#683).
+///
+/// Mixed 2-level + 3-level for the same device pick **newest data** (file
+/// mtime), not size. The leftover 2-level file is the one with months of
+/// history and would win on size forever, even after the 3-level file is
+/// the one being written.
 pub(crate) fn select_remote_dbs_by_device_id(dbs: Vec<RemoteDb>) -> Vec<RemoteDb> {
     let mut by_device: HashMap<String, Vec<RemoteDb>> = HashMap::new();
     for db in dbs {
@@ -368,20 +527,35 @@ pub(crate) fn select_remote_dbs_by_device_id(dbs: Vec<RemoteDb>) -> Vec<RemoteDb
 
     let mut selected = Vec::with_capacity(by_device.len());
     for (device_id, mut group) in by_device {
-        group.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+        let mixed =
+            group.iter().any(RemoteDb::is_two_level) && group.iter().any(|d| !d.is_two_level());
+        if mixed {
+            group.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+        } else {
+            group.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+        }
         let mut group = group.into_iter();
         let winner = group.next().expect("device_id group is non-empty");
         let skipped: Vec<String> = group
             .map(|d| format!("{} ({} bytes)", d.path.display(), d.size))
             .collect();
         if !skipped.is_empty() {
-            warn!(
-                "device_id {device_id} appears under {} folders; using largest {} ({} bytes), skipping: {:?}",
-                skipped.len() + 1,
-                winner.path.display(),
-                winner.size,
-                skipped
-            );
+            if mixed {
+                warn!(
+                    "device_id {device_id} has both 2-level and 3-level dbs; using newest {} ({} bytes), skipping: {:?}",
+                    winner.path.display(),
+                    winner.size,
+                    skipped
+                );
+            } else {
+                warn!(
+                    "device_id {device_id} appears under {} folders; using largest {} ({} bytes), skipping: {:?}",
+                    skipped.len() + 1,
+                    winner.path.display(),
+                    winner.size,
+                    skipped
+                );
+            }
         }
         selected.push(winner);
     }
@@ -394,6 +568,56 @@ pub(crate) fn select_remote_dbs_by_device_id(dbs: Vec<RemoteDb>) -> Vec<RemoteDb
     selected
 }
 
+const SQLITE_SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+fn sidecar_path(db: &Path, suffix: &str) -> PathBuf {
+    let mut s = db.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+fn rename_sqlite_db(src: &Path, dest: &Path) -> std::io::Result<()> {
+    fs::rename(src, dest)?;
+    for suffix in SQLITE_SIDECARS {
+        let src_side = sidecar_path(src, suffix);
+        if src_side.exists() {
+            fs::rename(&src_side, sidecar_path(dest, suffix))?;
+        }
+    }
+    Ok(())
+}
+
+/// If `{sync_root}/{device_id}/test.db` exists and the 3-level destination
+/// `{sync_root}/{hostname}/{device_id}/test.db` does not, rename the leftover
+/// own db (plus sqlite sidecars) into place.
+///
+/// Creating a fresh 3-level file would re-export the entire history into a
+/// new Syncthing object. A rename is one metadata op and, because the
+/// content is identical, a cheap move on the syncer side. Nothing is deleted:
+/// an empty leftover `{device_id}/` directory is left behind.
+///
+/// Returns `true` if a rename happened.
+pub(crate) fn promote_legacy_own_db(
+    sync_root: &Path,
+    hostname: &str,
+    device_id: &str,
+) -> std::io::Result<bool> {
+    let dest_dir = sync_root.join(hostname).join(device_id);
+    let dest = dest_dir.join("test.db");
+    let src = sync_root.join(device_id).join("test.db");
+    if dest.exists() || !src.exists() || src == dest {
+        return Ok(false);
+    }
+    fs::create_dir_all(&dest_dir)?;
+    info!(
+        "Promoting leftover 2-level own db {} → {} (avoid re-exporting history into a new file)",
+        src.display(),
+        dest.display()
+    );
+    rename_sqlite_db(&src, &dest)?;
+    Ok(true)
+}
+
 /// 2-level walker: `{sync_directory}/{x}/*.db`.
 ///
 /// Callers pass different roots:
@@ -402,9 +626,10 @@ pub(crate) fn select_remote_dbs_by_device_id(dbs: Vec<RemoteDb>) -> Vec<RemoteDb
 /// - advanced `sync_run` against the sync root finds the legacy
 ///   `{device_id}/*.db` layout
 ///
-/// Do not broaden this to 3-level at the sync root. That would make a
-/// pull import the leftover root orphan from #682. Default-daemon pull
-/// is [`list_remote_dbs`] (3-level-only), not this function.
+/// Default-daemon pull is [`list_remote_dbs`] (both layouts). This walker
+/// stays 2-level relative to the directory it is given: a host folder
+/// yields `{host}/{device_id}/*.db`; the sync root yields leftover
+/// `{device_id}/*.db`.
 ///
 /// I/O errors are propagated rather than unwrapped (a panic here aborts the app
 /// on Android, ActivityWatch/aw-android#220) and rather than skipped: silently
@@ -466,12 +691,13 @@ fn select_db_paths_by_device_id(paths: Vec<PathBuf>) -> Vec<PathBuf> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let (size, mtime) = file_size_and_mtime(fs::metadata(&path).ok());
             Some(RemoteDb {
                 hostname,
                 device_id,
                 path,
                 size,
+                mtime,
             })
         })
         .collect();
@@ -549,10 +775,11 @@ impl SyncDirEntry {
 
 /// Classify the sync folder for `aw-sync status` and empty-pull warnings.
 ///
-/// 3-level databases come from [`list_remote_dbs`] + [`select_remote_dbs_by_device_id`]
+/// Peer databases come from [`list_remote_dbs`] + [`select_remote_dbs_by_device_id`]
 /// — the same pair `pull_all` uses — so duplicate-`device_id` "not pulled" reasons
-/// match the pull path. Status-only overlay on top of that list: 2-level leftovers,
-/// unrecognised files/dirs, own-staging vs peer, [`SyncLayout`].
+/// match the pull path (both 2-level leftovers and 3-level hosts). Status-only
+/// overlay on top of that list: unrecognised files/dirs, own-staging vs peer,
+/// [`SyncLayout`].
 ///
 /// Does not open sqlite files and does not create directories. `local_device_id`
 /// is used to tell own staging copies from peers; pass `None` when unknown.
@@ -564,7 +791,16 @@ pub fn scan_sync_dir(
     let selected = select_remote_dbs_by_device_id(remotes.clone());
     let selected_paths: HashSet<PathBuf> = selected.into_iter().map(|d| d.path).collect();
     let remote_paths: HashSet<PathBuf> = remotes.iter().map(|d| d.path.clone()).collect();
-    let known_hosts: HashSet<String> = remotes.iter().map(|d| d.hostname.clone()).collect();
+    let known_hosts: HashSet<String> = remotes
+        .iter()
+        .filter(|d| !d.hostname.is_empty())
+        .map(|d| d.hostname.clone())
+        .collect();
+    let two_level_tops: HashSet<PathBuf> = remotes
+        .iter()
+        .filter(|d| d.is_two_level())
+        .filter_map(|d| d.path.parent().map(Path::to_path_buf))
+        .collect();
 
     let mut entries: Vec<SyncDirEntry> = remotes
         .into_iter()
@@ -580,6 +816,10 @@ pub fn scan_sync_dir(
                 continue;
             }
             if !path.is_dir() {
+                continue;
+            }
+            if two_level_tops.contains(&path) {
+                // Already classified from list_remote_dbs as a 2-level db.
                 continue;
             }
             let name = file_name_string(&path);
@@ -618,11 +858,12 @@ fn remote_db_to_entry(
     selected_paths: &HashSet<PathBuf>,
 ) -> SyncDirEntry {
     let own = local_device_id == Some(db.device_id.as_str());
+    let two_level = db.is_two_level();
     let not_visible = if own {
         Some("own device_id, excluded from pull".to_string())
     } else if !selected_paths.contains(&db.path) {
         Some(format!(
-            "duplicate device_id {}; pull keeps the largest db only (ActivityWatch/aw-server-rust#683)",
+            "duplicate device_id {}; pull keeps one db per device (ActivityWatch/aw-server-rust#683)",
             db.device_id
         ))
     } else {
@@ -632,13 +873,17 @@ fn remote_db_to_entry(
         path: db.path.clone(),
         db_path: Some(db.path),
         db_size: Some(db.size),
-        layout: Some(SyncLayout::ThreeLevel),
+        layout: Some(if two_level {
+            SyncLayout::TwoLevel
+        } else {
+            SyncLayout::ThreeLevel
+        }),
         kind: if own {
             SyncEntryKind::OwnStaging
         } else {
             SyncEntryKind::Peer
         },
-        hostname_folder: Some(db.hostname),
+        hostname_folder: if two_level { None } else { Some(db.hostname) },
         device_id: Some(db.device_id),
         not_visible_to_daemon: not_visible,
     }

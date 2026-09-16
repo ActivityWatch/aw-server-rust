@@ -415,63 +415,61 @@ fn get_or_create_sync_bucket(
     // Look up the unsanitized ID first.  Any device that was synced before
     // aw-android added hostname sanitization (ActivityWatch/aw-android#272) may
     // have left a local bucket whose ID and hostname contain whitespace (e.g.
-    // `…-synced-from-POCO F8 Ultra`).  Keep using that ID to avoid a fork that
-    // would cause a full re-import (ActivityWatch/activitywatch#1373).
+    // `…-synced-from-POCO F8 Ultra`) or a case-only fork (`…-synced-from-PIXEL8`).
+    // Keep using that ID to avoid a full re-import (ActivityWatch/activitywatch#1373).
     match ds_to.get_bucket(new_id.as_str()) {
         Ok(bucket) => return Ok(bucket),
         Err(DatastoreError::NoSuchBucket(_)) => {}
         Err(e) => return Err(format!("Failed to get bucket '{new_id}': {e:?}")),
     }
 
-    // The bucket does not exist yet.  If the ID *or the source hostname* contains
-    // whitespace, sanitize before creating: aw-server-rust rejects new buckets
-    // with whitespace hostnames (#658).  The ID-only check is not enough —
-    // `$aw.sync.origin` can already be clean while `bucket_from.hostname` still
-    // has spaces, and `create_bucket` would 400 on the hostname field.
+    // Always sanitize. DeviceHostname.kt lowercases and replaces punctuation,
+    // not just whitespace — `PIXEL8` vs `pixel8` is the same fork as
+    // `POCO F8 Ultra` vs `poco_f8_ultra`, just without spaces. Lookup order
+    // stays *raw ID → sanitized ID*; create under the sanitized ID whenever it
+    // differs from raw so Android's hostname-column migration lands on an
+    // existing bucket regardless of which character class differed.
     //
-    // Sanitization uses Android's algorithm (not a whitespace-only replace) so
-    // today's desktop creates `…-synced-from-poco_f8_ultra` and Android's
-    // hostname-column migration lands on the same ID.
-    let (final_id, final_hostname) = if bucket_from.hostname.contains(char::is_whitespace)
-        || new_id.contains(char::is_whitespace)
+    // Desktop peers with dots (`erb-m2.localdomain`) will create
+    // `…-synced-from-erb-m2_localdomain` for *new* imports; existing ones are
+    // found via the raw lookup. That is a display wart the `(device_id, id)`
+    // identity work in ActivityWatch/activitywatch#302 removes — not a reason
+    // to keep the fork open.
+    let sanitized_hostname = sanitize_hostname(&bucket_from.hostname);
+    let sanitized_id = if let Some(ref origin) = sync_origin {
+        let orig_bucketid = bucket_from
+            .id
+            .split("-synced-from-")
+            .next()
+            .unwrap_or(bucket_from.id.as_str());
+        format!("{orig_bucketid}-synced-from-{}", sanitize_hostname(origin))
+    } else {
+        // Push path: keep the original bucket ID; only the hostname field
+        // needs to be a legal create_bucket value.
+        new_id.clone()
+    };
+    // Android maps empty/punctuation-only names to the "unknown" sentinel.
+    // Creating `-synced-from-unknown` on pull would mix every such remote
+    // into one destination — the same provenance hole the
+    // `hostname == "unknown"` guard in `sync_datastores` exists to close.
+    // Refuse; the per-bucket warn+continue then skips this bucket.
+    if !is_push
+        && (sanitized_hostname == "unknown" || sanitized_id.ends_with("-synced-from-unknown"))
     {
-        let sanitized_hostname = sanitize_hostname(&bucket_from.hostname);
-        let sanitized_id = if let Some(ref origin) = sync_origin {
-            let orig_bucketid = bucket_from
-                .id
-                .split("-synced-from-")
-                .next()
-                .unwrap_or(bucket_from.id.as_str());
-            format!("{orig_bucketid}-synced-from-{}", sanitize_hostname(origin))
-        } else {
-            // Push path: keep the original bucket ID; only the hostname field
-            // needs to be a legal create_bucket value.
-            new_id.clone()
-        };
-        // Android maps empty/punctuation-only names to the "unknown" sentinel.
-        // Creating `-synced-from-unknown` on pull would mix every such remote
-        // into one destination — the same provenance hole the
-        // `hostname == "unknown"` guard in `sync_datastores` exists to close.
-        // Refuse; the per-bucket warn+continue then skips this bucket.
-        if !is_push
-            && (sanitized_hostname == "unknown" || sanitized_id.ends_with("-synced-from-unknown"))
-        {
-            return Err(format!(
-                "Bucket '{}' hostname sanitizes to the unknown sentinel; \
-                 refusing to sync it without provenance",
-                bucket_from.id
-            ));
-        }
-        // If a sanitized bucket already exists, use it.
+        return Err(format!(
+            "Bucket '{}' hostname sanitizes to the unknown sentinel; \
+             refusing to sync it without provenance",
+            bucket_from.id
+        ));
+    }
+    if sanitized_id != new_id {
         match ds_to.get_bucket(sanitized_id.as_str()) {
             Ok(bucket) => return Ok(bucket),
             Err(DatastoreError::NoSuchBucket(_)) => {}
             Err(e) => return Err(format!("Failed to get bucket '{sanitized_id}': {e:?}")),
         }
-        (sanitized_id, sanitized_hostname)
-    } else {
-        (new_id.clone(), bucket_from.hostname.clone())
-    };
+    }
+    let (final_id, final_hostname) = (sanitized_id, sanitized_hostname);
 
     let mut bucket_new = bucket_from.clone();
     bucket_new.id = final_id.clone();
@@ -620,21 +618,40 @@ pub fn sync_datastores(
     // Sync buckets in order of most recently updated
     buckets_from.sort_by_key(|b| b.metadata.end);
 
+    // Partial failure is non-fatal (one bad bucket must not skip the rest).
+    // Total failure must still be Err: otherwise a destination that is down
+    // reports success, which is the #682 silence reintroduced via #688's skip.
     let mut buckets = Vec::with_capacity(buckets_from.len());
+    let mut attempted = 0usize;
+    let mut succeeded = 0usize;
+    let mut last_err: Option<String> = None;
     for bucket_from in buckets_from {
+        attempted += 1;
+        let bucket_id = bucket_from.id.clone();
         let bucket_to = match get_or_create_sync_bucket(&bucket_from, ds_to, is_push) {
             Ok(b) => b,
             Err(e) => {
-                // Non-fatal: log and skip this bucket so a bad peer does not
-                // abort the entire pass and leave other buckets un-synced (#692).
-                warn!(" ! Skipping bucket '{}': {}", bucket_from.id, e);
+                warn!(" ! Skipping bucket '{}': {}", bucket_id, e);
+                last_err = Some(e);
                 continue;
             }
         };
         match sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec) {
-            Ok(synced) => buckets.push(synced),
-            Err(e) => warn!(" ! Skipping sync for bucket: {}", e),
+            Ok(synced) => {
+                succeeded += 1;
+                buckets.push(synced);
+            }
+            Err(e) => {
+                warn!(" ! Skipping sync for bucket '{}': {}", bucket_id, e);
+                last_err = Some(e);
+            }
         }
+    }
+    if attempted > 0 && succeeded == 0 {
+        return Err(format!(
+            "all {attempted} buckets failed; last error: {}",
+            last_err.as_deref().unwrap_or("unknown")
+        ));
     }
 
     Ok(buckets)
@@ -1035,6 +1052,13 @@ mod hostname_sanitize_tests {
         // whitespace-only replace would produce "POCO_F8_Ultra" and fork the
         // day aw-android#272 migrates the phone's hostname column.
         assert_eq!(sanitize_hostname("POCO F8 Ultra"), "poco_f8_ultra");
+        // Case-only fork: no whitespace, but Android still lowercases.
+        assert_eq!(sanitize_hostname("PIXEL8"), "pixel8");
+        // Dotted desktop hostname: punctuation becomes `_`.
+        assert_eq!(
+            sanitize_hostname("erb-m2.localdomain"),
+            "erb-m2_localdomain"
+        );
     }
 
     #[test]
@@ -1049,5 +1073,10 @@ mod hostname_sanitize_tests {
         // Whitespace + punctuation only: the get_or_create pull-refuse path.
         assert_eq!(sanitize_hostname(" * "), "unknown");
         assert_eq!(sanitize_hostname(" !!! "), "unknown");
+        assert_eq!(sanitize_hostname("PIXEL8"), "pixel8");
+        assert_eq!(
+            sanitize_hostname("erb-m2.localdomain"),
+            "erb-m2_localdomain"
+        );
     }
 }

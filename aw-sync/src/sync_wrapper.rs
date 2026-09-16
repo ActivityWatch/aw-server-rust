@@ -41,16 +41,29 @@ pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
             .map(|d| d.path.display().to_string())
             .collect::<Vec<_>>()
     );
+    // Partial failure is non-fatal (one bad peer must not skip the rest).
+    // Total failure must still be Err so CLI/JNI/supervisor can tell a
+    // destination-down pass from a successful one.
+    let mut attempted = 0usize;
+    let mut succeeded = 0usize;
+    let mut last_err: Option<String> = None;
     for remote in selection.selected {
+        attempted += 1;
+        // Per-peer isolation: a peer that fails to open must not abort the
+        // pass and skip every peer after it. Bucket-level errors are already
+        // non-fatal in `sync_datastores`; peer-level open failures need the
+        // same warn+continue so a later skip-on-mismatch (#693) has somewhere
+        // to go instead of becoming "abort pass" (#688).
         match pull_db(client, &remote.hostname, &remote.path) {
-            Ok(one) => report.merge(one),
+            Ok(one) => {
+                succeeded += 1;
+                report.merge(one);
+            }
             Err(e) => {
-                // Per-peer isolation: a peer that fails to open must not abort
-                // the pass and skip every peer after it. Bucket-level errors are
-                // already non-fatal in `sync_datastores`; peer-level open
-                // failures need the same warn+continue so a later
-                // skip-on-mismatch (#693) has somewhere to go instead of
-                // becoming "abort pass" (#688).
+                warn!(
+                    "Skipping peer '{}' ({:?}): {e}",
+                    remote.hostname, remote.path
+                );
                 warn!(
                     "Skipping peer '{}' ({:?}): {e}",
                     remote.hostname, remote.path
@@ -61,8 +74,20 @@ pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
                     remote.path,
                     e.to_string(),
                 ));
+                last_err = Some(e.to_string());
             }
         }
+    }
+    if attempted > 0 && succeeded == 0 {
+        report.finish();
+        // Persist the aggregate (the failures) so a total abort is visible
+        // afterwards, then fail the pass.
+        crate::report::persist_last_report_warn(&report);
+        return Err(format!(
+            "all {attempted} peers failed; last error: {}",
+            last_err.as_deref().unwrap_or("unknown")
+        )
+        .into());
     }
     report.finish();
     Ok(report)

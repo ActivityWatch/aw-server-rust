@@ -87,10 +87,12 @@ fn round_trip() -> (Datastore, Datastore) {
     sync_datastores(&a_local, &a_export, true, Some("device-A"), &spec).unwrap();
 
     // 2. HOSTB pulls HOSTA's export. This copy is correct and expected.
+    // Destination IDs use the sanitized origin (`hosta`), matching
+    // DeviceHostname.kt — not the raw `HOSTA` hostname.
     sync_datastores(&a_export, &b_local, false, None, &spec).unwrap();
     assert!(
-        bucket_ids(&b_local).contains(&"aw-watcher-window_HOSTA-synced-from-HOSTA".to_string()),
-        "precondition: HOSTB should hold HOSTA's data as a synced-from-HOSTA bucket, got {:?}",
+        bucket_ids(&b_local).contains(&"aw-watcher-window_HOSTA-synced-from-hosta".to_string()),
+        "precondition: HOSTB should hold HOSTA's data as a synced-from-hosta bucket, got {:?}",
         bucket_ids(&b_local)
     );
 

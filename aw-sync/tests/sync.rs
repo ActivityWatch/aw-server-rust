@@ -103,9 +103,9 @@ mod sync_tests {
     /// exception — the SIGABRT in ActivityWatch/aw-android#220. `sync_datastores`
     /// used to `unwrap()` every datastore call, so any failure here was fatal.
     ///
-    /// Since the per-bucket non-fatal change (#692), sync_datastores returns
-    /// Ok(()) and warns when individual buckets fail, so a broken peer does not
-    /// abort the whole pass.  No panic is still the key invariant.
+    /// Since the per-bucket non-fatal change (#692), a broken *sibling* does
+    /// not abort the whole pass. A pass where every bucket fails is still Err
+    /// so callers can tell it from success. No panic is the key invariant.
     #[test]
     fn test_unusable_datastore_does_not_panic() {
         let state = init_teststate();
@@ -118,9 +118,10 @@ mod sync_tests {
         ))
         .expect("path is valid UTF-8");
 
-        // Previously this panicked (unwrap on datastore failure); later it
-        // returned Err; now it returns Ok(()) after skipping the broken bucket.
-        // The key property: it must not panic.
+        // Previously this panicked (unwrap on datastore failure). Per-bucket
+        // skip makes a *partial* failure non-fatal, but every bucket failing
+        // (destination down) must still be Err so callers can tell it from
+        // success. The key property: it must not panic.
         let result = aw_sync::sync_datastores(
             &state.ds_src,
             &ds_broken,
@@ -128,15 +129,11 @@ mod sync_tests {
             Some("device-0"),
             &SyncSpec::default(),
         );
+        let err =
+            result.expect_err("total bucket failure must return Err, not Ok(()); must not panic");
         assert!(
-            !result.is_err() || result.is_ok(),
-            "sync_datastores must not panic; got {result:?}"
-        );
-        // With non-fatal per-bucket errors, the function now returns Ok(())
-        // and logs a warning rather than propagating the per-bucket failure.
-        assert!(
-            result.is_ok(),
-            "a per-bucket failure must not abort the whole pass; got {result:?}"
+            err.contains("all 1 buckets failed"),
+            "error should report total failure, got: {err}"
         );
     }
 
@@ -264,6 +261,130 @@ mod sync_tests {
         );
     }
 
+    /// Case-only hostnames (`PIXEL8`) have no whitespace, so a whitespace-only
+    /// guard would leave the destination as `…-synced-from-PIXEL8`. Android's
+    /// later hostname migration produces `pixel8` and forks the history.
+    #[test]
+    fn test_case_only_hostname_pull_creates_sanitized_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "PIXEL8",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        let sanitized_id = "aw-watcher-android-synced-from-pixel8";
+        assert!(
+            dest_buckets.contains_key(sanitized_id),
+            "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-android-synced-from-PIXEL8"),
+            "case-only fork must not be created, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(dest_buckets.get(sanitized_id).unwrap().hostname, "pixel8");
+    }
+
+    /// Dotted desktop hostnames (`erb-m2.localdomain`) sanitize punctuation to
+    /// `_` for *new* imports. Existing raw IDs are still found via the raw lookup.
+    #[test]
+    fn test_dotted_hostname_pull_creates_sanitized_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-window",
+            "type": "currentwindow",
+            "hostname": "erb-m2.localdomain",
+            "client": "aw-watcher-window"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        let sanitized_id = "aw-watcher-window-synced-from-erb-m2_localdomain";
+        assert!(
+            dest_buckets.contains_key(sanitized_id),
+            "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-window-synced-from-erb-m2.localdomain"),
+            "dotted raw id must not be created for new imports, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// If a legacy case-only bucket already exists, re-use it rather than
+    /// creating `…-synced-from-pixel8` beside `…-synced-from-PIXEL8`.
+    #[test]
+    fn test_case_only_hostname_pull_reuses_legacy_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "PIXEL8",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        let legacy_id = "aw-watcher-android-synced-from-PIXEL8";
+        let legacy_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": legacy_id,
+            "type": "currentwindow",
+            "hostname": "PIXEL8",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&legacy_bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        assert!(
+            dest_buckets.contains_key(legacy_id),
+            "legacy case-only bucket must be preserved"
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-android-synced-from-pixel8"),
+            "a sanitized fork must not be created when legacy bucket exists, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
     /// If `$aw.sync.origin` is already clean while `bucket.hostname` still has
     /// whitespace, the sanitizer must still run: otherwise `create_bucket` 400s
     /// on the hostname field even though the derived ID is legal.
@@ -375,8 +496,9 @@ mod sync_tests {
         .unwrap();
         state.ds_src.create_bucket(&bucket).unwrap();
 
-        // Previously this panicked; later it returned Err; now it returns Ok(())
-        // after skipping the malformed bucket.  No panic is the key invariant.
+        // Previously this panicked. A single malformed bucket is a total
+        // failure of the pass, so it must return Err (not Ok after skip).
+        // No panic is still the key invariant.
         let result = aw_sync::sync_datastores(
             &state.ds_src,
             &state.ds_dest,
@@ -384,9 +506,10 @@ mod sync_tests {
             None,
             &SyncSpec::default(),
         );
+        let err = result.expect_err("total failure of a one-bucket pass must be Err");
         assert!(
-            result.is_ok(),
-            "a malformed bucket must not abort the whole pass; got {result:?}"
+            err.contains("all 1 buckets failed"),
+            "error should report total failure, got: {err}"
         );
         // The malformed bucket must have been skipped, not imported.
         let dest_buckets = state.ds_dest.get_buckets().unwrap();

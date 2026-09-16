@@ -467,9 +467,9 @@ fn reconcile_updated_events(
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
-) {
+) -> Result<(), String> {
     let Some(resume) = resume_sync_at else {
-        return;
+        return Ok(());
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
 
@@ -481,22 +481,22 @@ fn reconcile_updated_events(
     // keep duration; duration-only updates stay on the heartbeat path. Do not
     // also cap by count — a newest-first cap silently skips older in-window
     // edits.
-    let source_events = ds_from
-        .get_events(
-            bucket_from.id.as_str(),
-            Some(lookback_start),
-            Some(resume),
-            None,
-        )
-        .unwrap();
-    let dest_events = ds_to
-        .get_events(
-            bucket_to.id.as_str(),
-            Some(lookback_start),
-            Some(resume),
-            None,
-        )
-        .unwrap();
+    //
+    // Datastore errors return rather than unwrap: a panic here aborts the
+    // whole pass (and on Android, the JNI frame). The per-bucket skip in
+    // ActivityWatch/aw-server-rust#697 then drops this bucket, not the daemon.
+    let source_events = ds_from.get_events(
+        bucket_from.id.as_str(),
+        Some(lookback_start),
+        Some(resume),
+        None,
+    )?;
+    let dest_events = ds_to.get_events(
+        bucket_to.id.as_str(),
+        Some(lookback_start),
+        Some(resume),
+        None,
+    )?;
 
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for event in dest_events {
@@ -551,18 +551,15 @@ fn reconcile_updated_events(
                     src
                 })
                 .collect();
-            ds_to
-                .insert_events(bucket_to.id.as_str(), replacements)
-                .unwrap();
+            ds_to.insert_events(bucket_to.id.as_str(), replacements)?;
         }
         let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
         if !stale.is_empty() {
-            ds_to
-                .delete_events_by_id(bucket_to.id.as_str(), stale)
-                .unwrap();
+            ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
         }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
+    Ok(())
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -594,7 +591,7 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at);
+    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
 
     // Fetch events in bounded chunks to avoid OOM on devices with limited RAM (e.g. Android).
     // get_events returns events in descending order (newest first), so we paginate backwards

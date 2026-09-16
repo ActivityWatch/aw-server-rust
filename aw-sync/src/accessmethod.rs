@@ -68,7 +68,7 @@ impl AccessMethod for Datastore {
     }
     fn delete_events_by_id(&self, bucket_id: &str, event_ids: Vec<i64>) -> Result<(), String> {
         Datastore::delete_events_by_id(self, bucket_id, event_ids).map_err(|e| format!("{e:?}"))?;
-        self.force_commit().unwrap();
+        self.force_commit().map_err(|e| format!("{e:?}"))?;
         Ok(())
     }
 }

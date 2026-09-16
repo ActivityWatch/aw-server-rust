@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
@@ -479,4 +479,680 @@ fn select_db_paths_by_device_id(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         .into_iter()
         .map(|d| d.path)
         .collect()
+}
+
+/// How a database sits in the sync folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncLayout {
+    TwoLevel,
+    ThreeLevel,
+}
+
+impl SyncLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncLayout::TwoLevel => "2-level",
+            SyncLayout::ThreeLevel => "3-level",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncEntryKind {
+    Peer,
+    OwnStaging,
+    Unrecognised,
+}
+
+impl SyncEntryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncEntryKind::Peer => "peer",
+            SyncEntryKind::OwnStaging => "own-staging",
+            SyncEntryKind::Unrecognised => "unrecognised",
+        }
+    }
+}
+
+/// One filesystem entry in the sync directory, classified without opening sqlite.
+#[derive(Debug, Clone)]
+pub struct SyncDirEntry {
+    pub path: PathBuf,
+    pub db_path: Option<PathBuf>,
+    pub db_size: Option<u64>,
+    pub layout: Option<SyncLayout>,
+    pub kind: SyncEntryKind,
+    pub hostname_folder: Option<String>,
+    pub device_id: Option<String>,
+    /// Why this path is not a pull remote (own staging, junk, empty folder).
+    pub not_visible_to_daemon: Option<String>,
+}
+
+impl SyncDirEntry {
+    pub fn diagnostic_line(&self) -> String {
+        let size = self
+            .db_size
+            .map(format_bytes)
+            .unwrap_or_else(|| "-".to_string());
+        let layout = self.layout.map(|l| l.as_str()).unwrap_or("-");
+        let mut line = format!(
+            "  [{:<12} {layout}] {}  {size}",
+            self.kind.as_str(),
+            self.path.display()
+        );
+        if let Some(reason) = &self.not_visible_to_daemon {
+            line.push_str(&format!("\n    not pulled: {reason}"));
+        }
+        line
+    }
+}
+
+/// Classify the sync folder for `aw-sync status` and empty-pull warnings.
+///
+/// 3-level databases come from [`list_remote_dbs`] + [`select_remote_dbs_by_device_id`]
+/// — the same pair `pull_all` uses — so duplicate-`device_id` "not pulled" reasons
+/// match the pull path. Status-only overlay on top of that list: 2-level leftovers,
+/// unrecognised files/dirs, own-staging vs peer, [`SyncLayout`].
+///
+/// Does not open sqlite files and does not create directories. `local_device_id`
+/// is used to tell own staging copies from peers; pass `None` when unknown.
+pub fn scan_sync_dir(
+    sync_directory: &Path,
+    local_device_id: Option<&str>,
+) -> std::io::Result<Vec<SyncDirEntry>> {
+    let remotes = list_remote_dbs(sync_directory)?;
+    let selected = select_remote_dbs_by_device_id(remotes.clone());
+    let selected_paths: HashSet<PathBuf> = selected.into_iter().map(|d| d.path).collect();
+    let remote_paths: HashSet<PathBuf> = remotes.iter().map(|d| d.path.clone()).collect();
+    let known_hosts: HashSet<String> = remotes.iter().map(|d| d.hostname.clone()).collect();
+
+    let mut entries: Vec<SyncDirEntry> = remotes
+        .into_iter()
+        .map(|db| remote_db_to_entry(db, local_device_id, &selected_paths))
+        .collect();
+
+    if sync_directory.exists() {
+        for child in fs::read_dir(sync_directory)? {
+            let child = child?;
+            let path = child.path();
+            if path.is_file() {
+                entries.push(file_at_root(path));
+                continue;
+            }
+            if !path.is_dir() {
+                continue;
+            }
+            let name = file_name_string(&path);
+            if name.as_ref().is_some_and(|n| known_hosts.contains(n)) {
+                // Host folder already walked by list_remote_dbs. Only pick
+                // leftover 2-level *.db files sitting beside device_id dirs.
+                for file in fs::read_dir(&path)? {
+                    let fp = file?.path();
+                    if fp.is_file()
+                        && fp.extension().unwrap_or_else(|| OsStr::new("")) == "db"
+                        && !remote_paths.contains(&fp)
+                    {
+                        entries.push(db_entry(
+                            &fp,
+                            SyncLayout::TwoLevel,
+                            None,
+                            name.clone(),
+                            local_device_id,
+                            None,
+                        )?);
+                    }
+                }
+                continue;
+            }
+            classify_top_dir(&path, local_device_id, &mut entries)?;
+        }
+    }
+
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(entries)
+}
+
+fn remote_db_to_entry(
+    db: RemoteDb,
+    local_device_id: Option<&str>,
+    selected_paths: &HashSet<PathBuf>,
+) -> SyncDirEntry {
+    let own = local_device_id == Some(db.device_id.as_str());
+    let not_visible = if own {
+        Some("own device_id, excluded from pull".to_string())
+    } else if !selected_paths.contains(&db.path) {
+        Some(format!(
+            "duplicate device_id {}; pull keeps the largest db only (ActivityWatch/aw-server-rust#683)",
+            db.device_id
+        ))
+    } else {
+        None
+    };
+    SyncDirEntry {
+        path: db.path.clone(),
+        db_path: Some(db.path),
+        db_size: Some(db.size),
+        layout: Some(SyncLayout::ThreeLevel),
+        kind: if own {
+            SyncEntryKind::OwnStaging
+        } else {
+            SyncEntryKind::Peer
+        },
+        hostname_folder: Some(db.hostname),
+        device_id: Some(db.device_id),
+        not_visible_to_daemon: not_visible,
+    }
+}
+
+fn file_at_root(path: PathBuf) -> SyncDirEntry {
+    let is_db = path.extension().unwrap_or_else(|| OsStr::new("")) == "db";
+    let db_size = fs::metadata(&path).ok().map(|m| m.len());
+    SyncDirEntry {
+        db_path: is_db.then(|| path.clone()),
+        db_size: is_db.then_some(db_size).flatten(),
+        layout: None,
+        kind: SyncEntryKind::Unrecognised,
+        hostname_folder: None,
+        device_id: None,
+        not_visible_to_daemon: Some(if is_db {
+            "database at sync root; expected {device_id}/*.db or {hostname}/{device_id}/*.db"
+                .to_string()
+        } else {
+            "not a database".to_string()
+        }),
+        path,
+    }
+}
+
+fn classify_top_dir(
+    dir: &Path,
+    local_device_id: Option<&str>,
+    entries: &mut Vec<SyncDirEntry>,
+) -> std::io::Result<()> {
+    let top_name = file_name_string(dir);
+    let mut db_files = Vec::new();
+    let mut subdirs = Vec::new();
+    for child in fs::read_dir(dir)? {
+        let child = child?;
+        let path = child.path();
+        if path.is_dir() {
+            subdirs.push(path);
+        } else if path.extension().unwrap_or_else(|| OsStr::new("")) == "db" {
+            db_files.push(path);
+        }
+    }
+
+    for db in &db_files {
+        entries.push(db_entry(
+            db,
+            SyncLayout::TwoLevel,
+            None,
+            top_name.clone(),
+            local_device_id,
+            None,
+        )?);
+    }
+
+    let mut found_three_level = false;
+    for sub in &subdirs {
+        let device_id = file_name_string(sub);
+        let mut sub_dbs = Vec::new();
+        for child in fs::read_dir(sub)? {
+            let path = child?.path();
+            if path.extension().unwrap_or_else(|| OsStr::new("")) == "db" {
+                sub_dbs.push(path);
+            }
+        }
+        if sub_dbs.is_empty() {
+            entries.push(SyncDirEntry {
+                path: sub.clone(),
+                db_path: None,
+                db_size: None,
+                layout: Some(SyncLayout::ThreeLevel),
+                kind: SyncEntryKind::Unrecognised,
+                hostname_folder: top_name.clone(),
+                device_id,
+                not_visible_to_daemon: Some("hostname/device_id folder with no .db".to_string()),
+            });
+            continue;
+        }
+        found_three_level = true;
+        for db in sub_dbs {
+            entries.push(db_entry(
+                &db,
+                SyncLayout::ThreeLevel,
+                top_name.clone(),
+                device_id.clone(),
+                local_device_id,
+                None,
+            )?);
+        }
+    }
+
+    if db_files.is_empty() && !found_three_level && subdirs.is_empty() {
+        entries.push(SyncDirEntry {
+            path: dir.to_path_buf(),
+            db_path: None,
+            db_size: None,
+            layout: None,
+            kind: SyncEntryKind::Unrecognised,
+            hostname_folder: None,
+            device_id: top_name,
+            not_visible_to_daemon: Some("directory with no database".to_string()),
+        });
+    }
+    Ok(())
+}
+
+fn db_entry(
+    db: &Path,
+    layout: SyncLayout,
+    hostname_folder: Option<String>,
+    device_id: Option<String>,
+    local_device_id: Option<&str>,
+    not_visible_to_daemon: Option<String>,
+) -> std::io::Result<SyncDirEntry> {
+    let db_size = fs::metadata(db).ok().map(|m| m.len());
+    let own = match (local_device_id, device_id.as_deref()) {
+        (Some(local), Some(did)) => local == did,
+        (Some(local), None) => db.to_string_lossy().contains(local),
+        _ => false,
+    };
+    let mut not_visible = not_visible_to_daemon;
+    if own && not_visible.is_none() {
+        not_visible = Some("own device_id, excluded from pull".to_string());
+    }
+    Ok(SyncDirEntry {
+        path: db.to_path_buf(),
+        db_path: Some(db.to_path_buf()),
+        db_size,
+        layout: Some(layout),
+        kind: if own {
+            SyncEntryKind::OwnStaging
+        } else {
+            SyncEntryKind::Peer
+        },
+        hostname_folder,
+        device_id,
+        not_visible_to_daemon: not_visible,
+    })
+}
+
+fn file_name_string(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+}
+
+pub fn format_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Warn-lines for a pull that found no remotes, or that missed classified peers.
+pub fn pull_discovery_warnings(
+    sync_directory: &Path,
+    local_device_id: &str,
+    found_remotes: &[PathBuf],
+) -> Vec<String> {
+    let scan = match scan_sync_dir(sync_directory, Some(local_device_id)) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return vec![format!(
+                "Could not scan sync dir {}: {e}",
+                sync_directory.display()
+            )]
+        }
+    };
+
+    let mut lines = Vec::new();
+    let found: std::collections::HashSet<&PathBuf> = found_remotes.iter().collect();
+    let missed: Vec<&SyncDirEntry> = scan
+        .iter()
+        .filter(|e| {
+            e.kind == SyncEntryKind::Peer && e.db_path.as_ref().is_some_and(|p| !found.contains(p))
+        })
+        .collect();
+
+    if found_remotes.is_empty() {
+        lines.push(format!(
+            "Found 0 remote db files to pull from {}. \
+             Zero peers in a configured sync dir is usually a layout or setup problem, not a no-op.",
+            sync_directory.display()
+        ));
+        if scan.is_empty() {
+            lines.push(
+                "  (sync directory is empty aside from what this process creates)".to_string(),
+            );
+        } else {
+            for entry in &scan {
+                lines.push(entry.diagnostic_line());
+            }
+        }
+    } else if !missed.is_empty() {
+        lines.push(format!(
+            "Found {} peer db(s) that pull did not select:",
+            missed.len()
+        ));
+        for entry in missed {
+            lines.push(entry.diagnostic_line());
+        }
+    }
+
+    let mut by_device: std::collections::BTreeMap<String, Vec<&SyncDirEntry>> =
+        std::collections::BTreeMap::new();
+    for entry in scan
+        .iter()
+        .filter(|e| e.device_id.is_some() && e.db_path.is_some())
+    {
+        if let Some(did) = &entry.device_id {
+            by_device.entry(did.clone()).or_default().push(entry);
+        }
+    }
+    for (did, group) in by_device {
+        if group.len() > 1 {
+            let folders: Vec<String> = group
+                .iter()
+                .map(|e| {
+                    e.hostname_folder
+                        .clone()
+                        .unwrap_or_else(|| e.path.display().to_string())
+                })
+                .collect();
+            lines.push(format!(
+                "device_id {did} appears under {} folders: {} — pulling both can truncate history (see ActivityWatch/aw-server-rust#683)",
+                group.len(),
+                folders.join(", ")
+            ));
+        }
+    }
+
+    lines
+}
+
+/// Read-only peek at a peer sqlite file (bucket hostname, counts, newest event).
+///
+/// Opens with `SQLITE_OPEN_READ_ONLY` so a doctor command does not create
+/// `-wal`/`-shm` sidecars in a Syncthing folder.
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone)]
+pub struct DbInspect {
+    pub hostname: Option<String>,
+    pub bucket_count: usize,
+    pub event_count: i64,
+    pub newest_event: Option<chrono::DateTime<chrono::Utc>>,
+    pub buckets: Vec<BucketInspect>,
+}
+
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone)]
+pub struct BucketInspect {
+    pub id: String,
+}
+
+#[cfg(feature = "cli")]
+pub fn inspect_sync_db(path: &Path) -> Result<DbInspect, String> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("failed to open {} read-only: {e}", path.display()))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT buckets.name, buckets.hostname,
+                    COUNT(events.id),
+                    MAX(events.endtime)
+             FROM buckets
+             LEFT JOIN events ON events.bucketrow = buckets.id
+             GROUP BY buckets.id",
+        )
+        .map_err(|e| format!("schema query failed on {}: {e}", path.display()))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let hostname: String = row.get(1)?;
+            let events: i64 = row.get(2)?;
+            let last_ns: Option<i64> = row.get(3)?;
+            Ok((id, hostname, events, last_ns))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut buckets = Vec::new();
+    let mut hostname = None;
+    let mut event_count = 0i64;
+    let mut newest_ns: Option<i64> = None;
+    for row in rows {
+        let (id, host, events, last_ns) = row.map_err(|e| e.to_string())?;
+        event_count += events;
+        if hostname.is_none() && !host.is_empty() && host != "unknown" {
+            hostname = Some(host.clone());
+        }
+        if let Some(ns) = last_ns {
+            newest_ns = Some(newest_ns.map_or(ns, |cur| cur.max(ns)));
+        }
+        buckets.push(BucketInspect { id });
+    }
+
+    Ok(DbInspect {
+        hostname,
+        bucket_count: buckets.len(),
+        event_count,
+        newest_event: newest_ns.and_then(ns_to_datetime),
+        buckets,
+    })
+}
+
+#[cfg(feature = "cli")]
+fn ns_to_datetime(ns: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    let seconds = ns / 1_000_000_000;
+    let subnanos = (ns % 1_000_000_000) as u32;
+    chrono::DateTime::from_timestamp(seconds, subnanos)
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod scan_tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_sync_dir() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "aw-sync-scan-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn touch_db(path: &Path, size: usize) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, vec![0u8; size]).unwrap();
+    }
+
+    #[test]
+    fn classifies_both_layouts_and_flags_duplicate_device_id() {
+        let root = temp_sync_dir();
+        let local = "d7bc68e7-aaaa-bbbb-cccc-dddddddddddd";
+        let peer = "41662faa-aaaa-bbbb-cccc-dddddddddddd";
+
+        touch_db(&root.join(local).join("test.db"), 64);
+        touch_db(&root.join("poco_f8_ultra").join(peer).join("test.db"), 273);
+        touch_db(&root.join("POCO F8 Ultra").join(peer).join("test.db"), 9);
+        fs::write(root.join("readme.txt"), "noise").unwrap();
+
+        let scan = scan_sync_dir(&root, Some(local)).unwrap();
+        let kinds: Vec<_> = scan.iter().map(|e| (e.kind, e.layout)).collect();
+        assert!(
+            kinds
+                .iter()
+                .any(|(k, l)| *k == SyncEntryKind::OwnStaging && *l == Some(SyncLayout::TwoLevel)),
+            "own 2-level staging: {kinds:?}"
+        );
+        let three_level_peers: Vec<_> = scan
+            .iter()
+            .filter(|e| e.kind == SyncEntryKind::Peer && e.layout == Some(SyncLayout::ThreeLevel))
+            .collect();
+        assert_eq!(three_level_peers.len(), 2);
+        let kept: Vec<_> = three_level_peers
+            .iter()
+            .filter(|e| e.not_visible_to_daemon.is_none())
+            .collect();
+        let skipped: Vec<_> = three_level_peers
+            .iter()
+            .filter(|e| e.not_visible_to_daemon.is_some())
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "pull-equivalent winner: {three_level_peers:?}"
+        );
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(kept[0].db_size, Some(273));
+        assert!(
+            skipped[0]
+                .not_visible_to_daemon
+                .as_ref()
+                .is_some_and(|s| s.contains("duplicate device_id")),
+            "skipped duplicate must use the pull selector: {skipped:?}"
+        );
+
+        let warnings = pull_discovery_warnings(&root, local, &[]);
+        let joined = warnings.join("\n");
+        assert!(
+            joined.contains("Found 0 remote db files"),
+            "empty-pull warning: {joined}"
+        );
+        assert!(
+            joined.contains("3-level"),
+            "must list 3-level peers in the dump: {joined}"
+        );
+        assert!(
+            joined.contains(peer),
+            "must name the duplicated device_id: {joined}"
+        );
+        assert!(
+            joined.contains("appears under 2 folders"),
+            "duplicate device_id warning: {joined}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn status_keeps_the_same_duplicate_winner_as_pull() {
+        let root = temp_sync_dir();
+        let local = "local-device";
+        let peer = "peer-device";
+        touch_db(&root.join("poco_f8_ultra").join(peer).join("test.db"), 273);
+        touch_db(&root.join("POCO F8 Ultra").join(peer).join("test.db"), 9);
+
+        let remotes = list_remote_dbs(&root).unwrap();
+        let selected = select_remote_dbs_by_device_id(remotes);
+        let winner = selected
+            .iter()
+            .find(|d| d.device_id == peer)
+            .expect("pull selector keeps one db for the peer");
+
+        let scan = scan_sync_dir(&root, Some(local)).unwrap();
+        let kept: Vec<_> = scan
+            .iter()
+            .filter(|e| {
+                e.kind == SyncEntryKind::Peer
+                    && e.layout == Some(SyncLayout::ThreeLevel)
+                    && e.not_visible_to_daemon.is_none()
+            })
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].db_path.as_ref(), Some(&winner.path));
+        assert_eq!(kept[0].db_size, Some(winner.size));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn two_level_peer_is_selected_when_found() {
+        let root = temp_sync_dir();
+        let local = "local-device";
+        let peer = "peer-device";
+        touch_db(&root.join(peer).join("test.db"), 8);
+
+        let scan = scan_sync_dir(&root, Some(local)).unwrap();
+        let peer_entry = scan
+            .iter()
+            .find(|e| e.kind == SyncEntryKind::Peer)
+            .expect("peer");
+        assert_eq!(peer_entry.layout, Some(SyncLayout::TwoLevel));
+        assert!(peer_entry.not_visible_to_daemon.is_none());
+
+        let found = vec![root.join(peer).join("test.db")];
+        let warnings = pull_discovery_warnings(&root, local, &found);
+        assert!(
+            warnings
+                .iter()
+                .all(|l| !l.contains("Found 0 remote db files")),
+            "should not warn about empty remotes when a 2-level peer was found: {warnings:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn inspect_sync_db_reads_hostname_and_newest_event() {
+        let root = temp_sync_dir();
+        let db_path = root.join("peer").join("test.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        {
+            use rusqlite::Connection;
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE buckets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    type TEXT NOT NULL,
+                    client TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    created TEXT NOT NULL,
+                    data TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bucketrow INTEGER NOT NULL,
+                    starttime INTEGER NOT NULL,
+                    endtime INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+                INSERT INTO buckets (name, type, client, hostname, created, data)
+                    VALUES ('aw-watcher-android', 'currentwindow', 'aw-android',
+                            'POCO F8 Ultra', '2021-01-01T00:00:00Z', '{}');
+                INSERT INTO events (bucketrow, starttime, endtime, data)
+                    VALUES (1, 1000000000, 2000000000, '{}');",
+            )
+            .unwrap();
+        }
+
+        let info = inspect_sync_db(&db_path).unwrap();
+        assert_eq!(info.hostname.as_deref(), Some("POCO F8 Ultra"));
+        assert_eq!(info.bucket_count, 1);
+        assert_eq!(info.event_count, 1);
+        assert!(info.newest_event.is_some());
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -18,6 +18,10 @@ mod accessmethod;
 pub use accessmethod::AccessMethod;
 
 mod dirs;
+#[cfg(feature = "cli")]
+mod status;
+#[cfg(feature = "cli")]
+pub use status::run_status;
 mod util;
 
 #[cfg(target_os = "android")]

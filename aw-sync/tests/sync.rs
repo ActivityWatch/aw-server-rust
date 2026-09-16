@@ -301,6 +301,59 @@ mod sync_tests {
         assert_eq!(dest_bucket.hostname, "poco_f8_ultra");
     }
 
+    /// A hostname that contains whitespace but sanitizes to the "unknown"
+    /// sentinel (e.g. `" * "`) must not create `-synced-from-unknown` on pull —
+    /// that ID is shared by every such remote and would mix events. The bucket
+    /// is skipped; a healthy sibling still syncs (per-bucket non-fatal).
+    #[test]
+    fn test_whitespace_hostname_that_sanitizes_to_unknown_is_skipped_on_pull() {
+        let state = init_teststate();
+
+        let junk: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-junk",
+            "type": "test",
+            "hostname": " * ",
+            "client": "test"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&junk).unwrap();
+
+        let healthy: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-healthy",
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&healthy).unwrap();
+
+        let result = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        );
+        assert!(
+            result.is_ok(),
+            "junk hostname must skip that bucket, not abort the pass; got {result:?}"
+        );
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        assert!(
+            !dest_buckets
+                .keys()
+                .any(|k| k.contains("bucket-junk") || k.ends_with("-synced-from-unknown")),
+            "must not create -synced-from-unknown, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            dest_buckets.contains_key("bucket-healthy-synced-from-device-0"),
+            "healthy sibling must still sync, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
     /// Bucket metadata of an unexpected shape must not panic:
     /// `$aw.sync.origin` is read from data written by another host, so it is not
     /// under this host's control.

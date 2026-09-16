@@ -448,6 +448,20 @@ fn get_or_create_sync_bucket(
             // needs to be a legal create_bucket value.
             new_id.clone()
         };
+        // Android maps empty/punctuation-only names to the "unknown" sentinel.
+        // Creating `-synced-from-unknown` on pull would mix every such remote
+        // into one destination — the same provenance hole the
+        // `hostname == "unknown"` guard in `sync_datastores` exists to close.
+        // Refuse; the per-bucket warn+continue then skips this bucket.
+        if !is_push
+            && (sanitized_hostname == "unknown" || sanitized_id.ends_with("-synced-from-unknown"))
+        {
+            return Err(format!(
+                "Bucket '{}' hostname sanitizes to the unknown sentinel; \
+                 refusing to sync it without provenance",
+                bucket_from.id
+            ));
+        }
         // If a sanitized bucket already exists, use it.
         match ds_to.get_bucket(sanitized_id.as_str()) {
             Ok(bucket) => return Ok(bucket),
@@ -1032,5 +1046,8 @@ mod hostname_sanitize_tests {
         assert_eq!(sanitize_hostname(""), "unknown");
         assert_eq!(sanitize_hostname("   "), "unknown");
         assert_eq!(sanitize_hostname("***"), "unknown");
+        // Whitespace + punctuation only: the get_or_create pull-refuse path.
+        assert_eq!(sanitize_hostname(" * "), "unknown");
+        assert_eq!(sanitize_hostname(" !!! "), "unknown");
     }
 }

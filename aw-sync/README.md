@@ -5,6 +5,8 @@ Synchronization for ActivityWatch.
 
 Works by syncing local buckets with a special folder, which in turn should be synchronized by rsync/Syncthing/Dropbox/GDrive/etc.
 
+Android is supported: the official app drives this same crate over JNI.
+
 The latest beta versions of ActivityWatch ship with the `aw-sync` binary, but it's not enabled by default. You can start it from aw-qt or the command line, but due to the early state of development might not have the best UX. Please report issues and submit PRs!
 
 Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch/aw-server/pull/50
@@ -12,27 +14,27 @@ Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch
 
 ## Usage
 
-This will start a daemon which pulls and pushes events with the sync directory (`~/ActivityWatchSync` by default) every 5 minutes:
+The command that actually pulls and pushes today is a one-shot pass. Share the sync directory first (see below), then:
 
 ```sh
-# Basic sync daemon (syncs all buckets every 5 minutes)
-aw-sync
-
-# Same as above
-aw-sync daemon
-
-# Sync daemon with specific buckets only
-aw-sync daemon --buckets "aw-watcher-window,aw-watcher-afk" --start-date "2024-01-01"
-
-# Sync daemon in push-only or pull-only mode
-aw-sync daemon --mode push
-aw-sync daemon --mode pull
-
-# Sync all buckets once and exit
-aw-sync sync --start-date "2024-01-01"
+# Pull every 3-level peer and push this device, then exit
+aw-sync sync
 
 # Doctor: why is pull empty / which peers exist in the folder?
 aw-sync status
+
+# One-shot with filters or a single direction
+aw-sync sync --buckets "aw-watcher-window,aw-watcher-afk" --start-date "2024-01-01"
+aw-sync sync --mode push
+aw-sync sync --mode pull
+```
+
+`aw-sync` / `aw-sync daemon` currently **does not pull** from the 3-level `{hostname}/{device_id}/` layout that Android and `aw-sync sync` write. The daemon stages `{device_id}/test.db` at the sync-folder root and only walks two directory levels, so those peers are invisible ([#682](https://github.com/ActivityWatch/aw-server-rust/issues/682)). Until that switch lands, use `aw-sync sync` (or a systemd/cron timer around it) — not the daemon.
+
+```sh
+# Daemon — currently broken for mixed / Android layouts (see above)
+aw-sync
+aw-sync daemon
 ```
 
 For more options, see `aw-sync --help`. Some notable options:
@@ -47,18 +49,26 @@ For more options, see `aw-sync --help`. Some notable options:
 
 ### Setting up sync
 
-Once you have aw-sync running, you need to set up syncing with the sync directory using your preferred syncing tool.
+Share the sync directory with Syncthing, Dropbox, Drive, or rsync **before** running aw-sync. aw-sync only reads and writes files in that folder; it does not transport them between devices.
 
-The default sync directory is `~/ActivityWatchSync`, but you can change it using the `--sync-dir` option or by setting the `AW_SYNC_DIR` environment variable.
+Default directory: `~/ActivityWatchSync` (`--sync-dir` or `AW_SYNC_DIR`).
+
+Working paths (`aw-sync sync`, Android) write:
+
+```txt
+~/ActivityWatchSync/{hostname}/{device_id}/test.db
+```
+
+The default daemon still writes `~/ActivityWatchSync/{device_id}/test.db` (two levels). Other devices cannot see that file.
 
 ### Running from source
 
 If you want to run it from source, in the root of the repository run:
 
 ```sh
-cargo run --bin aw-sync
+cargo run --bin aw-sync -- sync
 ```
-For more options, see `cargo run --bin aw-sync -- --help`.
+For more options, see `cargo run --bin aw-sync -- --help`. Bare `cargo run --bin aw-sync` starts the daemon, which currently does not pull (see Usage).
 
 ## FAQ
 
@@ -74,10 +84,9 @@ We also avoid having to implement complex features such as conflict resolution, 
 
 ### What are the limitations?
 
-- It only syncs afk and window buckets by default (since bucket IDs need to be unique)
-  - It will work a lot better once proper `hostname -> device ID` migration is complete.
-- It doesn't sync settings
-- It doesn't support Android, yet.
+- The default `aw-sync` / `aw-sync daemon` command does not pull from the 3-level layout (see Usage). `aw-sync sync` and the Android app do.
+- By default all buckets are synced. `--buckets` is opt-in filtering, not a window/afk-only default.
+- It doesn't sync settings.
 - It mirrors events to all devices,
   - If you have a lot of devices you'll get a lot of duplicates, taking up a lot of space and potentially impacting performance.
 - It doesn't support modifying/deleting events, yet.

@@ -30,6 +30,12 @@ type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, 
 /// SQLite URI for a side-effect-free open: no `-wal`/`-shm`, no locks that
 /// fight a file syncer. `?`/`#`/`%` in the path are encoded so they cannot
 /// be parsed as the query string.
+///
+/// `immutable=1` is load-bearing. It tells SQLite the file cannot change, so
+/// the open never creates `-wal`/`-shm` and never takes a lock — which is
+/// why a pull can read a peer file in a directory this device does not own.
+/// Do not drop it to "see the WAL": that reintroduces sidecars in peers'
+/// folders. See [`Datastore::open_read_only`].
 fn sqlite_readonly_uri(path: &str) -> String {
     let mut encoded = path
         .replace('%', "%25")
@@ -261,19 +267,28 @@ impl DatastoreWorker {
             }
         }
 
+        // BEGIN IMMEDIATE takes a reserved (write) lock. On a read-only
+        // connection that is either SQLITE_READONLY (the worker retried
+        // forever) or a no-op depending on SQLite version — Deferred is the
+        // correct read-only behavior either way.
+        let tx_behavior = if read_only {
+            TransactionBehavior::Deferred
+        } else {
+            TransactionBehavior::Immediate
+        };
+
         // Start handling and respond to requests
         loop {
             let last_commit_time: DateTime<Utc> = Utc::now();
-            let mut tx: Transaction =
-                match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
-                    Ok(tx) => tx,
-                    Err(err) => {
-                        error!("Unable to start transaction! {:?}", err);
-                        // Wait 1s before retrying
-                        std::thread::sleep(std::time::Duration::from_millis(1000));
-                        continue;
-                    }
-                };
+            let mut tx: Transaction = match conn.transaction_with_behavior(tx_behavior) {
+                Ok(tx) => tx,
+                Err(err) => {
+                    error!("Unable to start transaction! {:?}", err);
+                    // Wait 1s before retrying
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                    continue;
+                }
+            };
             // Snapshot BEFORE the request loop. SetKeyValue/DeleteKeyValue
             // reload the engine from the still-open transaction so a later
             // insert in the same batch is filtered. If commit fails we restore
@@ -553,6 +568,13 @@ impl Datastore {
     /// `journal_mode`/`synchronous`. Returns `OldDbVersion` when
     /// `user_version != NEWEST_DB_VERSION` so a caller can skip that peer
     /// (ActivityWatch/aw-server-rust#693).
+    ///
+    /// `immutable=1` means SQLite will not look at a peer's `-wal`/`-shm`.
+    /// Committed-but-not-yet-checkpointed frames in that WAL are therefore
+    /// invisible. aw-sync checkpoints on clean close, so the steady-state
+    /// file is self-contained; this only bites mid-push. A stale-but-
+    /// consistent snapshot is strictly better than a torn one, and dropping
+    /// `immutable` would reintroduce `-shm` files in a foreign directory.
     pub fn open_read_only(dbpath: String) -> Result<Self, DatastoreError> {
         let version = probe_user_version(&dbpath)?;
         if version != crate::NEWEST_DB_VERSION {

@@ -59,7 +59,7 @@ Working paths (`aw-sync sync`, Android) write:
 ~/ActivityWatchSync/{hostname}/{device_id}/test.db
 ```
 
-The default daemon still writes `~/ActivityWatchSync/{device_id}/test.db` (two levels). Other devices cannot see that file.
+The default daemon still writes `~/ActivityWatchSync/{device_id}/test.db` (two levels). `aw-sync sync` and the Android app cannot see that file.
 
 ### Running from source
 

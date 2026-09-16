@@ -131,6 +131,7 @@ pub fn sync_run(
                     report.finish();
                     crate::report::persist_last_report_warn(&report);
                 }
+                close_opened_datastores(&ds_remotes, &ds_localremote);
                 return Err(e.into());
             }
         }
@@ -164,6 +165,7 @@ pub fn sync_run(
                     ));
                     report.finish();
                     crate::report::persist_last_report_warn(&report);
+                    close_opened_datastores(&ds_remotes, &ds_localremote);
                     return Err(e.into());
                 }
             }
@@ -171,26 +173,22 @@ pub fn sync_run(
     }
 
     // Push local server buckets to sync folder
-    if let Some(ds_localremote) = &ds_localremote {
+    if let Some(ds_local) = &ds_localremote {
         info!("Pushing...");
-        match sync_datastores(client, ds_localremote, true, Some(device_id), sync_spec) {
+        match sync_datastores(client, ds_local, true, Some(device_id), sync_spec) {
             Ok(buckets) => report.pushed = buckets,
             Err(e) => {
                 report.record_push_failure(&e);
                 report.finish();
                 crate::report::persist_last_report_warn(&report);
+                close_opened_datastores(&ds_remotes, &ds_localremote);
                 return Err(e.into());
             }
         }
     }
 
     // Close open database connections
-    for (_, ds_from) in &ds_remotes {
-        ds_from.close();
-    }
-    if let Some(ds_localremote) = &ds_localremote {
-        ds_localremote.close();
-    }
+    close_opened_datastores(&ds_remotes, &ds_localremote);
 
     // Dropping also works to close the database connections, weirdly enough.
     // Probably because once the database is dropped, the thread will stop,
@@ -203,6 +201,22 @@ pub fn sync_run(
 
     report.finish();
     Ok(report)
+}
+
+/// Stop datastore worker threads. Drop alone does not wait for the sqlite
+/// lock; the success path already called `close()` for that reason. Error
+/// returns must do the same or a long-lived daemon can leak connections
+/// across failed passes.
+fn close_opened_datastores(
+    ds_remotes: &[(crate::util::RemoteDb, Datastore)],
+    ds_localremote: &Option<Datastore>,
+) {
+    for (_, ds_from) in ds_remotes {
+        ds_from.close();
+    }
+    if let Some(ds) = ds_localremote {
+        ds.close();
+    }
 }
 
 #[allow(dead_code)]

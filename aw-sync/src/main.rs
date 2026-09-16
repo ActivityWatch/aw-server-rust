@@ -291,9 +291,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // Push
+                // Push. On failure the pull phase already did real work:
+                // persist what was pulled before propagating, so
+                // `aw-sync status` shows the pull, not just the push.
                 info!("Pushing local data");
-                report.merge(sync_wrapper::push(&client)?);
+                match sync_wrapper::push(&client) {
+                    Ok(push_report) => report.merge(push_report),
+                    Err(e) => {
+                        report.warnings.push(format!("push failed: {e}"));
+                        report.finish();
+                        info!("{}", report.summary_message());
+                        aw_sync_persist(&report);
+                        return Err(e);
+                    }
+                }
                 report.finish();
                 info!("{}", report.summary_message());
                 aw_sync_persist(&report);

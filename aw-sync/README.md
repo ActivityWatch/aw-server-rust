@@ -22,11 +22,6 @@ aw-sync sync
 
 # Doctor: why is pull empty / which peers exist in the folder?
 aw-sync status
-
-# One-shot with filters or a single direction
-aw-sync sync --buckets "aw-watcher-window,aw-watcher-afk" --start-date "2024-01-01"
-aw-sync sync --mode push
-aw-sync sync --mode pull
 ```
 
 `aw-sync` / `aw-sync daemon` currently **does not pull** from the 3-level `{hostname}/{device_id}/` layout that Android and `aw-sync sync` write. The daemon stages `{device_id}/test.db` at the sync-folder root and only walks two directory levels, so those peers are invisible ([#682](https://github.com/ActivityWatch/aw-server-rust/issues/682)). Until that switch lands, use `aw-sync sync` (or a systemd/cron timer around it) — not the daemon.
@@ -45,7 +40,7 @@ For more options, see `aw-sync --help`. Some notable options:
 - `--start-date`: Only sync events after this date (YYYY-MM-DD)
 - `--sync-db`: Specify a specific database file in the sync directory
 - `--mode`: Choose sync mode: "push", "pull", or "both" (default: "both")
-  - For `aw-sync sync`, passing `--mode` (with no other options) is enough to opt into the per-bucket sync path where it's respected; without it, or any of `--buckets`/`--start-date`/`--sync-db`, `aw-sync sync` falls back to the legacy host-based mode, which always does both a pull and a push
+  - On `aw-sync sync`, `--mode` / `--buckets` / `--start-date` / `--sync-db` switch to `sync_run`, which uses the two-level `{device_id}/test.db` layout (same as the daemon). Those flags will not see Android or bare-`aw-sync sync` peers. Bare `aw-sync sync` (no extra flags) is the 3-level path and always does both a pull and a push.
 
 ### Setting up sync
 
@@ -53,7 +48,7 @@ Share the sync directory with Syncthing, Dropbox, Drive, or rsync **before** run
 
 Default directory: `~/ActivityWatchSync` (`--sync-dir` or `AW_SYNC_DIR`).
 
-Working paths (`aw-sync sync`, Android) write:
+Working paths (bare `aw-sync sync`, Android) write:
 
 ```txt
 ~/ActivityWatchSync/{hostname}/{device_id}/test.db
@@ -84,7 +79,7 @@ We also avoid having to implement complex features such as conflict resolution, 
 
 ### What are the limitations?
 
-- The default `aw-sync` / `aw-sync daemon` command does not pull from the 3-level layout (see Usage). `aw-sync sync` and the Android app do.
+- The default `aw-sync` / `aw-sync daemon` command does not pull from the 3-level layout (see Usage). Bare `aw-sync sync` and the Android app do. `aw-sync sync --mode`/`--buckets`/`--start-date` use the two-level path.
 - By default all buckets are synced. `--buckets` is opt-in filtering, not a window/afk-only default.
 - It doesn't sync settings.
 - It mirrors events to all devices,

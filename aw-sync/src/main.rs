@@ -26,6 +26,7 @@ use aw_client_rust::blocking::AwClient;
 
 mod accessmethod;
 mod dirs;
+mod report;
 mod status;
 mod sync;
 mod sync_wrapper;
@@ -137,6 +138,7 @@ enum Commands {
     ///
     /// 3-level peers come from the same `RemoteDb` walker `pull_all` uses;
     /// 2-level leftovers and unrecognised entries sit on top of that list.
+    /// Also prints the last persisted `SyncReport` (what the previous pass did).
     /// Does not create staging files.
     Status {},
 }
@@ -268,26 +270,33 @@ fn main() -> Result<(), Box<dyn Error>> {
                     start: start_date,
                 };
 
-                sync::sync_run(&client, &sync_spec, mode.unwrap_or(sync::SyncMode::Both))?
+                let report =
+                    sync::sync_run(&client, &sync_spec, mode.unwrap_or(sync::SyncMode::Both))?;
+                info!("{}", report.summary_message());
+                aw_sync_persist(&report);
             } else {
                 // Simple host-based sync mode (backwards compatibility)
+                let mut report = sync::SyncReport::new(sync::SyncMode::Both);
                 // Pull
                 match host {
                     Some(hosts) => {
                         for host in hosts.iter() {
                             info!("Pulling from host: {}", host);
-                            sync_wrapper::pull(host, &client)?;
+                            report.merge(sync_wrapper::pull(host, &client)?);
                         }
                     }
                     None => {
                         info!("Pulling from all hosts");
-                        sync_wrapper::pull_all(&client)?;
+                        report.merge(sync_wrapper::pull_all(&client)?);
                     }
                 }
 
                 // Push
                 info!("Pushing local data");
-                sync_wrapper::push(&client)?
+                report.merge(sync_wrapper::push(&client)?);
+                report.finish();
+                info!("{}", report.summary_message());
+                aw_sync_persist(&report);
             }
         }
 
@@ -337,9 +346,15 @@ fn daemon(
     };
 
     loop {
-        if let Err(e) = sync::sync_run(client, &sync_spec, mode) {
-            error!("Error during sync cycle: {}", e);
-            return Err(e);
+        match sync::sync_run(client, &sync_spec, mode) {
+            Ok(report) => {
+                info!("{}", report.summary_message());
+                aw_sync_persist(&report);
+            }
+            Err(e) => {
+                error!("Error during sync cycle: {}", e);
+                return Err(e);
+            }
         }
 
         info!("Sync pass done, sleeping for 5 minutes");
@@ -356,4 +371,8 @@ fn daemon(
     }
 
     Ok(())
+}
+
+fn aw_sync_persist(report: &sync::SyncReport) {
+    crate::report::persist_last_report_warn(report);
 }

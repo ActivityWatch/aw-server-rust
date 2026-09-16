@@ -274,12 +274,9 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPullAll(
     jni_guard(&mut env, "syncPullAll", |env| {
         let result: Result<String, String> = (|| {
             let client = get_client(port)?;
-            pull_all(&client).map_err(|e| format!("Sync pull failed: {}", e))?;
-            Ok(json!({
-                "success": true,
-                "message": "Successfully pulled from all hosts"
-            })
-            .to_string())
+            let report = pull_all(&client).map_err(|e| format!("Sync pull failed: {}", e))?;
+            crate::report::persist_last_report_warn(&report);
+            Ok(report.to_jni_json())
         })();
         sync_result_to_jstring(env, "syncPullAll", result)
     })
@@ -301,13 +298,10 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPull(
                 .map_err(|e| format!("Failed to get hostname string: {}", e))?
                 .into();
 
-            pull(&hostname_str, &client).map_err(|e| format!("Sync pull failed: {}", e))?;
-
-            Ok(json!({
-                "success": true,
-                "message": format!("Successfully pulled from host: {}", hostname_str)
-            })
-            .to_string())
+            let report =
+                pull(&hostname_str, &client).map_err(|e| format!("Sync pull failed: {}", e))?;
+            crate::report::persist_last_report_warn(&report);
+            Ok(report.to_jni_json())
         })();
         sync_result_to_jstring(env, "syncPull", result)
     })
@@ -328,13 +322,10 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPush(
                 .map_err(|e| format!("Failed to get hostname: {}", e))?
                 .into();
             let client = get_client(port)?;
-            push_with_hostname(&client, &hostname_str)
+            let report = push_with_hostname(&client, &hostname_str)
                 .map_err(|e| format!("Sync push failed: {}", e))?;
-            Ok(json!({
-                "success": true,
-                "message": "Successfully pushed local data"
-            })
-            .to_string())
+            crate::report::persist_last_report_warn(&report);
+            Ok(report.to_jni_json())
         })();
         sync_result_to_jstring(env, "syncPush", result)
     })
@@ -356,16 +347,15 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
                 .into();
             let client = get_client(port)?;
 
-            pull_all(&client).map_err(|e| format!("Pull phase failed: {}", e))?;
+            let mut report = pull_all(&client).map_err(|e| format!("Pull phase failed: {}", e))?;
 
-            push_with_hostname(&client, &hostname_str)
-                .map_err(|e| format!("Push phase failed: {}", e))?;
-
-            Ok(json!({
-                "success": true,
-                "message": "Successfully completed full sync"
-            })
-            .to_string())
+            report.merge(
+                push_with_hostname(&client, &hostname_str)
+                    .map_err(|e| format!("Push phase failed: {}", e))?,
+            );
+            report.finish();
+            crate::report::persist_last_report_warn(&report);
+            Ok(report.to_jni_json())
         })();
         sync_result_to_jstring(env, "syncBoth", result)
     })

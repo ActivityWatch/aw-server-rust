@@ -19,18 +19,11 @@ use chrono::{DateTime, Duration, Utc};
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Bucket, Event};
 
-#[cfg(feature = "cli")]
-use clap::ValueEnum;
-
 use crate::accessmethod::AccessMethod;
+use crate::report::{BucketReport, PeerReport};
+use crate::util::find_remotes_nonlocal_selection;
 
-#[derive(PartialEq, Eq, Copy, Clone)]
-#[cfg_attr(feature = "cli", derive(ValueEnum))]
-pub enum SyncMode {
-    Push,
-    Pull,
-    Both,
-}
+pub use crate::report::{SyncMode, SyncReport};
 
 #[derive(Debug)]
 pub struct SyncSpec {
@@ -58,12 +51,17 @@ impl Default for SyncSpec {
     }
 }
 
-/// Performs a single sync pass
+/// Performs a single sync pass and returns what it did.
+///
+/// A `Ok` report is complete. On error, a partial report (failed peer, any
+/// peers already imported) is persisted so `aw-sync status` can show the
+/// failure without the process having to stay alive.
 pub fn sync_run(
     client: &AwClient,
     sync_spec: &SyncSpec,
     mode: SyncMode,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<SyncReport, Box<dyn Error>> {
+    let mut report = SyncReport::new(mode);
     let info = client.get_info()?;
 
     // FIXME: Here it is assumed that the device_id for the local server is the one used by
@@ -78,11 +76,12 @@ pub fn sync_run(
     // "each device only writes files it owns" invariant (see
     // ActivityWatch/aw-server-rust#682).
     let ds_localremote = maybe_setup_local_remote(sync_spec.path.as_path(), device_id, mode)?;
-    let remote_dbfiles = crate::util::find_remotes_nonlocal(
+    let selection = find_remotes_nonlocal_selection(
         sync_spec.path.as_path(),
         device_id,
         sync_spec.path_db.as_ref(),
     )?;
+    let remote_dbfiles: Vec<_> = selection.selected.iter().map(|d| d.path.clone()).collect();
 
     // Log if remotes found
     // TODO: Only log remotes of interest
@@ -104,17 +103,35 @@ pub fn sync_run(
         ) {
             warn!("{line}");
         }
+        for skipped in &selection.skipped {
+            report.peers.push(PeerReport::skipped(
+                skipped.db.device_id.clone(),
+                skipped.db.hostname.clone(),
+                skipped.db.path.clone(),
+                skipped.reason.clone(),
+            ));
+        }
     }
 
     // Peer files are opened read-only: never migrate, never flip WAL
     // (ActivityWatch/aw-server-rust#693). Version mismatch is skipped, not fatal.
     let mut ds_remotes = Vec::new();
-    for path in &remote_dbfiles {
-        match open_peer_datastore(path) {
-            Ok(Some(ds)) => ds_remotes.push(ds),
+    for db in &selection.selected {
+        match open_peer_datastore(&db.path) {
+            Ok(Some(ds)) => ds_remotes.push((db.clone(), ds)),
             Ok(None) => {}
             Err(e) => {
-                warn!("Failed to open remote db {}: {e}", path.display());
+                warn!("Failed to open remote db {}: {e}", db.path.display());
+                if mode == SyncMode::Pull || mode == SyncMode::Both {
+                    report.peers.push(PeerReport::failed(
+                        db.device_id.clone(),
+                        db.hostname.clone(),
+                        db.path.clone(),
+                        e.clone(),
+                    ));
+                    report.finish();
+                    crate::report::persist_last_report_warn(&report);
+                }
                 return Err(e.into());
             }
         }
@@ -124,26 +141,51 @@ pub fn sync_run(
         info!(
             "Found {} remote datastores: {:?}",
             ds_remotes.len(),
-            ds_remotes
+            ds_remotes.iter().map(|(_, ds)| ds).collect::<Vec<_>>()
         );
     }
 
     // Pull
     if mode == SyncMode::Pull || mode == SyncMode::Both {
         info!("Pulling...");
-        for ds_from in &ds_remotes {
-            sync_datastores(ds_from, client, false, None, sync_spec)?;
+        for (db, ds_from) in &ds_remotes {
+            match sync_datastores(ds_from, client, false, None, sync_spec) {
+                Ok(buckets) => report.peers.push(PeerReport::imported(
+                    db.device_id.clone(),
+                    db.hostname.clone(),
+                    db.path.clone(),
+                    buckets,
+                )),
+                Err(e) => {
+                    report.peers.push(PeerReport::failed(
+                        db.device_id.clone(),
+                        db.hostname.clone(),
+                        db.path.clone(),
+                        e.clone(),
+                    ));
+                    report.finish();
+                    crate::report::persist_last_report_warn(&report);
+                    return Err(e.into());
+                }
+            }
         }
     }
 
     // Push local server buckets to sync folder
     if let Some(ds_localremote) = &ds_localremote {
         info!("Pushing...");
-        sync_datastores(client, ds_localremote, true, Some(device_id), sync_spec)?;
+        match sync_datastores(client, ds_localremote, true, Some(device_id), sync_spec) {
+            Ok(buckets) => report.pushed = buckets,
+            Err(e) => {
+                report.finish();
+                crate::report::persist_last_report_warn(&report);
+                return Err(e.into());
+            }
+        }
     }
 
     // Close open database connections
-    for ds_from in &ds_remotes {
+    for (_, ds_from) in &ds_remotes {
         ds_from.close();
     }
     if let Some(ds_localremote) = &ds_localremote {
@@ -159,7 +201,8 @@ pub fn sync_run(
     // NOTE: Will fail if db connections not closed (as it will open them again)
     //list_buckets(&client, sync_spec.path.as_path());
 
-    Ok(())
+    report.finish();
+    Ok(report)
 }
 
 #[allow(dead_code)]
@@ -375,7 +418,7 @@ pub fn sync_datastores(
     is_push: bool,
     src_did: Option<&str>,
     sync_spec: &SyncSpec,
-) -> Result<(), String> {
+) -> Result<Vec<BucketReport>, String> {
     // FIXME: "-synced" should only be appended when synced to the local database, not to the
     // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
@@ -448,12 +491,13 @@ pub fn sync_datastores(
     // Sync buckets in order of most recently updated
     buckets_from.sort_by_key(|b| b.metadata.end);
 
+    let mut buckets = Vec::with_capacity(buckets_from.len());
     for bucket_from in buckets_from {
         let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push)?;
-        sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec)?;
+        buckets.push(sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec)?);
     }
 
-    Ok(())
+    Ok(buckets)
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -463,7 +507,7 @@ fn sync_one(
     bucket_from: Bucket,
     bucket_to: Bucket,
     sync_spec: &SyncSpec,
-) -> Result<(), String> {
+) -> Result<BucketReport, String> {
     let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
@@ -628,7 +672,11 @@ fn sync_one(
         }
     }
 
-    Ok(())
+    Ok(BucketReport {
+        bucket_id: bucket_to.id,
+        events_new: new_events_count,
+        resumed_at: resume_sync_at,
+    })
 }
 
 fn log_buckets(ds: &dyn AccessMethod) -> Result<(), String> {

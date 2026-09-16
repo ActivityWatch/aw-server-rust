@@ -135,8 +135,9 @@ enum Commands {
     List {},
     /// Doctor: classify every entry in the sync folder and say why pull is empty.
     ///
-    /// Walks both the 2-level (`{device_id}/*.db`) and 3-level
-    /// (`{hostname}/{device_id}/*.db`) layouts. Does not create staging files.
+    /// 3-level peers come from the same `RemoteDb` walker `pull_all` uses;
+    /// 2-level leftovers and unrecognised entries sit on top of that list.
+    /// Does not create staging files.
     Status {},
 }
 

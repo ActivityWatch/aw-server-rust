@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
@@ -547,7 +547,12 @@ impl SyncDirEntry {
     }
 }
 
-/// Walk both known sync-folder layouts and classify every entry.
+/// Classify the sync folder for `aw-sync status` and empty-pull warnings.
+///
+/// 3-level databases come from [`list_remote_dbs`] + [`select_remote_dbs_by_device_id`]
+/// — the same pair `pull_all` uses — so duplicate-`device_id` "not pulled" reasons
+/// match the pull path. Status-only overlay on top of that list: 2-level leftovers,
+/// unrecognised files/dirs, own-staging vs peer, [`SyncLayout`].
 ///
 /// Does not open sqlite files and does not create directories. `local_device_id`
 /// is used to tell own staging copies from peers; pass `None` when unknown.
@@ -555,26 +560,88 @@ pub fn scan_sync_dir(
     sync_directory: &Path,
     local_device_id: Option<&str>,
 ) -> std::io::Result<Vec<SyncDirEntry>> {
-    let mut entries = Vec::new();
-    if !sync_directory.exists() {
-        return Ok(entries);
-    }
+    let remotes = list_remote_dbs(sync_directory)?;
+    let selected = select_remote_dbs_by_device_id(remotes.clone());
+    let selected_paths: HashSet<PathBuf> = selected.into_iter().map(|d| d.path).collect();
+    let remote_paths: HashSet<PathBuf> = remotes.iter().map(|d| d.path.clone()).collect();
+    let known_hosts: HashSet<String> = remotes.iter().map(|d| d.hostname.clone()).collect();
 
-    for child in fs::read_dir(sync_directory)? {
-        let child = child?;
-        let path = child.path();
-        if path.is_file() {
-            entries.push(file_at_root(path));
-            continue;
+    let mut entries: Vec<SyncDirEntry> = remotes
+        .into_iter()
+        .map(|db| remote_db_to_entry(db, local_device_id, &selected_paths))
+        .collect();
+
+    if sync_directory.exists() {
+        for child in fs::read_dir(sync_directory)? {
+            let child = child?;
+            let path = child.path();
+            if path.is_file() {
+                entries.push(file_at_root(path));
+                continue;
+            }
+            if !path.is_dir() {
+                continue;
+            }
+            let name = file_name_string(&path);
+            if name.as_ref().is_some_and(|n| known_hosts.contains(n)) {
+                // Host folder already walked by list_remote_dbs. Only pick
+                // leftover 2-level *.db files sitting beside device_id dirs.
+                for file in fs::read_dir(&path)? {
+                    let fp = file?.path();
+                    if fp.is_file()
+                        && fp.extension().unwrap_or_else(|| OsStr::new("")) == "db"
+                        && !remote_paths.contains(&fp)
+                    {
+                        entries.push(db_entry(
+                            &fp,
+                            SyncLayout::TwoLevel,
+                            None,
+                            name.clone(),
+                            local_device_id,
+                            None,
+                        )?);
+                    }
+                }
+                continue;
+            }
+            classify_top_dir(&path, local_device_id, &mut entries)?;
         }
-        if !path.is_dir() {
-            continue;
-        }
-        classify_top_dir(&path, local_device_id, &mut entries)?;
     }
 
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(entries)
+}
+
+fn remote_db_to_entry(
+    db: RemoteDb,
+    local_device_id: Option<&str>,
+    selected_paths: &HashSet<PathBuf>,
+) -> SyncDirEntry {
+    let own = local_device_id == Some(db.device_id.as_str());
+    let not_visible = if own {
+        Some("own device_id, excluded from pull".to_string())
+    } else if !selected_paths.contains(&db.path) {
+        Some(format!(
+            "duplicate device_id {}; pull keeps the largest db only (ActivityWatch/aw-server-rust#683)",
+            db.device_id
+        ))
+    } else {
+        None
+    };
+    SyncDirEntry {
+        path: db.path.clone(),
+        db_path: Some(db.path),
+        db_size: Some(db.size),
+        layout: Some(SyncLayout::ThreeLevel),
+        kind: if own {
+            SyncEntryKind::OwnStaging
+        } else {
+            SyncEntryKind::Peer
+        },
+        hostname_folder: Some(db.hostname),
+        device_id: Some(db.device_id),
+        not_visible_to_daemon: not_visible,
+    }
 }
 
 fn file_at_root(path: PathBuf) -> SyncDirEntry {
@@ -941,9 +1008,28 @@ mod scan_tests {
             .filter(|e| e.kind == SyncEntryKind::Peer && e.layout == Some(SyncLayout::ThreeLevel))
             .collect();
         assert_eq!(three_level_peers.len(), 2);
-        assert!(three_level_peers
+        let kept: Vec<_> = three_level_peers
             .iter()
-            .all(|e| e.not_visible_to_daemon.is_none()));
+            .filter(|e| e.not_visible_to_daemon.is_none())
+            .collect();
+        let skipped: Vec<_> = three_level_peers
+            .iter()
+            .filter(|e| e.not_visible_to_daemon.is_some())
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "pull-equivalent winner: {three_level_peers:?}"
+        );
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(kept[0].db_size, Some(273));
+        assert!(
+            skipped[0]
+                .not_visible_to_daemon
+                .as_ref()
+                .is_some_and(|s| s.contains("duplicate device_id")),
+            "skipped duplicate must use the pull selector: {skipped:?}"
+        );
 
         let warnings = pull_discovery_warnings(&root, local, &[]);
         let joined = warnings.join("\n");
@@ -963,6 +1049,37 @@ mod scan_tests {
             joined.contains("appears under 2 folders"),
             "duplicate device_id warning: {joined}"
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn status_keeps_the_same_duplicate_winner_as_pull() {
+        let root = temp_sync_dir();
+        let local = "local-device";
+        let peer = "peer-device";
+        touch_db(&root.join("poco_f8_ultra").join(peer).join("test.db"), 273);
+        touch_db(&root.join("POCO F8 Ultra").join(peer).join("test.db"), 9);
+
+        let remotes = list_remote_dbs(&root).unwrap();
+        let selected = select_remote_dbs_by_device_id(remotes);
+        let winner = selected
+            .iter()
+            .find(|d| d.device_id == peer)
+            .expect("pull selector keeps one db for the peer");
+
+        let scan = scan_sync_dir(&root, Some(local)).unwrap();
+        let kept: Vec<_> = scan
+            .iter()
+            .filter(|e| {
+                e.kind == SyncEntryKind::Peer
+                    && e.layout == Some(SyncLayout::ThreeLevel)
+                    && e.not_visible_to_daemon.is_none()
+            })
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].db_path.as_ref(), Some(&winner.path));
+        assert_eq!(kept[0].db_size, Some(winner.size));
 
         let _ = fs::remove_dir_all(root);
     }

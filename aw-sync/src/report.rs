@@ -171,7 +171,7 @@ impl SyncReport {
         let skipped = self.peers_skipped();
         let failed = self.peers_failed();
         let peer_n = self.peers.len();
-        match self.mode {
+        let mut msg = match self.mode {
             SyncMode::Pull => format!(
                 "Pulled {pulled} new events from {imported}/{peer_n} peers \
                  ({skipped} skipped, {failed} failed)"
@@ -184,7 +184,14 @@ impl SyncReport {
                 "Synced {pulled} events in from {imported}/{peer_n} peers \
                  ({skipped} skipped, {failed} failed); pushed {pushed} events"
             ),
+        };
+        // Daemon and JNI log this string. Warnings (push abort, empty-dir
+        // diagnosis) must ride along or the line looks like a no-op success.
+        if !self.warnings.is_empty() {
+            msg.push_str("; ");
+            msg.push_str(&self.warnings.join("; "));
         }
+        msg
     }
 
     /// JSON `SyncInterface.performSyncAsync` already parses (`success` + `message`),
@@ -593,6 +600,11 @@ mod tests {
         assert!(
             text.contains("push failed: disk full"),
             "display must surface the push failure: {text}"
+        );
+        assert!(
+            loaded.summary_message().contains("push failed: disk full"),
+            "daemon/JNI summary must not look like success: {}",
+            loaded.summary_message()
         );
     }
 

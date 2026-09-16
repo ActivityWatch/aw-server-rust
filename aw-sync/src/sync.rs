@@ -376,32 +376,56 @@ fn get_or_create_sync_bucket(
         )
     };
 
+    // Look up the unsanitized ID first.  Any device that was synced before
+    // aw-android added hostname sanitization (ActivityWatch/aw-android#272) may
+    // have left a local bucket whose ID and hostname contain whitespace (e.g.
+    // `…-synced-from-POCO F8 Ultra`).  Keep using that ID to avoid a fork that
+    // would cause a full re-import (ActivityWatch/activitywatch#1373).
     match ds_to.get_bucket(new_id.as_str()) {
-        Ok(bucket) => Ok(bucket),
-        Err(DatastoreError::NoSuchBucket(_)) => {
-            let mut bucket_new = bucket_from.clone();
-            bucket_new.id = new_id.clone();
-            // Only stamp $aw.sync.origin on pull/import.  The derived origin already handles
-            // the legacy case: hostname is used when the source bucket has no metadata field.
-            if let Some(origin) = sync_origin {
-                bucket_new
-                    .data
-                    .insert("$aw.sync.origin".to_string(), serde_json::json!(origin));
-            } else {
-                // Push path: strip any stale $aw.sync.origin that bucket_from may carry
-                // (e.g. if it was previously imported by a pull).  Staging copies must
-                // never look like synced-from-remote buckets.
-                bucket_new.data.remove("$aw.sync.origin");
-            }
-            ds_to
-                .create_bucket(&bucket_new)
-                .map_err(|e| format!("Failed to create bucket '{new_id}': {e:?}"))?;
-            ds_to
-                .get_bucket(new_id.as_str())
-                .map_err(|e| format!("Failed to read back bucket '{new_id}': {e:?}"))
-        }
-        Err(e) => Err(format!("Failed to get bucket '{new_id}': {e:?}")),
+        Ok(bucket) => return Ok(bucket),
+        Err(DatastoreError::NoSuchBucket(_)) => {}
+        Err(e) => return Err(format!("Failed to get bucket '{new_id}': {e:?}")),
     }
+
+    // The bucket does not exist yet.  If the ID or hostname contains whitespace,
+    // sanitize before creating: aw-server-rust rejects new buckets with whitespace
+    // hostnames (#658).  We must also check whether a sanitized bucket was already
+    // created by a previous sync session so we don't open a second fork.
+    let (final_id, final_hostname) = if new_id.contains(char::is_whitespace) {
+        let sanitized_id = new_id.replace(char::is_whitespace, "_");
+        let sanitized_hostname = bucket_from.hostname.replace(char::is_whitespace, "_");
+        // If a sanitized bucket already exists, use it.
+        match ds_to.get_bucket(sanitized_id.as_str()) {
+            Ok(bucket) => return Ok(bucket),
+            Err(DatastoreError::NoSuchBucket(_)) => {}
+            Err(e) => return Err(format!("Failed to get bucket '{sanitized_id}': {e:?}")),
+        }
+        (sanitized_id, sanitized_hostname)
+    } else {
+        (new_id.clone(), bucket_from.hostname.clone())
+    };
+
+    let mut bucket_new = bucket_from.clone();
+    bucket_new.id = final_id.clone();
+    bucket_new.hostname = final_hostname;
+    // Only stamp $aw.sync.origin on pull/import.  The derived origin already handles
+    // the legacy case: hostname is used when the source bucket has no metadata field.
+    if let Some(origin) = sync_origin {
+        bucket_new
+            .data
+            .insert("$aw.sync.origin".to_string(), serde_json::json!(origin));
+    } else {
+        // Push path: strip any stale $aw.sync.origin that bucket_from may carry
+        // (e.g. if it was previously imported by a pull).  Staging copies must
+        // never look like synced-from-remote buckets.
+        bucket_new.data.remove("$aw.sync.origin");
+    }
+    ds_to
+        .create_bucket(&bucket_new)
+        .map_err(|e| format!("Failed to create bucket '{final_id}': {e:?}"))?;
+    ds_to
+        .get_bucket(final_id.as_str())
+        .map_err(|e| format!("Failed to read back bucket '{final_id}': {e:?}"))
 }
 
 /// Number of events fetched per page in the chunked-fetch loop in `sync_one`.
@@ -530,8 +554,19 @@ pub fn sync_datastores(
 
     let mut buckets = Vec::with_capacity(buckets_from.len());
     for bucket_from in buckets_from {
-        let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push)?;
-        buckets.push(sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec)?);
+        let bucket_to = match get_or_create_sync_bucket(&bucket_from, ds_to, is_push) {
+            Ok(b) => b,
+            Err(e) => {
+                // Non-fatal: log and skip this bucket so a bad peer does not
+                // abort the entire pass and leave other buckets un-synced (#692).
+                warn!(" ! Skipping bucket '{}': {}", bucket_from.id, e);
+                continue;
+            }
+        };
+        match sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec) {
+            Ok(synced) => buckets.push(synced),
+            Err(e) => warn!(" ! Skipping sync for bucket: {}", e),
+        }
     }
 
     Ok(buckets)

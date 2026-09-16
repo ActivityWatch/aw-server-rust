@@ -642,7 +642,10 @@ pub fn sync_datastores(
                 buckets.push(synced);
             }
             Err(e) => {
-                warn!(" ! Skipping sync for bucket '{}': {}", bucket_id, e);
+                warn!(
+                    " ! Skipping sync for bucket '{bucket_id}': {e}. \
+                     Destination may already contain a partial write; next pass resumes from dest newest"
+                );
                 last_err = Some(e);
             }
         }

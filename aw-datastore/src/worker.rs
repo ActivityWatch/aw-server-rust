@@ -12,6 +12,7 @@ use chrono::Utc;
 
 use rusqlite::Connection;
 use rusqlite::DropBehavior;
+use rusqlite::OpenFlags;
 use rusqlite::Transaction;
 use rusqlite::TransactionBehavior;
 
@@ -25,6 +26,66 @@ use crate::DatastoreMethod;
 
 type RequestSender = mpsc_requests::RequestSender<Command, Result<Response, DatastoreError>>;
 type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>;
+
+/// SQLite URI for a side-effect-free open: no `-wal`/`-shm`, no locks that
+/// fight a file syncer. `?`/`#`/`%` in the path are encoded so they cannot
+/// be parsed as the query string.
+///
+/// `immutable=1` is load-bearing. It tells SQLite the file cannot change, so
+/// the open never creates `-wal`/`-shm` and never takes a lock — which is
+/// why a pull can read a peer file in a directory this device does not own.
+/// Do not drop it to "see the WAL": that reintroduces sidecars in peers'
+/// folders, and a plain `mode=ro` connection then rejects `BEGIN IMMEDIATE`.
+/// See [`Datastore::open_read_only`].
+///
+/// The connection can live across a multi-page pull. Syncthing/Dropbox write
+/// a temp file and rename, so an open handle keeps the old inode on POSIX
+/// (a consistent snapshot) and blocks the rename on Windows (the syncer
+/// retries). Only in-place rewriting (`rsync --inplace`, a naive `cp` over
+/// the file) defeats it. Copy-then-open is the belt-and-braces option if
+/// that ever bites; not needed now.
+///
+/// Windows path normalisation (backslash → slash, drive-letter, UNC) is
+/// gated on `cfg!(windows)`, not path shape. A backslash is a legal POSIX
+/// filename character; rewriting it on Linux/macOS would make the probe
+/// target a different file.
+fn sqlite_readonly_uri(path: &str) -> String {
+    let encoded = path
+        .replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('#', "%23");
+    if cfg!(windows) {
+        let encoded = encoded.replace('\\', "/");
+        let has_drive_letter = encoded.len() >= 2 && encoded.as_bytes().get(1) == Some(&b':');
+        let is_unc = encoded.starts_with("//");
+        if has_drive_letter {
+            return format!("file:///{encoded}?mode=ro&immutable=1");
+        }
+        if is_unc {
+            // SQLite UNC form is file:////server/share/file.db (four slashes).
+            return format!("file://{encoded}?mode=ro&immutable=1");
+        }
+    }
+    format!("file:{encoded}?mode=ro&immutable=1")
+}
+
+fn open_readonly_connection(path: &str) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        sqlite_readonly_uri(path),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+}
+
+/// Read `user_version` without mutating the file.
+fn probe_user_version(path: &str) -> Result<i32, DatastoreError> {
+    let conn = open_readonly_connection(path).map_err(|e| {
+        DatastoreError::InternalError(format!("read-only open failed for {path}: {e}"))
+    })?;
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| {
+            DatastoreError::InternalError(format!("user_version read failed for {path}: {e}"))
+        })
+}
 
 #[derive(Clone)]
 pub struct Datastore {
@@ -148,6 +209,8 @@ impl DatastoreWorker {
     }
 
     fn work_loop(&mut self, method: DatastoreMethod) {
+        let read_only = matches!(&method, DatastoreMethod::FileReadOnly(_));
+
         // Open SQLite connection
         let mut conn = match &method {
             DatastoreMethod::Memory() => {
@@ -155,6 +218,9 @@ impl DatastoreWorker {
             }
             DatastoreMethod::File(path) => {
                 Connection::open(path).expect("Failed to create datastore")
+            }
+            DatastoreMethod::FileReadOnly(path) => {
+                open_readonly_connection(path).expect("Failed to open datastore read-only")
             }
             #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
             DatastoreMethod::FileEncrypted(path, key) => {
@@ -176,24 +242,22 @@ impl DatastoreWorker {
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .expect("Failed to set busy timeout");
 
-        // WAL turns each commit into a single sequential WAL append+fsync where
-        // delete mode paid two fsyncs plus journal-file churn, and lets future
-        // reader connections proceed while a commit is in flight.
-        // synchronous=FULL is set explicitly (rather than relying on the
-        // default) so a commit remains durable on disk the moment it returns;
-        // with NORMAL the WAL is only synced at checkpoints, which would
-        // silently widen the loss window on power failure.
-        // In-memory databases ignore the request (journal_mode stays "memory").
-        let journal_mode: String = conn
-            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
-            .expect("Failed to query journal_mode");
-        if !matches!(&method, DatastoreMethod::Memory()) && journal_mode != "wal" {
-            warn!("Failed to enable WAL (journal_mode={journal_mode}), continuing without it");
+        // WAL / synchronous=FULL are writes. Skip them on a peer file: a pull
+        // must not create `-wal`/`-shm` in a directory this device does not
+        // own (ActivityWatch/aw-server-rust#693). In-memory databases ignore
+        // the request (journal_mode stays "memory").
+        if !read_only {
+            let journal_mode: String = conn
+                .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+                .expect("Failed to query journal_mode");
+            if !matches!(&method, DatastoreMethod::Memory()) && journal_mode != "wal" {
+                warn!("Failed to enable WAL (journal_mode={journal_mode}), continuing without it");
+            }
+            conn.pragma_update(None, "synchronous", "FULL")
+                .expect("Failed to set synchronous=FULL");
         }
-        conn.pragma_update(None, "synchronous", "FULL")
-            .expect("Failed to set synchronous=FULL");
 
-        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        let mut ds = DatastoreInstance::new(&conn, !read_only).unwrap();
 
         // Load persisted privacy filters before serving inserts. The engine
         // starts empty; without this, rules saved in a previous process sit
@@ -222,19 +286,28 @@ impl DatastoreWorker {
             }
         }
 
+        // BEGIN IMMEDIATE takes a reserved (write) lock. On a read-only
+        // connection that is either SQLITE_READONLY (the worker retried
+        // forever) or a no-op depending on SQLite version — Deferred is the
+        // correct read-only behavior either way.
+        let tx_behavior = if read_only {
+            TransactionBehavior::Deferred
+        } else {
+            TransactionBehavior::Immediate
+        };
+
         // Start handling and respond to requests
         loop {
             let last_commit_time: DateTime<Utc> = Utc::now();
-            let mut tx: Transaction =
-                match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
-                    Ok(tx) => tx,
-                    Err(err) => {
-                        error!("Unable to start transaction! {:?}", err);
-                        // Wait 1s before retrying
-                        std::thread::sleep(std::time::Duration::from_millis(1000));
-                        continue;
-                    }
-                };
+            let mut tx: Transaction = match conn.transaction_with_behavior(tx_behavior) {
+                Ok(tx) => tx,
+                Err(err) => {
+                    error!("Unable to start transaction! {:?}", err);
+                    // Wait 1s before retrying
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                    continue;
+                }
+            };
             // Snapshot BEFORE the request loop. SetKeyValue/DeleteKeyValue
             // reload the engine from the still-open transaction so a later
             // insert in the same batch is filtered. If commit fails we restore
@@ -508,6 +581,34 @@ impl Datastore {
         Datastore::_new_internal(method, legacy_import)
     }
 
+    /// Open an existing database without writing to it.
+    ///
+    /// Uses `file:…?mode=ro&immutable=1`, never runs migrations, never sets
+    /// `journal_mode`/`synchronous`. Returns `OldDbVersion` when
+    /// `user_version != NEWEST_DB_VERSION` so a caller can skip that peer
+    /// (ActivityWatch/aw-server-rust#693).
+    ///
+    /// `immutable=1` means SQLite will not look at a peer's `-wal`/`-shm`.
+    /// Committed-but-not-yet-checkpointed frames in that WAL are therefore
+    /// invisible. aw-sync checkpoints on clean close, so the steady-state
+    /// file is self-contained; this only bites mid-push. A stale-but-
+    /// consistent snapshot is strictly better than a torn one, and dropping
+    /// `immutable` would reintroduce `-shm` files in a foreign directory.
+    pub fn open_read_only(dbpath: String) -> Result<Self, DatastoreError> {
+        let version = probe_user_version(&dbpath)?;
+        if version != crate::NEWEST_DB_VERSION {
+            return Err(DatastoreError::OldDbVersion(format!(
+                "Tried to open a database with an incompatible database version! \
+                 Database has version {version} while the supported version is {}",
+                crate::NEWEST_DB_VERSION
+            )));
+        }
+        Ok(Datastore::_new_internal(
+            DatastoreMethod::FileReadOnly(dbpath),
+            false,
+        ))
+    }
+
     pub fn new_in_memory(legacy_import: bool) -> Self {
         let method = DatastoreMethod::Memory();
         Datastore::_new_internal(method, legacy_import)
@@ -764,5 +865,48 @@ impl Datastore {
             // Worker already gone means there is nothing left to close
             Err(e) => warn!("Error closing database: {e:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod sqlite_readonly_uri_tests {
+    use super::sqlite_readonly_uri;
+
+    #[test]
+    fn posix_absolute() {
+        assert_eq!(
+            sqlite_readonly_uri("/var/lib/activitywatch/peer.db"),
+            "file:/var/lib/activitywatch/peer.db?mode=ro&immutable=1"
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn posix_path_with_literal_backslash_is_not_rewritten() {
+        // A backslash is a valid POSIX filename character. Windows
+        // normalisation is cfg!(windows)-gated so this path is passed
+        // through untouched on Linux/macOS.
+        assert_eq!(
+            sqlite_readonly_uri(r"/home/erik/we\ird.db"),
+            r"file:/home/erik/we\ird.db?mode=ro&immutable=1"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_drive_letter() {
+        assert_eq!(
+            sqlite_readonly_uri(r"C:\Users\bob\peer.db"),
+            "file:///C:/Users/bob/peer.db?mode=ro&immutable=1"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_unc() {
+        assert_eq!(
+            sqlite_readonly_uri(r"\\server\share\peer.db"),
+            "file:////server/share/peer.db?mode=ro&immutable=1"
+        );
     }
 }

@@ -106,11 +106,13 @@ pub fn sync_run(
         }
     }
 
-    // TODO: Check for compatible remote db version before opening
+    // Peer files are opened read-only: never migrate, never flip WAL
+    // (ActivityWatch/aw-server-rust#693). Version mismatch is skipped, not fatal.
     let mut ds_remotes = Vec::new();
     for path in &remote_dbfiles {
-        match create_datastore(path) {
-            Ok(ds) => ds_remotes.push(ds),
+        match open_peer_datastore(path) {
+            Ok(Some(ds)) => ds_remotes.push(ds),
+            Ok(None) => {}
             Err(e) => {
                 warn!("Failed to open remote db {}: {e}", path.display());
                 return Err(e.into());
@@ -173,12 +175,12 @@ pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
     let remote_dbfiles = crate::util::find_remotes_nonlocal(sync_directory, device_id, None)?;
     info!("Found remotes: {:?}", remote_dbfiles);
 
-    // TODO: Check for compatible remote db version before opening
-    let ds_remotes: Vec<Datastore> = remote_dbfiles
-        .iter()
-        .map(|p| p.as_path())
-        .map(create_datastore)
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut ds_remotes = Vec::new();
+    for path in &remote_dbfiles {
+        if let Some(ds) = open_peer_datastore(path)? {
+            ds_remotes.push(ds);
+        }
+    }
 
     log_buckets(client)?;
     log_buckets(&ds_localremote)?;
@@ -232,10 +234,32 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
 /// converting it, which would silently open a *different* file than the caller
 /// asked for.
 pub fn create_datastore(path: &Path) -> Result<Datastore, String> {
-    let pathstr = path
-        .to_str()
-        .ok_or_else(|| format!("Sync database path is not valid UTF-8: {}", path.display()))?;
+    let pathstr = utf8_db_path(path)?;
     Ok(Datastore::new(pathstr.to_string(), false))
+}
+
+/// Open a *peer* database for pull: read-only, no migration, no WAL sidecars.
+///
+/// Returns `Ok(None)` when `user_version` does not match this binary so the
+/// caller can skip that peer and keep walking (ActivityWatch/aw-server-rust#693).
+fn open_peer_datastore(path: &Path) -> Result<Option<Datastore>, String> {
+    let pathstr = utf8_db_path(path)?;
+    match Datastore::open_read_only(pathstr.to_string()) {
+        Ok(ds) => Ok(Some(ds)),
+        Err(DatastoreError::OldDbVersion(msg)) => {
+            warn!("Skipping peer db {}: {msg}", path.display());
+            Ok(None)
+        }
+        Err(e) => Err(format!(
+            "Failed to open remote db {}: {e:?}",
+            path.display()
+        )),
+    }
+}
+
+fn utf8_db_path(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("Sync database path is not valid UTF-8: {}", path.display()))
 }
 
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.

@@ -14,7 +14,7 @@ mod datastore_tests {
     use chrono::Utc;
     use serde_json::json;
 
-    use aw_datastore::Datastore;
+    use aw_datastore::{Datastore, DatastoreError};
 
     use aw_models::Bucket;
     use aw_models::BucketMetadata;
@@ -1123,5 +1123,81 @@ mod datastore_tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    /// ActivityWatch/aw-server-rust#693: a pull must not create `-wal`/`-shm`
+    /// beside a file this device does not own.
+    #[test]
+    fn test_read_only_open_does_not_create_wal_sidecars() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("peer-readonly.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+
+        {
+            let ds = Datastore::new(db_path_str.clone(), false);
+            create_test_bucket(&ds);
+            ds.insert_events("testid", &[test_event(Utc::now(), Duration::seconds(1))])
+                .unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+        }
+
+        // Checkpoint so we can delete WAL sidecars without losing the row.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+
+        let wal = db_path.with_extension("db-wal");
+        let shm = db_path.with_extension("db-shm");
+        let _ = std::fs::remove_file(&wal);
+        let _ = std::fs::remove_file(&shm);
+
+        {
+            let ds = Datastore::open_read_only(db_path_str).unwrap();
+            let buckets = ds.get_buckets().unwrap();
+            assert!(
+                buckets.contains_key("testid"),
+                "read-only open must still see existing buckets, got {buckets:?}"
+            );
+            let events = ds.get_events("testid", None, None, None).unwrap();
+            assert_eq!(events.len(), 1);
+            ds.close();
+        }
+
+        assert!(
+            !wal.exists(),
+            "read-only open must not create {}",
+            wal.display()
+        );
+        assert!(
+            !shm.exists(),
+            "read-only open must not create {}",
+            shm.display()
+        );
+    }
+
+    #[test]
+    fn test_read_only_open_skips_old_user_version() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("peer-v4.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
+        }
+
+        let wal = db_path.with_extension("db-wal");
+        let shm = db_path.with_extension("db-shm");
+        let _ = std::fs::remove_file(&wal);
+        let _ = std::fs::remove_file(&shm);
+
+        match Datastore::open_read_only(db_path.to_str().unwrap().to_string()) {
+            Err(DatastoreError::OldDbVersion(msg)) => {
+                assert!(msg.contains("version 4"), "got {msg}");
+            }
+            other => panic!("expected OldDbVersion, got {other:?}"),
+        }
+        assert!(!wal.exists(), "version probe must not create a WAL sidecar");
+        assert!(!shm.exists(), "version probe must not create a SHM sidecar");
     }
 }

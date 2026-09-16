@@ -32,7 +32,7 @@ fn _get_db_version(conn: &Connection) -> i32 {
  * 5: Replaced single-column events indexes with a composite index
  * 6: Added an endtime-first index for recent interval reads
  */
-static NEWEST_DB_VERSION: i32 = 6;
+pub const NEWEST_DB_VERSION: i32 = 6;
 
 fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;

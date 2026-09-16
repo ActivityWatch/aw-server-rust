@@ -282,7 +282,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Some(hosts) => {
                         for host in hosts.iter() {
                             info!("Pulling from host: {}", host);
-                            report.merge(sync_wrapper::pull(host, &client)?);
+                            // A later host's `?` must not drop earlier hosts
+                            // from last-sync-report.json. Same contract as the
+                            // push-failure path below: persist the aggregate,
+                            // then propagate.
+                            match sync_wrapper::pull(host, &client) {
+                                Ok(one) => report.merge(one),
+                                Err(e) => {
+                                    report.record_pull_failure(host, &e);
+                                    report.finish();
+                                    info!("{}", report.summary_message());
+                                    aw_sync_persist(&report);
+                                    return Err(e);
+                                }
+                            }
                         }
                     }
                     None => {

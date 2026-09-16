@@ -122,6 +122,17 @@ impl SyncReport {
         self.warnings.push(format!("push failed: {err}"));
     }
 
+    /// Record a per-host pull abort on an aggregate report.
+    ///
+    /// Simple host-based sync (`aw-sync sync --host a --host b`) merges each
+    /// host's report. If a later host fails, the `?` would drop earlier hosts
+    /// from `last-sync-report.json`. The caller records this, persists, then
+    /// returns the `Err`.
+    pub fn record_pull_failure(&mut self, host: &str, err: impl fmt::Display) {
+        self.warnings
+            .push(format!("pull from {host} failed: {err}"));
+    }
+
     pub fn events_new(&self) -> i64 {
         self.peers
             .iter()
@@ -605,6 +616,60 @@ mod tests {
             loaded.summary_message().contains("push failed: disk full"),
             "daemon/JNI summary must not look like success: {}",
             loaded.summary_message()
+        );
+    }
+
+    /// A later host's pull abort must keep earlier hosts on disk. The
+    /// `--host a --host b` path merges into one report; dropping it on `?`
+    /// would leave only the failing host's inner persist.
+    #[test]
+    fn later_host_pull_failure_keeps_earlier_hosts_on_disk() {
+        let mut report = SyncReport::new(SyncMode::Both);
+        report.peers.push(PeerReport::imported(
+            "dev-a".into(),
+            "host-a".into(),
+            PathBuf::from("/sync/host-a/dev-a/test.db"),
+            vec![BucketReport {
+                bucket_id: "aw-watcher-window".into(),
+                events_new: 7,
+                resumed_at: None,
+            }],
+        ));
+        report.record_pull_failure("host-b", "no db found");
+        report.finish();
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "pull from host-b failed: no db found"),
+            "pull abort must be on the report, got {:?}",
+            report.warnings
+        );
+        assert_eq!(report.peers_imported(), 1);
+        assert!(
+            report
+                .summary_message()
+                .contains("pull from host-b failed: no db found"),
+            "daemon summary must name the failed host: {}",
+            report.summary_message()
+        );
+
+        let path = temp_report_path();
+        persist_last_report_to(&report, &path).unwrap();
+        let loaded = load_last_report_from(&path).unwrap().unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.peers_imported(), 1);
+        assert_eq!(loaded.peers[0].hostname, "host-a");
+        assert_eq!(loaded.events_pulled(), 7);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains("pull from host-b failed: no db found")),
+            "loaded report dropped the later-host failure: {:?}",
+            loaded.warnings
         );
     }
 

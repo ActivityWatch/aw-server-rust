@@ -212,6 +212,25 @@ mod tests {
     }
 
     #[test]
+    fn list_remote_dbs_skips_legacy_two_level_root_dbs() {
+        // `{sync_root}/{device_id}/test.db` is the leftover daemon layout
+        // from #682. pull_all must not import it.
+        let root = temp_sync_root();
+        let three = write_remote_db(&root, "poco_f8_ultra", "device-1", 64);
+        let two_level_dir = root.join("device-orphan");
+        fs::create_dir_all(&two_level_dir).unwrap();
+        let orphan = two_level_dir.join("test.db");
+        fs::write(&orphan, vec![0u8; 128]).unwrap();
+
+        let listed = super::list_remote_dbs(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, three);
+        assert!(listed.iter().all(|d| d.path != orphan));
+    }
+
+    #[test]
     fn select_remote_dbs_keeps_largest_per_device_id() {
         let root = temp_sync_root();
         let large = write_remote_db(&root, "poco_f8_ultra", "device-1", 64);
@@ -313,6 +332,15 @@ pub(crate) struct RemoteDb {
 /// can collapse duplicate folders for one device before importing. I/O errors
 /// are propagated rather than skipped: dropping a host directory we failed to
 /// read would report a successful sync that quietly omitted that host's data.
+///
+/// 3-level-only by design. `pull_all` used to go through [`get_remotes`] and
+/// then `find_remotes` on each host folder; now it uses this walker, so a
+/// leftover 2-level root db (`{sync_root}/{device_id}/test.db`, no hostname
+/// folder) is **not** a pull candidate. That is the correct outcome: the
+/// 1.19 GB root orphan from ActivityWatch/aw-server-rust#682 must never be
+/// imported by a peer. Do not "fix" this by broadening the walk — the
+/// advanced `sync_run` path still uses [`find_remotes`] (2-level, relative
+/// to whatever directory it is given).
 pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>> {
     let mut dbs = Vec::new();
     if !sync_root.exists() {
@@ -395,10 +423,14 @@ pub(crate) fn select_remote_dbs_by_device_id(dbs: Vec<RemoteDb>) -> Vec<RemoteDb
     selected
 }
 
-/// Return all remotes in the sync folder
-/// Only returns folders that match ./{host}/{device_id}/*.db
+/// Return hostnames that have a `{host}/{device_id}/*.db` tree.
+///
+/// `pull_all` no longer calls this — it uses [`list_remote_dbs`] +
+/// [`select_remote_dbs_by_device_id`]. Kept only so hostname-only callers
+/// (if any remain) do not break; do not put pull back on this path, it
+/// cannot distinguish duplicate `device_id` folders.
 // TODO: share logic with find_remotes and find_remotes_nonlocal
-#[allow(dead_code)] // kept for hostname-only callers; pull_all now uses list_remote_dbs
+#[allow(dead_code)] // pull_all now uses list_remote_dbs; no remaining in-crate caller
 pub fn get_remotes() -> Result<Vec<String>, Box<dyn Error>> {
     let sync_root_dir = crate::dirs::get_sync_dir()?;
     fs::create_dir_all(&sync_root_dir)?;
@@ -416,7 +448,17 @@ pub fn get_remotes() -> Result<Vec<String>, Box<dyn Error>> {
     Ok(hostnames)
 }
 
-/// Returns a list of all remote dbs
+/// 2-level walker: `{sync_directory}/{x}/*.db`.
+///
+/// Callers pass different roots:
+/// - `sync_wrapper::pull` passes a host folder, so this finds
+///   `{host}/{device_id}/*.db`
+/// - advanced `sync_run` against the sync root finds the legacy
+///   `{device_id}/*.db` layout
+///
+/// Do not broaden this to 3-level at the sync root. That would make a
+/// pull import the leftover root orphan from #682. Default-daemon pull
+/// is [`list_remote_dbs`] (3-level-only), not this function.
 ///
 /// I/O errors are propagated rather than unwrapped (a panic here aborts the app
 /// on Android, ActivityWatch/aw-android#220) and rather than skipped: silently

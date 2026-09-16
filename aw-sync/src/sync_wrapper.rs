@@ -45,17 +45,22 @@ pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
         match pull_db(client, &remote.hostname, &remote.path) {
             Ok(one) => report.merge(one),
             Err(e) => {
+                // Per-peer isolation: a peer that fails to open must not abort
+                // the pass and skip every peer after it. Bucket-level errors are
+                // already non-fatal in `sync_datastores`; peer-level open
+                // failures need the same warn+continue so a later
+                // skip-on-mismatch (#693) has somewhere to go instead of
+                // becoming "abort pass" (#688).
+                warn!(
+                    "Skipping peer '{}' ({:?}): {e}",
+                    remote.hostname, remote.path
+                );
                 report.peers.push(PeerReport::failed(
                     remote.device_id,
                     remote.hostname,
                     remote.path,
                     e.to_string(),
                 ));
-                report.finish();
-                // Persist the aggregate (earlier peers + this failure), not
-                // only the phase-local report from the failing `sync_run`.
-                crate::report::persist_last_report_warn(&report);
-                return Err(e);
             }
         }
     }

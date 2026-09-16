@@ -174,8 +174,9 @@ mod sync_tests {
 
         let dest_buckets = state.ds_dest.get_buckets().unwrap();
 
-        // The destination bucket ID must use underscores, not spaces.
-        let sanitized_id = "aw-watcher-android-synced-from-POCO_F8_Ultra";
+        // Must match aw-android's sanitizeDeviceHostname, not a whitespace-only
+        // replace ("POCO_F8_Ultra" would fork when Android migrates).
+        let sanitized_id = "aw-watcher-android-synced-from-poco_f8_ultra";
         assert!(
             dest_buckets.contains_key(sanitized_id),
             "expected sanitized bucket id '{sanitized_id}', got: {:?}",
@@ -187,13 +188,26 @@ mod sync_tests {
             !dest_buckets.contains_key(whitespace_id),
             "whitespace bucket id '{whitespace_id}' must not be created"
         );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-android-synced-from-POCO_F8_Ultra"),
+            "whitespace-only replace must not be used; got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
 
         // The hostname field on the destination bucket must also be sanitized.
         let dest_bucket = dest_buckets.get(sanitized_id).unwrap();
-        assert!(
-            !dest_bucket.hostname.contains(char::is_whitespace),
-            "destination hostname must not contain whitespace, got: {:?}",
-            dest_bucket.hostname
+        assert_eq!(
+            dest_bucket.hostname, "poco_f8_ultra",
+            "destination hostname must match Android's sanitizer"
+        );
+        // $aw.sync.origin keeps the raw hostname so the pre-migration phone
+        // identity is still recoverable.
+        assert_eq!(
+            dest_bucket
+                .data
+                .get("$aw.sync.origin")
+                .and_then(|v| v.as_str()),
+            Some("POCO F8 Ultra")
         );
     }
 
@@ -242,12 +256,49 @@ mod sync_tests {
             "legacy unsanitized bucket must be preserved"
         );
         // No new sanitized duplicate must have been created.
-        let sanitized_id = "aw-watcher-android-synced-from-POCO_F8_Ultra";
+        let sanitized_id = "aw-watcher-android-synced-from-poco_f8_ultra";
         assert!(
             !dest_buckets.contains_key(sanitized_id),
             "a sanitized fork must not be created when legacy bucket exists, got: {:?}",
             dest_buckets.keys().collect::<Vec<_>>()
         );
+    }
+
+    /// If `$aw.sync.origin` is already clean while `bucket.hostname` still has
+    /// whitespace, the sanitizer must still run: otherwise `create_bucket` 400s
+    /// on the hostname field even though the derived ID is legal.
+    #[test]
+    fn test_whitespace_hostname_sanitizes_even_when_id_is_clean() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android",
+            "data": {"$aw.sync.origin": "poco_f8_ultra"}
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        let sanitized_id = "aw-watcher-android-synced-from-poco_f8_ultra";
+        let dest_bucket = dest_buckets.get(sanitized_id).unwrap_or_else(|| {
+            panic!(
+                "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+                dest_buckets.keys().collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(dest_bucket.hostname, "poco_f8_ultra");
     }
 
     /// Bucket metadata of an unexpected shape must not panic:

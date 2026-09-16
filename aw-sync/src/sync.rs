@@ -337,6 +337,42 @@ fn utf8_db_path(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("Sync database path is not valid UTF-8: {}", path.display()))
 }
 
+/// Sanitize a device hostname so it is a legal bucket hostname and a stable
+/// sync-ID suffix.
+///
+/// Must stay byte-identical to aw-android's `sanitizeDeviceHostname`
+/// (`mobile/src/main/java/net/activitywatch/android/DeviceHostname.kt`):
+/// trim, lowercase, replace `[^a-z0-9_-]+` with `_`, trim `_`. Empty result
+/// becomes `"unknown"`.
+///
+/// Divergence here forks destination buckets the day Android migrates its
+/// hostname column (ActivityWatch/aw-android#272) onto a different
+/// `-synced-from-` ID (ActivityWatch/activitywatch#1373).
+pub fn sanitize_hostname(raw: &str) -> String {
+    let value = raw.trim();
+    if value.is_empty() {
+        return "unknown".to_string();
+    }
+    let lower = value.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut in_run = false;
+    for c in lower.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+            out.push(c);
+            in_run = false;
+        } else if !in_run {
+            out.push('_');
+            in_run = true;
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
 ///
 /// Returns an error rather than panicking on a datastore failure or on bucket
@@ -387,13 +423,31 @@ fn get_or_create_sync_bucket(
         Err(e) => return Err(format!("Failed to get bucket '{new_id}': {e:?}")),
     }
 
-    // The bucket does not exist yet.  If the ID or hostname contains whitespace,
-    // sanitize before creating: aw-server-rust rejects new buckets with whitespace
-    // hostnames (#658).  We must also check whether a sanitized bucket was already
-    // created by a previous sync session so we don't open a second fork.
-    let (final_id, final_hostname) = if new_id.contains(char::is_whitespace) {
-        let sanitized_id = new_id.replace(char::is_whitespace, "_");
-        let sanitized_hostname = bucket_from.hostname.replace(char::is_whitespace, "_");
+    // The bucket does not exist yet.  If the ID *or the source hostname* contains
+    // whitespace, sanitize before creating: aw-server-rust rejects new buckets
+    // with whitespace hostnames (#658).  The ID-only check is not enough —
+    // `$aw.sync.origin` can already be clean while `bucket_from.hostname` still
+    // has spaces, and `create_bucket` would 400 on the hostname field.
+    //
+    // Sanitization uses Android's algorithm (not a whitespace-only replace) so
+    // today's desktop creates `…-synced-from-poco_f8_ultra` and Android's
+    // hostname-column migration lands on the same ID.
+    let (final_id, final_hostname) = if bucket_from.hostname.contains(char::is_whitespace)
+        || new_id.contains(char::is_whitespace)
+    {
+        let sanitized_hostname = sanitize_hostname(&bucket_from.hostname);
+        let sanitized_id = if let Some(ref origin) = sync_origin {
+            let orig_bucketid = bucket_from
+                .id
+                .split("-synced-from-")
+                .next()
+                .unwrap_or(bucket_from.id.as_str());
+            format!("{orig_bucketid}-synced-from-{}", sanitize_hostname(origin))
+        } else {
+            // Push path: keep the original bucket ID; only the hostname field
+            // needs to be a legal create_bucket value.
+            new_id.clone()
+        };
         // If a sanitized bucket already exists, use it.
         match ds_to.get_bucket(sanitized_id.as_str()) {
             Ok(bucket) => return Ok(bucket),
@@ -954,5 +1008,29 @@ mod pull_only_staging_tests {
             ds.close();
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod hostname_sanitize_tests {
+    use super::sanitize_hostname;
+
+    #[test]
+    fn poco_f8_ultra_matches_android() {
+        // The contract Erik asked for on ActivityWatch/aw-server-rust#697:
+        // whitespace-only replace would produce "POCO_F8_Ultra" and fork the
+        // day aw-android#272 migrates the phone's hostname column.
+        assert_eq!(sanitize_hostname("POCO F8 Ultra"), "poco_f8_ultra");
+    }
+
+    #[test]
+    fn android_device_hostname_contract() {
+        // Byte-identical to aw-android DeviceHostnameTest.kt.
+        assert_eq!(sanitize_hostname("Pixel 8"), "pixel_8");
+        assert_eq!(sanitize_hostname("My-Phone_1"), "my-phone_1");
+        assert_eq!(sanitize_hostname("  Pixel  8  "), "pixel_8");
+        assert_eq!(sanitize_hostname(""), "unknown");
+        assert_eq!(sanitize_hostname("   "), "unknown");
+        assert_eq!(sanitize_hostname("***"), "unknown");
     }
 }

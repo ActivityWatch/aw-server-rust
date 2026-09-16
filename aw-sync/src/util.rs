@@ -885,12 +885,19 @@ pub fn format_bytes(n: u64) -> String {
 }
 
 /// Warn-lines for a pull that found no remotes, or that missed classified peers.
+///
+/// `local_device_id` is `None` when the local server was not contacted
+/// (`pull_all` must not `get_info()` — that call has a 120s HTTP timeout).
+/// Empty string is treated as unknown: `Some("")` is not unclassified, it
+/// makes `path.contains("")` true and leftover 2-level own staging look like
+/// a peer that pull failed to select.
 pub fn pull_discovery_warnings(
     sync_directory: &Path,
-    local_device_id: &str,
+    local_device_id: Option<&str>,
     found_remotes: &[PathBuf],
 ) -> Vec<String> {
-    let scan = match scan_sync_dir(sync_directory, Some(local_device_id)) {
+    let local_device_id = local_device_id.filter(|s| !s.is_empty());
+    let scan = match scan_sync_dir(sync_directory, local_device_id) {
         Ok(entries) => entries,
         Err(e) => {
             return vec![format!(
@@ -905,7 +912,24 @@ pub fn pull_discovery_warnings(
     let missed: Vec<&SyncDirEntry> = scan
         .iter()
         .filter(|e| {
-            e.kind == SyncEntryKind::Peer && e.db_path.as_ref().is_some_and(|p| !found.contains(p))
+            if e.kind != SyncEntryKind::Peer {
+                return false;
+            }
+            let Some(path) = e.db_path.as_ref() else {
+                return false;
+            };
+            if found.contains(path) {
+                return false;
+            }
+            // Without a local id, 2-level leftovers cannot be told from own
+            // staging (`{sync_root}/{device_id}/test.db`). `pull_all` also
+            // never selects 2-level, so calling them "unselected peers" is
+            // a false diagnostic. Known local id keeps the mixed-layout
+            // warning for a real 2-level *peer*.
+            if local_device_id.is_none() && e.layout == Some(SyncLayout::TwoLevel) {
+                return false;
+            }
+            true
         })
         .collect();
 
@@ -1116,7 +1140,7 @@ mod scan_tests {
             "skipped duplicate must use the pull selector: {skipped:?}"
         );
 
-        let warnings = pull_discovery_warnings(&root, local, &[]);
+        let warnings = pull_discovery_warnings(&root, Some(local), &[]);
         let joined = warnings.join("\n");
         assert!(
             joined.contains("Found 0 remote db files"),
@@ -1185,12 +1209,44 @@ mod scan_tests {
         assert!(peer_entry.not_visible_to_daemon.is_none());
 
         let found = vec![root.join(peer).join("test.db")];
-        let warnings = pull_discovery_warnings(&root, local, &found);
+        let warnings = pull_discovery_warnings(&root, Some(local), &found);
         assert!(
             warnings
                 .iter()
                 .all(|l| !l.contains("Found 0 remote db files")),
             "should not warn about empty remotes when a 2-level peer was found: {warnings:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unknown_local_id_does_not_report_two_level_leftover_as_unselected_peer() {
+        // Mixed layout: leftover 2-level own staging (pre-#685) plus a
+        // 3-level peer that pull_all selected. Passing "" used to classify
+        // the leftover as Peer and warn "pull did not select".
+        let root = temp_sync_dir();
+        let local = "local-device";
+        let peer = "peer-device";
+        touch_db(&root.join(local).join("test.db"), 64);
+        let peer_db = root.join("other-host").join(peer).join("test.db");
+        touch_db(&peer_db, 273);
+        let found = vec![peer_db];
+
+        let unknown = pull_discovery_warnings(&root, None, &found).join("\n");
+        assert!(
+            !unknown.contains("pull did not select"),
+            "unknown local id must not call leftover 2-level own staging a missed peer: {unknown}"
+        );
+        let empty_str = pull_discovery_warnings(&root, Some(""), &found).join("\n");
+        assert!(
+            !empty_str.contains("pull did not select"),
+            "empty string is unknown, not a match-everything id: {empty_str}"
+        );
+        let known = pull_discovery_warnings(&root, Some(local), &found).join("\n");
+        assert!(
+            !known.contains("pull did not select"),
+            "known local id classifies 2-level own as OwnStaging: {known}"
         );
 
         let _ = fs::remove_dir_all(root);

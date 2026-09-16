@@ -20,11 +20,13 @@ pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
         ));
     }
     let found: Vec<_> = selection.selected.iter().map(|d| d.path.clone()).collect();
-    // No get_info() here: an empty-dir pass must stay a local filesystem
-    // check (the #682 case). Own-vs-peer classification is optional for
-    // the warning text; "" leaves entries unclassified rather than
-    // hanging if the server is down.
-    report.capture_warnings(crate::util::pull_discovery_warnings(&sync_root, "", &found));
+    // No get_info() here: reqwest's client timeout is 120s, and an empty-dir
+    // pass (#682) must stay a local filesystem check. `None` is unknown, not
+    // `Some("")` — empty string does not unclassify entries, and leftover
+    // 2-level own staging then shows up as "peer db(s) that pull did not select".
+    report.capture_warnings(crate::util::pull_discovery_warnings(
+        &sync_root, None, &found,
+    ));
     if selection.selected.is_empty() {
         info!("No remote databases found in {:?}", sync_root);
         report.finish();

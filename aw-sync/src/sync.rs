@@ -99,7 +99,7 @@ pub fn sync_run(
     if mode == SyncMode::Pull || mode == SyncMode::Both {
         report.capture_warnings(crate::util::pull_discovery_warnings(
             sync_spec.path.as_path(),
-            device_id,
+            Some(device_id),
             &remote_dbfiles,
         ));
         for skipped in &selection.skipped {

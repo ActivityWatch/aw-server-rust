@@ -501,7 +501,7 @@ mod tests {
         let mut report = SyncReport::new(SyncMode::Pull);
         report.capture_warnings(crate::util::pull_discovery_warnings(
             &root,
-            "local-device",
+            Some("local-device"),
             &[],
         ));
         report.finish();

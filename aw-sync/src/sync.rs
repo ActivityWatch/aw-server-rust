@@ -197,6 +197,11 @@ fn maybe_setup_local_remote(
     if mode == SyncMode::Push || mode == SyncMode::Both {
         Ok(Some(setup_local_remote(path, device_id)?))
     } else {
+        // `get_sync_dir()` is path construction only. Push/Both used to create
+        // the root as a side effect of staging; pull-only still needs the root
+        // so `find_remotes` does not NotFound (advanced CLI / pull-only daemon
+        // on a fresh machine). Do not create `{path}/{device_id}/`.
+        fs::create_dir_all(path)?;
         Ok(None)
     }
 }
@@ -643,6 +648,26 @@ mod pull_only_staging_tests {
             !dir.join("device-local").exists(),
             "pull-only must not create {{peer}}/{{our_device_id}}/"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pull_creates_missing_sync_root_without_local_staging() {
+        let dir = temp_dir();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(!dir.exists());
+        let staged = maybe_setup_local_remote(&dir, "device-local", SyncMode::Pull).unwrap();
+        assert!(staged.is_none());
+        assert!(
+            dir.is_dir(),
+            "pull-only must create the sync root so discovery does not NotFound"
+        );
+        assert!(
+            !dir.join("device-local").exists(),
+            "pull-only must not create {{peer}}/{{our_device_id}}/"
+        );
+        let remotes = crate::util::find_remotes_nonlocal(&dir, "device-local", None).unwrap();
+        assert!(remotes.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

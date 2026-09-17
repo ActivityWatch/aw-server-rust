@@ -269,7 +269,7 @@ fn get_user_log_dir() -> Result<PathBuf, ()> {
 }
 
 #[cfg(target_os = "android")]
-pub fn get_log_dir(module: &str) -> Result<PathBuf, ()> {
+pub fn get_log_dir(_module: &str) -> Result<PathBuf, ()> {
     panic!("not implemented on Android");
 }
 

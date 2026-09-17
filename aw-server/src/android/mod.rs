@@ -37,8 +37,6 @@ pub mod android {
 
     use crate::panic_guard::catch_panic;
 
-    use std::path::PathBuf;
-
     use crate::endpoints;
     use crate::endpoints::ServerState;
     use aw_client_rust::classes::{classes_from_settings_str, default_classes};
@@ -151,18 +149,41 @@ pub mod android {
 
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_startServer(
-        env: JNIEnv,
+        _env: JNIEnv,
         _: JClass,
+        port: jint,
     ) {
         jni_guard_void("startServer", || {
-            info!("Starting server...");
-            start_server();
+            // `jint` is i32, so reject values that cannot be a listening port
+            // instead of letting `as u16` silently wrap (65536 -> 0 -> ephemeral
+            // port) or truncate a negative value.
+            let port = match u16::try_from(port) {
+                Ok(p) if p != 0 => p,
+                _ => {
+                    error!("startServer: invalid port {}; refusing to start", port);
+                    return;
+                }
+            };
+            info!("Starting server on port {}...", port);
+            start_server(port);
             info!("Server exited");
         });
     }
 
-    #[rocket::main]
-    async fn start_server() {
+    fn start_server(port: u16) {
+        // On the JNI boundary we must not panic: surface the failure through
+        // the log instead (jni_guard_void would swallow a panic here anyway).
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                error!("startServer: failed to create tokio runtime: {}", e);
+                return;
+            }
+        };
+        rt.block_on(start_server_impl(port));
+    }
+
+    async fn start_server_impl(port: u16) {
         info!("Building server state...");
 
         // FIXME: Why is unsafe needed here? Can we get rid of it?
@@ -175,9 +196,9 @@ pub mod android {
             info!("Using server_state:: device_id: {}", server_state.device_id);
 
             let mut server_config = crate::config::create_config("default", None);
-            server_config.port = 5600;
+            server_config.port = port;
 
-            endpoints::build_rocket(server_state, server_config)
+            let _ = endpoints::build_rocket(server_state, server_config)
                 .launch()
                 .await;
         }

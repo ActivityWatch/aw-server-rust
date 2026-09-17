@@ -1361,7 +1361,11 @@ mod peer_isolation_tests {
         let old = dir.join("old.db");
         {
             let conn = rusqlite::Connection::open(&old).unwrap();
-            conn.pragma_update(None, "user_version", 4).unwrap();
+            // Hermetic: pick a version guaranteed incompatible for any realistic
+            // schema bump, instead of a hardcoded value that goes stale when
+            // NEWEST_DB_VERSION reaches it.
+            conn.pragma_update(None, "user_version", aw_datastore::NEWEST_DB_VERSION + 1000)
+                .unwrap();
         }
         let missing = dir.join("missing.db");
         let db_old = peer_db("dev-old", "host-old", old);

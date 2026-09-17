@@ -320,6 +320,48 @@ mod tests {
         assert!(selected.contains(&large));
         assert!(selected.contains(&other));
     }
+
+    #[test]
+    fn list_remote_dbs_skips_dot_directories() {
+        // `.stversions` / `.git` look like host folders to a 3-level walk.
+        // Trash Can versioning can put a `.db` at a shallow path under them
+        // (ActivityWatch/aw-server-rust#689).
+        let root = temp_sync_root();
+        let real = write_remote_db(&root, "poco_f8_ultra", "device-1", 64);
+        write_remote_db(&root, ".stversions", "device-1", 128);
+        write_remote_db(&root, ".git", "objects", 8);
+        let hidden_device = root.join("poco_f8_ultra").join(".stfolder").join("test.db");
+        fs::create_dir_all(hidden_device.parent().unwrap()).unwrap();
+        fs::write(&hidden_device, vec![0u8; 4]).unwrap();
+
+        let listed = super::list_remote_dbs(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, real);
+    }
+
+    #[test]
+    fn find_remotes_skips_dot_directories() {
+        // 2-level layout: `{root}/{device_id}/test.db`. A Syncthing Trash Can
+        // folder at `{root}/.stversions/test.db` is the same depth and would
+        // otherwise look like a peer.
+        let root = temp_sync_root();
+        let real_dir = root.join("device-1");
+        fs::create_dir_all(&real_dir).unwrap();
+        let real = real_dir.join("test.db");
+        fs::write(&real, vec![0u8; 16]).unwrap();
+        let stversions = root.join(".stversions");
+        fs::create_dir_all(&stversions).unwrap();
+        let junk = stversions.join("test.db");
+        fs::write(&junk, vec![0u8; 32]).unwrap();
+
+        let remotes = super::find_remotes(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(remotes, vec![real]);
+        assert!(!remotes.iter().any(|p| p == &junk));
+    }
 }
 
 /// A peer database discovered under `{sync_root}/{hostname}/{device_id}/*.db`.
@@ -345,6 +387,11 @@ pub(crate) struct RemoteDb {
 /// Do not "fix" this by broadening the walk — the advanced `sync_run` path
 /// still uses [`find_remotes`] (2-level, relative to whatever directory it
 /// is given). Two walkers, two code paths; that is intentional.
+///
+/// Dot-directories (`.git`, `.stfolder`, `.stversions`) are skipped. They
+/// are not host folders, and because I/O errors propagate, an unreadable
+/// entry under one of them would abort the whole pass
+/// (ActivityWatch/aw-server-rust#689).
 pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>> {
     let mut dbs = Vec::new();
     if !sync_root.exists() {
@@ -353,7 +400,7 @@ pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>
     for host_ent in fs::read_dir(sync_root)? {
         let host_ent = host_ent?;
         let host_path = host_ent.path();
-        if !host_path.is_dir() {
+        if !host_path.is_dir() || is_dot_dir(&host_path) {
             continue;
         }
         let Some(hostname) = host_ent.file_name().to_str().map(str::to_string) else {
@@ -362,7 +409,7 @@ pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>
         for device_ent in fs::read_dir(&host_path)? {
             let device_ent = device_ent?;
             let device_path = device_ent.path();
-            if !device_path.is_dir() {
+            if !device_path.is_dir() || is_dot_dir(&device_path) {
                 continue;
             }
             let Some(device_id) = device_ent.file_name().to_str().map(str::to_string) else {
@@ -474,11 +521,15 @@ pub(crate) fn select_remote_dbs_detailed(dbs: Vec<RemoteDb>) -> RemoteSelection 
 /// on Android, ActivityWatch/aw-android#220) and rather than skipped: silently
 /// dropping a host directory we failed to read would report a successful sync
 /// that quietly omitted that host's data.
+///
+/// Dot-directories are skipped for the same reason as [`list_remote_dbs`]
+/// (ActivityWatch/aw-server-rust#689). A Syncthing Trash Can layout can
+/// place `{sync}/.stversions/*.db` shallow enough to be a 2-level "peer".
 fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut dbs = Vec::new();
     for entry in fs::read_dir(sync_directory)? {
         let hostdir = entry?.path();
-        if !hostdir.is_dir() {
+        if !hostdir.is_dir() || is_dot_dir(&hostdir) {
             continue;
         }
         for entry in fs::read_dir(&hostdir)? {
@@ -664,7 +715,7 @@ pub fn scan_sync_dir(
                 entries.push(file_at_root(path));
                 continue;
             }
-            if !path.is_dir() {
+            if !path.is_dir() || is_dot_dir(&path) {
                 continue;
             }
             let name = file_name_string(&path);
@@ -867,6 +918,19 @@ fn file_name_string(path: &Path) -> Option<String> {
     path.file_name()
         .and_then(|n| n.to_str())
         .map(str::to_string)
+}
+
+/// Syncthing (`.stfolder`, `.stversions`), git, and similar metadata dirs
+/// are not host folders. Walking them is wasted I/O and, because the
+/// walkers propagate I/O errors, an unreadable entry under one of them
+/// aborts the whole pass (ActivityWatch/aw-server-rust#689).
+fn is_dot_dir(path: &Path) -> bool {
+    // `to_string_lossy` (not `to_str`) so a non-UTF8 dot-directory name is
+    // still recognized: the leading `.` is valid ASCII and survives lossy
+    // conversion even when later bytes are replaced.
+    path.file_name()
+        .map(|n| n.to_string_lossy())
+        .is_some_and(|n| n.starts_with('.'))
 }
 
 pub fn format_bytes(n: u64) -> String {
@@ -1250,6 +1314,29 @@ mod scan_tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_sync_dir_skips_dot_directories() {
+        let root = temp_sync_dir();
+        let peer = "peer-device";
+        touch_db(&root.join("poco_f8_ultra").join(peer).join("test.db"), 16);
+        touch_db(&root.join(".stversions").join(peer).join("test.db"), 64);
+        fs::create_dir_all(root.join(".stfolder")).unwrap();
+        fs::create_dir_all(root.join(".git").join("objects")).unwrap();
+
+        let scan = scan_sync_dir(&root, Some("local-device")).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(
+            scan.iter().all(|e| e
+                .path
+                .components()
+                .all(|c| c.as_os_str().to_str().is_none_or(|s| !s.starts_with('.')))),
+            "dot-dirs must not appear as sync entries: {scan:?}"
+        );
+        assert_eq!(scan.len(), 1);
+        assert_eq!(scan[0].kind, SyncEntryKind::Peer);
     }
 
     #[cfg(feature = "cli")]

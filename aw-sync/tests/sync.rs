@@ -96,14 +96,18 @@ mod sync_tests {
             .collect()
     }
 
-    /// A datastore failure must be *returned*, never panicked.
+    /// A datastore failure must not panic.
     ///
     /// On Android the sync step runs inside a JNI `extern "C"` frame, where an
     /// unwinding panic aborts the whole app process rather than surfacing as an
     /// exception — the SIGABRT in ActivityWatch/aw-android#220. `sync_datastores`
     /// used to `unwrap()` every datastore call, so any failure here was fatal.
+    ///
+    /// Since the per-bucket non-fatal change (#692), a broken *sibling* does
+    /// not abort the whole pass. A pass where every bucket fails is still Err
+    /// so callers can tell it from success. No panic is the key invariant.
     #[test]
-    fn test_unusable_datastore_returns_error_instead_of_panicking() {
+    fn test_unusable_datastore_does_not_panic() {
         let state = init_teststate();
         create_bucket(&state.ds_src, 0);
 
@@ -114,6 +118,10 @@ mod sync_tests {
         ))
         .expect("path is valid UTF-8");
 
+        // Previously this panicked (unwrap on datastore failure). Per-bucket
+        // skip makes a *partial* failure non-fatal, but every bucket failing
+        // (destination down) must still be Err so callers can tell it from
+        // success. The key property: it must not panic.
         let result = aw_sync::sync_datastores(
             &state.ds_src,
             &ds_broken,
@@ -121,17 +129,360 @@ mod sync_tests {
             Some("device-0"),
             &SyncSpec::default(),
         );
+        let err =
+            result.expect_err("total bucket failure must return Err, not Ok(()); must not panic");
         assert!(
-            result.is_err(),
-            "an unusable destination datastore must return Err, got {result:?}"
+            err.contains("all 1 buckets failed"),
+            "error should report total failure, got: {err}"
         );
     }
 
-    /// Bucket metadata of an unexpected shape must also be an error, not a panic:
+    /// Pulling a peer whose bucket hostname contains whitespace must not fail with
+    /// a 400: aw-server-rust rejects new buckets with whitespace hostnames (#658).
+    /// `get_or_create_sync_bucket` must sanitize the hostname (and derived ID)
+    /// before creating, while still re-using any legacy unsanitized bucket that
+    /// was imported before the sanitization was added.
+    #[test]
+    fn test_whitespace_hostname_pull_creates_sanitized_bucket() {
+        let state = init_teststate();
+
+        // Source bucket whose hostname contains a space, as produced by Android
+        // devices that were named before aw-android added hostname sanitization
+        // (ActivityWatch/aw-android#272).
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        // In-memory datastore does not enforce the server-side whitespace check,
+        // so the sync completes without 400.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+
+        // Must match aw-android's sanitizeDeviceHostname, not a whitespace-only
+        // replace ("POCO_F8_Ultra" would fork when Android migrates).
+        let sanitized_id = "aw-watcher-android-synced-from-poco_f8_ultra";
+        assert!(
+            dest_buckets.contains_key(sanitized_id),
+            "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        // No whitespace bucket must have been created.
+        let whitespace_id = "aw-watcher-android-synced-from-POCO F8 Ultra";
+        assert!(
+            !dest_buckets.contains_key(whitespace_id),
+            "whitespace bucket id '{whitespace_id}' must not be created"
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-android-synced-from-POCO_F8_Ultra"),
+            "whitespace-only replace must not be used; got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+
+        // The hostname field on the destination bucket must also be sanitized.
+        let dest_bucket = dest_buckets.get(sanitized_id).unwrap();
+        assert_eq!(
+            dest_bucket.hostname, "poco_f8_ultra",
+            "destination hostname must match Android's sanitizer"
+        );
+        // $aw.sync.origin keeps the raw hostname so the pre-migration phone
+        // identity is still recoverable.
+        assert_eq!(
+            dest_bucket
+                .data
+                .get("$aw.sync.origin")
+                .and_then(|v| v.as_str()),
+            Some("POCO F8 Ultra")
+        );
+    }
+
+    /// If a legacy unsanitized bucket already exists in the destination (imported
+    /// before the sanitization was added), re-use it instead of creating a new
+    /// sanitized one.  Creating a sanitized copy forks the destination and causes
+    /// a full re-import (ActivityWatch/activitywatch#1373).
+    #[test]
+    fn test_whitespace_hostname_pull_reuses_legacy_unsanitized_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        // Simulate a pre-existing legacy destination bucket with unsanitized ID.
+        let legacy_id = "aw-watcher-android-synced-from-POCO F8 Ultra";
+        let legacy_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": legacy_id,
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&legacy_bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+
+        // The legacy bucket must be present and re-used — not replaced.
+        assert!(
+            dest_buckets.contains_key(legacy_id),
+            "legacy unsanitized bucket must be preserved"
+        );
+        // No new sanitized duplicate must have been created.
+        let sanitized_id = "aw-watcher-android-synced-from-poco_f8_ultra";
+        assert!(
+            !dest_buckets.contains_key(sanitized_id),
+            "a sanitized fork must not be created when legacy bucket exists, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Case-only hostnames (`PIXEL8`) have no whitespace, so a whitespace-only
+    /// guard would leave the destination as `…-synced-from-PIXEL8`. Android's
+    /// later hostname migration produces `pixel8` and forks the history.
+    #[test]
+    fn test_case_only_hostname_pull_creates_sanitized_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "PIXEL8",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        let sanitized_id = "aw-watcher-android-synced-from-pixel8";
+        assert!(
+            dest_buckets.contains_key(sanitized_id),
+            "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-android-synced-from-PIXEL8"),
+            "case-only fork must not be created, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(dest_buckets.get(sanitized_id).unwrap().hostname, "pixel8");
+    }
+
+    /// Dotted desktop hostnames (`erb-m2.localdomain`) sanitize punctuation to
+    /// `_` for *new* imports. Existing raw IDs are still found via the raw lookup.
+    #[test]
+    fn test_dotted_hostname_pull_creates_sanitized_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-window",
+            "type": "currentwindow",
+            "hostname": "erb-m2.localdomain",
+            "client": "aw-watcher-window"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        let sanitized_id = "aw-watcher-window-synced-from-erb-m2_localdomain";
+        assert!(
+            dest_buckets.contains_key(sanitized_id),
+            "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-window-synced-from-erb-m2.localdomain"),
+            "dotted raw id must not be created for new imports, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// If a legacy case-only bucket already exists, re-use it rather than
+    /// creating `…-synced-from-pixel8` beside `…-synced-from-PIXEL8`.
+    #[test]
+    fn test_case_only_hostname_pull_reuses_legacy_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "PIXEL8",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        let legacy_id = "aw-watcher-android-synced-from-PIXEL8";
+        let legacy_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": legacy_id,
+            "type": "currentwindow",
+            "hostname": "PIXEL8",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&legacy_bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        assert!(
+            dest_buckets.contains_key(legacy_id),
+            "legacy case-only bucket must be preserved"
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-android-synced-from-pixel8"),
+            "a sanitized fork must not be created when legacy bucket exists, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// If `$aw.sync.origin` is already clean while `bucket.hostname` still has
+    /// whitespace, the sanitizer must still run: otherwise `create_bucket` 400s
+    /// on the hostname field even though the derived ID is legal.
+    #[test]
+    fn test_whitespace_hostname_sanitizes_even_when_id_is_clean() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android",
+            "data": {"$aw.sync.origin": "poco_f8_ultra"}
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        let sanitized_id = "aw-watcher-android-synced-from-poco_f8_ultra";
+        let dest_bucket = dest_buckets.get(sanitized_id).unwrap_or_else(|| {
+            panic!(
+                "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+                dest_buckets.keys().collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(dest_bucket.hostname, "poco_f8_ultra");
+    }
+
+    /// A hostname that contains whitespace but sanitizes to the "unknown"
+    /// sentinel (e.g. `" * "`) must not create `-synced-from-unknown` on pull —
+    /// that ID is shared by every such remote and would mix events. The bucket
+    /// is skipped; a healthy sibling still syncs (per-bucket non-fatal).
+    #[test]
+    fn test_whitespace_hostname_that_sanitizes_to_unknown_is_skipped_on_pull() {
+        let state = init_teststate();
+
+        let junk: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-junk",
+            "type": "test",
+            "hostname": " * ",
+            "client": "test"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&junk).unwrap();
+
+        let healthy: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-healthy",
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&healthy).unwrap();
+
+        let result = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        );
+        assert!(
+            result.is_ok(),
+            "junk hostname must skip that bucket, not abort the pass; got {result:?}"
+        );
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        assert!(
+            !dest_buckets
+                .keys()
+                .any(|k| k.contains("bucket-junk") || k.ends_with("-synced-from-unknown")),
+            "must not create -synced-from-unknown, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            dest_buckets.contains_key("bucket-healthy-synced-from-device-0"),
+            "healthy sibling must still sync, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Bucket metadata of an unexpected shape must not panic:
     /// `$aw.sync.origin` is read from data written by another host, so it is not
     /// under this host's control.
+    ///
+    /// With the per-bucket non-fatal change (#692), a malformed bucket is now
+    /// skipped (warn + continue) rather than aborting the whole sync pass.
     #[test]
-    fn test_non_string_sync_origin_returns_error_instead_of_panicking() {
+    fn test_non_string_sync_origin_does_not_panic() {
         let state = init_teststate();
         let bucket: Bucket = serde_json::from_str(
             r#"{
@@ -145,6 +496,9 @@ mod sync_tests {
         .unwrap();
         state.ds_src.create_bucket(&bucket).unwrap();
 
+        // Previously this panicked. A single malformed bucket is a total
+        // failure of the pass, so it must return Err (not Ok after skip).
+        // No panic is still the key invariant.
         let result = aw_sync::sync_datastores(
             &state.ds_src,
             &state.ds_dest,
@@ -152,10 +506,17 @@ mod sync_tests {
             None,
             &SyncSpec::default(),
         );
-        let err = result.expect_err("a non-string $aw.sync.origin must return Err");
+        let err = result.expect_err("total failure of a one-bucket pass must be Err");
         assert!(
-            err.contains("$aw.sync.origin"),
-            "error should name the offending field, got: {err}"
+            err.contains("all 1 buckets failed"),
+            "error should report total failure, got: {err}"
+        );
+        // The malformed bucket must have been skipped, not imported.
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        assert!(
+            dest_buckets.is_empty(),
+            "skipped bucket must not appear in destination, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
         );
     }
 

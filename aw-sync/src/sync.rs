@@ -337,6 +337,42 @@ fn utf8_db_path(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("Sync database path is not valid UTF-8: {}", path.display()))
 }
 
+/// Sanitize a device hostname so it is a legal bucket hostname and a stable
+/// sync-ID suffix.
+///
+/// Must stay byte-identical to aw-android's `sanitizeDeviceHostname`
+/// (`mobile/src/main/java/net/activitywatch/android/DeviceHostname.kt`):
+/// trim, lowercase, replace `[^a-z0-9_-]+` with `_`, trim `_`. Empty result
+/// becomes `"unknown"`.
+///
+/// Divergence here forks destination buckets the day Android migrates its
+/// hostname column (ActivityWatch/aw-android#272) onto a different
+/// `-synced-from-` ID (ActivityWatch/activitywatch#1373).
+pub fn sanitize_hostname(raw: &str) -> String {
+    let value = raw.trim();
+    if value.is_empty() {
+        return "unknown".to_string();
+    }
+    let lower = value.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut in_run = false;
+    for c in lower.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+            out.push(c);
+            in_run = false;
+        } else if !in_run {
+            out.push('_');
+            in_run = true;
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
 ///
 /// Returns an error rather than panicking on a datastore failure or on bucket
@@ -376,32 +412,86 @@ fn get_or_create_sync_bucket(
         )
     };
 
+    // Look up the unsanitized ID first.  Any device that was synced before
+    // aw-android added hostname sanitization (ActivityWatch/aw-android#272) may
+    // have left a local bucket whose ID and hostname contain whitespace (e.g.
+    // `…-synced-from-POCO F8 Ultra`) or a case-only fork (`…-synced-from-PIXEL8`).
+    // Keep using that ID to avoid a full re-import (ActivityWatch/activitywatch#1373).
     match ds_to.get_bucket(new_id.as_str()) {
-        Ok(bucket) => Ok(bucket),
-        Err(DatastoreError::NoSuchBucket(_)) => {
-            let mut bucket_new = bucket_from.clone();
-            bucket_new.id = new_id.clone();
-            // Only stamp $aw.sync.origin on pull/import.  The derived origin already handles
-            // the legacy case: hostname is used when the source bucket has no metadata field.
-            if let Some(origin) = sync_origin {
-                bucket_new
-                    .data
-                    .insert("$aw.sync.origin".to_string(), serde_json::json!(origin));
-            } else {
-                // Push path: strip any stale $aw.sync.origin that bucket_from may carry
-                // (e.g. if it was previously imported by a pull).  Staging copies must
-                // never look like synced-from-remote buckets.
-                bucket_new.data.remove("$aw.sync.origin");
-            }
-            ds_to
-                .create_bucket(&bucket_new)
-                .map_err(|e| format!("Failed to create bucket '{new_id}': {e:?}"))?;
-            ds_to
-                .get_bucket(new_id.as_str())
-                .map_err(|e| format!("Failed to read back bucket '{new_id}': {e:?}"))
-        }
-        Err(e) => Err(format!("Failed to get bucket '{new_id}': {e:?}")),
+        Ok(bucket) => return Ok(bucket),
+        Err(DatastoreError::NoSuchBucket(_)) => {}
+        Err(e) => return Err(format!("Failed to get bucket '{new_id}': {e:?}")),
     }
+
+    // Always sanitize. DeviceHostname.kt lowercases and replaces punctuation,
+    // not just whitespace — `PIXEL8` vs `pixel8` is the same fork as
+    // `POCO F8 Ultra` vs `poco_f8_ultra`, just without spaces. Lookup order
+    // stays *raw ID → sanitized ID*; create under the sanitized ID whenever it
+    // differs from raw so Android's hostname-column migration lands on an
+    // existing bucket regardless of which character class differed.
+    //
+    // Desktop peers with dots (`erb-m2.localdomain`) will create
+    // `…-synced-from-erb-m2_localdomain` for *new* imports; existing ones are
+    // found via the raw lookup. That is a display wart the `(device_id, id)`
+    // identity work in ActivityWatch/activitywatch#302 removes — not a reason
+    // to keep the fork open.
+    let sanitized_hostname = sanitize_hostname(&bucket_from.hostname);
+    let sanitized_id = if let Some(ref origin) = sync_origin {
+        let orig_bucketid = bucket_from
+            .id
+            .split("-synced-from-")
+            .next()
+            .unwrap_or(bucket_from.id.as_str());
+        format!("{orig_bucketid}-synced-from-{}", sanitize_hostname(origin))
+    } else {
+        // Push path: keep the original bucket ID; only the hostname field
+        // needs to be a legal create_bucket value.
+        new_id.clone()
+    };
+    // Android maps empty/punctuation-only names to the "unknown" sentinel.
+    // Creating `-synced-from-unknown` on pull would mix every such remote
+    // into one destination — the same provenance hole the
+    // `hostname == "unknown"` guard in `sync_datastores` exists to close.
+    // Refuse; the per-bucket warn+continue then skips this bucket.
+    if !is_push
+        && (sanitized_hostname == "unknown" || sanitized_id.ends_with("-synced-from-unknown"))
+    {
+        return Err(format!(
+            "Bucket '{}' hostname sanitizes to the unknown sentinel; \
+             refusing to sync it without provenance",
+            bucket_from.id
+        ));
+    }
+    if sanitized_id != new_id {
+        match ds_to.get_bucket(sanitized_id.as_str()) {
+            Ok(bucket) => return Ok(bucket),
+            Err(DatastoreError::NoSuchBucket(_)) => {}
+            Err(e) => return Err(format!("Failed to get bucket '{sanitized_id}': {e:?}")),
+        }
+    }
+    let (final_id, final_hostname) = (sanitized_id, sanitized_hostname);
+
+    let mut bucket_new = bucket_from.clone();
+    bucket_new.id = final_id.clone();
+    bucket_new.hostname = final_hostname;
+    // Only stamp $aw.sync.origin on pull/import.  The derived origin already handles
+    // the legacy case: hostname is used when the source bucket has no metadata field.
+    if let Some(origin) = sync_origin {
+        bucket_new
+            .data
+            .insert("$aw.sync.origin".to_string(), serde_json::json!(origin));
+    } else {
+        // Push path: strip any stale $aw.sync.origin that bucket_from may carry
+        // (e.g. if it was previously imported by a pull).  Staging copies must
+        // never look like synced-from-remote buckets.
+        bucket_new.data.remove("$aw.sync.origin");
+    }
+    ds_to
+        .create_bucket(&bucket_new)
+        .map_err(|e| format!("Failed to create bucket '{final_id}': {e:?}"))?;
+    ds_to
+        .get_bucket(final_id.as_str())
+        .map_err(|e| format!("Failed to read back bucket '{final_id}': {e:?}"))
 }
 
 /// Number of events fetched per page in the chunked-fetch loop in `sync_one`.
@@ -528,10 +618,43 @@ pub fn sync_datastores(
     // Sync buckets in order of most recently updated
     buckets_from.sort_by_key(|b| b.metadata.end);
 
+    // Partial failure is non-fatal (one bad bucket must not skip the rest).
+    // Total failure must still be Err: otherwise a destination that is down
+    // reports success, which is the #682 silence reintroduced via #688's skip.
     let mut buckets = Vec::with_capacity(buckets_from.len());
+    let mut attempted = 0usize;
+    let mut succeeded = 0usize;
+    let mut last_err: Option<String> = None;
     for bucket_from in buckets_from {
-        let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push)?;
-        buckets.push(sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec)?);
+        attempted += 1;
+        let bucket_id = bucket_from.id.clone();
+        let bucket_to = match get_or_create_sync_bucket(&bucket_from, ds_to, is_push) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(" ! Skipping bucket '{}': {}", bucket_id, e);
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec) {
+            Ok(synced) => {
+                succeeded += 1;
+                buckets.push(synced);
+            }
+            Err(e) => {
+                warn!(
+                    " ! Skipping sync for bucket '{bucket_id}': {e}. \
+                     Destination may already contain a partial write; next pass resumes from dest newest"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    if attempted > 0 && succeeded == 0 {
+        return Err(format!(
+            "all {attempted} buckets failed; last error: {}",
+            last_err.as_deref().unwrap_or("unknown")
+        ));
     }
 
     Ok(buckets)
@@ -919,5 +1042,44 @@ mod pull_only_staging_tests {
             ds.close();
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod hostname_sanitize_tests {
+    use super::sanitize_hostname;
+
+    #[test]
+    fn poco_f8_ultra_matches_android() {
+        // The contract Erik asked for on ActivityWatch/aw-server-rust#697:
+        // whitespace-only replace would produce "POCO_F8_Ultra" and fork the
+        // day aw-android#272 migrates the phone's hostname column.
+        assert_eq!(sanitize_hostname("POCO F8 Ultra"), "poco_f8_ultra");
+        // Case-only fork: no whitespace, but Android still lowercases.
+        assert_eq!(sanitize_hostname("PIXEL8"), "pixel8");
+        // Dotted desktop hostname: punctuation becomes `_`.
+        assert_eq!(
+            sanitize_hostname("erb-m2.localdomain"),
+            "erb-m2_localdomain"
+        );
+    }
+
+    #[test]
+    fn android_device_hostname_contract() {
+        // Byte-identical to aw-android DeviceHostnameTest.kt.
+        assert_eq!(sanitize_hostname("Pixel 8"), "pixel_8");
+        assert_eq!(sanitize_hostname("My-Phone_1"), "my-phone_1");
+        assert_eq!(sanitize_hostname("  Pixel  8  "), "pixel_8");
+        assert_eq!(sanitize_hostname(""), "unknown");
+        assert_eq!(sanitize_hostname("   "), "unknown");
+        assert_eq!(sanitize_hostname("***"), "unknown");
+        // Whitespace + punctuation only: the get_or_create pull-refuse path.
+        assert_eq!(sanitize_hostname(" * "), "unknown");
+        assert_eq!(sanitize_hostname(" !!! "), "unknown");
+        assert_eq!(sanitize_hostname("PIXEL8"), "pixel8");
+        assert_eq!(
+            sanitize_hostname("erb-m2.localdomain"),
+            "erb-m2_localdomain"
+        );
     }
 }

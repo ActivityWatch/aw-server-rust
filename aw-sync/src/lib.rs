@@ -12,6 +12,7 @@ pub use report::{
 
 mod sync;
 pub use sync::create_datastore;
+pub use sync::sanitize_hostname;
 pub use sync::sync_datastores;
 pub use sync::sync_run;
 pub use sync::SyncSpec;

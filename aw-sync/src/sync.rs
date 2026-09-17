@@ -120,18 +120,20 @@ pub fn sync_run(
     // A single unreadable db must not abort the pass
     // (ActivityWatch/aw-server-rust#688): record it and keep walking; only a
     // total open failure is fatal.
+    // Peer datastores are only needed for pulling: a Push-only pass must not
+    // open (or abort on) peer databases at all — pushing only uses the local
+    // staging datastore, and unreadable/incompatible peers would otherwise
+    // block or silently taint a push pass.
     let mut ds_remotes = Vec::new();
-    match open_peer_datastores(
-        &selection.selected,
-        &mut report,
-        mode == SyncMode::Pull || mode == SyncMode::Both,
-    ) {
-        Ok(opened) => ds_remotes = opened,
-        Err(e) => {
-            report.finish();
-            crate::report::persist_last_report_warn(&report);
-            close_opened_datastores(&ds_remotes, &ds_localremote);
-            return Err(e.into());
+    if mode == SyncMode::Pull || mode == SyncMode::Both {
+        match open_peer_datastores(&selection.selected, &mut report, true) {
+            Ok(opened) => ds_remotes = opened,
+            Err(e) => {
+                report.finish();
+                crate::report::persist_last_report_warn(&report);
+                close_opened_datastores(&ds_remotes, &ds_localremote);
+                return Err(e.into());
+            }
         }
     }
 

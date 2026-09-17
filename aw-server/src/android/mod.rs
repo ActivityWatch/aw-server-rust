@@ -171,7 +171,15 @@ pub mod android {
     }
 
     fn start_server(port: u16) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        // On the JNI boundary we must not panic: surface the failure through
+        // the log instead (jni_guard_void would swallow a panic here anyway).
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                error!("startServer: failed to create tokio runtime: {}", e);
+                return;
+            }
+        };
         rt.block_on(start_server_impl(port));
     }
 

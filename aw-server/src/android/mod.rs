@@ -153,16 +153,17 @@ pub mod android {
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_startServer(
         env: JNIEnv,
         _: JClass,
+        port: jint,
     ) {
         jni_guard_void("startServer", || {
-            info!("Starting server...");
-            start_server();
+            info!("Starting server on port {}...", port);
+            start_server(port as u16);
             info!("Server exited");
         });
     }
 
     #[rocket::main]
-    async fn start_server() {
+    async fn start_server(port: u16) {
         info!("Building server state...");
 
         // FIXME: Why is unsafe needed here? Can we get rid of it?
@@ -175,7 +176,7 @@ pub mod android {
             info!("Using server_state:: device_id: {}", server_state.device_id);
 
             let mut server_config = crate::config::create_config("default", None);
-            server_config.port = 5600;
+            server_config.port = port;
 
             endpoints::build_rocket(server_state, server_config)
                 .launch()

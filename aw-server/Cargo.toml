@@ -59,4 +59,4 @@ libc = "0.2"
 android_logger = "0.13"
 openssl-sys = { version = "0.9.82", features = ["vendored"]}
 aw-client-rust = { path = "../aw-client-rust" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

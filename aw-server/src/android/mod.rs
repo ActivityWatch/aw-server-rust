@@ -154,8 +154,18 @@ pub mod android {
         port: jint,
     ) {
         jni_guard_void("startServer", || {
+            // `jint` is i32, so reject values that cannot be a listening port
+            // instead of letting `as u16` silently wrap (65536 -> 0 -> ephemeral
+            // port) or truncate a negative value.
+            let port = match u16::try_from(port) {
+                Ok(p) if p != 0 => p,
+                _ => {
+                    error!("startServer: invalid port {}; refusing to start", port);
+                    return;
+                }
+            };
             info!("Starting server on port {}...", port);
-            start_server(port as u16);
+            start_server(port);
             info!("Server exited");
         });
     }

@@ -925,8 +925,11 @@ fn file_name_string(path: &Path) -> Option<String> {
 /// walkers propagate I/O errors, an unreadable entry under one of them
 /// aborts the whole pass (ActivityWatch/aw-server-rust#689).
 fn is_dot_dir(path: &Path) -> bool {
+    // `to_string_lossy` (not `to_str`) so a non-UTF8 dot-directory name is
+    // still recognized: the leading `.` is valid ASCII and survives lossy
+    // conversion even when later bytes are replaced.
     path.file_name()
-        .and_then(|n| n.to_str())
+        .map(|n| n.to_string_lossy())
         .is_some_and(|n| n.starts_with('.'))
 }
 

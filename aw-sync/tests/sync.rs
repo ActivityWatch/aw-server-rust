@@ -405,7 +405,34 @@ mod sync_tests {
         }))
         .unwrap();
         state.ds_src.insert_events(healthy_id, &[ev]).unwrap();
+
+        // The ambiguous bucket must ALSO carry an event. Otherwise a regression that
+        // silently reused one of the two legacy candidates would copy nothing, both
+        // legacy buckets would still read 0 events, and the refusal assertions below
+        // would pass vacuously. With a real event present, only an actual skip keeps
+        // them at 0.
+        let ev_ambiguous: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "ambiguous"}
+        }))
+        .unwrap();
+        state
+            .ds_src
+            .insert_events(&src_bucket.id, &[ev_ambiguous])
+            .unwrap();
         state.ds_src.force_commit().unwrap();
+
+        // Premise guard: the refusal assertions below are only meaningful if the
+        // ambiguous source bucket actually has something to copy.
+        assert_eq!(
+            state
+                .ds_src
+                .get_event_count(&src_bucket.id, None, None)
+                .unwrap(),
+            1,
+            "premise: the ambiguous source bucket must carry one event"
+        );
 
         // Two legacy destination buckets whose origins both sanitize to "poco_f8_ultra".
         for (legacy_id, raw_origin) in [
@@ -456,7 +483,9 @@ mod sync_tests {
         assert!(healthy_count > 0, "healthy bucket must have events synced");
 
         // The two ambiguous legacy buckets were not written to — the conflict was
-        // skipped, not merged.
+        // skipped, not merged.  The source bucket holds an event (premise guard
+        // above), so a silent pick-one-candidate regression would make one of these
+        // counts 1 and fail here.
         for legacy_id in [
             "aw-watcher-android-synced-from-POCO F8 Ultra",
             "aw-watcher-android-synced-from-Poco F8 Ultra",

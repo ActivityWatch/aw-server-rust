@@ -294,17 +294,39 @@ mod sync_tests {
         .unwrap();
         state.ds_dest.create_bucket(&legacy_bucket).unwrap();
 
-        // Insert one event into the source so the sync pass has something to copy.
-        let ts = chrono::Utc::now();
-        let ev: Event = serde_json::from_value(serde_json::json!({
-            "timestamp": ts.to_rfc3339(),
+        // Seed the legacy destination bucket with one event at T0 — simulating
+        // previously-imported history.  This establishes the resume cursor.
+        let t0 = Utc::now();
+        let existing_event: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": t0.to_rfc3339(),
             "duration": 1,
-            "data": {"app": "test"}
+            "data": {"app": "existing"}
+        }))
+        .unwrap();
+        state
+            .ds_dest
+            .insert_events(legacy_id, &[existing_event])
+            .unwrap();
+        state.ds_dest.force_commit().unwrap();
+
+        // Two source events: one before T0 (already covered) and one after T0 (new).
+        // The sync must read the cursor from the reused bucket and import only the
+        // post-T0 event — not re-import everything from scratch.
+        let before_t0: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": (t0 - Duration::hours(1)).to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "old"}
+        }))
+        .unwrap();
+        let after_t0: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": (t0 + Duration::hours(1)).to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "new"}
         }))
         .unwrap();
         state
             .ds_src
-            .insert_events("aw-watcher-android", &[ev])
+            .insert_events("aw-watcher-android", &[before_t0, after_t0])
             .unwrap();
         state.ds_src.force_commit().unwrap();
 
@@ -331,12 +353,17 @@ mod sync_tests {
             "a sanitized fork must not be created; got: {:?}",
             dest_buckets.keys().collect::<Vec<_>>()
         );
-        // Events were imported into the legacy bucket, not lost.
+        // Exactly 2 events: the pre-existing one at T0 plus the new T0+1h event.
+        // A count of 3 would mean the cursor was NOT read (full re-import from scratch).
         let event_count = state
             .ds_dest
             .get_event_count(legacy_id, None, None)
             .unwrap();
-        assert!(event_count > 0, "legacy bucket must have received events");
+        assert_eq!(
+            event_count, 2,
+            "legacy bucket must have exactly 2 events (existing + new); \
+             3 would mean the cursor was ignored and history was re-imported"
+        );
     }
 
     /// Two distinct pre-#697 buckets for the same base ID whose `$aw.sync.origin`
@@ -346,7 +373,8 @@ mod sync_tests {
     fn test_pre697_origin_scan_refuses_ambiguous_candidates() {
         let state = init_teststate();
 
-        // Post-migration phone bucket.
+        // Ambiguous source bucket: two pre-#697 destination buckets share the same
+        // sanitized origin — sync_one must skip this bucket with a warning, not abort.
         let src_bucket: Bucket = serde_json::from_value(serde_json::json!({
             "id": "aw-watcher-android",
             "type": "currentwindow",
@@ -355,6 +383,29 @@ mod sync_tests {
         }))
         .unwrap();
         state.ds_src.create_bucket(&src_bucket).unwrap();
+
+        // A second, healthy source bucket that must sync successfully even while the
+        // ambiguous bucket is being skipped — one unresolvable bucket must not abort
+        // the whole peer sync.
+        let healthy_id = "aw-watcher-window";
+        let healthy_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": healthy_id,
+            "type": "currentwindow",
+            "hostname": "poco_f8_ultra",
+            "client": "aw-qt"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&healthy_bucket).unwrap();
+
+        let ts = Utc::now();
+        let ev: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "test"}
+        }))
+        .unwrap();
+        state.ds_src.insert_events(healthy_id, &[ev]).unwrap();
+        state.ds_src.force_commit().unwrap();
 
         // Two legacy destination buckets whose origins both sanitize to "poco_f8_ultra".
         for (legacy_id, raw_origin) in [
@@ -378,19 +429,47 @@ mod sync_tests {
             state.ds_dest.create_bucket(&b).unwrap();
         }
 
-        let result = aw_sync::sync_datastores(
+        // The ambiguous android bucket is skipped (warn+continue); the healthy window
+        // bucket syncs normally.  sync_datastores must return Ok overall.
+        aw_sync::sync_datastores(
             &state.ds_src,
             &state.ds_dest,
             false, // pull
             None,
             &SyncSpec::default(),
-        );
-        // The ambiguous-candidates path must fail rather than silently merge.
-        let err = result.expect_err("ambiguous pre-#697 buckets must return Err");
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+
+        // The healthy bucket was synced — it has a destination and received events.
+        let healthy_dest_id = "aw-watcher-window-synced-from-poco_f8_ultra";
         assert!(
-            err.contains("pre-#697 buckets share"),
-            "error should explain the ambiguity, got: {err}"
+            dest_buckets.contains_key(healthy_dest_id),
+            "healthy bucket must be synced even when another bucket is ambiguous; got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
         );
+        let healthy_count = state
+            .ds_dest
+            .get_event_count(healthy_dest_id, None, None)
+            .unwrap();
+        assert!(healthy_count > 0, "healthy bucket must have events synced");
+
+        // The two ambiguous legacy buckets were not written to — the conflict was
+        // skipped, not merged.
+        for legacy_id in [
+            "aw-watcher-android-synced-from-POCO F8 Ultra",
+            "aw-watcher-android-synced-from-Poco F8 Ultra",
+        ] {
+            let count = state
+                .ds_dest
+                .get_event_count(legacy_id, None, None)
+                .unwrap();
+            assert_eq!(
+                count, 0,
+                "ambiguous legacy bucket '{legacy_id}' must not have received events"
+            );
+        }
     }
 
     /// Case-only hostnames (`PIXEL8`) have no whitespace, so a whitespace-only

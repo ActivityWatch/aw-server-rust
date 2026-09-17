@@ -9,6 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -410,6 +411,11 @@ const BATCH_SIZE: usize = 5000;
 #[cfg(test)]
 const BATCH_SIZE: usize = 5;
 
+/// How far before the resume cursor to look for owner-originated edits of
+/// already-synced events (ActivityWatch/aw-android#253). Bounded so a full
+/// historical bucket is never loaded into memory on Android.
+const EDIT_RECONCILE_LOOKBACK: Duration = Duration::days(7);
+
 /// Whether a bucket holds data synced from another host, rather than data
 /// collected on this host.
 ///
@@ -531,6 +537,130 @@ pub fn sync_datastores(
     Ok(buckets)
 }
 
+fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
+    (
+        event.timestamp,
+        event.duration.num_nanoseconds().unwrap_or(0),
+    )
+}
+
+/// Replace dest events whose timestamp+duration still exist on the source but
+/// whose data changed.
+///
+/// WebUI/Android title edits are delete+insert at the same timestamp and
+/// duration. The resume cursor starts at the destination's latest event end,
+/// so those replacements are outside the incremental fetch window. Under the
+/// single-writer model the source is authoritative for its own buckets, so a
+/// same-identity row with different data is an owner-originated edit, not a
+/// conflict. Identity includes duration so two events that share a timestamp
+/// are not collapsed into one HashMap slot.
+///
+/// Duration-only updates of the live last event stay on the incremental
+/// heartbeat path. Must run *before* that copy: a latest-event title edit is
+/// also re-fetched as a start-clipped fragment, and heartbeat() refuses to
+/// merge different data, which would insert a duplicate unless dest already
+/// holds the new payload.
+fn reconcile_updated_events(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    bucket_from: &Bucket,
+    bucket_to: &Bucket,
+    resume_sync_at: Option<DateTime<Utc>>,
+) -> Result<(), String> {
+    let Some(resume) = resume_sync_at else {
+        return Ok(());
+    };
+    let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
+
+    // Bound both fetches to the lookback window ending at `resume`.
+    // end=None would load every newer source event when dest is far behind,
+    // exhausting Android RAM and bypassing the paginated incremental copy.
+    // get_events clips to the query range; dest-latest ends at `resume`, so
+    // that clip is a no-op on its (timestamp, duration) identity. Title edits
+    // keep duration; duration-only updates stay on the heartbeat path. Do not
+    // also cap by count — a newest-first cap silently skips older in-window
+    // edits.
+    //
+    // Datastore errors return rather than unwrap: a panic here aborts the
+    // whole pass (and on Android, the JNI frame). The per-bucket skip in
+    // ActivityWatch/aw-server-rust#697 then drops this bucket, not the daemon.
+    let source_events = ds_from.get_events(
+        bucket_from.id.as_str(),
+        Some(lookback_start),
+        Some(resume),
+        None,
+    )?;
+    let dest_events = ds_to.get_events(
+        bucket_to.id.as_str(),
+        Some(lookback_start),
+        Some(resume),
+        None,
+    )?;
+
+    let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
+    for event in dest_events {
+        if event.timestamp >= lookback_start && event.timestamp < resume {
+            dest_by_identity
+                .entry(event_identity(&event))
+                .or_default()
+                .push(event);
+        }
+    }
+
+    let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
+    for src in source_events {
+        // Skip events that start at/after the dest cursor; the incremental
+        // copy owns those. Do not use end>resume: the dest-latest event starts
+        // before resume and must still be title-reconciled.
+        if src.timestamp < lookback_start || src.timestamp >= resume {
+            continue;
+        }
+        src_by_identity
+            .entry(event_identity(&src))
+            .or_default()
+            .push(src);
+    }
+
+    for (identity, srcs) in src_by_identity {
+        let mut dsts = match dest_by_identity.remove(&identity) {
+            Some(dsts) if !dsts.is_empty() => dsts,
+            _ => continue,
+        };
+        let mut to_insert = Vec::new();
+        for src in srcs {
+            if let Some(idx) = dsts.iter().position(|dst| dst.data == src.data) {
+                // Still present on dest — keep it, including same-identity
+                // siblings a later source row must not treat as stale.
+                dsts.remove(idx);
+            } else {
+                to_insert.push(src);
+            }
+        }
+        if to_insert.is_empty() && dsts.is_empty() {
+            continue;
+        }
+        let ts = identity.0;
+        // Insert before delete so a crash cannot drop the row. A later pass
+        // sees matching data, skips insert, and still removes remaining stale ids.
+        if !to_insert.is_empty() {
+            let replacements: Vec<Event> = to_insert
+                .into_iter()
+                .map(|mut src| {
+                    src.id = None;
+                    src
+                })
+                .collect();
+            ds_to.insert_events(bucket_to.id.as_str(), replacements)?;
+        }
+        let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
+        if !stale.is_empty() {
+            ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
+        }
+        info!("   ~ Reconciled edited event at {:?}", ts);
+    }
+    Ok(())
+}
+
 /// Syncs a single bucket from one datastore to another
 fn sync_one(
     ds_from: &dyn AccessMethod,
@@ -559,6 +689,8 @@ fn sync_one(
     } else {
         info!("   + Starting from beginning");
     }
+
+    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
 
     // Fetch events in bounded chunks to avoid OOM on devices with limited RAM (e.g. Android).
     // get_events returns events in descending order (newest first), so we paginate backwards

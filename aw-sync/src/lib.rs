@@ -4,6 +4,12 @@ extern crate chrono;
 extern crate serde;
 extern crate serde_json;
 
+mod report;
+pub use report::{
+    last_report_path, load_last_report, persist_last_report, persist_last_report_warn,
+    BucketReport, PeerOutcome, PeerReport, SyncMode, SyncReport,
+};
+
 mod sync;
 pub use sync::create_datastore;
 pub use sync::sync_datastores;

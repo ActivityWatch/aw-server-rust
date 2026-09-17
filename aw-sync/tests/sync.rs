@@ -222,6 +222,39 @@ mod sync_tests {
         assert!(buckets_src.len() == buckets_dest.len());
     }
 
+    #[test]
+    fn test_sync_datastores_returns_new_event_counts() {
+        let state = init_teststate();
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        create_events(&state.ds_src, &bucket_id, 3);
+
+        let reports = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].events_new, 3);
+        assert!(
+            reports[0].bucket_id.contains("-synced-from-"),
+            "pull destination id should carry provenance, got {}",
+            reports[0].bucket_id
+        );
+
+        let second = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(second[0].events_new, 0, "second pull must be a no-op");
+    }
+
     /// On pull (is_push=false), the destination bucket should have $aw.sync.origin set to
     /// the source bucket's hostname.  On push (is_push=true), $aw.sync.origin must NOT be
     /// written to the staging copy.

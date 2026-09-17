@@ -32,6 +32,7 @@ aw-sync daemon --mode pull
 aw-sync sync --start-date "2024-01-01"
 
 # Doctor: why is pull empty / which peers exist in the folder?
+# Also prints the last persisted pass (peers, events, skips).
 aw-sync status
 ```
 

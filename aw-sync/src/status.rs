@@ -92,6 +92,21 @@ pub fn collect_status(
     ));
     out.push('\n');
 
+    match crate::report::load_last_report() {
+        Ok(Some(report)) => {
+            out.push_str(&report.to_string());
+            out.push('\n');
+        }
+        Ok(None) => {
+            out.push_str("Last pass: (none — no pass has been persisted yet)\n\n");
+        }
+        Err(e) => {
+            out.push_str(&format!(
+                "Last pass: (could not read last-sync-report.json: {e})\n\n"
+            ));
+        }
+    }
+
     if inspected.is_empty() {
         out.push_str("Entries: (none)\n");
     } else {

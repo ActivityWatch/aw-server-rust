@@ -2,32 +2,68 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-use crate::sync::{sync_run, SyncMode, SyncSpec};
+use crate::report::{PeerReport, SyncMode, SyncReport};
+use crate::sync::{sync_run, SyncSpec};
 use aw_client_rust::blocking::AwClient;
 
-pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
+pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
     let sync_root = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
     let dbs = crate::util::list_remote_dbs(&sync_root)?;
-    let selected = crate::util::select_remote_dbs_by_device_id(dbs);
-    if selected.is_empty() {
+    let selection = crate::util::select_remote_dbs_detailed(dbs);
+    let mut report = SyncReport::new(SyncMode::Pull);
+    for skipped in &selection.skipped {
+        report.peers.push(PeerReport::skipped(
+            skipped.db.device_id.clone(),
+            skipped.db.hostname.clone(),
+            skipped.db.path.clone(),
+            skipped.reason.clone(),
+        ));
+    }
+    let found: Vec<_> = selection.selected.iter().map(|d| d.path.clone()).collect();
+    // No get_info() here: reqwest's client timeout is 120s, and an empty-dir
+    // pass (#682) must stay a local filesystem check. `None` is unknown, not
+    // `Some("")` — empty string does not unclassify entries, and leftover
+    // 2-level own staging then shows up as "peer db(s) that pull did not select".
+    report.capture_warnings(crate::util::pull_discovery_warnings(
+        &sync_root, None, &found,
+    ));
+    if selection.selected.is_empty() {
         info!("No remote databases found in {:?}", sync_root);
-        return Ok(());
+        report.finish();
+        return Ok(report);
     }
     info!(
         "Pulling {} remote database(s): {:?}",
-        selected.len(),
-        selected
+        selection.selected.len(),
+        selection
+            .selected
             .iter()
             .map(|d| d.path.display().to_string())
             .collect::<Vec<_>>()
     );
-    for remote in selected {
-        pull_db(client, &remote.hostname, &remote.path)?;
+    for remote in selection.selected {
+        match pull_db(client, &remote.hostname, &remote.path) {
+            Ok(one) => report.merge(one),
+            Err(e) => {
+                report.peers.push(PeerReport::failed(
+                    remote.device_id,
+                    remote.hostname,
+                    remote.path,
+                    e.to_string(),
+                ));
+                report.finish();
+                // Persist the aggregate (earlier peers + this failure), not
+                // only the phase-local report from the failing `sync_run`.
+                crate::report::persist_last_report_warn(&report);
+                return Err(e);
+            }
+        }
     }
-    Ok(())
+    report.finish();
+    Ok(report)
 }
 
-pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
+pub fn pull(host: &str, client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
     // Path to the sync folder
     // Sync folder is structured ./{hostname}/{device_id}/test.db
     let sync_root_dir = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
@@ -61,7 +97,7 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
     pull_db(client, host, &db.path())
 }
 
-fn pull_db(client: &AwClient, host: &str, db_path: &Path) -> Result<(), Box<dyn Error>> {
+fn pull_db(client: &AwClient, host: &str, db_path: &Path) -> Result<SyncReport, Box<dyn Error>> {
     client.wait_for_start()?;
     let sync_root_dir = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
     let sync_dir = sync_root_dir.join(host);
@@ -71,15 +107,14 @@ fn pull_db(client: &AwClient, host: &str, db_path: &Path) -> Result<(), Box<dyn 
         buckets: None, // Sync all buckets by default
         start: None,
     };
-    sync_run(client, &sync_spec, SyncMode::Pull)?;
-    Ok(())
+    sync_run(client, &sync_spec, SyncMode::Pull)
 }
 
-pub fn push(client: &AwClient) -> Result<(), Box<dyn Error>> {
+pub fn push(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
     push_with_hostname(client, &client.hostname)
 }
 
-pub fn push_with_hostname(client: &AwClient, hostname: &str) -> Result<(), Box<dyn Error>> {
+pub fn push_with_hostname(client: &AwClient, hostname: &str) -> Result<SyncReport, Box<dyn Error>> {
     let sync_dir = crate::dirs::get_sync_dir()
         .map_err(|_| "Could not get sync dir")?
         .join(hostname);
@@ -90,7 +125,5 @@ pub fn push_with_hostname(client: &AwClient, hostname: &str) -> Result<(), Box<d
         buckets: None, // Sync all buckets by default
         start: None,
     };
-    sync_run(client, &sync_spec, SyncMode::Push)?;
-
-    Ok(())
+    sync_run(client, &sync_spec, SyncMode::Push)
 }

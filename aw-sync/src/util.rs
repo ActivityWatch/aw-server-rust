@@ -271,6 +271,39 @@ mod tests {
     }
 
     #[test]
+    fn select_remote_dbs_detailed_reports_duplicate_skips() {
+        let winner = super::RemoteDb {
+            hostname: "host-a".into(),
+            device_id: "aaa".into(),
+            path: std::path::PathBuf::from("/sync/host-a/aaa/test.db"),
+            size: 100,
+        };
+        let loser = super::RemoteDb {
+            hostname: "host-a-old".into(),
+            device_id: "aaa".into(),
+            path: std::path::PathBuf::from("/sync/host-a-old/aaa/test.db"),
+            size: 10,
+        };
+        let other = super::RemoteDb {
+            hostname: "host-b".into(),
+            device_id: "bbb".into(),
+            path: std::path::PathBuf::from("/sync/host-b/bbb/test.db"),
+            size: 1,
+        };
+        let selection =
+            super::select_remote_dbs_detailed(vec![winner.clone(), loser.clone(), other.clone()]);
+        assert_eq!(selection.selected, vec![winner.clone(), other]);
+        assert_eq!(selection.skipped.len(), 1);
+        assert_eq!(selection.skipped[0].db, loser);
+        assert!(selection.skipped[0]
+            .reason
+            .contains("duplicate device_id aaa"));
+        assert!(selection.skipped[0]
+            .reason
+            .contains("/sync/host-a/aaa/test.db"));
+    }
+
+    #[test]
     fn select_db_paths_keeps_largest_per_device_id() {
         let root = temp_sync_root();
         let large = write_remote_db(&root, "poco_f8_ultra", "device-1", 64);
@@ -354,6 +387,20 @@ pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>
     Ok(dbs)
 }
 
+/// A remote that `select_remote_dbs_detailed` chose not to import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkippedRemote {
+    pub db: RemoteDb,
+    pub reason: String,
+}
+
+/// Selected remotes plus the duplicates that were dropped.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RemoteSelection {
+    pub selected: Vec<RemoteDb>,
+    pub skipped: Vec<SkippedRemote>,
+}
+
 /// Keep one database per `device_id`, preferring the largest file.
 ///
 /// A hostname change (or sanitization) can leave the same device writing under
@@ -361,27 +408,43 @@ pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>
 /// bucket hostname, so both land in the same destination bucket, and resume
 /// then silently drops the older history. See ActivityWatch/aw-server-rust#683.
 pub(crate) fn select_remote_dbs_by_device_id(dbs: Vec<RemoteDb>) -> Vec<RemoteDb> {
+    select_remote_dbs_detailed(dbs).selected
+}
+
+/// Same collapse as [`select_remote_dbs_by_device_id`], but keeps the losers
+/// so a `SyncReport` can record `PeerOutcome::Skipped` instead of a log line.
+pub(crate) fn select_remote_dbs_detailed(dbs: Vec<RemoteDb>) -> RemoteSelection {
     let mut by_device: HashMap<String, Vec<RemoteDb>> = HashMap::new();
     for db in dbs {
         by_device.entry(db.device_id.clone()).or_default().push(db);
     }
 
     let mut selected = Vec::with_capacity(by_device.len());
+    let mut skipped = Vec::new();
     for (device_id, mut group) in by_device {
         group.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
         let mut group = group.into_iter();
         let winner = group.next().expect("device_id group is non-empty");
-        let skipped: Vec<String> = group
-            .map(|d| format!("{} ({} bytes)", d.path.display(), d.size))
-            .collect();
-        if !skipped.is_empty() {
+        let losers: Vec<RemoteDb> = group.collect();
+        if !losers.is_empty() {
+            let skip_paths: Vec<String> = losers
+                .iter()
+                .map(|d| format!("{} ({} bytes)", d.path.display(), d.size))
+                .collect();
             warn!(
                 "device_id {device_id} appears under {} folders; using largest {} ({} bytes), skipping: {:?}",
-                skipped.len() + 1,
+                losers.len() + 1,
                 winner.path.display(),
                 winner.size,
-                skipped
+                skip_paths
             );
+            for db in losers {
+                let reason = format!(
+                    "duplicate device_id {device_id}; kept larger {}",
+                    winner.path.display()
+                );
+                skipped.push(SkippedRemote { db, reason });
+            }
         }
         selected.push(winner);
     }
@@ -391,7 +454,8 @@ pub(crate) fn select_remote_dbs_by_device_id(dbs: Vec<RemoteDb>) -> Vec<RemoteDb
             .then_with(|| a.device_id.cmp(&b.device_id))
             .then_with(|| a.path.cmp(&b.path))
     });
-    selected
+    skipped.sort_by(|a, b| a.db.path.cmp(&b.db.path));
+    RemoteSelection { selected, skipped }
 }
 
 /// 2-level walker: `{sync_directory}/{x}/*.db`.
@@ -436,6 +500,21 @@ pub fn find_remotes_nonlocal(
     device_id: &str,
     sync_db: Option<&PathBuf>,
 ) -> std::io::Result<Vec<PathBuf>> {
+    Ok(
+        find_remotes_nonlocal_selection(sync_directory, device_id, sync_db)?
+            .selected
+            .into_iter()
+            .map(|d| d.path)
+            .collect(),
+    )
+}
+
+/// Same as [`find_remotes_nonlocal`], plus the duplicate-device_id skips.
+pub(crate) fn find_remotes_nonlocal_selection(
+    sync_directory: &Path,
+    device_id: &str,
+    sync_db: Option<&PathBuf>,
+) -> std::io::Result<RemoteSelection> {
     let remotes_all = find_remotes(sync_directory)?;
     let filtered: Vec<PathBuf> = remotes_all
         .into_iter()
@@ -450,11 +529,20 @@ pub fn find_remotes_nonlocal(
             }
         })
         .collect();
-    Ok(select_db_paths_by_device_id(filtered))
+    Ok(paths_to_remote_selection(filtered))
 }
 
 /// Collapse `{…}/{device_id}/*.db` paths to the largest file per device_id.
+#[cfg(test)]
 fn select_db_paths_by_device_id(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths_to_remote_selection(paths)
+        .selected
+        .into_iter()
+        .map(|d| d.path)
+        .collect()
+}
+
+fn paths_to_remote_selection(paths: Vec<PathBuf>) -> RemoteSelection {
     let dbs: Vec<RemoteDb> = paths
         .into_iter()
         .filter_map(|path| {
@@ -475,10 +563,7 @@ fn select_db_paths_by_device_id(paths: Vec<PathBuf>) -> Vec<PathBuf> {
             })
         })
         .collect();
-    select_remote_dbs_by_device_id(dbs)
-        .into_iter()
-        .map(|d| d.path)
-        .collect()
+    select_remote_dbs_detailed(dbs)
 }
 
 /// How a database sits in the sync folder.
@@ -800,12 +885,19 @@ pub fn format_bytes(n: u64) -> String {
 }
 
 /// Warn-lines for a pull that found no remotes, or that missed classified peers.
+///
+/// `local_device_id` is `None` when the local server was not contacted
+/// (`pull_all` must not `get_info()` — that call has a 120s HTTP timeout).
+/// Empty string is treated as unknown: `Some("")` is not unclassified, it
+/// makes `path.contains("")` true and leftover 2-level own staging look like
+/// a peer that pull failed to select.
 pub fn pull_discovery_warnings(
     sync_directory: &Path,
-    local_device_id: &str,
+    local_device_id: Option<&str>,
     found_remotes: &[PathBuf],
 ) -> Vec<String> {
-    let scan = match scan_sync_dir(sync_directory, Some(local_device_id)) {
+    let local_device_id = local_device_id.filter(|s| !s.is_empty());
+    let scan = match scan_sync_dir(sync_directory, local_device_id) {
         Ok(entries) => entries,
         Err(e) => {
             return vec![format!(
@@ -820,7 +912,24 @@ pub fn pull_discovery_warnings(
     let missed: Vec<&SyncDirEntry> = scan
         .iter()
         .filter(|e| {
-            e.kind == SyncEntryKind::Peer && e.db_path.as_ref().is_some_and(|p| !found.contains(p))
+            if e.kind != SyncEntryKind::Peer {
+                return false;
+            }
+            let Some(path) = e.db_path.as_ref() else {
+                return false;
+            };
+            if found.contains(path) {
+                return false;
+            }
+            // Without a local id, 2-level leftovers cannot be told from own
+            // staging (`{sync_root}/{device_id}/test.db`). `pull_all` also
+            // never selects 2-level, so calling them "unselected peers" is
+            // a false diagnostic. Known local id keeps the mixed-layout
+            // warning for a real 2-level *peer*.
+            if local_device_id.is_none() && e.layout == Some(SyncLayout::TwoLevel) {
+                return false;
+            }
+            true
         })
         .collect();
 
@@ -1031,7 +1140,7 @@ mod scan_tests {
             "skipped duplicate must use the pull selector: {skipped:?}"
         );
 
-        let warnings = pull_discovery_warnings(&root, local, &[]);
+        let warnings = pull_discovery_warnings(&root, Some(local), &[]);
         let joined = warnings.join("\n");
         assert!(
             joined.contains("Found 0 remote db files"),
@@ -1100,12 +1209,44 @@ mod scan_tests {
         assert!(peer_entry.not_visible_to_daemon.is_none());
 
         let found = vec![root.join(peer).join("test.db")];
-        let warnings = pull_discovery_warnings(&root, local, &found);
+        let warnings = pull_discovery_warnings(&root, Some(local), &found);
         assert!(
             warnings
                 .iter()
                 .all(|l| !l.contains("Found 0 remote db files")),
             "should not warn about empty remotes when a 2-level peer was found: {warnings:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unknown_local_id_does_not_report_two_level_leftover_as_unselected_peer() {
+        // Mixed layout: leftover 2-level own staging (pre-#685) plus a
+        // 3-level peer that pull_all selected. Passing "" used to classify
+        // the leftover as Peer and warn "pull did not select".
+        let root = temp_sync_dir();
+        let local = "local-device";
+        let peer = "peer-device";
+        touch_db(&root.join(local).join("test.db"), 64);
+        let peer_db = root.join("other-host").join(peer).join("test.db");
+        touch_db(&peer_db, 273);
+        let found = vec![peer_db];
+
+        let unknown = pull_discovery_warnings(&root, None, &found).join("\n");
+        assert!(
+            !unknown.contains("pull did not select"),
+            "unknown local id must not call leftover 2-level own staging a missed peer: {unknown}"
+        );
+        let empty_str = pull_discovery_warnings(&root, Some(""), &found).join("\n");
+        assert!(
+            !empty_str.contains("pull did not select"),
+            "empty string is unknown, not a match-everything id: {empty_str}"
+        );
+        let known = pull_discovery_warnings(&root, Some(local), &found).join("\n");
+        assert!(
+            !known.contains("pull did not select"),
+            "known local id classifies 2-level own as OwnStaging: {known}"
         );
 
         let _ = fs::remove_dir_all(root);

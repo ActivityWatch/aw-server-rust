@@ -295,6 +295,7 @@ dependencies = [
  "serde_json",
  "subtle",
  "tempfile",
+ "tokio",
  "toml",
  "uuid",
 ]

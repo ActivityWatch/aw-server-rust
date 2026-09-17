@@ -37,8 +37,6 @@ pub mod android {
 
     use crate::panic_guard::catch_panic;
 
-    use std::path::PathBuf;
-
     use crate::endpoints;
     use crate::endpoints::ServerState;
     use aw_client_rust::classes::{classes_from_settings_str, default_classes};
@@ -151,7 +149,7 @@ pub mod android {
 
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_startServer(
-        env: JNIEnv,
+        _env: JNIEnv,
         _: JClass,
         port: jint,
     ) {
@@ -162,8 +160,12 @@ pub mod android {
         });
     }
 
-    #[rocket::main]
-    async fn start_server(port: u16) {
+    fn start_server(port: u16) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(start_server_impl(port));
+    }
+
+    async fn start_server_impl(port: u16) {
         info!("Building server state...");
 
         // FIXME: Why is unsafe needed here? Can we get rid of it?
@@ -178,7 +180,7 @@ pub mod android {
             let mut server_config = crate::config::create_config("default", None);
             server_config.port = port;
 
-            endpoints::build_rocket(server_state, server_config)
+            let _ = endpoints::build_rocket(server_state, server_config)
                 .launch()
                 .await;
         }

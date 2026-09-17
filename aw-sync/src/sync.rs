@@ -547,6 +547,69 @@ fn get_or_create_sync_bucket(
             Err(e) => return Err(format!("Failed to get bucket '{sanitized_id}': {e:?}")),
         }
     }
+
+    // Pre-#697 origin-based fallback (ActivityWatch/aw-server-rust#707):
+    // Both exact lookups missed.  A desktop that imported the peer before
+    // ActivityWatch/aw-server-rust#697 landed holds the raw hostname from that
+    // day (e.g. `…-synced-from-POCO F8 Ultra`) with `$aw.sync.origin` set to
+    // that same raw value.  After ActivityWatch/aw-android#273 migrates the
+    // phone's staging hostname to `poco_f8_ultra`, first-hand buckets carry no
+    // `$aw.sync.origin`, so both lookups above miss and the whole history gets
+    // re-imported.  Scan the destination's -synced-from- buckets for one whose
+    // base ID matches and whose `$aw.sync.origin` sanitizes to the same target.
+    if !is_push {
+        let target_base = bucket_from
+            .id
+            .split("-synced-from-")
+            .next()
+            .unwrap_or(bucket_from.id.as_str());
+        let target_sanitized = sanitize_hostname(
+            sync_origin
+                .as_deref()
+                .unwrap_or(bucket_from.hostname.as_str()),
+        );
+        let all_dest = ds_to
+            .get_buckets()
+            .map_err(|e| format!("Failed to list dest buckets for origin scan: {e:?}"))?;
+        let mut candidates: Vec<Bucket> = all_dest
+            .into_values()
+            .filter(|b| {
+                let b_base = b.id.split("-synced-from-").next().unwrap_or(&b.id);
+                if b_base != target_base {
+                    return false;
+                }
+                // $aw.sync.origin must be present and sanitize to the same value.
+                b.data
+                    .get("$aw.sync.origin")
+                    .and_then(|v| v.as_str())
+                    .map(|s| sanitize_hostname(s) == target_sanitized)
+                    .unwrap_or(false)
+            })
+            .collect();
+        match candidates.len() {
+            0 => {} // fall through to create a new bucket
+            1 => {
+                let found = candidates.remove(0);
+                info!(
+                    "   ↩  Reusing pre-#697 bucket '{}' for '{}'",
+                    found.id, bucket_from.id
+                );
+                return Ok(found);
+            }
+            n => {
+                // Two distinct pre-#697 buckets share the same sanitized origin —
+                // ambiguous.  Refuse rather than silently merging distinct histories
+                // (ActivityWatch/aw-server-rust#697 :368).
+                let ids: Vec<&str> = candidates.iter().map(|b| b.id.as_str()).collect();
+                return Err(format!(
+                    "Cannot resolve destination for '{}': {n} pre-#697 buckets share \
+                     sanitized origin '{}': {ids:?}; deduplicate manually",
+                    bucket_from.id, target_sanitized
+                ));
+            }
+        }
+    }
+
     let (final_id, final_hostname) = (sanitized_id, sanitized_hostname);
 
     let mut bucket_new = bucket_from.clone();

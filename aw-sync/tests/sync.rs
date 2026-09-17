@@ -261,6 +261,138 @@ mod sync_tests {
         );
     }
 
+    /// A desktop that imported the peer **before** ActivityWatch/aw-server-rust#697
+    /// landed holds `…-synced-from-POCO F8 Ultra` (raw, with `$aw.sync.origin` set
+    /// to the raw value by #697's import stamp).  After ActivityWatch/aw-android#273
+    /// migrates the phone's hostname to `poco_f8_ultra`, first-hand buckets carry no
+    /// `$aw.sync.origin`, so the two direct lookups miss.  The pre-#697 fallback scan
+    /// must find the legacy bucket and resume from it rather than creating a new one
+    /// that triggers a full re-import.
+    #[test]
+    fn test_pre697_origin_scan_resumes_legacy_bucket() {
+        let state = init_teststate();
+
+        // Post-migration phone bucket: sanitized hostname, no $aw.sync.origin.
+        let src_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "poco_f8_ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&src_bucket).unwrap();
+
+        // Pre-#697 destination bucket: raw ID + $aw.sync.origin stamped by #697.
+        let legacy_id = "aw-watcher-android-synced-from-POCO F8 Ultra";
+        let legacy_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": legacy_id,
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android",
+            "data": {"$aw.sync.origin": "POCO F8 Ultra"}
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&legacy_bucket).unwrap();
+
+        // Insert one event into the source so the sync pass has something to copy.
+        let ts = chrono::Utc::now();
+        let ev: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "test"}
+        }))
+        .unwrap();
+        state
+            .ds_src
+            .insert_events("aw-watcher-android", &[ev])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+
+        // The legacy bucket must be reused, not replaced.
+        assert!(
+            dest_buckets.contains_key(legacy_id),
+            "legacy bucket must be preserved"
+        );
+        // No new sanitized fork must appear.
+        let forked_id = "aw-watcher-android-synced-from-poco_f8_ultra";
+        assert!(
+            !dest_buckets.contains_key(forked_id),
+            "a sanitized fork must not be created; got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        // Events were imported into the legacy bucket, not lost.
+        let event_count = state
+            .ds_dest
+            .get_event_count(legacy_id, None, None)
+            .unwrap();
+        assert!(event_count > 0, "legacy bucket must have received events");
+    }
+
+    /// Two distinct pre-#697 buckets for the same base ID whose `$aw.sync.origin`
+    /// values sanitize to the same target must trigger an error rather than a
+    /// silent merge (ActivityWatch/aw-server-rust#697 :368).
+    #[test]
+    fn test_pre697_origin_scan_refuses_ambiguous_candidates() {
+        let state = init_teststate();
+
+        // Post-migration phone bucket.
+        let src_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "poco_f8_ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&src_bucket).unwrap();
+
+        // Two legacy destination buckets whose origins both sanitize to "poco_f8_ultra".
+        for (legacy_id, raw_origin) in [
+            (
+                "aw-watcher-android-synced-from-POCO F8 Ultra",
+                "POCO F8 Ultra",
+            ),
+            (
+                "aw-watcher-android-synced-from-Poco F8 Ultra",
+                "Poco F8 Ultra",
+            ),
+        ] {
+            let b: Bucket = serde_json::from_value(serde_json::json!({
+                "id": legacy_id,
+                "type": "currentwindow",
+                "hostname": raw_origin,
+                "client": "aw-android",
+                "data": {"$aw.sync.origin": raw_origin}
+            }))
+            .unwrap();
+            state.ds_dest.create_bucket(&b).unwrap();
+        }
+
+        let result = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        );
+        // The ambiguous-candidates path must fail rather than silently merge.
+        let err = result.expect_err("ambiguous pre-#697 buckets must return Err");
+        assert!(
+            err.contains("pre-#697 buckets share"),
+            "error should explain the ambiguity, got: {err}"
+        );
+    }
+
     /// Case-only hostnames (`PIXEL8`) have no whitespace, so a whitespace-only
     /// guard would leave the destination as `…-synced-from-PIXEL8`. Android's
     /// later hostname migration produces `pixel8` and forks the history.

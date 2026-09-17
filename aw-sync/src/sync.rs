@@ -22,7 +22,7 @@ use aw_models::{Bucket, Event};
 
 use crate::accessmethod::AccessMethod;
 use crate::report::{BucketReport, PeerReport};
-use crate::util::find_remotes_nonlocal_selection;
+use crate::util::{find_remotes_nonlocal_selection, RemoteDb};
 
 pub use crate::report::{SyncMode, SyncReport};
 
@@ -117,35 +117,21 @@ pub fn sync_run(
     // (ActivityWatch/aw-server-rust#693). Version mismatch is skipped, not fatal —
     // but it must be *visible*: record it on the report so status/JNI do not
     // present an all-incompatible pass as a clean empty one.
+    // A single unreadable db must not abort the pass
+    // (ActivityWatch/aw-server-rust#688): record it and keep walking; only a
+    // total open failure is fatal.
     let mut ds_remotes = Vec::new();
-    for db in &selection.selected {
-        match open_peer_datastore(&db.path) {
-            Ok(OpenedPeer::Ready(ds)) => ds_remotes.push((db.clone(), ds)),
-            Ok(OpenedPeer::Incompatible(msg)) => {
-                if mode == SyncMode::Pull || mode == SyncMode::Both {
-                    report.peers.push(PeerReport::skipped(
-                        db.device_id.clone(),
-                        db.hostname.clone(),
-                        db.path.clone(),
-                        format!("incompatible database version: {msg}"),
-                    ));
-                }
-            }
-            Err(e) => {
-                warn!("Failed to open remote db {}: {e}", db.path.display());
-                if mode == SyncMode::Pull || mode == SyncMode::Both {
-                    report.peers.push(PeerReport::failed(
-                        db.device_id.clone(),
-                        db.hostname.clone(),
-                        db.path.clone(),
-                        e.clone(),
-                    ));
-                    report.finish();
-                    crate::report::persist_last_report_warn(&report);
-                }
-                close_opened_datastores(&ds_remotes, &ds_localremote);
-                return Err(e.into());
-            }
+    match open_peer_datastores(
+        &selection.selected,
+        &mut report,
+        mode == SyncMode::Pull || mode == SyncMode::Both,
+    ) {
+        Ok(opened) => ds_remotes = opened,
+        Err(e) => {
+            report.finish();
+            crate::report::persist_last_report_warn(&report);
+            close_opened_datastores(&ds_remotes, &ds_localremote);
+            return Err(e.into());
         }
     }
 
@@ -160,27 +146,15 @@ pub fn sync_run(
     // Pull
     if mode == SyncMode::Pull || mode == SyncMode::Both {
         info!("Pulling...");
-        for (db, ds_from) in &ds_remotes {
-            match sync_datastores(ds_from, client, false, None, sync_spec) {
-                Ok(buckets) => report.peers.push(PeerReport::imported(
-                    db.device_id.clone(),
-                    db.hostname.clone(),
-                    db.path.clone(),
-                    buckets,
-                )),
-                Err(e) => {
-                    report.peers.push(PeerReport::failed(
-                        db.device_id.clone(),
-                        db.hostname.clone(),
-                        db.path.clone(),
-                        e.clone(),
-                    ));
-                    report.finish();
-                    crate::report::persist_last_report_warn(&report);
-                    close_opened_datastores(&ds_remotes, &ds_localremote);
-                    return Err(e.into());
-                }
-            }
+        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = ds_remotes
+            .iter()
+            .map(|(db, ds)| (db, ds as &dyn AccessMethod))
+            .collect();
+        if let Err(e) = pull_from_remotes(&remotes, client, sync_spec, &mut report, true) {
+            report.finish();
+            crate::report::persist_last_report_warn(&report);
+            close_opened_datastores(&ds_remotes, &ds_localremote);
+            return Err(e.into());
         }
     }
 
@@ -330,6 +304,108 @@ fn open_peer_datastore(path: &Path) -> Result<OpenedPeer, String> {
             path.display()
         )),
     }
+}
+
+/// Open each discovered peer db, skipping unreadable ones.
+///
+/// A single unreadable peer is recorded (when `record_peers`) and skipped, not
+/// fatal (ActivityWatch/aw-server-rust#688). Only a total open failure — every
+/// discovered peer failed to open, none usable — is `Err`, so a broken folder
+/// is not reported as a clean empty pass.
+fn open_peer_datastores(
+    selected: &[RemoteDb],
+    report: &mut SyncReport,
+    record_peers: bool,
+) -> Result<Vec<(RemoteDb, Datastore)>, String> {
+    let mut opened: Vec<(RemoteDb, Datastore)> = Vec::new();
+    let mut failures = 0usize;
+    let mut last_err: Option<String> = None;
+    for db in selected {
+        match open_peer_datastore(&db.path) {
+            Ok(OpenedPeer::Ready(ds)) => opened.push((db.clone(), ds)),
+            Ok(OpenedPeer::Incompatible(msg)) => {
+                if record_peers {
+                    report.peers.push(PeerReport::skipped(
+                        db.device_id.clone(),
+                        db.hostname.clone(),
+                        db.path.clone(),
+                        format!("incompatible database version: {msg}"),
+                    ));
+                }
+            }
+            Err(e) => {
+                warn!("Skipping unreadable peer db {}: {e}", db.path.display());
+                failures += 1;
+                last_err = Some(e.clone());
+                if record_peers {
+                    report.peers.push(PeerReport::failed(
+                        db.device_id.clone(),
+                        db.hostname.clone(),
+                        db.path.clone(),
+                        e.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    if opened.is_empty() && failures > 0 {
+        return Err(format!(
+            "all {failures} discovered peers failed to open; last error: {}",
+            last_err.as_deref().unwrap_or("unknown")
+        ));
+    }
+    Ok(opened)
+}
+
+/// Pull each remote independently so a broken peer does not abort the pass
+/// (ActivityWatch/aw-server-rust#688). Partial failure is recorded (when
+/// `record_peers`) and non-fatal; total failure (every remote failed, none
+/// succeeded) is still Err so a down destination is not reported as success.
+fn pull_from_remotes(
+    remotes: &[(&RemoteDb, &dyn AccessMethod)],
+    dest: &dyn AccessMethod,
+    sync_spec: &SyncSpec,
+    report: &mut SyncReport,
+    record_peers: bool,
+) -> Result<(), String> {
+    let mut attempted = 0usize;
+    let mut succeeded = 0usize;
+    let mut last_err: Option<String> = None;
+    for (db, ds_from) in remotes {
+        attempted += 1;
+        match sync_datastores(*ds_from, dest, false, None, sync_spec) {
+            Ok(buckets) => {
+                succeeded += 1;
+                if record_peers {
+                    report.peers.push(PeerReport::imported(
+                        db.device_id.clone(),
+                        db.hostname.clone(),
+                        db.path.clone(),
+                        buckets,
+                    ));
+                }
+            }
+            Err(e) => {
+                warn!("Skipping peer {}: {e}", db.hostname);
+                last_err = Some(e.clone());
+                if record_peers {
+                    report.peers.push(PeerReport::failed(
+                        db.device_id.clone(),
+                        db.hostname.clone(),
+                        db.path.clone(),
+                        e.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    if attempted > 0 && succeeded == 0 {
+        return Err(format!(
+            "all {attempted} peers failed; last error: {}",
+            last_err.as_deref().unwrap_or("unknown")
+        ));
+    }
+    Ok(())
 }
 
 fn utf8_db_path(path: &Path) -> Result<&str, String> {
@@ -1081,5 +1157,226 @@ mod hostname_sanitize_tests {
             sanitize_hostname("erb-m2.localdomain"),
             "erb-m2_localdomain"
         );
+    }
+}
+
+#[cfg(test)]
+mod peer_isolation_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use aw_models::Bucket;
+
+    fn bucket(id: &str, hostname: &str) -> Bucket {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": "test",
+            "hostname": hostname,
+            "client": "test"
+        }))
+        .unwrap()
+    }
+
+    fn peer_db(label: &str, hostname: &str, path: PathBuf) -> RemoteDb {
+        RemoteDb {
+            hostname: hostname.to_string(),
+            device_id: label.to_string(),
+            path,
+            size: 0,
+        }
+    }
+
+    fn dummy_report() -> SyncReport {
+        SyncReport::new(SyncMode::Pull)
+    }
+
+    /// A Datastore whose parent dir does not exist: `Datastore::new` still
+    /// succeeds (open is lazy on the worker thread), but `sync_datastores`
+    /// fails. Unique per call so the test is hermetic.
+    fn unreadable_peer(label: &str) -> Datastore {
+        let path = std::env::temp_dir().join(format!(
+            "aw-sync-missing-{}-{}-{}/peer.db",
+            label,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        create_datastore(&path).expect("path is valid UTF-8")
+    }
+
+    /// A broken peer listed first must not prevent a healthy sibling from
+    /// importing. This is the daemon-path #688 abort: `sync_run` used `?` on
+    /// each remote, so the first unreadable db skipped every peer after it.
+    #[test]
+    fn broken_peer_does_not_skip_healthy_sibling() {
+        let healthy = Datastore::new_in_memory(false);
+        healthy
+            .create_bucket(&bucket("aw-watcher-window", "host-ok"))
+            .unwrap();
+        let dest = Datastore::new_in_memory(false);
+        let broken = unreadable_peer("sibling");
+
+        let db_a = peer_db("dev-a", "host-broken", PathBuf::from("/nonexistent-a.db"));
+        let db_b = peer_db("dev-b", "host-ok", PathBuf::from("/nonexistent-b.db"));
+        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> =
+            vec![(&db_a, &broken), (&db_b, &healthy)];
+        let mut report = dummy_report();
+        pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, false)
+            .expect("partial failure must be Ok");
+
+        let dest_buckets = dest.get_buckets().unwrap();
+        assert!(
+            dest_buckets.contains_key("aw-watcher-window-synced-from-host-ok"),
+            "healthy sibling must still import, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        broken.close();
+        healthy.close();
+        dest.close();
+    }
+
+    #[test]
+    fn all_peers_failing_is_still_err() {
+        let dest = Datastore::new_in_memory(false);
+        let broken_a = unreadable_peer("all-a");
+        let broken_b = unreadable_peer("all-b");
+
+        let db_a = peer_db("dev-a", "host-a", PathBuf::from("/nonexistent-a.db"));
+        let db_b = peer_db("dev-b", "host-b", PathBuf::from("/nonexistent-b.db"));
+        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> =
+            vec![(&db_a, &broken_a), (&db_b, &broken_b)];
+        let mut report = dummy_report();
+        let err = pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, false)
+            .expect_err("total failure must be Err");
+        assert!(
+            err.contains("all 2 peers failed"),
+            "error should report total failure, got: {err}"
+        );
+        broken_a.close();
+        broken_b.close();
+        dest.close();
+    }
+
+    #[test]
+    fn no_discovered_peers_is_ok() {
+        let mut report = dummy_report();
+        let opened = open_peer_datastores(&[], &mut report, false).expect("zero peers is a no-op");
+        assert!(opened.is_empty());
+    }
+
+    #[test]
+    fn missing_peer_file_is_open_failure() {
+        // Peer open is read-only and fails on a missing file.
+        // create_datastore would have succeeded (lazy worker) and hidden this.
+        let missing = std::env::temp_dir().join(format!(
+            "aw-sync-missing-open-{}-{}/nope.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = peer_db("dev-missing", "host-missing", missing);
+        let mut report = dummy_report();
+        let err =
+            open_peer_datastores(&[db], &mut report, false).expect_err("missing file must be Err");
+        assert!(
+            err.contains("all 1 discovered peers failed to open"),
+            "error should report total open failure, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn all_open_failures_is_err() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/tmp/aw-sync-\xff.db".to_vec(),
+        ));
+        let db = peer_db("dev-bad", "host-bad", bad);
+        let mut report = dummy_report();
+        let err = open_peer_datastores(&[db], &mut report, false)
+            .expect_err("all open failures must be Err");
+        assert!(
+            err.contains("all 1 discovered peers failed to open"),
+            "error should report total open failure, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mixed_open_keeps_the_readable_peer() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = std::env::temp_dir().join(format!(
+            "aw-sync-open-mix-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("peer.db");
+        // open_peer_datastore is read-only: needs a current-version sqlite
+        // file with schema. Datastore::new is WAL-lazy, so checkpoint after
+        // close or the immutable probe sees a torn image.
+        {
+            let ds = create_datastore(&good).unwrap();
+            ds.create_bucket(&bucket("aw-watcher-window", "host-ok"))
+                .unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+            let conn = rusqlite::Connection::open(&good).unwrap();
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        let bad = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/tmp/aw-sync-\xff-mix.db".to_vec(),
+        ));
+        let db_bad = peer_db("dev-bad", "host-bad", bad);
+        let db_good = peer_db("dev-good", "host-ok", good);
+        let mut report = dummy_report();
+        let opened = open_peer_datastores(&[db_bad, db_good], &mut report, false)
+            .expect("partial open failure must be Ok");
+        assert_eq!(opened.len(), 1);
+        for (_, ds) in opened {
+            ds.close();
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_skip_plus_open_failure_counts_only_failures() {
+        // Incompatible-version skips must not inflate the all-fail count.
+        let dir = std::env::temp_dir().join(format!(
+            "aw-sync-open-vermix-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.db");
+        {
+            let conn = rusqlite::Connection::open(&old).unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
+        }
+        let missing = dir.join("missing.db");
+        let db_old = peer_db("dev-old", "host-old", old);
+        let db_missing = peer_db("dev-missing", "host-missing", missing);
+        let mut report = dummy_report();
+        let err = open_peer_datastores(&[db_old, db_missing], &mut report, false)
+            .expect_err("hard open failure with no usable peer is Err");
+        assert!(
+            err.contains("all 1 discovered peers failed to open"),
+            "count must be hard failures only, not discovered paths, got: {err}"
+        );
+        assert!(
+            !err.contains("all 2 discovered peers failed to open"),
+            "must not count the version-mismatch skip as an open failure, got: {err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

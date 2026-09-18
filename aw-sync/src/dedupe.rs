@@ -68,7 +68,12 @@ pub struct BucketDedupeResult {
 /// data)`, so as long as a page never splits a run of same-timestamp events,
 /// every duplicate group is fully contained within one page and
 /// `find_duplicate_ids` can be applied per page independently — no
-/// across-page bookkeeping needed. Boundary handling mirrors `sync::sync_one`.
+/// across-page bookkeeping needed.
+///
+/// Boundary events are carried forward into the next page's batch rather than
+/// re-fetched with `end = boundary_ts`, because the server clips event
+/// durations at the `end` boundary — events starting exactly at `boundary_ts`
+/// would have their durations zeroed, producing false duplicate keys.
 fn dedupe_bucket_paginated<F>(mut fetch_page: F) -> Result<(usize, Vec<i64>), Box<dyn Error>>
 where
     F: FnMut(Option<DateTime<Utc>>) -> Result<Vec<Event>, Box<dyn Error>>,
@@ -76,28 +81,53 @@ where
     let mut total_events = 0usize;
     let mut duplicate_ids = Vec::new();
     let mut fetch_end: Option<DateTime<Utc>> = None;
+    // Boundary events popped from the end of a full page, carried into the
+    // next iteration so they're processed alongside any remaining events at
+    // the same timestamp — without going through a server re-fetch that would
+    // clip their durations.
+    let mut carry: Vec<Event> = Vec::new();
 
     loop {
-        let mut page = fetch_page(fetch_end)?;
+        let fetched = fetch_page(fetch_end)?;
+        let is_last_page = fetched.len() < PAGE_SIZE;
+
+        // Combine carried boundary events (newer) with the newly fetched page
+        // (older). Carry is always newer: it came from the bottom of the
+        // previous full page, so timestamps in carry >= timestamps in fetched.
+        let mut page = carry;
+        carry = Vec::new();
+        page.extend(fetched);
+
         if page.is_empty() {
             break;
         }
-        let is_last_page = page.len() < PAGE_SIZE;
 
         if !is_last_page {
-            // page is newest-first; page.last() = oldest event in this full page.
+            // page is newest-first; page.last() = oldest event in this batch.
             // Never split a run of same-timestamp events across two pages, or a
             // duplicate group could be cut in half with its older half missed.
             let boundary_ts = page.last().unwrap().timestamp;
             let newest_ts = page.first().unwrap().timestamp;
             if newest_ts != boundary_ts {
+                // Pop all events at boundary_ts into carry. Advance to one ns
+                // before boundary_ts so the next server fetch excludes that
+                // timestamp — carried events already hold the true-duration
+                // copies from this page.
                 while page.last().is_some_and(|e| e.timestamp == boundary_ts) {
-                    page.pop();
+                    carry.push(page.pop().unwrap());
                 }
-                fetch_end = Some(boundary_ts);
+                fetch_end = Some(boundary_ts - Duration::nanoseconds(1));
             } else {
-                // Whole page shares one timestamp; can't split further without
-                // an unbounded query. Not expected for real AW event data.
+                // Entire batch shares one timestamp. Advance past it.
+                // If more than PAGE_SIZE events share this timestamp, those
+                // beyond what fit in this page are not deduped in this pass.
+                // This is not expected for normal AW event data; a subsequent
+                // run will catch any residual duplicates.
+                warn!(
+                    "Entire page shares timestamp {}; if more events exist at \
+                     this timestamp they will not be deduped in this pass",
+                    boundary_ts
+                );
                 fetch_end = Some(boundary_ts - Duration::nanoseconds(1));
             }
         }
@@ -105,7 +135,7 @@ where
         total_events += page.len();
         duplicate_ids.extend(find_duplicate_ids(&page));
 
-        if is_last_page {
+        if is_last_page && carry.is_empty() {
             break;
         }
     }
@@ -276,8 +306,10 @@ mod tests {
     }
 
     /// A fake `get_events(end)`: returns events with `timestamp <= end`
-    /// (or all, if `end` is None), newest-first — same contract as the real
-    /// client, so `dedupe_bucket_paginated` can be exercised without a server.
+    /// (or all, if `end` is None), newest-first, with server-side duration
+    /// clipping applied — same contract as the real client. Events that start
+    /// at exactly `end` have their duration clipped to zero (the real server
+    /// clips event end-times at the query boundary).
     fn fake_fetch_page(
         all: &[Event],
         end: Option<DateTime<Utc>>,
@@ -285,11 +317,58 @@ mod tests {
         let mut page: Vec<Event> = all
             .iter()
             .filter(|e| end.is_none_or(|end| e.timestamp <= end))
-            .cloned()
+            .map(|e| {
+                // Simulate server-side duration clipping: events whose
+                // duration extends past `end` are clipped to fit.
+                if let Some(end) = end {
+                    let event_end = e.timestamp + e.duration;
+                    if event_end > end {
+                        let clipped_dur = end - e.timestamp;
+                        return Event {
+                            duration: if clipped_dur < Duration::zero() {
+                                Duration::zero()
+                            } else {
+                                clipped_dur
+                            },
+                            ..e.clone()
+                        };
+                    }
+                }
+                e.clone()
+            })
             .collect();
         page.sort_by_key(|e| std::cmp::Reverse(e.id));
         page.truncate(PAGE_SIZE);
         Ok(page)
+    }
+
+    /// Regression test for the duration-clipping P1 bug: a boundary event's
+    /// duration must not be changed by server-side clipping when the event is
+    /// carried into the next batch. Two events with same timestamp but
+    /// different durations are distinct; neither should be flagged as a
+    /// duplicate of the other.
+    #[test]
+    fn carry_preserves_duration_across_page_boundary() {
+        // PAGE_SIZE=3. Events at ts=200 straddle a page boundary:
+        //   page 1 fetched (end=None): ids [20, 11, 10] — ts=200 events fill the boundary
+        //   Without the fix, id=10 and id=11 would be re-fetched with end=200ns,
+        //   clipping their durations to 0 and making them look like duplicates
+        //   of id=9 (which also has ts=200 and dur=0 in the clipped view).
+        //
+        // The two events at ts=200 have DIFFERENT durations (5s vs 10s) — they
+        // are genuinely distinct and must not be deleted.
+        let all = vec![
+            event(20, 500, 10, "z"),
+            event(11, 200, 10, "a"), // distinct: dur=10s — must NOT be flagged
+            event(10, 200, 5, "a"),  // distinct: dur=5s  — must NOT be flagged
+            event(9, 100, 10, "b"),
+        ];
+        let (total, dups) = dedupe_bucket_paginated(|end| fake_fetch_page(&all, end)).unwrap();
+        assert_eq!(total, all.len());
+        assert!(
+            dups.is_empty(),
+            "expected no duplicates (all events are distinct), got: {dups:?}"
+        );
     }
 
     #[test]

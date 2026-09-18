@@ -1,7 +1,7 @@
 use dirs::home_dir;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
-#[cfg(any(target_os = "android", test))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -35,13 +35,57 @@ pub fn resolve_profile(
 /// Uses the same profile appname as aw-server so a named profile (e.g.
 /// `research`) does not share prod's sync config. `testing` follows the
 /// same new-root-plus-legacy-fallback rule as aw-server.
-// TODO: add proper config support
 #[cfg(not(target_os = "android"))]
-#[allow(dead_code)]
 pub fn get_config_dir() -> Result<PathBuf, Box<dyn Error>> {
     let dir = sync_config_dir(&aw_server::dirs::appname())?;
     fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// aw-sync's own settings, read from `{config_dir}/config.toml`.
+///
+/// `pull` controls whether the **daemon** imports peers on each pass —
+/// desktop only; Android stays push-only by design
+/// (ActivityWatch/aw-android#291). The one-shot `aw-sync sync` command
+/// always pulls+pushes regardless of this file, and an explicit `--mode`
+/// on the daemon always wins over it (ActivityWatch/aw-server-rust#714).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncConfig {
+    #[serde(default)]
+    pub pull: bool,
+}
+
+const DEFAULT_SYNC_CONFIG_TOML: &str = "\
+# aw-sync config
+pull = false   # default; set true to import peers from the sync folder every pass
+";
+
+/// Load `config.toml` from `dir`, writing the commented default if it does
+/// not exist yet (so users find the switch on first daemon start). Returns
+/// the parsed config and the path it was read from.
+#[cfg(not(target_os = "android"))]
+pub fn load_or_create_sync_config(dir: &Path) -> Result<(SyncConfig, PathBuf), Box<dyn Error>> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join("config.toml");
+    if !path.is_file() {
+        fs::write(&path, DEFAULT_SYNC_CONFIG_TOML)?;
+    }
+    let content = fs::read_to_string(&path)?;
+    let config: SyncConfig = toml::from_str(&content)?;
+    Ok((config, path))
+}
+
+/// Which `SyncMode` a daemon pass should use: an explicit `--mode` always
+/// wins; otherwise the config's `pull` flag picks push-only vs both.
+pub fn effective_daemon_mode(
+    cli_mode: Option<crate::report::SyncMode>,
+    pull: bool,
+) -> crate::report::SyncMode {
+    cli_mode.unwrap_or(if pull {
+        crate::report::SyncMode::Both
+    } else {
+        crate::report::SyncMode::Push
+    })
 }
 
 /// Path construction only — does not create directories (so tests stay off-disk).
@@ -112,7 +156,6 @@ pub(crate) fn files_dir_from_xdg_data_home(xdg_data_home: &Path) -> Option<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn resolve_profile_cli_wins_over_env_and_testing() {
@@ -211,5 +254,70 @@ mod tests {
         assert!(files_dir_from_xdg_data_home(Path::new("/")).is_none());
         assert!(files_dir_from_xdg_data_home(Path::new("data")).is_none());
         assert!(files_dir_from_xdg_data_home(Path::new("/tmp/config")).is_none());
+    }
+
+    // ActivityWatch/aw-server-rust#714: daemon pull is opt-in.
+    #[test]
+    fn effective_daemon_mode_explicit_cli_always_wins() {
+        use crate::report::SyncMode;
+        assert_eq!(
+            effective_daemon_mode(Some(SyncMode::Pull), false),
+            SyncMode::Pull
+        );
+        assert_eq!(
+            effective_daemon_mode(Some(SyncMode::Pull), true),
+            SyncMode::Pull
+        );
+        assert_eq!(
+            effective_daemon_mode(Some(SyncMode::Both), false),
+            SyncMode::Both
+        );
+    }
+
+    #[test]
+    fn effective_daemon_mode_no_cli_follows_config_pull_flag() {
+        use crate::report::SyncMode;
+        // No config.toml (or pull = false): push-only by default.
+        assert_eq!(effective_daemon_mode(None, false), SyncMode::Push);
+        // pull = true: daemon imports too.
+        assert_eq!(effective_daemon_mode(None, true), SyncMode::Both);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn temp_sync_config_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "aw-sync-config-tests-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn load_or_create_sync_config_writes_commented_default_when_missing() {
+        let dir = temp_sync_config_dir("missing");
+        let (config, path) = load_or_create_sync_config(&dir).unwrap();
+        assert!(!config.pull, "default config must be pull = false");
+        assert!(path.is_file());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("pull = false"),
+            "commented default should mention pull = false, got: {content}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn load_or_create_sync_config_respects_existing_pull_true() {
+        let dir = temp_sync_config_dir("pull-true");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), "pull = true\n").unwrap();
+        let (config, _path) = load_or_create_sync_config(&dir).unwrap();
+        assert!(config.pull);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

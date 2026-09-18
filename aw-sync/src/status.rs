@@ -90,6 +90,25 @@ pub fn collect_status(
             "UNREACHABLE"
         }
     ));
+
+    match crate::dirs::get_config_dir()
+        .and_then(|dir| crate::dirs::load_or_create_sync_config(&dir))
+    {
+        Ok((sync_config, sync_config_path)) => {
+            let effective_mode = crate::dirs::effective_daemon_mode(None, sync_config.pull);
+            out.push_str(&format!(
+                "daemon mode: {} (pull={}, config: {})\n",
+                effective_mode.as_str(),
+                sync_config.pull,
+                sync_config_path.display()
+            ));
+        }
+        Err(e) => {
+            out.push_str(&format!(
+                "daemon mode: (could not read aw-sync config: {e})\n"
+            ));
+        }
+    }
     out.push('\n');
 
     match crate::report::load_last_report() {

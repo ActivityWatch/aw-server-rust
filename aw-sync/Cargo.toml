@@ -28,6 +28,10 @@ clap = { version = "4.1", features = ["derive"], optional = true }
 ctrlc = { version = "3.4.5", optional = true }
 rusqlite = { version = "0.30", features = ["bundled"], optional = true }
 
+# sync-v2 dependencies (optional)
+zstd = { version = "0.13", optional = true }
+sha2 = { version = "0.10", optional = true }
+
 aw-server = { path = "../aw-server" }
 aw-models = { path = "../aw-models" }
 aw-datastore = { path = "../aw-datastore" }
@@ -46,3 +50,4 @@ tempfile = "3"
 [features]
 default = ["cli"]
 cli = ["clap", "ctrlc", "dep:rusqlite"]
+sync-v2 = ["dep:zstd", "dep:sha2"]

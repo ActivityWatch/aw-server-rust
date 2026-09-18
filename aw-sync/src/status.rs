@@ -3,16 +3,44 @@
 //! Read-only: never creates staging databases. 3-level peers are the
 //! `RemoteDb` list `pull_all` uses; classification of leftovers sits on top.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::io::{self, Write};
 
 use aw_client_rust::blocking::AwClient;
+use aw_models::Bucket;
 use chrono::{DateTime, Utc};
 
+use crate::sync::sanitize_hostname;
 use crate::util::{
     inspect_sync_db, scan_sync_dir, DbInspect, SyncDirEntry, SyncEntryKind, SyncLayout,
 };
+
+/// Sanitized hostnames of every peer already imported into a local bucket,
+/// derived from the bucket ID's `-synced-from-{host}` suffix and the
+/// `$aw.sync.origin` metadata.
+///
+/// Sanitized at build time: buckets imported before aw-android hostname
+/// sanitization (ActivityWatch/aw-android#272) still hold the raw hostname in
+/// both fields. Callers compare against `sanitize_hostname(host)`, so an
+/// un-sanitized set would report those legacy imports as missing.
+fn build_imported_origins(local_buckets: &HashMap<String, Bucket>) -> HashSet<String> {
+    local_buckets
+        .keys()
+        .filter_map(|id| {
+            id.split("-synced-from-")
+                .nth(1)
+                .filter(|s| !s.is_empty())
+                .map(sanitize_hostname)
+        })
+        .chain(local_buckets.values().filter_map(|b| {
+            b.data
+                .get("$aw.sync.origin")
+                .and_then(|v| v.as_str())
+                .map(sanitize_hostname)
+        }))
+        .collect()
+}
 
 pub fn run_status(
     client: &AwClient,
@@ -46,21 +74,7 @@ pub fn collect_status(
     } else {
         Default::default()
     };
-    let imported_origins: HashSet<String> = local_buckets
-        .keys()
-        .filter_map(|id| {
-            id.split("-synced-from-")
-                .nth(1)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
-        .chain(local_buckets.values().filter_map(|b| {
-            b.data
-                .get("$aw.sync.origin")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        }))
-        .collect();
+    let imported_origins = build_imported_origins(&local_buckets);
     let local_newest = local_buckets
         .values()
         .filter_map(|b| b.metadata.end.or(b.last_updated))
@@ -151,7 +165,7 @@ fn format_inspect(info: &DbInspect, imported_origins: &HashSet<String>) -> Strin
             .unwrap_or_else(|| "-".to_string())
     ));
     if let Some(host) = &info.hostname {
-        let imported = imported_origins.contains(host);
+        let imported = imported_origins.contains(sanitize_hostname(host).as_str());
         s.push_str(&format!(
             "    imported locally: {}\n",
             if imported { "yes" } else { "no" }
@@ -218,7 +232,7 @@ fn collect_warnings(
         }
         if entry.kind == SyncEntryKind::Peer {
             if let Some(host) = &info.hostname {
-                if !imported_origins.contains(host) {
+                if !imported_origins.contains(sanitize_hostname(host).as_str()) {
                     warnings.push(format!(
                         "peer {} ({}) has not been imported locally",
                         entry.device_id.as_deref().unwrap_or("?"),
@@ -256,4 +270,67 @@ fn collect_warnings(
     }
 
     warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bucket_with_origin(id: &str, hostname: &str, origin: Option<&str>) -> Bucket {
+        let mut data = serde_json::Map::new();
+        if let Some(origin) = origin {
+            data.insert(
+                "$aw.sync.origin".to_string(),
+                serde_json::Value::String(origin.to_string()),
+            );
+        }
+        Bucket {
+            bid: None,
+            id: id.to_string(),
+            _type: "currentwindow".to_string(),
+            client: "test".to_string(),
+            hostname: hostname.to_string(),
+            created: None,
+            data,
+            metadata: Default::default(),
+            events: None,
+            last_updated: None,
+        }
+    }
+
+    #[test]
+    fn build_imported_origins_recognizes_legacy_raw_hostname_imports() {
+        // aw-server-rust#712 P2: a bucket imported before aw-android hostname
+        // sanitization (aw-android#272) holds the raw "POCO F8 Ultra" in both
+        // the bucket ID suffix and $aw.sync.origin. Lookups compare against
+        // sanitize_hostname(host) ("poco_f8_ultra"), so the set itself must
+        // be sanitized at build time or legacy imports look "not imported".
+        let mut local_buckets = HashMap::new();
+        local_buckets.insert(
+            "aw-watcher-window_POCO F8 Ultra-synced-from-POCO F8 Ultra".to_string(),
+            bucket_with_origin(
+                "aw-watcher-window_POCO F8 Ultra-synced-from-POCO F8 Ultra",
+                "local-host",
+                Some("POCO F8 Ultra"),
+            ),
+        );
+
+        let imported_origins = build_imported_origins(&local_buckets);
+
+        assert!(imported_origins.contains(sanitize_hostname("POCO F8 Ultra").as_str()));
+        assert!(imported_origins.contains("poco_f8_ultra"));
+    }
+
+    #[test]
+    fn build_imported_origins_ignores_buckets_without_origin_markers() {
+        let mut local_buckets = HashMap::new();
+        local_buckets.insert(
+            "aw-watcher-window".to_string(),
+            bucket_with_origin("aw-watcher-window", "local-host", None),
+        );
+
+        let imported_origins = build_imported_origins(&local_buckets);
+
+        assert!(imported_origins.is_empty());
+    }
 }

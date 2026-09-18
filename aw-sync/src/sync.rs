@@ -54,6 +54,28 @@ impl Default for SyncSpec {
     }
 }
 
+/// Discover all sync peers reachable from `sync_root`, excluding `own_device_id`.
+///
+/// Unions the 3-level Android/new-desktop walker (`list_remote_dbs`) with the
+/// 2-level legacy-desktop walker (`find_remotes_nonlocal_selection`), then
+/// deduplicates by device_id keeping the largest file per device
+/// (`select_remote_dbs_detailed`).  Called by `sync_run` when `path_db` is
+/// `None` (daemon / root call) and by the regression tests so both exercise the
+/// same production path.
+pub(crate) fn discover_peers(
+    sync_root: &Path,
+    own_device_id: &str,
+) -> Result<crate::util::RemoteSelection, Box<dyn Error>> {
+    let mut all_dbs: Vec<RemoteDb> = list_remote_dbs(sync_root)?
+        .into_iter()
+        .filter(|db| db.device_id != own_device_id)
+        .collect();
+    let two_level = find_remotes_nonlocal_selection(sync_root, own_device_id, None)?;
+    all_dbs.extend(two_level.selected);
+    all_dbs.extend(two_level.skipped.into_iter().map(|s| s.db));
+    Ok(select_remote_dbs_detailed(all_dbs))
+}
+
 /// Performs a single sync pass and returns what it did.
 ///
 /// A `Ok` report is complete. On error, a partial report (failed peer, any
@@ -89,14 +111,7 @@ pub fn sync_run(
     // path is already a host subdirectory, not the sync root, so list_remote_dbs
     // would walk into grandchildren and find nothing useful.
     let selection = if sync_spec.path_db.is_none() {
-        let mut all_dbs: Vec<RemoteDb> = list_remote_dbs(sync_spec.path.as_path())?
-            .into_iter()
-            .filter(|db| db.device_id != device_id)
-            .collect();
-        let two_level = find_remotes_nonlocal_selection(sync_spec.path.as_path(), device_id, None)?;
-        all_dbs.extend(two_level.selected);
-        all_dbs.extend(two_level.skipped.into_iter().map(|s| s.db));
-        select_remote_dbs_detailed(all_dbs)
+        discover_peers(sync_spec.path.as_path(), device_id)?
     } else {
         find_remotes_nonlocal_selection(
             sync_spec.path.as_path(),
@@ -1768,16 +1783,17 @@ mod daemon_peer_discovery_tests {
         fs::write(path, b"").unwrap();
     }
 
+    fn write_sized(path: &PathBuf, size: usize) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, vec![0u8; size]).unwrap();
+    }
+
+    // Thin wrapper so tests exercise the actual production discovery path,
+    // not a copy that can silently diverge.
     fn discover(sync_root: &PathBuf, own_device_id: &str) -> crate::util::RemoteSelection {
-        let mut all_dbs: Vec<crate::util::RemoteDb> = list_remote_dbs(sync_root)
-            .unwrap()
-            .into_iter()
-            .filter(|db| db.device_id != own_device_id)
-            .collect();
-        let two_level = find_remotes_nonlocal_selection(sync_root, own_device_id, None).unwrap();
-        all_dbs.extend(two_level.selected);
-        all_dbs.extend(two_level.skipped.into_iter().map(|s| s.db));
-        select_remote_dbs_detailed(all_dbs)
+        super::discover_peers(sync_root, own_device_id).unwrap()
     }
 
     /// Simulates the daemon peer-discovery path (path_db = None) against a
@@ -1852,6 +1868,103 @@ mod daemon_peer_discovery_tests {
             2,
             "daemon must discover both Android and legacy peers; got: {:?}",
             selection.selected
+        );
+
+        let _ = fs::remove_dir_all(&sync_root);
+    }
+
+    /// When the same device_id appears in both the 3-level (Android) and the
+    /// 2-level (legacy) layout — e.g. a desktop that was migrated from an old
+    /// sync directory — `discover_peers` must return exactly one entry for that
+    /// device, keeping the larger file.
+    ///
+    /// The two fixtures use deliberately different sizes, with the *smaller*
+    /// file's path sorting first alphabetically ("new-hostname/..." <
+    /// "shared-device-id/..."). That makes the assertion exercise the
+    /// largest-file tie-break in `select_remote_dbs_detailed` specifically —
+    /// with two identically-sized fixtures the path-ordering tie-break alone
+    /// would pick the same winner, so that variant would still pass even if
+    /// the size comparison were silently dropped.
+    #[test]
+    fn daemon_deduplicates_same_device_in_both_layouts() {
+        let sync_root = temp_dir();
+        let device_id = "shared-device-id";
+
+        // 3-level entry for the same device (e.g. after a hostname rename) —
+        // smaller file; must lose despite its path sorting first.
+        write_sized(
+            &sync_root
+                .join("new-hostname")
+                .join(device_id)
+                .join("sync.db"),
+            8,
+        );
+        // 2-level legacy entry for the same device_id — the larger file,
+        // must be the one selected.
+        let legacy_path = sync_root.join(device_id).join("test.db");
+        write_sized(&legacy_path, 64);
+
+        let selection = discover(&sync_root, "local-device-id");
+
+        assert_eq!(
+            selection.selected.len(),
+            1,
+            "duplicate device_id across layouts must be collapsed to one; got selected: {:?}, skipped: {:?}",
+            selection.selected,
+            selection.skipped,
+        );
+        assert_eq!(
+            selection.selected[0].device_id, device_id,
+            "the surviving entry must be for the shared device_id"
+        );
+        assert_eq!(
+            selection.selected[0].path, legacy_path,
+            "the larger (legacy 2-level) file must survive, not the smaller 3-level one"
+        );
+        assert_eq!(
+            selection.skipped.len(),
+            1,
+            "the other layout entry must be reported as skipped"
+        );
+
+        let _ = fs::remove_dir_all(&sync_root);
+    }
+
+    /// A leftover own-device root db (`{root}/{own_device_id}/test.db` — the
+    /// #682 artefact every desktop that ran the old daemon still has, sometimes
+    /// over 1 GB) must be excluded from discovery.  The 3-level peer alongside
+    /// it must still be selected, and the own db must appear in neither
+    /// `selected` nor `skipped`.
+    #[test]
+    fn daemon_excludes_own_device_root_db_alongside_three_level_peer() {
+        let sync_root = temp_dir();
+        let own_id = "aaaa-0000-own-device-id";
+
+        // Old daemon's own staging db at the 2-level root path: {own_id}/test.db
+        touch(&sync_root.join(own_id).join("test.db"));
+
+        // A genuine 3-level Android peer that must survive discovery
+        touch(
+            &sync_root
+                .join("poco_f8_ultra")
+                .join("bbbb-1111-android-peer")
+                .join("sync.db"),
+        );
+
+        let selection = discover(&sync_root, own_id);
+
+        assert_eq!(
+            selection.selected.len(),
+            1,
+            "own-device root db must not be selected; only the 3-level peer must be; got: {:?}",
+            selection.selected
+        );
+        assert_eq!(selection.selected[0].device_id, "bbbb-1111-android-peer");
+
+        let own_in_skipped = selection.skipped.iter().any(|s| s.db.device_id == own_id);
+        assert!(
+            !own_in_skipped,
+            "own-device root db must not appear in skipped list either"
         );
 
         let _ = fs::remove_dir_all(&sync_root);

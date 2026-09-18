@@ -373,7 +373,6 @@ mod tests {
         assert!(files_dir_from_xdg_data_home(Path::new("/tmp/config")).is_none());
     }
 
-
     // ActivityWatch/aw-server-rust#714: daemon pull is opt-in.
     #[test]
     fn effective_daemon_mode_explicit_cli_always_wins() {

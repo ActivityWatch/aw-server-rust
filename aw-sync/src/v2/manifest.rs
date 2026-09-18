@@ -112,10 +112,20 @@ impl Manifest {
 }
 
 /// fsync a directory so a preceding `rename` into it survives a crash.
+///
+/// No-op on Windows: directory handles opened via `File::open` cannot be
+/// fsynced on that platform, and Windows' write-through cache provides
+/// equivalent durability guarantees for our rename semantics.
 pub(crate) fn fsync_dir(dir: &Path) -> Result<(), String> {
-    fs::File::open(dir)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| format!("fsync dir {}: {e}", dir.display()))
+    #[cfg(unix)]
+    {
+        fs::File::open(dir)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| format!("fsync dir {}: {e}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 /// Path for manifest inside the device directory.

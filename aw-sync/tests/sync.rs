@@ -1175,4 +1175,147 @@ mod sync_tests {
         }
         Ok(datastores)
     }
+
+    /// Regression test for ActivityWatch/aw-server-rust#711 — Symptom 1.
+    ///
+    /// When the newest destination event has duration=0, `resume_sync_at` equals
+    /// its own timestamp. The inclusive source fetch re-imports that event on every
+    /// subsequent pass, growing the destination by 1 on each run. After a no-op
+    /// second sync (no new source events) the destination count must not grow.
+    #[test]
+    fn test_sync_no_duplicate_on_zero_duration_boundary() {
+        let state = init_teststate();
+
+        // create_event always sets duration=0; this is the boundary case.
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+        create_events(&state.ds_src, bucket_id.as_str(), 3);
+
+        // First sync — imports all 3 events.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            3,
+            "first sync must import all 3 events"
+        );
+
+        // Second sync — no new source events; must not re-import the boundary event.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            3,
+            "second sync with no new source events must not create a duplicate"
+        );
+    }
+
+    /// Regression test for ActivityWatch/aw-server-rust#711 — Symptom 2.
+    ///
+    /// Two source events share the exact same timestamp (e.g. a stopwatch
+    /// `running:true` with duration=0 and a `running:false` with duration>0).
+    /// `get_events(limit=1)` may return the duration=0 event, setting
+    /// `resume_sync_at = T`, causing the non-duplicate event to be re-inserted on
+    /// every subsequent pass. After both events are synced, further passes must
+    /// import 0 new events.
+    #[test]
+    fn test_sync_no_duplicate_with_timestamp_ties() {
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+
+        // Two events at the exact same timestamp — the tie that triggers the bug.
+        let ts: DateTime<Utc> = Utc::now();
+        let e_running: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 0,
+            "data": {"label": "Testing", "running": true}
+        }))
+        .unwrap();
+        let e_finished: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 182.0,
+            "data": {"label": "Testing", "running": false}
+        }))
+        .unwrap();
+
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &[e_running, e_finished])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // First sync — both events must be imported.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "first sync must import both tied-timestamp events"
+        );
+
+        // Second sync — no new source events; neither tied event must be duplicated.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "second sync must not duplicate tied-timestamp boundary events"
+        );
+
+        // Third sync — stability check.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "third sync must not introduce further duplicates"
+        );
+    }
 }

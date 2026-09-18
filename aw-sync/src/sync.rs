@@ -965,6 +965,7 @@ fn sync_one(
     let most_recent_events = ds_to.get_events(bucket_to.id.as_str(), None, None, Some(1))?;
     // If the destination bucket already has events, resume from where it left off.
     // Otherwise (first sync of this bucket), fall back to sync_spec.start, if specified.
+    let newest_timestamp = most_recent_events.first().map(|e| e.timestamp);
     let resume_sync_at = most_recent_events
         .first()
         .map(|e| e.timestamp + e.duration)
@@ -977,6 +978,42 @@ fn sync_one(
     }
 
     reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+
+    // Build a fingerprint set of events already in the destination at the resume boundary.
+    // The source fetch uses get_events(start=resume_sync_at) with overlap semantics:
+    // it returns any event whose (timestamp + duration >= resume_sync_at). This includes:
+    //   - duration=0 events at resume_sync_at (Symptom 1: re-imported every pass)
+    //   - events at newest.timestamp with duration > 0 whose end == resume_sync_at
+    //     (Symptom 2: timestamp-tie — a different event at the same timestamp)
+    //
+    // We must NOT query the dedup window with a narrow end time: get_events clips event
+    // durations to the query window (parse_event_row), so get_events(start=T, end=T+1ms)
+    // returns e_finished with duration=1ms instead of 182s, breaking fingerprint matching.
+    // Fix: use end=None (endtime_filter = i64::MAX) to prevent clipping, then filter in
+    // Rust to only events AT boundary_ts.
+    let boundary_dedup: std::collections::HashSet<(i64, i64, String)> =
+        if let Some(boundary_ts) = newest_timestamp {
+            ds_to
+                .get_events(
+                    bucket_to.id.as_str(),
+                    Some(boundary_ts),
+                    None, // no end filter — avoids duration clipping for events with duration > 0
+                    None,
+                )
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.timestamp == boundary_ts) // keep only events exactly at the boundary
+                .map(|e| {
+                    (
+                        e.timestamp.timestamp_millis(),
+                        e.duration.num_milliseconds(),
+                        serde_json::to_string(&e.data).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
 
     // Fetch events in bounded chunks to avoid OOM on devices with limited RAM (e.g. Android).
     // get_events returns events in descending order (newest first), so we paginate backwards
@@ -1069,6 +1106,24 @@ fn sync_one(
         } else {
             // Last (oldest) page: process oldest-first to preserve ID ordering.
             chunk.reverse(); // chunk is now ASC (oldest first)
+
+            // Dedup: skip any boundary event already in the destination.
+            // Handles the duration=0 re-import and same-timestamp tie cases (#711).
+            if !boundary_dedup.is_empty() {
+                let before_dedup = chunk.len();
+                chunk.retain(|e| {
+                    let fp = (
+                        e.timestamp.timestamp_millis(),
+                        e.duration.num_milliseconds(),
+                        serde_json::to_string(&e.data).unwrap_or_default(),
+                    );
+                    !boundary_dedup.contains(&fp)
+                });
+                let skipped = before_dedup - chunk.len();
+                if skipped > 0 {
+                    info!("  - Skipped {} boundary duplicate(s)", skipped);
+                }
+            }
 
             // Use heartbeat() for the oldest event only in the single-page case:
             // dest's "last event" is still the pre-sync resume-boundary row, so heartbeat()

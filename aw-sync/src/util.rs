@@ -397,8 +397,18 @@ pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>
     if !sync_root.exists() {
         return Ok(dbs);
     }
+    // The outer read_dir propagates: if sync_root itself is unreadable the
+    // caller should know. Inner failures (one bad host or device directory)
+    // are logged and skipped so a single inaccessible peer does not abort
+    // discovery of all others.
     for host_ent in fs::read_dir(sync_root)? {
-        let host_ent = host_ent?;
+        let host_ent = match host_ent {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("list_remote_dbs: skipping unreadable entry in {sync_root:?}: {e}");
+                continue;
+            }
+        };
         let host_path = host_ent.path();
         if !host_path.is_dir() || is_dot_dir(&host_path) {
             continue;
@@ -406,8 +416,21 @@ pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>
         let Some(hostname) = host_ent.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        for device_ent in fs::read_dir(&host_path)? {
-            let device_ent = device_ent?;
+        let device_iter = match fs::read_dir(&host_path) {
+            Ok(it) => it,
+            Err(e) => {
+                warn!("list_remote_dbs: cannot read host dir {host_path:?}: {e}");
+                continue;
+            }
+        };
+        for device_ent in device_iter {
+            let device_ent = match device_ent {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("list_remote_dbs: skipping unreadable entry in {host_path:?}: {e}");
+                    continue;
+                }
+            };
             let device_path = device_ent.path();
             if !device_path.is_dir() || is_dot_dir(&device_path) {
                 continue;
@@ -415,8 +438,21 @@ pub(crate) fn list_remote_dbs(sync_root: &Path) -> std::io::Result<Vec<RemoteDb>
             let Some(device_id) = device_ent.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            for file_ent in fs::read_dir(&device_path)? {
-                let file_ent = file_ent?;
+            let file_iter = match fs::read_dir(&device_path) {
+                Ok(it) => it,
+                Err(e) => {
+                    warn!("list_remote_dbs: cannot read device dir {device_path:?}: {e}");
+                    continue;
+                }
+            };
+            for file_ent in file_iter {
+                let file_ent = match file_ent {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!("list_remote_dbs: skipping unreadable entry in {device_path:?}: {e}");
+                        continue;
+                    }
+                };
                 let path = file_ent.path();
                 if !(path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("db")) {
                     continue;

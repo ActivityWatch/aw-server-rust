@@ -1175,4 +1175,355 @@ mod sync_tests {
         }
         Ok(datastores)
     }
+
+    /// Regression test for ActivityWatch/aw-server-rust#711 — Symptom 1.
+    ///
+    /// When the newest destination event has duration=0, `resume_sync_at` equals
+    /// its own timestamp. The inclusive source fetch re-imports that event on every
+    /// subsequent pass, growing the destination by 1 on each run. After a no-op
+    /// second sync (no new source events) the destination count must not grow.
+    #[test]
+    fn test_sync_no_duplicate_on_zero_duration_boundary() {
+        let state = init_teststate();
+
+        // create_event always sets duration=0; this is the boundary case.
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+        create_events(&state.ds_src, bucket_id.as_str(), 3);
+
+        // First sync — imports all 3 events.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            3,
+            "first sync must import all 3 events"
+        );
+
+        // Second sync — no new source events; must not re-import the boundary event.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            3,
+            "second sync with no new source events must not create a duplicate"
+        );
+    }
+
+    /// Regression test for ActivityWatch/aw-server-rust#711 — Symptom 2.
+    ///
+    /// Two source events share the exact same timestamp (e.g. a stopwatch
+    /// `running:true` with duration=0 and a `running:false` with duration>0).
+    /// `get_events(limit=1)` may return the duration=0 event, setting
+    /// `resume_sync_at = T`, causing the non-duplicate event to be re-inserted on
+    /// every subsequent pass. After both events are synced, further passes must
+    /// import 0 new events.
+    #[test]
+    fn test_sync_no_duplicate_with_timestamp_ties() {
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+
+        // Two events at the exact same timestamp — the tie that triggers the bug.
+        let ts: DateTime<Utc> = Utc::now();
+        let e_running: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 0,
+            "data": {"label": "Testing", "running": true}
+        }))
+        .unwrap();
+        let e_finished: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 182.0,
+            "data": {"label": "Testing", "running": false}
+        }))
+        .unwrap();
+
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &[e_running, e_finished])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // First sync — both events must be imported.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "first sync must import both tied-timestamp events"
+        );
+
+        // Second sync — no new source events; neither tied event must be duplicated.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "second sync must not duplicate tied-timestamp boundary events"
+        );
+
+        // Third sync — stability check.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "third sync must not introduce further duplicates"
+        );
+    }
+
+    /// Regression test for the "Clipping Defeats Boundary Dedup" review finding on
+    /// ActivityWatch/aw-server-rust#713.
+    ///
+    /// When the newest destination event has a *positive* duration (not just the
+    /// duration=0 case from #711 Symptom 1), `resume_sync_at` is set to that event's
+    /// end time. The resumed source query then re-fetches the same event clipped to
+    /// the query start, i.e. with the event's original (timestamp, duration) replaced
+    /// by (resume_sync_at, 0). A dedup fingerprint keyed on (start, duration) cannot
+    /// match this clipped copy against the unclipped destination event, so the fix
+    /// must dedup on something invariant under start-clipping (end time), not on
+    /// start+duration.
+    #[test]
+    fn test_sync_no_duplicate_on_positive_duration_boundary() {
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+        let base_ts: DateTime<Utc> = Utc::now();
+
+        // A single event with a positive duration — the only (and therefore boundary)
+        // event in the bucket. Its end (base_ts + 182.639s) becomes resume_sync_at.
+        let boundary: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": base_ts.to_rfc3339(),
+            "duration": 182.639,
+            "data": {"label": "Testing"}
+        }))
+        .unwrap();
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &[boundary])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // First sync — imports the one boundary event.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            1,
+            "first sync must import the positive-duration boundary event"
+        );
+
+        // Add more new events than the test BATCH_SIZE (5) so the follow-up sync spans
+        // multiple pages. This matters: a single-page sync routes the oldest event
+        // through heartbeat() (see sync_one), whose delta=0.0 adjacency merge happens
+        // to absorb the clipped boundary duplicate and would mask this bug. A
+        // multi-page sync routes the last page through insert_events() instead, which
+        // exposes the duplicate directly if the dedup fingerprint fails to match.
+        // Timestamps are placed well after the boundary's end so they aren't
+        // themselves clipped or excluded by the resume-boundary query.
+        let new_events: Vec<Event> = (0..6)
+            .map(|i| {
+                let ts = base_ts + Duration::seconds(200 + i * 10);
+                serde_json::from_value(serde_json::json!({
+                    "timestamp": ts.to_rfc3339(),
+                    "duration": 0,
+                    "data": {"label": format!("new-{i}")}
+                }))
+                .unwrap()
+            })
+            .collect();
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &new_events)
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // Second sync — the clipped re-fetch of the boundary event must be recognized
+        // as a duplicate and skipped, not inserted as a spurious zero-duration copy
+        // alongside the 6 genuinely new events.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            7,
+            "second sync must import the 6 new events without re-duplicating \
+             the positive-duration boundary event"
+        );
+    }
+
+    /// Regression test for the HTTP/peewee boundary-dedup gap.
+    ///
+    /// When the destination is the Python aw-server over HTTP, `get_events(start=T)`
+    /// excludes duration=0 events AT T (peewee: `endtime >= start` with endtime==T
+    /// evaluates false for dur=0). The fingerprint set then lacks the dur=0 shape and
+    /// the event is re-imported on every subsequent pass.
+    ///
+    /// Fix: build fingerprints with `start = T - 1ms` (same overlap window as the
+    /// source fetch). Exact-match fingerprints make the wider window harmless for
+    /// events before T.
+    ///
+    /// This in-process test verifies the dedup logic is correct for both the
+    /// dur=0 and dur>0 shapes when the destination is pre-populated (production
+    /// state: the bucket already contains all boundary events from a prior sync).
+    #[test]
+    fn test_sync_no_duplicate_with_prepopulated_boundary() {
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+
+        // Two events at the exact same timestamp — the production shape that triggers
+        // the bug: a dur=0 "running:true" and a dur>0 "running:false".
+        let ts: DateTime<Utc> = Utc::now();
+        let e_running: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 0,
+            "data": {"label": "Testing", "running": true}
+        }))
+        .unwrap();
+        let e_finished: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 182.0,
+            "data": {"label": "Testing", "running": false}
+        }))
+        .unwrap();
+
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &[e_running.clone(), e_finished.clone()])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // Pre-populate the destination directly — simulating a prior completed sync.
+        // Both event shapes are already present in the dest bucket before we call sync.
+        let dest_bucket_id = synced_id.clone();
+        let dest_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": dest_bucket_id,
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test"
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&dest_bucket).unwrap();
+        state
+            .ds_dest
+            .insert_events(dest_bucket_id.as_str(), &[e_running, e_finished])
+            .unwrap();
+        state.ds_dest.force_commit().unwrap();
+
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "pre-populated destination must have 2 events before sync"
+        );
+
+        // Sync — destination already has all source events; must import 0.
+        // This exercises the fingerprint window: with the old start=T query the
+        // dur=0 event at T is excluded by HTTP/peewee semantics, leaving it
+        // un-fingerprinted and causing a re-import. With start=T-1ms both shapes
+        // are fingerprinted and 0 events are imported.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "sync against pre-populated destination must import 0 events (no boundary duplicates)"
+        );
+
+        // Second pass — stability.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "second pass must remain stable at 2 events"
+        );
+    }
 }

@@ -22,7 +22,9 @@ use aw_models::{Bucket, Event};
 
 use crate::accessmethod::AccessMethod;
 use crate::report::{BucketReport, PeerReport};
-use crate::util::{find_remotes_nonlocal_selection, RemoteDb};
+use crate::util::{
+    find_remotes_nonlocal_selection, list_remote_dbs, select_remote_dbs_detailed, RemoteDb,
+};
 
 pub use crate::report::{SyncMode, SyncReport};
 
@@ -77,11 +79,31 @@ pub fn sync_run(
     // "each device only writes files it owns" invariant (see
     // ActivityWatch/aw-server-rust#682).
     let ds_localremote = maybe_setup_local_remote(sync_spec.path.as_path(), device_id, mode)?;
-    let selection = find_remotes_nonlocal_selection(
-        sync_spec.path.as_path(),
-        device_id,
-        sync_spec.path_db.as_ref(),
-    )?;
+
+    // Peer discovery: union 3-level (Android / new desktop layout) and
+    // 2-level (legacy desktop) walkers so the daemon finds the same peers
+    // that `pull_all` and `aw-sync status` report.
+    //
+    // When a specific path_db is provided (sync_wrapper::pull, which passes a
+    // peer's host folder + the exact db file), stay on the 2-level path — the
+    // path is already a host subdirectory, not the sync root, so list_remote_dbs
+    // would walk into grandchildren and find nothing useful.
+    let selection = if sync_spec.path_db.is_none() {
+        let mut all_dbs: Vec<RemoteDb> = list_remote_dbs(sync_spec.path.as_path())?
+            .into_iter()
+            .filter(|db| db.device_id != device_id)
+            .collect();
+        let two_level = find_remotes_nonlocal_selection(sync_spec.path.as_path(), device_id, None)?;
+        all_dbs.extend(two_level.selected);
+        all_dbs.extend(two_level.skipped.into_iter().map(|s| s.db));
+        select_remote_dbs_detailed(all_dbs)
+    } else {
+        find_remotes_nonlocal_selection(
+            sync_spec.path.as_path(),
+            device_id,
+            sync_spec.path_db.as_ref(),
+        )?
+    };
     let remote_dbfiles: Vec<_> = selection.selected.iter().map(|d| d.path.clone()).collect();
 
     // Log if remotes found
@@ -1384,5 +1406,124 @@ mod peer_isolation_tests {
             "must not count the version-mismatch skip as an open failure, got: {err}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// Regression guard for ActivityWatch/aw-server-rust#709.
+///
+/// The daemon's peer discovery (sync_run with no path_db) must select 3-level
+/// Android peers (`{hostname}/{device_id}/*.db`) in addition to legacy 2-level
+/// ones.  Before the fix it used only the 2-level walker and reported
+/// "Found 0 remote db files" for any Android peer.
+#[cfg(test)]
+mod daemon_peer_discovery_tests {
+    use super::*;
+
+    /// Uses `tempfile::tempdir()` for a directory name unique per call, not
+    /// per-process: the three tests here run on parallel threads within the
+    /// same process, so a pid+timestamp name (as used elsewhere in this file)
+    /// can collide and make them share one directory (flaky, reproduced
+    /// locally by Erik — ActivityWatch/aw-server-rust#710).
+    /// `keep()` detaches the `TempDir` guard so the directory survives past
+    /// this function, matching the manual `fs::remove_dir_all` cleanup each
+    /// test already does.
+    fn temp_dir() -> PathBuf {
+        tempfile::tempdir().unwrap().keep()
+    }
+
+    fn touch(path: &PathBuf) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, b"").unwrap();
+    }
+
+    fn discover(sync_root: &PathBuf, own_device_id: &str) -> crate::util::RemoteSelection {
+        let mut all_dbs: Vec<crate::util::RemoteDb> = list_remote_dbs(sync_root)
+            .unwrap()
+            .into_iter()
+            .filter(|db| db.device_id != own_device_id)
+            .collect();
+        let two_level = find_remotes_nonlocal_selection(sync_root, own_device_id, None).unwrap();
+        all_dbs.extend(two_level.selected);
+        all_dbs.extend(two_level.skipped.into_iter().map(|s| s.db));
+        select_remote_dbs_detailed(all_dbs)
+    }
+
+    /// Simulates the daemon peer-discovery path (path_db = None) against a
+    /// sync root that contains only a 3-level Android peer.
+    #[test]
+    fn daemon_discovers_three_level_android_peer() {
+        let sync_root = temp_dir();
+        // Android 3-level layout: {hostname}/{device_id}/sync.db
+        touch(
+            &sync_root
+                .join("poco_f8_ultra")
+                .join("41662faa-1234-5678-9abc-def012345678")
+                .join("sync.db"),
+        );
+
+        let selection = discover(&sync_root, "local-device-id");
+
+        assert_eq!(
+            selection.selected.len(),
+            1,
+            "daemon must discover the Android 3-level peer; got: {:?}",
+            selection.selected
+        );
+        assert_eq!(selection.selected[0].hostname, "poco_f8_ultra");
+        assert_eq!(
+            selection.selected[0].device_id,
+            "41662faa-1234-5678-9abc-def012345678"
+        );
+
+        let _ = fs::remove_dir_all(&sync_root);
+    }
+
+    /// Verify the 2-level walker still finds legacy desktop peers so the
+    /// union does not regress backward compatibility.
+    #[test]
+    fn daemon_discovers_two_level_legacy_peer() {
+        let sync_root = temp_dir();
+        touch(&sync_root.join("legacy-desktop-device").join("test.db"));
+
+        let selection = discover(&sync_root, "local-device-id");
+
+        assert_eq!(
+            selection.selected.len(),
+            1,
+            "daemon must still discover the 2-level legacy peer; got: {:?}",
+            selection.selected
+        );
+        assert_eq!(selection.selected[0].device_id, "legacy-desktop-device");
+
+        let _ = fs::remove_dir_all(&sync_root);
+    }
+
+    /// Both a 3-level Android peer and a 2-level legacy peer must both be
+    /// selected (different device IDs — no deduplication needed).
+    #[test]
+    fn daemon_discovers_mixed_layout_peers() {
+        let sync_root = temp_dir();
+        // 3-level Android peer
+        touch(
+            &sync_root
+                .join("poco_f8_ultra")
+                .join("android-dev-id")
+                .join("sync.db"),
+        );
+        // 2-level legacy desktop peer
+        touch(&sync_root.join("desktop-dev-id").join("test.db"));
+
+        let selection = discover(&sync_root, "local-device-id");
+
+        assert_eq!(
+            selection.selected.len(),
+            2,
+            "daemon must discover both Android and legacy peers; got: {:?}",
+            selection.selected
+        );
+
+        let _ = fs::remove_dir_all(&sync_root);
     }
 }

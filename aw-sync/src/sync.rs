@@ -699,7 +699,7 @@ const EDIT_RECONCILE_LOOKBACK: Duration = Duration::days(7);
 /// ID truncated on import, independently of this check. Treating it as a marker
 /// therefore adds no new failure mode. Issue #649 tracks moving provenance to
 /// bucket metadata, which removes the dependency on the ID string entirely.
-fn is_synced_bucket(bucket: &Bucket) -> bool {
+pub(crate) fn is_synced_bucket(bucket: &Bucket) -> bool {
     bucket.id.contains("-synced-from-")
 }
 

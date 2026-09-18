@@ -25,6 +25,7 @@ use std::time::Duration;
 use aw_client_rust::blocking::AwClient;
 
 mod accessmethod;
+mod dedupe;
 mod dirs;
 mod report;
 mod status;
@@ -142,6 +143,24 @@ enum Commands {
     /// Also prints the last persisted `SyncReport` (what the previous pass did).
     /// Does not create staging files.
     Status {},
+    /// One-off cleanup: collapse exact-duplicate events in `-synced-from-`
+    /// buckets (accumulated by pre-#713 pull passes that re-imported the
+    /// resume-boundary event on every run).
+    ///
+    /// Only ever touches buckets carrying the `-synced-from-` marker; a
+    /// host's own first-hand buckets are never candidates. Duplicates are
+    /// exact matches on (timestamp, duration, data); the lowest-id (first
+    /// imported) copy of each group is kept.
+    Dedupe {
+        /// Restrict to specific bucket id(s), comma separated.
+        /// By default, every `-synced-from-` bucket is checked.
+        #[clap(long, value_parser=parse_list)]
+        bucket: Option<Vec<String>>,
+
+        /// Report duplicate counts without deleting anything.
+        #[clap(long)]
+        dry_run: bool,
+    },
 }
 
 fn parse_start_date(arg: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
@@ -357,6 +376,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // List all buckets
         Commands::List {} => sync::list_buckets(&client)?,
         Commands::Status {} => status::run_status(&client, &opts.host, port, &profile)?,
+        Commands::Dedupe { bucket, dry_run } => dedupe::run_dedupe(&client, bucket, dry_run)?,
     }
 
     // Needed to give the datastores some time to commit before program is shut down.

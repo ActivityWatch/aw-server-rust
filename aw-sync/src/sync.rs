@@ -1418,19 +1418,17 @@ mod peer_isolation_tests {
 #[cfg(test)]
 mod daemon_peer_discovery_tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// Uses `tempfile::tempdir()` for a directory name unique per call, not
+    /// per-process: the three tests here run on parallel threads within the
+    /// same process, so a pid+timestamp name (as used elsewhere in this file)
+    /// can collide and make them share one directory (flaky, reproduced
+    /// locally by Erik — ActivityWatch/aw-server-rust#710).
+    /// `keep()` detaches the `TempDir` guard so the directory survives past
+    /// this function, matching the manual `fs::remove_dir_all` cleanup each
+    /// test already does.
     fn temp_dir() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "aw-sync-daemon-discovery-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&p).unwrap();
-        p
+        tempfile::tempdir().unwrap().keep()
     }
 
     fn touch(path: &PathBuf) {

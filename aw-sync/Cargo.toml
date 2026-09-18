@@ -40,6 +40,9 @@ openssl = { version = "0.10.80", features = ["vendored"] }  # https://github.com
 jni = { version = "0.21", default-features = false }
 android_logger = "0.13"
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = ["cli"]
 cli = ["clap", "ctrlc", "dep:rusqlite"]

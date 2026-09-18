@@ -193,22 +193,31 @@ impl SegmentWriter {
 
         // If sealing the previous generation, mark it sealed in the manifest.
         // Guard: only seal if the file is actually present — if it was
-        // externally deleted, drop the dangling entry instead of advertising
-        // a sealed segment with a stale sha256 that points nowhere.
+        // externally deleted (NotFound), drop the dangling entry instead of
+        // advertising a sealed segment with a stale sha256 that points
+        // nowhere. Any other I/O error (permissions, hardware, sharing
+        // violation on Windows) must propagate: silently dropping the entry
+        // on a transient error would silently lose history.
         if prev_sealed {
             let prev_path = self.segment_path(self.generation);
-            if let Ok(bytes) = fs::read(&prev_path) {
-                if let Some(s) = segments
-                    .iter_mut()
-                    .find(|s| s.generation == self.generation)
-                {
-                    let mut h = Sha256::new();
-                    h.update(&bytes);
-                    s.sha256 = format!("{:x}", h.finalize());
-                    s.sealed = true;
+            match fs::read(&prev_path) {
+                Ok(bytes) => {
+                    if let Some(s) = segments
+                        .iter_mut()
+                        .find(|s| s.generation == self.generation)
+                    {
+                        let mut h = Sha256::new();
+                        h.update(&bytes);
+                        s.sha256 = format!("{:x}", h.finalize());
+                        s.sealed = true;
+                    }
                 }
-            } else {
-                segments.retain(|s| s.generation != self.generation);
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    segments.retain(|s| s.generation != self.generation);
+                }
+                Err(e) => {
+                    return Err(format!("read previous segment for sealing: {e}"));
+                }
             }
         }
 
@@ -739,5 +748,51 @@ mod tests {
                 "sealed segment must have a valid sha256"
             );
         }
+    }
+
+    // On Unix: replace a "large" gen-1 segment with a self-referential symlink.
+    // Path::exists() follows the link and returns false (so should_start_new
+    // fires and prev_sealed = true), but fs::read fails with ELOOP (not
+    // ENOENT) — which must propagate rather than silently drop the history.
+    #[cfg(unix)]
+    #[test]
+    fn test_io_error_during_seal_propagates() {
+        use std::os::unix::fs as unix_fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "test-host_io_err";
+        let bucket = make_bucket();
+
+        let mut writer = SegmentWriter::new(dir.path(), device_id, &bucket.id).unwrap();
+        writer.write_events(&bucket, &[make_event(0, 1)]).unwrap();
+
+        // Inflate gen 1 past SEAL_SIZE_BYTES so the writer knows to advance.
+        let seg_path = writer.segment_path(1);
+        fs::write(&seg_path, vec![0u8; SEAL_SIZE_BYTES as usize]).unwrap();
+
+        // Replace with a self-referential symlink: seg_path -> seg_path.
+        // exists() resolves the chain, hits ELOOP, and returns false, so the
+        // writer treats it as missing (starts gen 2) and sets prev_sealed=true.
+        // fs::read on the loop symlink returns ELOOP, not ENOENT.
+        fs::remove_file(&seg_path).unwrap();
+        unix_fs::symlink(&seg_path, &seg_path).unwrap();
+
+        let result = writer.write_events(&bucket, &[make_event(60, 2)]);
+
+        // Remove the loop symlink so tempdir cleanup can proceed.
+        fs::remove_file(&seg_path).ok();
+
+        assert!(
+            result.is_err(),
+            "non-NotFound I/O error must propagate, not silently drop history"
+        );
+        assert!(
+            result
+                .as_ref()
+                .unwrap_err()
+                .contains("read previous segment"),
+            "error must name the seal-read failure, got: {:?}",
+            result
+        );
     }
 }

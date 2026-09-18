@@ -1643,4 +1643,44 @@ mod daemon_peer_discovery_tests {
 
         let _ = fs::remove_dir_all(&sync_root);
     }
+
+    /// A leftover own-device root db (`{root}/{own_device_id}/test.db` — the
+    /// #682 artefact every desktop that ran the old daemon still has, sometimes
+    /// over 1 GB) must be excluded from discovery.  The 3-level peer alongside
+    /// it must still be selected, and the own db must appear in neither
+    /// `selected` nor `skipped`.
+    #[test]
+    fn daemon_excludes_own_device_root_db_alongside_three_level_peer() {
+        let sync_root = temp_dir();
+        let own_id = "aaaa-0000-own-device-id";
+
+        // Old daemon's own staging db at the 2-level root path: {own_id}/test.db
+        touch(&sync_root.join(own_id).join("test.db"));
+
+        // A genuine 3-level Android peer that must survive discovery
+        touch(
+            &sync_root
+                .join("poco_f8_ultra")
+                .join("bbbb-1111-android-peer")
+                .join("sync.db"),
+        );
+
+        let selection = discover(&sync_root, own_id);
+
+        assert_eq!(
+            selection.selected.len(),
+            1,
+            "own-device root db must not be selected; only the 3-level peer must be; got: {:?}",
+            selection.selected
+        );
+        assert_eq!(selection.selected[0].device_id, "bbbb-1111-android-peer");
+
+        let own_in_skipped = selection.skipped.iter().any(|s| s.db.device_id == own_id);
+        assert!(
+            !own_in_skipped,
+            "own-device root db must not appear in skipped list either"
+        );
+
+        let _ = fs::remove_dir_all(&sync_root);
+    }
 }

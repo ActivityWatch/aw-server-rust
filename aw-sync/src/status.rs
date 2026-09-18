@@ -10,6 +10,7 @@ use std::io::{self, Write};
 use aw_client_rust::blocking::AwClient;
 use chrono::{DateTime, Utc};
 
+use crate::sync::sanitize_hostname;
 use crate::util::{
     inspect_sync_db, scan_sync_dir, DbInspect, SyncDirEntry, SyncEntryKind, SyncLayout,
 };
@@ -151,7 +152,7 @@ fn format_inspect(info: &DbInspect, imported_origins: &HashSet<String>) -> Strin
             .unwrap_or_else(|| "-".to_string())
     ));
     if let Some(host) = &info.hostname {
-        let imported = imported_origins.contains(host);
+        let imported = imported_origins.contains(sanitize_hostname(host).as_str());
         s.push_str(&format!(
             "    imported locally: {}\n",
             if imported { "yes" } else { "no" }
@@ -218,7 +219,7 @@ fn collect_warnings(
         }
         if entry.kind == SyncEntryKind::Peer {
             if let Some(host) = &info.hostname {
-                if !imported_origins.contains(host) {
+                if !imported_origins.contains(sanitize_hostname(host).as_str()) {
                     warnings.push(format!(
                         "peer {} ({}) has not been imported locally",
                         entry.device_id.as_deref().unwrap_or("?"),

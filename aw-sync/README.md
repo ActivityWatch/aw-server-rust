@@ -23,6 +23,20 @@ aw-sync sync
 # Doctor: why is pull empty / which peers exist in the folder?
 # Also prints the last persisted pass (peers, events, skips).
 aw-sync status
+
+# One-off cleanup: collapse exact-duplicate events that accumulated in
+# `-synced-from-` buckets from pull passes before #713. Never touches a
+# host's own first-hand buckets.
+aw-sync dedupe --dry-run   # report only, across every -synced-from- bucket
+aw-sync dedupe --bucket aw-watcher-window-synced-from-host  # delete the extras in one bucket (lowest-id copy is kept)
+# Deleting from every -synced-from- bucket at once (no --bucket) requires --dry-run
+# review first: -synced-from- is an ID convention, not a reserved bucket type, so
+# `--bucket` makes the buckets you're deleting from an explicit, reviewed list.
+#
+# Caveat: deduplication compares (timestamp, duration, data) for exact equality.
+# Two genuinely distinct events that happen to share all three fields would be
+# collapsed — one copy deleted. This is practically impossible for real activity
+# data, but note it before running on a live instance.
 ```
 
 `aw-sync` / `aw-sync daemon` currently **does not pull** from the 3-level `{hostname}/{device_id}/` layout that Android and `aw-sync sync` write. The daemon stages `{device_id}/test.db` at the sync-folder root and only walks two directory levels, so those peers are invisible ([#682](https://github.com/ActivityWatch/aw-server-rust/issues/682)). Until that switch lands, use `aw-sync sync` (or a systemd/cron timer around it) — not the daemon.

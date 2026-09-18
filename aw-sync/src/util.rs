@@ -362,6 +362,34 @@ mod tests {
         assert_eq!(remotes, vec![real]);
         assert!(!remotes.iter().any(|p| p == &junk));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_remotes_skips_unreadable_host_dir_instead_of_aborting() {
+        // aw-server-rust#712 P1: an unreadable 2-level host dir must not
+        // abort discovery of the other, readable peers.
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_sync_root();
+        let good_dir = root.join("device-1");
+        fs::create_dir_all(&good_dir).unwrap();
+        let good = good_dir.join("test.db");
+        fs::write(&good, vec![0u8; 16]).unwrap();
+
+        let locked_dir = root.join("device-2");
+        fs::create_dir_all(&locked_dir).unwrap();
+        fs::write(locked_dir.join("test.db"), vec![0u8; 16]).unwrap();
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = super::find_remotes(&root);
+
+        // Restore permissions before cleanup, else remove_dir_all fails.
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let remotes = result.expect("unreadable peer dir must not abort discovery");
+        assert_eq!(remotes, vec![good]);
+    }
 }
 
 /// A peer database discovered under `{sync_root}/{hostname}/{device_id}/*.db`.
@@ -376,9 +404,10 @@ pub(crate) struct RemoteDb {
 /// List every `{hostname}/{device_id}/*.db` under `sync_root`.
 ///
 /// Returns device_id and file size so callers can collapse duplicate folders
-/// for one device before importing. I/O errors are propagated rather than
-/// skipped: dropping a host directory we failed to read would report a
-/// successful sync that quietly omitted that host's data.
+/// for one device before importing. Only the outer `sync_root` read_dir
+/// propagates; inner failures (one bad host or device directory) are logged
+/// and skipped so a single inaccessible peer does not abort discovery of all
+/// others.
 ///
 /// 3-level-only by design. This is the `pull_all` walker. A leftover 2-level
 /// root db (`{sync_root}/{device_id}/test.db`, no hostname folder) is **not**
@@ -553,10 +582,11 @@ pub(crate) fn select_remote_dbs_detailed(dbs: Vec<RemoteDb>) -> RemoteSelection 
 /// pull import the leftover root orphan from #682. Default-daemon pull
 /// is [`list_remote_dbs`] (3-level-only), not this function.
 ///
-/// I/O errors are propagated rather than unwrapped (a panic here aborts the app
-/// on Android, ActivityWatch/aw-android#220) and rather than skipped: silently
-/// dropping a host directory we failed to read would report a successful sync
-/// that quietly omitted that host's data.
+/// Only the outer `sync_directory` read_dir propagates (a panic here aborts
+/// the app on Android, ActivityWatch/aw-android#220); inner failures (one
+/// bad host or device directory) are logged and skipped so a single
+/// inaccessible peer does not abort discovery of all others — matching
+/// [`list_remote_dbs`]'s per-peer error isolation.
 ///
 /// Dot-directories are skipped for the same reason as [`list_remote_dbs`]
 /// (ActivityWatch/aw-server-rust#689). A Syncthing Trash Can layout can
@@ -564,12 +594,31 @@ pub(crate) fn select_remote_dbs_detailed(dbs: Vec<RemoteDb>) -> RemoteSelection 
 fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut dbs = Vec::new();
     for entry in fs::read_dir(sync_directory)? {
-        let hostdir = entry?.path();
+        let hostdir = match entry {
+            Ok(e) => e.path(),
+            Err(e) => {
+                warn!("find_remotes: skipping unreadable entry in {sync_directory:?}: {e}");
+                continue;
+            }
+        };
         if !hostdir.is_dir() || is_dot_dir(&hostdir) {
             continue;
         }
-        for entry in fs::read_dir(&hostdir)? {
-            let path = entry?.path();
+        let device_iter = match fs::read_dir(&hostdir) {
+            Ok(it) => it,
+            Err(e) => {
+                warn!("find_remotes: skipping unreadable host dir {hostdir:?}: {e}");
+                continue;
+            }
+        };
+        for entry in device_iter {
+            let path = match entry {
+                Ok(e) => e.path(),
+                Err(e) => {
+                    warn!("find_remotes: skipping unreadable entry in {hostdir:?}: {e}");
+                    continue;
+                }
+            };
             if path.extension().unwrap_or_else(|| OsStr::new("")) == "db" {
                 dbs.push(path);
             }

@@ -55,6 +55,12 @@ pub struct SegmentEntry {
     /// True once the segment will not be rewritten. An unsealed segment is the
     /// current open tail; its sha256 changes on every writer pass.
     pub sealed: bool,
+    /// Wall-clock time this generation was first written. Unlike `start_ts`
+    /// (the oldest *event* timestamp), this never changes across rewrites of
+    /// the same open tail — it drives the age-based seal policy so importing
+    /// old historical events doesn't look "already expired" on the first pass.
+    #[serde(default)]
+    pub first_written_at: Option<DateTime<Utc>>,
 }
 
 impl Manifest {
@@ -105,7 +111,7 @@ impl Manifest {
             w.flush().map_err(|e| format!("flush manifest: {e}"))?;
             f.sync_all().map_err(|e| format!("fsync manifest: {e}"))?;
         }
-        fs::rename(&tmp, &target).map_err(|e| format!("rename manifest: {e}"))?;
+        durable_rename(&tmp, &target)?;
         fsync_dir(target.parent().unwrap())?;
         Ok(())
     }
@@ -114,8 +120,8 @@ impl Manifest {
 /// fsync a directory so a preceding `rename` into it survives a crash.
 ///
 /// No-op on Windows: directory handles opened via `File::open` cannot be
-/// fsynced on that platform, and Windows' write-through cache provides
-/// equivalent durability guarantees for our rename semantics.
+/// fsynced on that platform. Durability for the rename itself is instead
+/// provided by `durable_rename`, which uses `MOVEFILE_WRITE_THROUGH` there.
 pub(crate) fn fsync_dir(dir: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -126,6 +132,49 @@ pub(crate) fn fsync_dir(dir: &Path) -> Result<(), String> {
     #[cfg(not(unix))]
     let _ = dir;
     Ok(())
+}
+
+/// Rename `from` to `to`, replacing any existing file at `to`, with the same
+/// crash-durability guarantee on every supported platform.
+///
+/// On Unix, a plain `rename` is already durable once the directory entry is
+/// fsynced (`fsync_dir`, called by the caller). Windows has no directory-fsync
+/// primitive, so the equivalent guarantee there is `MOVEFILE_WRITE_THROUGH`:
+/// `MoveFileExW` does not return until the rename is flushed to disk.
+pub(crate) fn durable_rename(from: &Path, to: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let from_wide: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to_wide: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: both buffers are valid, NUL-terminated UTF-16 strings that
+        // outlive the call.
+        let ok = unsafe {
+            MoveFileExW(
+                from_wide.as_ptr(),
+                to_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok == 0 {
+            return Err(format!(
+                "rename {} -> {}: {}",
+                from.display(),
+                to.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(from, to)
+            .map_err(|e| format!("rename {} -> {}: {e}", from.display(), to.display()))
+    }
 }
 
 /// Path for manifest inside the device directory.
@@ -205,6 +254,7 @@ mod tests {
                     end_ts: None,
                     sha256: "abc".to_string(),
                     sealed: false,
+                    first_written_at: Some(Utc::now()),
                 }],
             },
         );

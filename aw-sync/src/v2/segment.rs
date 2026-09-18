@@ -135,13 +135,18 @@ impl SegmentWriter {
             let prev_path = self.segment_path(self.generation);
             if prev_path.exists() {
                 let size = fs::metadata(&prev_path).map(|m| m.len()).unwrap_or(0);
-                let prev_start = manifest
+                // Age is measured from when this generation was first written
+                // to disk, not from its oldest event timestamp — otherwise
+                // importing events that are already older than SEAL_MAX_AGE
+                // (e.g. a historical backfill) would seal on every single
+                // pass instead of accumulating in the open tail.
+                let prev_created = manifest
                     .buckets
                     .get(&self.bucket_id)
                     .and_then(|e| e.segments.iter().find(|s| s.generation == self.generation))
-                    .and_then(|s| s.start_ts);
-                let too_old = prev_start
-                    .map(|start| Utc::now() - start >= seal_max_age())
+                    .and_then(|s| s.first_written_at);
+                let too_old = prev_created
+                    .map(|created| Utc::now() - created >= seal_max_age())
                     .unwrap_or(false);
                 size >= SEAL_SIZE_BYTES || too_old
             } else {
@@ -203,6 +208,14 @@ impl SegmentWriter {
             }
         }
 
+        // Preserve the generation's original creation time across open-tail
+        // rewrites; only a brand-new generation gets a fresh timestamp.
+        let first_written_at = segments
+            .iter()
+            .find(|s| s.generation == write_gen)
+            .and_then(|s| s.first_written_at)
+            .unwrap_or_else(Utc::now);
+
         // Remove any existing entry for this generation (open-tail rewrite)
         segments.retain(|s| s.generation != write_gen);
         segments.push(SegmentEntry {
@@ -213,6 +226,7 @@ impl SegmentWriter {
             end_ts,
             sha256: sha256_hex,
             sealed,
+            first_written_at: Some(first_written_at),
         });
         segments.sort_by_key(|s| s.generation);
 
@@ -325,7 +339,7 @@ impl SegmentWriter {
             w.flush().map_err(|e| format!("flush segment: {e}"))?;
             f.sync_all().map_err(|e| format!("fsync segment: {e}"))?;
         }
-        fs::rename(&tmp_path, &segment_path).map_err(|e| format!("rename segment: {e}"))?;
+        super::manifest::durable_rename(&tmp_path, &segment_path)?;
         super::manifest::fsync_dir(segment_path.parent().unwrap())?;
 
         Ok((n_events, start_ts, end_ts, sha256_hex, compressed_size))
@@ -643,5 +657,42 @@ mod tests {
             vec![1, 2],
             "segment lines must be chronological, oldest first"
         );
+    }
+
+    #[test]
+    fn test_historical_import_does_not_seal_every_pass() {
+        // Regression test for review finding: seal-by-age must be measured
+        // from the generation's own creation time, not from the oldest event
+        // timestamp. A historical backfill (events already older than
+        // SEAL_MAX_AGE) must still accumulate in one open tail across passes
+        // instead of sealing a tiny segment on every single write.
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "test-host_historical";
+        let bucket = make_bucket();
+        let hostname = gethostname::gethostname()
+            .into_string()
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        // Events dated well before SEAL_MAX_AGE (a "historical" backfill).
+        let old_offset = -(seal_max_age().num_seconds() * 3);
+        let mut writer = SegmentWriter::new(dir.path(), device_id, &bucket.id).unwrap();
+
+        let events_a = vec![make_event(old_offset, 1)];
+        let gen_a = writer.write_events(&bucket, &events_a).unwrap();
+        assert_eq!(gen_a, 1);
+
+        let events_b = vec![make_event(old_offset + 60, 2)];
+        let gen_b = writer.write_events(&bucket, &events_b).unwrap();
+        assert_eq!(
+            gen_b, 1,
+            "old event timestamps must not trigger seal-by-age; only wall-clock \
+             time since the generation's own creation should"
+        );
+
+        let manifest = Manifest::load_or_default(dir.path(), device_id, &hostname).unwrap();
+        let entry = manifest.buckets.get(&bucket.id).unwrap();
+        assert_eq!(entry.segments.len(), 1, "must stay a single open tail");
+        assert!(!entry.segments[0].sealed);
+        assert_eq!(entry.segments[0].n_events, 2);
     }
 }

@@ -324,6 +324,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
+ "windows-sys 0.59.0",
  "zstd",
 ]
 

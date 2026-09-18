@@ -151,9 +151,18 @@ enum Commands {
     /// host's own first-hand buckets are never candidates. Duplicates are
     /// exact matches on (timestamp, duration, data); the lowest-id (first
     /// imported) copy of each group is kept.
+    ///
+    /// `-synced-from-` is an ID convention, not a bucket type bucket creation
+    /// reserves (#649 tracks moving provenance to metadata instead), so
+    /// deleting from every matching bucket unattended is refused: without
+    /// `--dry-run`, `--bucket` is required, naming buckets you reviewed.
+    ///
+    /// Note: each duplicate is removed with an individual HTTP call, so
+    /// cleaning up tens of thousands of duplicates can take a long time.
     Dedupe {
-        /// Restrict to specific bucket id(s), comma separated.
-        /// By default, every `-synced-from-` bucket is checked.
+        /// Restrict to specific bucket id(s), comma separated. Every
+        /// `-synced-from-` bucket is checked with `--dry-run`; deleting
+        /// requires naming buckets here explicitly.
         #[clap(long, value_parser=parse_list)]
         bucket: Option<Vec<String>>,
 

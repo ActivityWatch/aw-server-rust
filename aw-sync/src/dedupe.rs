@@ -13,6 +13,16 @@ use std::io::{self, Write};
 
 use aw_client_rust::blocking::AwClient;
 use aw_models::Event;
+use chrono::{DateTime, Duration, Utc};
+
+/// Bounded page size for `dedupe_bucket_paginated`'s fetch loop, so a
+/// long-lived synced bucket can't be pulled into memory in one unbounded
+/// `get_events` call. Mirrors the pagination shape in `sync::sync_one`
+/// (that module's `BATCH_SIZE` is private, so this is a separate constant).
+#[cfg(not(test))]
+const PAGE_SIZE: usize = 5000;
+#[cfg(test)]
+const PAGE_SIZE: usize = 3;
 
 /// Among `events`, return the ids of every event that is an exact duplicate
 /// (same timestamp, duration and data — `Event`'s own `PartialEq`) of an
@@ -50,6 +60,59 @@ pub struct BucketDedupeResult {
     pub duplicate_events: usize,
 }
 
+/// Fetch `bucket_id`'s events via `fetch_page` in bounded pages (newest-first,
+/// walking the `end` boundary backwards) and return the total event count and
+/// duplicate ids, without ever holding the whole bucket in memory at once.
+///
+/// A duplicate group's members all share the same `(timestamp, duration,
+/// data)`, so as long as a page never splits a run of same-timestamp events,
+/// every duplicate group is fully contained within one page and
+/// `find_duplicate_ids` can be applied per page independently — no
+/// across-page bookkeeping needed. Boundary handling mirrors `sync::sync_one`.
+fn dedupe_bucket_paginated<F>(mut fetch_page: F) -> Result<(usize, Vec<i64>), Box<dyn Error>>
+where
+    F: FnMut(Option<DateTime<Utc>>) -> Result<Vec<Event>, Box<dyn Error>>,
+{
+    let mut total_events = 0usize;
+    let mut duplicate_ids = Vec::new();
+    let mut fetch_end: Option<DateTime<Utc>> = None;
+
+    loop {
+        let mut page = fetch_page(fetch_end)?;
+        if page.is_empty() {
+            break;
+        }
+        let is_last_page = page.len() < PAGE_SIZE;
+
+        if !is_last_page {
+            // page is newest-first; page.last() = oldest event in this full page.
+            // Never split a run of same-timestamp events across two pages, or a
+            // duplicate group could be cut in half with its older half missed.
+            let boundary_ts = page.last().unwrap().timestamp;
+            let newest_ts = page.first().unwrap().timestamp;
+            if newest_ts != boundary_ts {
+                while page.last().is_some_and(|e| e.timestamp == boundary_ts) {
+                    page.pop();
+                }
+                fetch_end = Some(boundary_ts);
+            } else {
+                // Whole page shares one timestamp; can't split further without
+                // an unbounded query. Not expected for real AW event data.
+                fetch_end = Some(boundary_ts - Duration::nanoseconds(1));
+            }
+        }
+
+        total_events += page.len();
+        duplicate_ids.extend(find_duplicate_ids(&page));
+
+        if is_last_page {
+            break;
+        }
+    }
+
+    Ok((total_events, duplicate_ids))
+}
+
 pub fn run_dedupe(
     client: &AwClient,
     buckets_filter: Option<Vec<String>>,
@@ -72,6 +135,19 @@ pub fn run_dedupe(
                 Some(_) => {}
             }
         }
+    } else if !dry_run {
+        // `-synced-from-` is an ID convention aw-sync itself reserves, but
+        // bucket creation doesn't enforce that reservation (ActivityWatch/aw-server-rust#649
+        // tracks moving provenance to bucket metadata instead of the ID string) — a
+        // hand-created bucket could coincidentally match it and get deleted from
+        // unattended. Require the caller to have reviewed a --dry-run report and
+        // named buckets explicitly before deleting from every match at once.
+        return Err(
+            "Refusing to delete from every -synced-from- bucket without --bucket: run with \
+             --dry-run first, review the per-bucket counts, then re-run with \
+             --bucket <id1,id2,...> naming the buckets you confirmed."
+                .into(),
+        );
     }
     targets.sort();
 
@@ -82,14 +158,23 @@ pub fn run_dedupe(
 
     let mut results = Vec::new();
     for bucket_id in targets {
-        let events = client.get_events(&bucket_id, None, None, None)?;
-        let total_events = events.len();
-        let duplicate_ids = find_duplicate_ids(&events);
+        let (total_events, duplicate_ids) = dedupe_bucket_paginated(|end| {
+            client
+                .get_events(&bucket_id, None, end, Some(PAGE_SIZE as u64))
+                .map_err(|e| -> Box<dyn Error> { e.into() })
+        })?;
         let duplicate_events = duplicate_ids.len();
 
         if duplicate_events > 0 && !dry_run {
-            for id in duplicate_ids {
+            info!(
+                "Deleting from {}: {} duplicate(s)...",
+                bucket_id, duplicate_events
+            );
+            for (i, id) in duplicate_ids.into_iter().enumerate() {
                 client.delete_event(&bucket_id, id)?;
+                if (i + 1) % 10_000 == 0 {
+                    info!("  {}/{} deleted", i + 1, duplicate_events);
+                }
             }
         }
 
@@ -188,5 +273,48 @@ mod tests {
     fn no_duplicates_returns_empty() {
         let events = vec![event(1, 100, 10, "a"), event(2, 200, 10, "a")];
         assert!(find_duplicate_ids(&events).is_empty());
+    }
+
+    /// A fake `get_events(end)`: returns events with `timestamp <= end`
+    /// (or all, if `end` is None), newest-first — same contract as the real
+    /// client, so `dedupe_bucket_paginated` can be exercised without a server.
+    fn fake_fetch_page(
+        all: &[Event],
+        end: Option<DateTime<Utc>>,
+    ) -> Result<Vec<Event>, Box<dyn Error>> {
+        let mut page: Vec<Event> = all
+            .iter()
+            .filter(|e| end.is_none_or(|end| e.timestamp <= end))
+            .cloned()
+            .collect();
+        page.sort_by_key(|e| std::cmp::Reverse(e.id));
+        page.truncate(PAGE_SIZE);
+        Ok(page)
+    }
+
+    #[test]
+    fn paginated_matches_single_shot_across_page_boundaries() {
+        // PAGE_SIZE is 3 under #[cfg(test)]. 7 events, forcing 3 pages, with a
+        // duplicate group (ids 11 and 12, both dups of the lowest-id copy 10)
+        // that straddles where a naive page cut would land — the boundary-safe
+        // pop must keep the whole tied run together in one page.
+        let all = vec![
+            event(20, 700, 10, "g"),
+            event(19, 600, 10, "f"),
+            event(18, 500, 10, "e"),
+            event(12, 400, 10, "a"), // dup of 10 (lowest id is keeper)
+            event(11, 400, 10, "a"), // dup of 10
+            event(10, 400, 10, "a"), // keeper: lowest id in the group
+            event(1, 100, 10, "z"),
+        ];
+        let (total, mut dups) = dedupe_bucket_paginated(|end| fake_fetch_page(&all, end)).unwrap();
+        dups.sort();
+        assert_eq!(total, all.len());
+        assert_eq!(dups, vec![11, 12]);
+
+        // Must match the unbounded single-shot result exactly.
+        let mut single_shot = find_duplicate_ids(&all);
+        single_shot.sort();
+        assert_eq!(dups, single_shot);
     }
 }

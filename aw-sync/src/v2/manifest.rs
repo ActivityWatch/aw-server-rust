@@ -66,6 +66,7 @@ pub struct SegmentEntry {
 impl Manifest {
     /// Load an existing manifest or return a fresh default.
     pub fn load_or_default(dir: &Path, device_id: &str, hostname: &str) -> Result<Self, String> {
+        validate_device_id(device_id)?;
         let path = manifest_path(dir, device_id);
         if path.exists() {
             let data = fs::read_to_string(&path).map_err(|e| format!("read manifest: {e}"))?;
@@ -187,6 +188,19 @@ pub fn device_dir(sync_root: &Path, device_id: &str) -> PathBuf {
     sync_root.join("devices").join(device_id)
 }
 
+/// Reject a device_id that could escape the sync root via path traversal.
+pub(super) fn validate_device_id(device_id: &str) -> Result<(), String> {
+    if device_id.is_empty() {
+        return Err("device_id must not be empty".to_string());
+    }
+    if device_id.contains('/') || device_id.contains('\\') || device_id.contains("..") {
+        return Err(format!(
+            "invalid device_id {device_id:?}: must not contain path separators or '..'"
+        ));
+    }
+    Ok(())
+}
+
 /// Compute the 16-char slug used in segment filenames.
 pub fn bucket_slug(bucket_id: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -285,5 +299,19 @@ mod tests {
         let result = Manifest::load_or_default(dir.path(), device_id, hostname);
         assert!(result.is_err(), "should refuse v > MAX_V");
         assert!(result.unwrap_err().contains("refusing to open"));
+    }
+
+    #[test]
+    fn test_device_id_path_traversal_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let hostname = "test-host";
+        for bad_id in &["../evil", "../../etc/passwd", "foo/bar", "foo\\bar"] {
+            let result = Manifest::load_or_default(dir.path(), bad_id, hostname);
+            assert!(
+                result.is_err(),
+                "should reject path-unsafe device_id: {bad_id}"
+            );
+            assert!(result.unwrap_err().contains("invalid device_id"));
+        }
     }
 }

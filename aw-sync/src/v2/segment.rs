@@ -191,20 +191,24 @@ impl SegmentWriter {
             .map(|e| e.segments.clone())
             .unwrap_or_default();
 
-        // If sealing the previous generation, mark it sealed in the manifest
+        // If sealing the previous generation, mark it sealed in the manifest.
+        // Guard: only seal if the file is actually present — if it was
+        // externally deleted, drop the dangling entry instead of advertising
+        // a sealed segment with a stale sha256 that points nowhere.
         if prev_sealed {
-            if let Some(s) = segments
-                .iter_mut()
-                .find(|s| s.generation == self.generation)
-            {
-                // Recompute sha256 for the now-final file
-                let prev_path = self.segment_path(self.generation);
-                if let Ok(bytes) = fs::read(&prev_path) {
+            let prev_path = self.segment_path(self.generation);
+            if let Ok(bytes) = fs::read(&prev_path) {
+                if let Some(s) = segments
+                    .iter_mut()
+                    .find(|s| s.generation == self.generation)
+                {
                     let mut h = Sha256::new();
                     h.update(&bytes);
                     s.sha256 = format!("{:x}", h.finalize());
+                    s.sealed = true;
                 }
-                s.sealed = true;
+            } else {
+                segments.retain(|s| s.generation != self.generation);
             }
         }
 
@@ -694,5 +698,46 @@ mod tests {
         assert_eq!(entry.segments.len(), 1, "must stay a single open tail");
         assert!(!entry.segments[0].sealed);
         assert_eq!(entry.segments[0].n_events, 2);
+    }
+
+    #[test]
+    fn test_externally_deleted_segment_drops_manifest_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "test-host_abc123";
+        let hostname = "test-host";
+        let bucket = make_bucket();
+
+        let mut writer = SegmentWriter::new(dir.path(), device_id, &bucket.id).unwrap();
+        let events_a = vec![make_event(0, 1)];
+        writer.write_events(&bucket, &events_a).unwrap();
+
+        // Confirm segment exists in manifest
+        {
+            let m = Manifest::load_or_default(dir.path(), device_id, &hostname).unwrap();
+            assert_eq!(m.buckets[&bucket.id].segments.len(), 1);
+        }
+
+        // Externally delete the segment file
+        let seg_path = writer.segment_path(1);
+        fs::remove_file(&seg_path).unwrap();
+
+        // A second write with enough size/events to force a new generation
+        // would normally try to seal gen 1 — but the file is gone.
+        // We simulate by calling write_events again; since the file is absent,
+        // should_start_new triggers and the old entry must be removed, not
+        // marked sealed with a stale sha256.
+        let events_b = vec![make_event(120, 2)];
+        writer.write_events(&bucket, &events_b).unwrap();
+
+        let m = Manifest::load_or_default(dir.path(), device_id, &hostname).unwrap();
+        let entry = &m.buckets[&bucket.id];
+        // Gen 1 entry must not be present — it would have a stale/empty sha256
+        for seg in &entry.segments {
+            assert_ne!(seg.generation, 1, "dangling gen=1 entry must be removed");
+            assert!(
+                !seg.sealed || !seg.sha256.is_empty(),
+                "sealed segment must have a valid sha256"
+            );
+        }
     }
 }

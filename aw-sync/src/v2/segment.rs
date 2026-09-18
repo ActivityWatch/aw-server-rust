@@ -27,7 +27,7 @@ use super::manifest::{bucket_slug, device_dir, BucketEntry, Manifest, SegmentEnt
 const SEAL_SIZE_BYTES: u64 = 1024 * 1024;
 
 /// Maximum age of an open-tail generation before it is sealed regardless of
-/// size, measured from the generation's first `start_ts`. Ensures a
+/// size, measured from when the generation was first written. Ensures a
 /// low-volume bucket doesn't rewrite the same tail forever.
 fn seal_max_age() -> chrono::Duration {
     chrono::Duration::days(1)

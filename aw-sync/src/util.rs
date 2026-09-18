@@ -381,6 +381,20 @@ mod tests {
         fs::write(locked_dir.join("test.db"), vec![0u8; 16]).unwrap();
         fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o000)).unwrap();
 
+        // Root (and some CI containers) can traverse a directory regardless
+        // of its mode bits, which would make the assertion below false. Skip
+        // rather than assert a permission the process can't actually be
+        // denied, instead of assuming a fixed non-root environment.
+        if fs::read_dir(&locked_dir).is_ok() {
+            fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::remove_dir_all(&root).unwrap();
+            eprintln!(
+                "skipping find_remotes_skips_unreadable_host_dir_instead_of_aborting: \
+                 process can read a mode 0o000 directory (running as root?)"
+            );
+            return;
+        }
+
         let result = super::find_remotes(&root);
 
         // Restore permissions before cleanup, else remove_dir_all fails.

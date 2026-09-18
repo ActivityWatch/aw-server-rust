@@ -1318,4 +1318,114 @@ mod sync_tests {
             "third sync must not introduce further duplicates"
         );
     }
+
+    /// Regression test for the HTTP/peewee boundary-dedup gap.
+    ///
+    /// When the destination is the Python aw-server over HTTP, `get_events(start=T)`
+    /// excludes duration=0 events AT T (peewee: `endtime >= start` with endtime==T
+    /// evaluates false for dur=0). The fingerprint set then lacks the dur=0 shape and
+    /// the event is re-imported on every subsequent pass.
+    ///
+    /// Fix: build fingerprints with `start = T - 1ms` (same overlap window as the
+    /// source fetch). Exact-match fingerprints make the wider window harmless for
+    /// events before T.
+    ///
+    /// This in-process test verifies the dedup logic is correct for both the
+    /// dur=0 and dur>0 shapes when the destination is pre-populated (production
+    /// state: the bucket already contains all boundary events from a prior sync).
+    #[test]
+    fn test_sync_no_duplicate_with_prepopulated_boundary() {
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+
+        // Two events at the exact same timestamp — the production shape that triggers
+        // the bug: a dur=0 "running:true" and a dur>0 "running:false".
+        let ts: DateTime<Utc> = Utc::now();
+        let e_running: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 0,
+            "data": {"label": "Testing", "running": true}
+        }))
+        .unwrap();
+        let e_finished: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 182.0,
+            "data": {"label": "Testing", "running": false}
+        }))
+        .unwrap();
+
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &[e_running.clone(), e_finished.clone()])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // Pre-populate the destination directly — simulating a prior completed sync.
+        // Both event shapes are already present in the dest bucket before we call sync.
+        let dest_bucket_id = synced_id.clone();
+        let dest_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": dest_bucket_id,
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test"
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&dest_bucket).unwrap();
+        state
+            .ds_dest
+            .insert_events(dest_bucket_id.as_str(), &[e_running, e_finished])
+            .unwrap();
+        state.ds_dest.force_commit().unwrap();
+
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "pre-populated destination must have 2 events before sync"
+        );
+
+        // Sync — destination already has all source events; must import 0.
+        // This exercises the fingerprint window: with the old start=T query the
+        // dur=0 event at T is excluded by HTTP/peewee semantics, leaving it
+        // un-fingerprinted and causing a re-import. With start=T-1ms both shapes
+        // are fingerprinted and 0 events are imported.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "sync against pre-populated destination must import 0 events (no boundary duplicates)"
+        );
+
+        // Second pass — stability.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "second pass must remain stable at 2 events"
+        );
+    }
 }

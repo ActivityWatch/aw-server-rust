@@ -989,20 +989,23 @@ fn sync_one(
     // We must NOT query the dedup window with a narrow end time: get_events clips event
     // durations to the query window (parse_event_row), so get_events(start=T, end=T+1ms)
     // returns e_finished with duration=1ms instead of 182s, breaking fingerprint matching.
-    // Fix: use end=None (endtime_filter = i64::MAX) to prevent clipping, then filter in
-    // Rust to only events AT boundary_ts.
+    //
+    // We also must NOT use start=T exactly: the Python aw-server (peewee) returns events
+    // where endtime >= start, so a duration=0 event AT T has endtime==T and is excluded.
+    // Fix: use start=T-1ms with end=None to catch all overlapping events (same window as
+    // the source fetch), then rely on exact-match fingerprints to prevent false dedup of
+    // events that genuinely belong earlier than the boundary.
     let boundary_dedup: std::collections::HashSet<(i64, i64, String)> =
         if let Some(boundary_ts) = newest_timestamp {
             ds_to
                 .get_events(
                     bucket_to.id.as_str(),
-                    Some(boundary_ts),
+                    Some(boundary_ts - Duration::milliseconds(1)), // -1ms catches dur=0 events at T under peewee semantics
                     None, // no end filter — avoids duration clipping for events with duration > 0
                     None,
                 )
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|e| e.timestamp == boundary_ts) // keep only events exactly at the boundary
                 .map(|e| {
                     (
                         e.timestamp.timestamp_millis(),

@@ -979,44 +979,52 @@ fn sync_one(
 
     reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
 
-    // Build a fingerprint set of events already in the destination at the resume boundary.
-    // The source fetch uses get_events(start=resume_sync_at) with overlap semantics:
-    // it returns any event whose (timestamp + duration >= resume_sync_at). This includes:
+    // Build a fingerprint set of events already at the tail of the destination, to dedup
+    // the source fetch against events that overlap the resume boundary. The source fetch
+    // uses get_events(start=resume_sync_at) with overlap semantics: it returns any event
+    // whose (timestamp + duration >= resume_sync_at). This includes:
     //   - duration=0 events at resume_sync_at (Symptom 1: re-imported every pass)
     //   - events at newest.timestamp with duration > 0 whose end == resume_sync_at
     //     (Symptom 2: timestamp-tie — a different event at the same timestamp)
+    //   - events that started before resume_sync_at and straddle it (Symptom 3: the source
+    //     query clips such an event's returned start forward to resume_sync_at, zeroing its
+    //     returned duration)
     //
-    // We must NOT query the dedup window with a narrow end time: get_events clips event
-    // durations to the query window (parse_event_row), so get_events(start=T, end=T+1ms)
-    // returns e_finished with duration=1ms instead of 182s, breaking fingerprint matching.
+    // Fetch by LIMIT rather than a start-time filter: an unfiltered get_events() cannot clip
+    // anything (clipping only triggers when a start/end bound cuts into an event), so these
+    // destination fingerprints are always the true, unclipped values. This also removes the
+    // dependency on peewee-vs-Rust-datastore asymmetry in start-boundary inclusivity that
+    // motivated the old `-1ms` workaround.
     //
-    // We also must NOT use start=T exactly: the Python aw-server (peewee) returns events
-    // where endtime >= start, so a duration=0 event AT T has endtime==T and is excluded.
-    // Fix: use start=T-1ms with end=None to catch all overlapping events (same window as
-    // the source fetch), then rely on exact-match fingerprints to prevent false dedup of
-    // events that genuinely belong earlier than the boundary.
-    let boundary_dedup: std::collections::HashSet<(i64, i64, String)> =
-        if let Some(boundary_ts) = newest_timestamp {
-            ds_to
-                .get_events(
-                    bucket_to.id.as_str(),
-                    Some(boundary_ts - Duration::milliseconds(1)), // -1ms catches dur=0 events at T under peewee semantics
-                    None, // no end filter — avoids duration clipping for events with duration > 0
-                    None,
+    // Fingerprint on (end_time, data) instead of (start_time, duration, data): an event's end
+    // time is invariant under the source-side start-clipping described above (clipping only
+    // moves the returned start forward and shrinks duration to compensate; the end is
+    // unchanged), so it's the only representation that reliably matches a clipped chunk event
+    // to its unclipped destination counterpart. Nanosecond precision avoids millisecond-window
+    // collisions between distinct events, consistent with the datastore's own event identity.
+    const BOUNDARY_DEDUP_LOOKBACK: u64 = 100;
+    let boundary_dedup: std::collections::HashSet<(i64, String)> = if newest_timestamp.is_some() {
+        ds_to
+            .get_events(
+                bucket_to.id.as_str(),
+                None,
+                None,
+                Some(BOUNDARY_DEDUP_LOOKBACK),
+            )
+            .map_err(|e| format!("Failed to fetch destination boundary events for dedup: {e}"))?
+            .into_iter()
+            .map(|e| {
+                (
+                    (e.timestamp + e.duration)
+                        .timestamp_nanos_opt()
+                        .unwrap_or(0),
+                    serde_json::to_string(&e.data).unwrap_or_default(),
                 )
-                .unwrap_or_default()
-                .into_iter()
-                .map(|e| {
-                    (
-                        e.timestamp.timestamp_millis(),
-                        e.duration.num_milliseconds(),
-                        serde_json::to_string(&e.data).unwrap_or_default(),
-                    )
-                })
-                .collect()
-        } else {
-            std::collections::HashSet::new()
-        };
+            })
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
 
     // Fetch events in bounded chunks to avoid OOM on devices with limited RAM (e.g. Android).
     // get_events returns events in descending order (newest first), so we paginate backwards
@@ -1111,13 +1119,16 @@ fn sync_one(
             chunk.reverse(); // chunk is now ASC (oldest first)
 
             // Dedup: skip any boundary event already in the destination.
-            // Handles the duration=0 re-import and same-timestamp tie cases (#711).
+            // Handles the duration=0 re-import, same-timestamp tie, and clipped-overlap
+            // cases (#711). Fingerprint must match the (end_time, data) scheme used to
+            // build `boundary_dedup` above — see the comment there for why.
             if !boundary_dedup.is_empty() {
                 let before_dedup = chunk.len();
                 chunk.retain(|e| {
                     let fp = (
-                        e.timestamp.timestamp_millis(),
-                        e.duration.num_milliseconds(),
+                        (e.timestamp + e.duration)
+                            .timestamp_nanos_opt()
+                            .unwrap_or(0),
                         serde_json::to_string(&e.data).unwrap_or_default(),
                     );
                     !boundary_dedup.contains(&fp)
@@ -1263,6 +1274,85 @@ mod pull_only_staging_tests {
             ds.close();
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod boundary_dedup_multipage_tests {
+    //! Regression coverage for the "Clipping Defeats Boundary Dedup" review
+    //! finding on ActivityWatch/aw-server-rust#713.
+    //!
+    //! When the newest destination event has a *positive* duration,
+    //! `resume_sync_at` is set to that event's end. The resumed source query
+    //! re-fetches the same event clipped to the query start, i.e. with the
+    //! event's original (timestamp, duration) replaced by (resume_sync_at, 0).
+    //! In a *single-page* sync this clipped duplicate happens to be absorbed by
+    //! `heartbeat()`'s delta=0.0 adjacency merge, masking the bug — so this
+    //! test lives here (not in `tests/sync.rs`) to use the `#[cfg(test)]`
+    //! `BATCH_SIZE = 5`, forcing a multi-page sync where the tail chunk is
+    //! inserted via `insert_events()` instead, which exposes the duplicate
+    //! directly if the dedup fingerprint fails to match.
+    use super::*;
+
+    #[test]
+    fn no_duplicate_on_positive_duration_boundary_across_multiple_pages() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-0",
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test"
+        }))
+        .unwrap();
+        ds_src.create_bucket(&bucket).unwrap();
+        let synced_id = "bucket-0-synced-from-device-0";
+        let base_ts: DateTime<Utc> = Utc::now();
+
+        // A single event with a positive duration — the only (and therefore
+        // boundary) event in the bucket. Its end (base_ts + 182.639s) becomes
+        // resume_sync_at.
+        let boundary: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": base_ts.to_rfc3339(),
+            "duration": 182.639,
+            "data": {"label": "Testing"}
+        }))
+        .unwrap();
+        ds_src.insert_events("bucket-0", &[boundary]).unwrap();
+        ds_src.force_commit().unwrap();
+
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+        assert_eq!(
+            ds_dest.get_event_count(synced_id, None, None).unwrap(),
+            1,
+            "first sync must import the positive-duration boundary event"
+        );
+
+        // BATCH_SIZE is 5 under #[cfg(test)]; 6 new events after the boundary
+        // force a second page, whose tail includes the boundary's clipped
+        // re-fetch and is written via insert_events() rather than heartbeat().
+        let new_events: Vec<Event> = (0..6)
+            .map(|i| {
+                let ts = base_ts + Duration::seconds(200 + i * 10);
+                serde_json::from_value(serde_json::json!({
+                    "timestamp": ts.to_rfc3339(),
+                    "duration": 0,
+                    "data": {"label": format!("new-{i}")}
+                }))
+                .unwrap()
+            })
+            .collect();
+        ds_src.insert_events("bucket-0", &new_events).unwrap();
+        ds_src.force_commit().unwrap();
+
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+        assert_eq!(
+            ds_dest.get_event_count(synced_id, None, None).unwrap(),
+            7,
+            "second sync must import the 6 new events without re-duplicating \
+             the positive-duration boundary event across a page boundary"
+        );
     }
 }
 

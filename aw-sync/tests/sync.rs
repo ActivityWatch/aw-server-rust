@@ -1319,6 +1319,104 @@ mod sync_tests {
         );
     }
 
+    /// Regression test for the "Clipping Defeats Boundary Dedup" review finding on
+    /// ActivityWatch/aw-server-rust#713.
+    ///
+    /// When the newest destination event has a *positive* duration (not just the
+    /// duration=0 case from #711 Symptom 1), `resume_sync_at` is set to that event's
+    /// end time. The resumed source query then re-fetches the same event clipped to
+    /// the query start, i.e. with the event's original (timestamp, duration) replaced
+    /// by (resume_sync_at, 0). A dedup fingerprint keyed on (start, duration) cannot
+    /// match this clipped copy against the unclipped destination event, so the fix
+    /// must dedup on something invariant under start-clipping (end time), not on
+    /// start+duration.
+    #[test]
+    fn test_sync_no_duplicate_on_positive_duration_boundary() {
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+        let base_ts: DateTime<Utc> = Utc::now();
+
+        // A single event with a positive duration — the only (and therefore boundary)
+        // event in the bucket. Its end (base_ts + 182.639s) becomes resume_sync_at.
+        let boundary: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": base_ts.to_rfc3339(),
+            "duration": 182.639,
+            "data": {"label": "Testing"}
+        }))
+        .unwrap();
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &[boundary])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // First sync — imports the one boundary event.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            1,
+            "first sync must import the positive-duration boundary event"
+        );
+
+        // Add more new events than the test BATCH_SIZE (5) so the follow-up sync spans
+        // multiple pages. This matters: a single-page sync routes the oldest event
+        // through heartbeat() (see sync_one), whose delta=0.0 adjacency merge happens
+        // to absorb the clipped boundary duplicate and would mask this bug. A
+        // multi-page sync routes the last page through insert_events() instead, which
+        // exposes the duplicate directly if the dedup fingerprint fails to match.
+        // Timestamps are placed well after the boundary's end so they aren't
+        // themselves clipped or excluded by the resume-boundary query.
+        let new_events: Vec<Event> = (0..6)
+            .map(|i| {
+                let ts = base_ts + Duration::seconds(200 + i * 10);
+                serde_json::from_value(serde_json::json!({
+                    "timestamp": ts.to_rfc3339(),
+                    "duration": 0,
+                    "data": {"label": format!("new-{i}")}
+                }))
+                .unwrap()
+            })
+            .collect();
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &new_events)
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // Second sync — the clipped re-fetch of the boundary event must be recognized
+        // as a duplicate and skipped, not inserted as a spurious zero-duration copy
+        // alongside the 6 genuinely new events.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            7,
+            "second sync must import the 6 new events without re-duplicating \
+             the positive-duration boundary event"
+        );
+    }
+
     /// Regression test for the HTTP/peewee boundary-dedup gap.
     ///
     /// When the destination is the Python aw-server over HTTP, `get_events(start=T)`

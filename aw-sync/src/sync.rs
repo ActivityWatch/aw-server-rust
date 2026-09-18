@@ -1516,6 +1516,13 @@ mod daemon_peer_discovery_tests {
         fs::write(path, b"").unwrap();
     }
 
+    fn write_sized(path: &PathBuf, size: usize) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, vec![0u8; size]).unwrap();
+    }
+
     // Thin wrapper so tests exercise the actual production discovery path,
     // not a copy that can silently diverge.
     fn discover(sync_root: &PathBuf, own_device_id: &str) -> crate::util::RemoteSelection {
@@ -1604,23 +1611,31 @@ mod daemon_peer_discovery_tests {
     /// sync directory — `discover_peers` must return exactly one entry for that
     /// device, keeping the larger file.
     ///
-    /// `touch` creates empty (0-byte) `.db` files. Both walkers filter by the
-    /// `.db` extension only — they do not check file size or sqlite headers —
-    /// so zero-byte files are valid test fixtures for discovery purposes.
+    /// The two fixtures use deliberately different sizes, with the *smaller*
+    /// file's path sorting first alphabetically ("new-hostname/..." <
+    /// "shared-device-id/..."). That makes the assertion exercise the
+    /// largest-file tie-break in `select_remote_dbs_detailed` specifically —
+    /// with two identically-sized fixtures the path-ordering tie-break alone
+    /// would pick the same winner, so that variant would still pass even if
+    /// the size comparison were silently dropped.
     #[test]
     fn daemon_deduplicates_same_device_in_both_layouts() {
         let sync_root = temp_dir();
         let device_id = "shared-device-id";
 
-        // 3-level entry for the same device (e.g. after a hostname rename)
-        touch(
+        // 3-level entry for the same device (e.g. after a hostname rename) —
+        // smaller file; must lose despite its path sorting first.
+        write_sized(
             &sync_root
                 .join("new-hostname")
                 .join(device_id)
                 .join("sync.db"),
+            8,
         );
-        // 2-level legacy entry for the same device_id
-        touch(&sync_root.join(device_id).join("test.db"));
+        // 2-level legacy entry for the same device_id — the larger file,
+        // must be the one selected.
+        let legacy_path = sync_root.join(device_id).join("test.db");
+        write_sized(&legacy_path, 64);
 
         let selection = discover(&sync_root, "local-device-id");
 
@@ -1634,6 +1649,10 @@ mod daemon_peer_discovery_tests {
         assert_eq!(
             selection.selected[0].device_id, device_id,
             "the surviving entry must be for the shared device_id"
+        );
+        assert_eq!(
+            selection.selected[0].path, legacy_path,
+            "the larger (legacy 2-level) file must survive, not the smaller 3-level one"
         );
         assert_eq!(
             selection.skipped.len(),

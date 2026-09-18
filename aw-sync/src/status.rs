@@ -104,6 +104,37 @@ pub fn collect_status(
             "UNREACHABLE"
         }
     ));
+
+    // Config-derived only: an explicit `--mode` on a running daemon overrides
+    // this and status has no way to see that from here. "Last pass" below
+    // reports the mode actually used on the last completed sync.
+    let (pull, config_label) = match crate::dirs::config_dir_path()
+        .and_then(|dir| crate::dirs::read_sync_config(&dir))
+    {
+        Ok((Some(cfg), path)) => {
+            let effective_mode = crate::dirs::effective_daemon_mode(None, cfg.daemon.pull);
+            out.push_str(&format!(
+                    "daemon mode: {} (pull={}, config: {}) — config-derived; see 'Last pass' below for the mode actually used, which wins if --mode was passed explicitly\n",
+                    effective_mode.as_str(),
+                    cfg.daemon.pull,
+                    path.display()
+                ));
+            (cfg.daemon.pull, path.display().to_string())
+        }
+        Ok((None, path)) => {
+            out.push_str(&format!(
+                    "daemon mode: push (pull=false, config: {} — not present, default) — config-derived; see 'Last pass' below for the mode actually used, which wins if --mode was passed explicitly\n",
+                    path.display()
+                ));
+            (false, path.display().to_string())
+        }
+        Err(e) => {
+            out.push_str(&format!(
+                "daemon mode: (could not read aw-sync config: {e})\n"
+            ));
+            (false, String::new())
+        }
+    };
     out.push('\n');
 
     match crate::report::load_last_report() {
@@ -137,7 +168,13 @@ pub fn collect_status(
         }
     }
 
-    let warnings = collect_warnings(&inspected, local_newest.as_ref(), &imported_origins);
+    let warnings = collect_warnings(
+        &inspected,
+        local_newest.as_ref(),
+        &imported_origins,
+        pull,
+        &config_label,
+    );
     out.push('\n');
     if warnings.is_empty() {
         out.push_str("Warnings: none\n");
@@ -178,8 +215,20 @@ fn collect_warnings(
     inspected: &[(SyncDirEntry, Option<Result<DbInspect, String>>)],
     local_newest: Option<&DateTime<Utc>>,
     imported_origins: &HashSet<String>,
+    pull: bool,
+    config_label: &str,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
+
+    // When pull is off, say so once at the top (if there are visible peers) instead
+    // of emitting a per-peer "not imported locally" warning for every peer.
+    let has_peers = inspected.iter().any(|(e, _)| e.kind == SyncEntryKind::Peer);
+    if !pull && has_peers && !config_label.is_empty() {
+        warnings.push(format!(
+            "pull is off in {config_label}; peers below are visible but not imported by the \
+             daemon (set pull = true, or run `aw-sync sync`)"
+        ));
+    }
 
     let has_two = inspected
         .iter()
@@ -230,7 +279,7 @@ fn collect_warnings(
                 ));
             }
         }
-        if entry.kind == SyncEntryKind::Peer {
+        if pull && entry.kind == SyncEntryKind::Peer {
             if let Some(host) = &info.hostname {
                 if !imported_origins.contains(sanitize_hostname(host).as_str()) {
                     warnings.push(format!(

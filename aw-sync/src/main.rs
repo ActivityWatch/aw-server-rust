@@ -88,9 +88,10 @@ enum Commands {
         buckets: Option<Vec<String>>,
 
         /// Mode to sync in. Can be "push", "pull", or "both".
-        /// Defaults to "both".
-        #[clap(long, default_value = "both")]
-        mode: sync::SyncMode,
+        /// If not given, follows aw-sync's own config.toml: push-only unless
+        /// `pull = true` is set there (ActivityWatch/aw-server-rust#714).
+        #[clap(long)]
+        mode: Option<sync::SyncMode>,
 
         /// Full path to sync db file
         /// Useful for syncing buckets from a specific db file in the sync directory.
@@ -219,7 +220,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     match opts.command.unwrap_or(Commands::Daemon {
         start_date: None,
         buckets: None,
-        mode: sync::SyncMode::Both,
+        mode: None,
         sync_db: None,
     }) {
         // Start daemon
@@ -233,7 +234,36 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let effective_buckets = buckets;
 
-            daemon(&client, start_date, effective_buckets, sync_db, mode)?;
+            // An explicit --mode always wins and must not depend on config.toml
+            // being readable/writable — only touch the config file when no CLI
+            // mode was given.
+            let effective_mode = if let Some(explicit_mode) = mode {
+                info!(
+                    "aw-sync: explicit --mode {} overrides config",
+                    explicit_mode.as_str()
+                );
+                explicit_mode
+            } else {
+                let sync_config_dir = dirs::get_config_dir()?;
+                let (sync_config, sync_config_path) =
+                    dirs::load_or_create_sync_config(&sync_config_dir)?;
+                let effective_mode = dirs::effective_daemon_mode(None, sync_config.daemon.pull);
+                info!(
+                    "aw-sync config: {} (pull={}) -> daemon mode: {}",
+                    sync_config_path.display(),
+                    sync_config.daemon.pull,
+                    effective_mode.as_str()
+                );
+                effective_mode
+            };
+
+            daemon(
+                &client,
+                start_date,
+                effective_buckets,
+                sync_db,
+                effective_mode,
+            )?;
         }
         // Perform sync
         Commands::Sync {

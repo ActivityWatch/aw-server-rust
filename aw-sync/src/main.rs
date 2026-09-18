@@ -247,11 +247,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let sync_config_dir = dirs::get_config_dir()?;
                 let (sync_config, sync_config_path) =
                     dirs::load_or_create_sync_config(&sync_config_dir)?;
-                let effective_mode = dirs::effective_daemon_mode(None, sync_config.pull);
+                let effective_mode = dirs::effective_daemon_mode(None, sync_config.daemon.pull);
                 info!(
                     "aw-sync config: {} (pull={}) -> daemon mode: {}",
                     sync_config_path.display(),
-                    sync_config.pull,
+                    sync_config.daemon.pull,
                     effective_mode.as_str()
                 );
                 effective_mode

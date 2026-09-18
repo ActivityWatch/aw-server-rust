@@ -98,14 +98,14 @@ pub fn collect_status(
         .and_then(|dir| crate::dirs::read_sync_config(&dir))
     {
         Ok((Some(cfg), path)) => {
-            let effective_mode = crate::dirs::effective_daemon_mode(None, cfg.pull);
+            let effective_mode = crate::dirs::effective_daemon_mode(None, cfg.daemon.pull);
             out.push_str(&format!(
                     "daemon mode: {} (pull={}, config: {}) — config-derived; see 'Last pass' below for the mode actually used, which wins if --mode was passed explicitly\n",
                     effective_mode.as_str(),
-                    cfg.pull,
+                    cfg.daemon.pull,
                     path.display()
                 ));
-            (cfg.pull, path.display().to_string())
+            (cfg.daemon.pull, path.display().to_string())
         }
         Ok((None, path)) => {
             out.push_str(&format!(

@@ -52,7 +52,10 @@ pub fn config_dir_path() -> Result<PathBuf, Box<dyn Error>> {
     sync_config_dir(&aw_server::dirs::appname())
 }
 
-/// aw-sync's own settings, read from `{config_dir}/config.toml`.
+/// `[daemon]` settings — namespaced (rather than top-level) so future
+/// aw-sync settings that apply elsewhere (e.g. to the one-shot `sync`
+/// command) have their own section instead of colliding with this one
+/// (per-module convention: cf. aw-server's `[auth]` in `aw-server/src/config.rs`).
 ///
 /// `pull` controls whether the **daemon** imports peers on each pass —
 /// desktop only; Android stays push-only by design
@@ -60,13 +63,21 @@ pub fn config_dir_path() -> Result<PathBuf, Box<dyn Error>> {
 /// always pulls+pushes regardless of this file, and an explicit `--mode`
 /// on the daemon always wins over it (ActivityWatch/aw-server-rust#714).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SyncConfig {
+pub struct DaemonConfig {
     #[serde(default)]
     pub pull: bool,
 }
 
+/// aw-sync's own settings, read from `{config_dir}/config.toml`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncConfig {
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+}
+
 const DEFAULT_SYNC_CONFIG_TOML: &str = "\
 # aw-sync config
+[daemon]
 pull = false   # default; set true to import peers from the sync folder every pass
 ";
 
@@ -328,12 +339,12 @@ mod tests {
     fn load_or_create_sync_config_writes_commented_default_when_missing() {
         let dir = temp_sync_config_dir("missing");
         let (config, path) = load_or_create_sync_config(&dir).unwrap();
-        assert!(!config.pull, "default config must be pull = false");
+        assert!(!config.daemon.pull, "default config must be pull = false");
         assert!(path.is_file());
         let content = fs::read_to_string(&path).unwrap();
         assert!(
-            content.contains("pull = false"),
-            "commented default should mention pull = false, got: {content}"
+            content.contains("[daemon]") && content.contains("pull = false"),
+            "commented default should be namespaced under [daemon] and mention pull = false, got: {content}"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -343,9 +354,9 @@ mod tests {
     fn load_or_create_sync_config_respects_existing_pull_true() {
         let dir = temp_sync_config_dir("pull-true");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("config.toml"), "pull = true\n").unwrap();
+        fs::write(dir.join("config.toml"), "[daemon]\npull = true\n").unwrap();
         let (config, _path) = load_or_create_sync_config(&dir).unwrap();
-        assert!(config.pull);
+        assert!(config.daemon.pull);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -364,9 +375,9 @@ mod tests {
     fn read_sync_config_reads_existing_config() {
         let dir = temp_sync_config_dir("read-existing");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("config.toml"), "pull = true\n").unwrap();
+        fs::write(dir.join("config.toml"), "[daemon]\npull = true\n").unwrap();
         let (config, _path) = read_sync_config(&dir).unwrap();
-        assert!(config.unwrap().pull, "should read pull = true");
+        assert!(config.unwrap().daemon.pull, "should read pull = true");
         let _ = fs::remove_dir_all(&dir);
     }
 }

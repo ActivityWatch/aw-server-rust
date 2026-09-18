@@ -91,32 +91,36 @@ pub fn collect_status(
         }
     ));
 
-    let (pull, config_label) =
-        match crate::dirs::get_config_dir().and_then(|dir| crate::dirs::read_sync_config(&dir)) {
-            Ok((Some(cfg), path)) => {
-                let effective_mode = crate::dirs::effective_daemon_mode(None, cfg.pull);
-                out.push_str(&format!(
-                    "daemon mode: {} (pull={}, config: {})\n",
+    // Config-derived only: an explicit `--mode` on a running daemon overrides
+    // this and status has no way to see that from here. "Last pass" below
+    // reports the mode actually used on the last completed sync.
+    let (pull, config_label) = match crate::dirs::config_dir_path()
+        .and_then(|dir| crate::dirs::read_sync_config(&dir))
+    {
+        Ok((Some(cfg), path)) => {
+            let effective_mode = crate::dirs::effective_daemon_mode(None, cfg.pull);
+            out.push_str(&format!(
+                    "daemon mode: {} (pull={}, config: {}) — config-derived; see 'Last pass' below for the mode actually used, which wins if --mode was passed explicitly\n",
                     effective_mode.as_str(),
                     cfg.pull,
                     path.display()
                 ));
-                (cfg.pull, path.display().to_string())
-            }
-            Ok((None, path)) => {
-                out.push_str(&format!(
-                    "daemon mode: push (pull=false, config: {} — not present, default)\n",
+            (cfg.pull, path.display().to_string())
+        }
+        Ok((None, path)) => {
+            out.push_str(&format!(
+                    "daemon mode: push (pull=false, config: {} — not present, default) — config-derived; see 'Last pass' below for the mode actually used, which wins if --mode was passed explicitly\n",
                     path.display()
                 ));
-                (false, path.display().to_string())
-            }
-            Err(e) => {
-                out.push_str(&format!(
-                    "daemon mode: (could not read aw-sync config: {e})\n"
-                ));
-                (false, String::new())
-            }
-        };
+            (false, path.display().to_string())
+        }
+        Err(e) => {
+            out.push_str(&format!(
+                "daemon mode: (could not read aw-sync config: {e})\n"
+            ));
+            (false, String::new())
+        }
+    };
     out.push('\n');
 
     match crate::report::load_last_report() {

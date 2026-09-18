@@ -35,11 +35,21 @@ pub fn resolve_profile(
 /// Uses the same profile appname as aw-server so a named profile (e.g.
 /// `research`) does not share prod's sync config. `testing` follows the
 /// same new-root-plus-legacy-fallback rule as aw-server.
+#[allow(dead_code)] // used by the aw-sync binary; the lib copy is unused (status.rs uses config_dir_path)
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, Box<dyn Error>> {
-    let dir = sync_config_dir(&aw_server::dirs::appname())?;
+    let dir = config_dir_path()?;
     fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Path to aw-sync's own config dir — construction only, does not create it.
+/// For read-only callers (e.g. `status`) that must never mutate the
+/// filesystem just to look at it; `get_config_dir` is for the daemon path,
+/// which is about to write `config.toml` there anyway.
+#[cfg(not(target_os = "android"))]
+pub fn config_dir_path() -> Result<PathBuf, Box<dyn Error>> {
+    sync_config_dir(&aw_server::dirs::appname())
 }
 
 /// aw-sync's own settings, read from `{config_dir}/config.toml`.

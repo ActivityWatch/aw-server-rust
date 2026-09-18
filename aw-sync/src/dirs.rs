@@ -63,6 +63,10 @@ pull = false   # default; set true to import peers from the sync folder every pa
 /// Load `config.toml` from `dir`, writing the commented default if it does
 /// not exist yet (so users find the switch on first daemon start). Returns
 /// the parsed config and the path it was read from.
+// dirs.rs is compiled by both lib.rs and main.rs (dual-include); the lib
+// does not call this directly (status.rs uses read_sync_config), but the
+// daemon binary does via its own mod dirs copy.
+#[cfg_attr(not(test), allow(dead_code))]
 #[cfg(not(target_os = "android"))]
 pub fn load_or_create_sync_config(dir: &Path) -> Result<(SyncConfig, PathBuf), Box<dyn Error>> {
     fs::create_dir_all(dir)?;
@@ -73,6 +77,20 @@ pub fn load_or_create_sync_config(dir: &Path) -> Result<(SyncConfig, PathBuf), B
     let content = fs::read_to_string(&path)?;
     let config: SyncConfig = toml::from_str(&content)?;
     Ok((config, path))
+}
+
+/// Read-only variant for `status`: returns `(None, path)` when the file is
+/// absent rather than writing the default. The daemon's `load_or_create`
+/// writes on first start; the doctor should never create files.
+#[cfg(not(target_os = "android"))]
+pub fn read_sync_config(dir: &Path) -> Result<(Option<SyncConfig>, PathBuf), Box<dyn Error>> {
+    let path = dir.join("config.toml");
+    if !path.is_file() {
+        return Ok((None, path));
+    }
+    let content = fs::read_to_string(&path)?;
+    let config: SyncConfig = toml::from_str(&content)?;
+    Ok((Some(config), path))
 }
 
 /// Which `SyncMode` a daemon pass should use: an explicit `--mode` always
@@ -318,6 +336,27 @@ mod tests {
         fs::write(dir.join("config.toml"), "pull = true\n").unwrap();
         let (config, _path) = load_or_create_sync_config(&dir).unwrap();
         assert!(config.pull);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn read_sync_config_returns_none_when_missing_and_does_not_create_file() {
+        let dir = temp_sync_config_dir("read-missing");
+        let (config, path) = read_sync_config(&dir).unwrap();
+        assert!(config.is_none(), "should return None when file is absent");
+        assert!(!path.exists(), "read_sync_config must not create the file");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn read_sync_config_reads_existing_config() {
+        let dir = temp_sync_config_dir("read-existing");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), "pull = true\n").unwrap();
+        let (config, _path) = read_sync_config(&dir).unwrap();
+        assert!(config.unwrap().pull, "should read pull = true");
         let _ = fs::remove_dir_all(&dir);
     }
 }

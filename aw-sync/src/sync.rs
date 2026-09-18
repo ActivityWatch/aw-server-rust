@@ -1002,9 +1002,28 @@ fn sync_one(
     // unchanged), so it's the only representation that reliably matches a clipped chunk event
     // to its unclipped destination counterpart. Nanosecond precision avoids millisecond-window
     // collisions between distinct events, consistent with the datastore's own event identity.
-    const BOUNDARY_DEDUP_LOOKBACK: u64 = 100;
-    let boundary_dedup: std::collections::HashSet<(i64, String)> = if newest_timestamp.is_some() {
-        ds_to
+    //
+    // Counted (not a HashSet): the fetched page can legitimately contain more than one event
+    // sharing a fingerprint (e.g. a bucket already corrupted by this bug pre-fix, or two
+    // genuinely distinct events that happen to share end-time and data). A HashSet would drop
+    // *every* source event with a matching fingerprint; counting only skips as many as are
+    // actually confirmed present in the destination, so any additional occurrences in the
+    // source are still treated as new and synced.
+    //
+    // Bounded by LIMIT rather than a start/end filter: any bound on this fetch would let
+    // clip_to_query_range clip events straddling it (the same failure mode this fingerprint
+    // scheme exists to route around — see the source-fetch comment above), and the AccessMethod
+    // trait has no HTTP-safe unclipped variant to page backward with instead. A page this large
+    // covers every observed real-world tie run (see #711 — up to ~550 duplicate rows at one
+    // timestamp) with over an order of magnitude of margin; a bucket with a longer unresolved
+    // tie than this is already corrupted well beyond what a resume-boundary dedup can repair —
+    // that's the one-off cleanup tracked as a separate follow-up issue.
+    const BOUNDARY_DEDUP_LOOKBACK: u64 = 2000;
+    let boundary_dedup: std::collections::HashMap<(i64, String), usize> = if newest_timestamp
+        .is_some()
+    {
+        let mut counts = std::collections::HashMap::new();
+        for e in ds_to
             .get_events(
                 bucket_to.id.as_str(),
                 None,
@@ -1012,18 +1031,18 @@ fn sync_one(
                 Some(BOUNDARY_DEDUP_LOOKBACK),
             )
             .map_err(|e| format!("Failed to fetch destination boundary events for dedup: {e}"))?
-            .into_iter()
-            .map(|e| {
-                (
-                    (e.timestamp + e.duration)
-                        .timestamp_nanos_opt()
-                        .unwrap_or(0),
-                    serde_json::to_string(&e.data).unwrap_or_default(),
-                )
-            })
-            .collect()
+        {
+            let fp = (
+                (e.timestamp + e.duration)
+                    .timestamp_nanos_opt()
+                    .unwrap_or(0),
+                serde_json::to_string(&e.data).unwrap_or_default(),
+            );
+            *counts.entry(fp).or_insert(0) += 1;
+        }
+        counts
     } else {
-        std::collections::HashSet::new()
+        std::collections::HashMap::new()
     };
 
     // Fetch events in bounded chunks to avoid OOM on devices with limited RAM (e.g. Android).
@@ -1118,11 +1137,16 @@ fn sync_one(
             // Last (oldest) page: process oldest-first to preserve ID ordering.
             chunk.reverse(); // chunk is now ASC (oldest first)
 
-            // Dedup: skip any boundary event already in the destination.
-            // Handles the duration=0 re-import, same-timestamp tie, and clipped-overlap
-            // cases (#711). Fingerprint must match the (end_time, data) scheme used to
-            // build `boundary_dedup` above — see the comment there for why.
+            // Dedup: skip boundary events already in the destination, up to the count
+            // confirmed present there. Consuming from the count (rather than a blanket
+            // `contains` check) means a source page with MORE occurrences of a fingerprint
+            // than exist in the destination still lets the extra ones through as genuinely
+            // new — a plain set would silently drop all of them. Handles the duration=0
+            // re-import, same-timestamp tie, and clipped-overlap cases (#711). Fingerprint
+            // must match the (end_time, data) scheme used to build `boundary_dedup` above —
+            // see the comment there for why.
             if !boundary_dedup.is_empty() {
+                let mut remaining = boundary_dedup.clone();
                 let before_dedup = chunk.len();
                 chunk.retain(|e| {
                     let fp = (
@@ -1131,7 +1155,13 @@ fn sync_one(
                             .unwrap_or(0),
                         serde_json::to_string(&e.data).unwrap_or_default(),
                     );
-                    !boundary_dedup.contains(&fp)
+                    match remaining.get_mut(&fp) {
+                        Some(count) if *count > 0 => {
+                            *count -= 1;
+                            false
+                        }
+                        _ => true,
+                    }
                 });
                 let skipped = before_dedup - chunk.len();
                 if skipped > 0 {
@@ -1352,6 +1382,95 @@ mod boundary_dedup_multipage_tests {
             7,
             "second sync must import the 6 new events without re-duplicating \
              the positive-duration boundary event across a page boundary"
+        );
+    }
+
+    #[test]
+    fn new_event_sharing_boundary_fingerprint_is_still_synced_across_multiple_pages() {
+        // Regression for the "Fingerprint Drops Distinct Events" review finding on
+        // ActivityWatch/aw-server-rust#713: the boundary-dedup fingerprint is
+        // (end_time, data) only (duration/start are dropped because they aren't
+        // clip-invariant), so a genuinely distinct source event that happens to end
+        // at the same instant with the same data as an already-synced boundary event
+        // must still be counted and synced — the dedup may only skip as many
+        // occurrences of a fingerprint as are confirmed present in the destination,
+        // not every source event that matches it.
+        //
+        // Uses the multi-page path (like the sibling test above) so the colliding
+        // event is written via insert_events() rather than heartbeat(), whose
+        // delta=0.0 adjacency merge would otherwise fold two same-data zero-gap
+        // events into one and mask the distinction this test targets.
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-0",
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test"
+        }))
+        .unwrap();
+        ds_src.create_bucket(&bucket).unwrap();
+        let synced_id = "bucket-0-synced-from-device-0";
+        let base_ts: DateTime<Utc> = Utc::now();
+        let boundary_end = base_ts + Duration::milliseconds((182.639 * 1000.0) as i64);
+
+        let boundary: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": base_ts.to_rfc3339(),
+            "duration": 182.639,
+            "data": {"label": "Testing"}
+        }))
+        .unwrap();
+        ds_src.insert_events("bucket-0", &[boundary]).unwrap();
+        ds_src.force_commit().unwrap();
+
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+        assert_eq!(
+            ds_dest.get_event_count(synced_id, None, None).unwrap(),
+            1,
+            "first sync must import the boundary event"
+        );
+
+        // A distinct event that starts later than the boundary but happens to end
+        // at exactly the same instant with the exact same data — same fingerprint
+        // as the already-synced boundary, but a genuinely different event.
+        let collider: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": (boundary_end - Duration::seconds(50)).to_rfc3339(),
+            "duration": 50.0,
+            "data": {"label": "Testing"}
+        }))
+        .unwrap();
+        // Six more events push the sync past BATCH_SIZE=5, forcing the collider
+        // (chronologically before them) into a later page, written via
+        // insert_events() rather than the single-page heartbeat() path.
+        let new_events: Vec<Event> = (0..6)
+            .map(|i| {
+                let ts = base_ts + Duration::seconds(200 + i * 10);
+                serde_json::from_value(serde_json::json!({
+                    "timestamp": ts.to_rfc3339(),
+                    "duration": 0,
+                    "data": {"label": format!("new-{i}")}
+                }))
+                .unwrap()
+            })
+            .collect();
+        ds_src.insert_events("bucket-0", &[collider]).unwrap();
+        ds_src.insert_events("bucket-0", &new_events).unwrap();
+        ds_src.force_commit().unwrap();
+
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+        assert_eq!(
+            ds_dest.get_event_count(synced_id, None, None).unwrap(),
+            8,
+            "the fingerprint-colliding event must be synced alongside the 6 new \
+             events, not dropped as a duplicate of the boundary"
+        );
+
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+        assert_eq!(
+            ds_dest.get_event_count(synced_id, None, None).unwrap(),
+            8,
+            "third sync must not re-import the boundary or the collider"
         );
     }
 }

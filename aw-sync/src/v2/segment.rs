@@ -10,6 +10,7 @@
 //! daemon pass using the same tmp+rename sequence, so a reader always sees a
 //! complete file.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,22 @@ use super::manifest::{bucket_slug, device_dir, BucketEntry, Manifest, SegmentEnt
 
 /// Minimum compressed segment size before sealing (1 MiB).
 const SEAL_SIZE_BYTES: u64 = 1024 * 1024;
+
+/// Maximum age of an open-tail generation before it is sealed regardless of
+/// size, measured from the generation's first `start_ts`. Ensures a
+/// low-volume bucket doesn't rewrite the same tail forever.
+fn seal_max_age() -> chrono::Duration {
+    chrono::Duration::days(1)
+}
+
+/// (n_events, start_ts, end_ts, sha256_hex, compressed_size)
+type SegmentWriteResult = (
+    u64,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    String,
+    u64,
+);
 
 /// Segment header (line 1 of each segment JSONL).
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,9 +107,11 @@ impl SegmentWriter {
 
     /// Write events to a segment and update the manifest.
     ///
-    /// If the previous generation's segment is unsealed (< SEAL_SIZE_BYTES),
-    /// it is rewritten under the same generation number. Otherwise a new
-    /// generation is started.
+    /// If the previous generation's segment is unsealed (< SEAL_SIZE_BYTES
+    /// and younger than `SEAL_MAX_AGE`), it is rewritten under the same
+    /// generation number — merged with whatever events that segment already
+    /// held, so a caller passing only newly-available events never drops the
+    /// existing tail. Otherwise a new generation is started.
     ///
     /// Returns the generation number written.
     pub fn write_events(&mut self, bucket: &Bucket, events: &[Event]) -> Result<u64, String> {
@@ -103,6 +122,12 @@ impl SegmentWriter {
         let device_dir = device_dir(&self.sync_dir, &self.device_id);
         fs::create_dir_all(&device_dir).map_err(|e| format!("create device dir: {e}"))?;
 
+        // Load once; reused both for the seal decision and the final update.
+        let hostname = gethostname::gethostname()
+            .into_string()
+            .unwrap_or_else(|_| "unknown".to_string());
+        let mut manifest = Manifest::load_or_default(&self.sync_dir, &self.device_id, &hostname)?;
+
         // Determine whether to seal the previous segment and start a new one.
         let should_start_new = if self.generation == 0 {
             true // First ever segment
@@ -110,7 +135,15 @@ impl SegmentWriter {
             let prev_path = self.segment_path(self.generation);
             if prev_path.exists() {
                 let size = fs::metadata(&prev_path).map(|m| m.len()).unwrap_or(0);
-                size >= SEAL_SIZE_BYTES
+                let prev_start = manifest
+                    .buckets
+                    .get(&self.bucket_id)
+                    .and_then(|e| e.segments.iter().find(|s| s.generation == self.generation))
+                    .and_then(|s| s.start_ts);
+                let too_old = prev_start
+                    .map(|start| Utc::now() - start >= seal_max_age())
+                    .unwrap_or(false);
+                size >= SEAL_SIZE_BYTES || too_old
             } else {
                 true
             }
@@ -127,17 +160,24 @@ impl SegmentWriter {
         // Seal previous generation if we're moving forward
         let prev_sealed = should_start_new && self.generation > 0;
 
+        // When rewriting the open tail, merge with whatever it already holds
+        // so a caller passing only the events new since the last pass can't
+        // make earlier events vanish from the sync folder.
+        let merged_events;
+        let events_to_write: &[Event] = if !should_start_new {
+            let prev_path = self.segment_path(write_gen);
+            let existing = Self::read_segment_events(&prev_path)?;
+            merged_events = merge_events(existing, events);
+            &merged_events
+        } else {
+            events
+        };
+
         // Write the segment
         let (n_events, start_ts, end_ts, sha256_hex, compressed_size) =
-            self.write_segment_file(bucket, events, write_gen)?;
+            self.write_segment_file(bucket, events_to_write, write_gen)?;
 
         let sealed = compressed_size >= SEAL_SIZE_BYTES;
-
-        // Update manifest
-        let hostname = gethostname::gethostname()
-            .into_string()
-            .unwrap_or_else(|_| "unknown".to_string());
-        let mut manifest = Manifest::load_or_default(&self.sync_dir, &self.device_id, &hostname)?;
 
         let slug = self.slug.clone();
         let existing = manifest.buckets.remove(&self.bucket_id);
@@ -202,16 +242,7 @@ impl SegmentWriter {
         bucket: &Bucket,
         events: &[Event],
         generation: u64,
-    ) -> Result<
-        (
-            u64,
-            Option<DateTime<Utc>>,
-            Option<DateTime<Utc>>,
-            String,
-            u64,
-        ),
-        String,
-    > {
+    ) -> Result<SegmentWriteResult, String> {
         let segment_path = self.segment_path(generation);
         let tmp_path = segment_path
             .parent()
@@ -237,12 +268,18 @@ impl SegmentWriter {
         serde_json::to_writer(&mut jsonl, &header).map_err(|e| format!("serialize header: {e}"))?;
         jsonl.push(b'\n');
 
-        // Lines 2+: events in chronological order
+        // Lines 2+: events in chronological order. Sort here rather than
+        // trusting the caller — the datastore's own retrieval order is
+        // newest-first, so passing that straight through would silently
+        // violate the segment format's ordering contract.
+        let mut sorted_events: Vec<&Event> = events.iter().collect();
+        sorted_events.sort_by_key(|e| e.timestamp);
+
         let mut start_ts: Option<DateTime<Utc>> = None;
         let mut end_ts: Option<DateTime<Utc>> = None;
         let mut n_events: u64 = 0;
 
-        for event in events {
+        for event in sorted_events {
             let ts_str = event
                 .timestamp
                 .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
@@ -289,8 +326,28 @@ impl SegmentWriter {
             f.sync_all().map_err(|e| format!("fsync segment: {e}"))?;
         }
         fs::rename(&tmp_path, &segment_path).map_err(|e| format!("rename segment: {e}"))?;
+        super::manifest::fsync_dir(segment_path.parent().unwrap())?;
 
         Ok((n_events, start_ts, end_ts, sha256_hex, compressed_size))
+    }
+
+    /// Read and decode an existing segment's events (skipping the header
+    /// line). Returns an empty vec if the segment doesn't exist yet.
+    fn read_segment_events(path: &Path) -> Result<Vec<Event>, String> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let compressed = fs::read(path).map_err(|e| format!("read segment: {e}"))?;
+        let decompressed = zstd::decode_all(compressed.as_slice())
+            .map_err(|e| format!("zstd decompress segment: {e}"))?;
+        let text = String::from_utf8(decompressed).map_err(|e| format!("segment utf8: {e}"))?;
+        text.lines()
+            .skip(1) // header
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_str::<Event>(line).map_err(|e| format!("parse event line: {e}"))
+            })
+            .collect()
     }
 
     fn segment_filename(&self, generation: u64) -> String {
@@ -300,6 +357,27 @@ impl SegmentWriter {
     fn segment_path(&self, generation: u64) -> PathBuf {
         device_dir(&self.sync_dir, &self.device_id).join(self.segment_filename(generation))
     }
+}
+
+/// Union of `existing` and `new`, deduped by event id (later entries win),
+/// events without an id kept as-is, sorted chronologically.
+fn merge_events(existing: Vec<Event>, new: &[Event]) -> Vec<Event> {
+    let mut by_id: BTreeMap<i64, Event> = BTreeMap::new();
+    let mut unkeyed: Vec<Event> = Vec::new();
+
+    for event in existing.into_iter().chain(new.iter().cloned()) {
+        match event.id {
+            Some(id) => {
+                by_id.insert(id, event);
+            }
+            None => unkeyed.push(event),
+        }
+    }
+
+    let mut merged: Vec<Event> = by_id.into_values().collect();
+    merged.extend(unkeyed);
+    merged.sort_by_key(|e| e.timestamp);
+    merged
 }
 
 #[cfg(test)]
@@ -479,5 +557,91 @@ mod tests {
         assert_eq!(gen, 0);
         let device_path = dir.path().join("devices").join(device_id);
         assert!(!device_path.exists() || fs::read_dir(&device_path).unwrap().count() == 0);
+    }
+
+    #[test]
+    fn test_open_tail_rewrite_preserves_earlier_events() {
+        // Regression test for the open-tail data loss found in review: a
+        // daemon pass that supplies only the events new since the last pass
+        // must not make the earlier events of that generation disappear.
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "test-host_tail_merge";
+        let bucket = make_bucket();
+        let hostname = gethostname::gethostname()
+            .into_string()
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let mut writer = SegmentWriter::new(dir.path(), device_id, &bucket.id).unwrap();
+
+        // Pass 1: write event A.
+        let events_a = vec![make_event(0, 1)];
+        let gen_a = writer.write_events(&bucket, &events_a).unwrap();
+        assert_eq!(gen_a, 1);
+
+        // Pass 2: caller only passes event B (new since last pass) — the
+        // segment stays well under SEAL_SIZE_BYTES, so this rewrites gen 1.
+        let events_b = vec![make_event(60, 2)];
+        let gen_b = writer.write_events(&bucket, &events_b).unwrap();
+        assert_eq!(gen_b, 1, "still the open tail, not a new generation");
+
+        // The decoded tail must contain A ∪ B, not just B.
+        let seg_path = dir
+            .path()
+            .join("devices")
+            .join(device_id)
+            .join(format!("{}.00000001.jsonl.zst", bucket_slug(&bucket.id)));
+        let compressed = fs::read(&seg_path).unwrap();
+        let decompressed = zstd::decode_all(compressed.as_slice()).unwrap();
+        let text = String::from_utf8(decompressed).unwrap();
+        let ids: Vec<i64> = text
+            .lines()
+            .skip(1)
+            .map(|line| serde_json::from_str::<Event>(line).unwrap().id.unwrap())
+            .collect();
+        assert_eq!(ids, vec![1, 2], "decoded tail must contain A union B");
+
+        // The manifest's n_events must reflect the union too.
+        let manifest = Manifest::load_or_default(dir.path(), device_id, &hostname).unwrap();
+        let entry = manifest.buckets.get(&bucket.id).unwrap();
+        assert_eq!(
+            entry.total_events, 2,
+            "manifest n_events must be |A union B|"
+        );
+        assert_eq!(entry.segments.len(), 1);
+        assert_eq!(entry.segments[0].n_events, 2);
+    }
+
+    #[test]
+    fn test_segments_written_chronologically_regardless_of_input_order() {
+        // Regression test: the datastore's natural retrieval order is
+        // newest-first. The writer must not trust caller order.
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "test-host_chrono";
+        let bucket = make_bucket();
+
+        // Pass events in reverse-chronological order (newest first).
+        let events = vec![make_event(60, 2), make_event(0, 1)];
+
+        let mut writer = SegmentWriter::new(dir.path(), device_id, &bucket.id).unwrap();
+        writer.write_events(&bucket, &events).unwrap();
+
+        let seg_path = dir
+            .path()
+            .join("devices")
+            .join(device_id)
+            .join(format!("{}.00000001.jsonl.zst", bucket_slug(&bucket.id)));
+        let compressed = fs::read(&seg_path).unwrap();
+        let decompressed = zstd::decode_all(compressed.as_slice()).unwrap();
+        let text = String::from_utf8(decompressed).unwrap();
+        let ids: Vec<i64> = text
+            .lines()
+            .skip(1)
+            .map(|line| serde_json::from_str::<Event>(line).unwrap().id.unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![1, 2],
+            "segment lines must be chronological, oldest first"
+        );
     }
 }

@@ -106,8 +106,16 @@ impl Manifest {
             f.sync_all().map_err(|e| format!("fsync manifest: {e}"))?;
         }
         fs::rename(&tmp, &target).map_err(|e| format!("rename manifest: {e}"))?;
+        fsync_dir(target.parent().unwrap())?;
         Ok(())
     }
+}
+
+/// fsync a directory so a preceding `rename` into it survives a crash.
+pub(crate) fn fsync_dir(dir: &Path) -> Result<(), String> {
+    fs::File::open(dir)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("fsync dir {}: {e}", dir.display()))
 }
 
 /// Path for manifest inside the device directory.

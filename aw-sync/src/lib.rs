@@ -31,5 +31,8 @@ mod status;
 pub use status::run_status;
 mod util;
 
+#[cfg(feature = "sync-v2")]
+pub mod v2;
+
 #[cfg(target_os = "android")]
 pub mod android;

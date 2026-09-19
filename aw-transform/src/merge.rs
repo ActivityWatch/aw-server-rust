@@ -39,13 +39,12 @@ use aw_models::Event;
 ///   { duration: 1.0, data: { "a": 2, "b": 2 } }
 ///   { duration: 1.0, data: { "a": 1, "b": 2 } }
 /// ```
-#[allow(clippy::map_entry)]
 pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event> {
     if keys.is_empty() {
         return vec![];
     }
     let mut merged_events_map: HashMap<String, Event> = HashMap::new();
-    'event: for event in events {
+    'event: for mut event in events {
         let mut key_values = Vec::new();
         for key in &keys {
             match event.data.get(key) {
@@ -54,28 +53,17 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
             }
         }
         let summed_key = key_values.join(".");
-        if merged_events_map.contains_key(&summed_key) {
-            let merged_event = merged_events_map.get_mut(&summed_key).unwrap();
-            merged_event.duration += event.duration;
-        } else {
-            let mut data = HashMap::new();
-            for key in &keys {
-                data.insert(key.clone(), event.data.get(key).unwrap());
+        match merged_events_map.entry(summed_key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().duration += event.duration;
             }
-            let merged_event = Event {
-                id: None,
-                timestamp: event.timestamp,
-                duration: event.duration,
-                data: event.data.clone(),
-            };
-            merged_events_map.insert(summed_key, merged_event);
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                event.id = None;
+                entry.insert(event);
+            }
         }
     }
-    let mut merged_events_list = Vec::new();
-    for (_key, event) in merged_events_map.drain() {
-        merged_events_list.push(event);
-    }
-    merged_events_list
+    merged_events_map.into_values().collect()
 }
 
 #[cfg(test)]
@@ -91,6 +79,30 @@ mod tests {
     use crate::sort_by_timestamp;
 
     use super::merge_events_by_keys;
+
+    #[test]
+    fn merge_preserves_first_payload_and_clears_id() {
+        let first = Event {
+            id: Some(42),
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(2),
+            data: json_map! {"app": json!("browser"), "title": json!("page"), "extra": json!({"nested": [1, 2]})},
+        };
+        let mut second = first.clone();
+        second.timestamp += Duration::seconds(10);
+        second.data.insert("extra".into(), json!("different"));
+        let mut missing = first.clone();
+        missing.data.remove("title");
+        let result = merge_events_by_keys(
+            vec![first.clone(), second, missing],
+            vec!["app".into(), "title".into()],
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, None);
+        assert_eq!(result[0].timestamp, first.timestamp);
+        assert_eq!(result[0].data, first.data);
+        assert_eq!(result[0].duration, Duration::seconds(4));
+    }
 
     #[test]
     fn test_merge_events_by_key() {

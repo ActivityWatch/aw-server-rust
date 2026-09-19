@@ -6,8 +6,9 @@ set -e;
 
 NDK_VERSION=r25c
 
-script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-project_path="$(readlink -f "$script_dir/.")"
+# Use `pwd -P` to resolve symlinks instead of `readlink -f`, which is not
+# supported by the BSD readlink shipped with macOS.
+project_path="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd -P )"
 
 platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
 

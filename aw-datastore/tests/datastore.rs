@@ -833,6 +833,43 @@ mod datastore_tests {
     }
 
     #[test]
+    fn stopwatch_changes_are_committed_before_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stopwatch.db");
+        let ds = Datastore::new(path.to_str().unwrap().to_string(), false);
+        let mut bucket = test_bucket();
+        bucket._type = "general.stopwatch".to_string();
+        ds.create_bucket(&bucket).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+
+        let mut event = test_event(Utc::now(), Duration::zero());
+        event.data = json_map! {"running": json!(true)};
+        event = ds.heartbeat(&bucket.id, event, 1.0).unwrap();
+        let id = event.id.unwrap();
+        let read_data = || -> serde_json::Value {
+            let data: String = conn
+                .query_row("SELECT data FROM events WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            serde_json::from_str(&data).unwrap()
+        };
+        assert_eq!(read_data()["running"], true);
+
+        event.data = json_map! {"running": json!(false)};
+        ds.insert_events(&bucket.id, &[event]).unwrap();
+        assert_eq!(read_data()["running"], false);
+
+        ds.delete_events_by_id(&bucket.id, vec![id]).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM events WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn test_migration_v4_to_v5() {
         let test_dir = tempfile::tempdir().unwrap();
         let db_path = test_dir.path().join("datastore-unittest-migration-v4.db");

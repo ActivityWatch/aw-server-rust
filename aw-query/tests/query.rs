@@ -353,6 +353,8 @@ mod query_tests {
             r#"
             events = query_bucket(find_bucket("{}", "testhost"));
             events = flood(events);
+            events = flood(events, 10);
+            events = flood(events, 0.5);
             events = sort_by_duration(events);
             events = limit_events(events, 10000);
             events = sort_by_timestamp(events);

@@ -272,10 +272,22 @@ mod qfunctions {
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
-        validate::args_length(&args, 1)?;
-        let events: Vec<Event> = args.into_iter().next().unwrap().try_into()?;
+        validate::args_length(&args, 1).or_else(|_| validate::args_length(&args, 2))?;
+        let mut args = args.into_iter();
+        let events: Vec<Event> = args.next().unwrap().try_into()?;
+        // Optional pulsetime in seconds, defaults to 5 like aw-core
+        let pulsetime_secs: f64 = match args.next() {
+            Some(arg) => arg.try_into()?,
+            None => 5.0,
+        };
+        if !pulsetime_secs.is_finite() || pulsetime_secs < 0.0 {
+            return Err(QueryError::InvalidFunctionParameters(format!(
+                "flood pulsetime must be a non-negative number of seconds, got {pulsetime_secs}"
+            )));
+        }
+        let pulsetime = chrono::Duration::nanoseconds((pulsetime_secs * 1e9).round() as i64);
         // Run flood
-        let mut flooded_events = aw_transform::flood(events, chrono::Duration::seconds(5));
+        let mut flooded_events = aw_transform::flood(events, pulsetime);
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {

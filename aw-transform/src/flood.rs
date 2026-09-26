@@ -105,16 +105,21 @@ pub fn flood(events: Vec<Event>, pulsetime: Duration) -> Vec<Event> {
 
     // The pairwise pass can modify an event after it was compared with its predecessor, and does
     // not resolve overlapping events with different data. Normalize the result so that it never
-    // contains overlapping events. For differing data, the later event wins.
+    // contains overlapping events, and adjacent same-data events are merged. For differing data,
+    // the later event wins.
     let mut normalized: Vec<Event> = Vec::with_capacity(events.len());
     for event in events.into_iter().filter(|e| e.duration > zero) {
         let mut merged = false;
         while let Some(previous) = normalized.last_mut() {
             let previous_end = previous.calculate_endtime();
-            if previous_end <= event.timestamp {
+            let same_data = previous.data == event.data;
+            // Merge same-data events that touch, not only those that overlap: the pairwise pass
+            // leaves a merged-away event as a zero-duration placeholder at the end of the merged
+            // event, so a chain of same-data events can come out as adjacent pieces.
+            if previous_end < event.timestamp || (previous_end == event.timestamp && !same_data) {
                 break;
             }
-            if previous.data == event.data {
+            if same_data {
                 let end = max(previous_end, event.calculate_endtime());
                 previous.duration = end - previous.timestamp;
                 merged = true;
@@ -427,6 +432,51 @@ mod tests {
             Duration::seconds(5),
         );
         assert_eq!(res, vec![ev(0., 20., "x")]);
+    }
+
+    #[test]
+    fn test_flood_merge_chains() {
+        // Chains of same-data events merge into one event, whether adjacent or within pulsetime
+        let pt = Duration::seconds(5);
+        let adjacent = vec![ev(0., 10., "x"), ev(10., 10., "x"), ev(20., 10., "x")];
+        assert_eq!(flood(adjacent, pt), vec![ev(0., 30., "x")]);
+
+        let gaps = vec![ev(0., 10., "x"), ev(12., 1., "x"), ev(14., 1., "x")];
+        assert_eq!(flood(gaps, pt), vec![ev(0., 15., "x")]);
+
+        let then_other = vec![ev(0., 10., "x"), ev(12., 1., "x"), ev(14., 1., "y")];
+        assert_eq!(
+            flood(then_other, pt),
+            vec![ev(0., 13.5, "x"), ev(13.5, 1.5, "y")]
+        );
+    }
+
+    #[test]
+    fn test_flood_merges_adjacent_randomized() {
+        let mut seed: u64 = 0x6a09_e667_f3bc_c908;
+        let mut next = |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        for _ in 0..500 {
+            let n = next(12) as usize;
+            let events: Vec<Event> = (0..n)
+                .map(|_| {
+                    let app = ["a", "b"][next(2) as usize];
+                    ev(next(60) as f64, next(15) as f64, app)
+                })
+                .collect();
+            let once = flood(events.clone(), Duration::seconds(5));
+            // No two adjacent same-data events are left unmerged
+            for pair in once.windows(2) {
+                assert!(
+                    pair[0].data != pair[1].data || pair[0].calculate_endtime() < pair[1].timestamp,
+                    "{events:?} -> {once:?}"
+                );
+            }
+        }
     }
 
     #[test]

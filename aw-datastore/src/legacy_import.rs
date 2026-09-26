@@ -124,7 +124,16 @@ mod import {
                         Err(err) => panic!("Timestamp string {timestamp_str}: {err:?}"),
                     };
 
-                    let duration_ns = aw_models::seconds_to_nanos(duration_float);
+                    let duration_ns = match aw_models::seconds_to_nanos(duration_float) {
+                        Some(ns) => ns,
+                        None => {
+                            warn!(
+                                "Skipping event with invalid duration {} in bucket {}",
+                                duration_float, bucket_id
+                            );
+                            continue;
+                        }
+                    };
 
                     let data: serde_json::map::Map<String, serde_json::Value> =
                         match serde_json::from_str(&data_str) {

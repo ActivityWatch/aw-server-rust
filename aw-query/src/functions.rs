@@ -280,12 +280,15 @@ mod qfunctions {
             Some(arg) => arg.try_into()?,
             None => 5.0,
         };
-        if !pulsetime_secs.is_finite() || pulsetime_secs < 0.0 {
-            return Err(QueryError::InvalidFunctionParameters(format!(
-                "flood pulsetime must be a non-negative number of seconds, got {pulsetime_secs}"
-            )));
-        }
-        let pulsetime = chrono::Duration::nanoseconds((pulsetime_secs * 1e9).round() as i64);
+        let pulsetime = match aw_models::seconds_to_nanos(pulsetime_secs) {
+            // Check the sign of the input, since tiny negative values round to 0 ns
+            Some(ns) if pulsetime_secs >= 0.0 => chrono::Duration::nanoseconds(ns),
+            _ => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                    "flood pulsetime must be a non-negative number of seconds (at most ~292 years), got {pulsetime_secs}"
+                )))
+            }
+        };
         // Run flood
         let mut flooded_events = aw_transform::flood(events, pulsetime);
         // Put events back into DataType::Event container
@@ -413,7 +416,13 @@ mod qfunctions {
         let mut sum_durations = chrono::Duration::zero();
         for event in events {
             match event {
-                DataType::Event(event) => sum_durations += event.duration,
+                DataType::Event(event) => {
+                    sum_durations = sum_durations.checked_add(&event.duration).ok_or_else(|| {
+                        QueryError::InvalidFunctionParameters(
+                            "sum_durations overflowed".to_string(),
+                        )
+                    })?
+                }
                 invalid_type => return Err(QueryError::InvalidFunctionParameters(format!(
                     "Expected function parameter of type List of Events, list contains {invalid_type:?}"
                 ))),

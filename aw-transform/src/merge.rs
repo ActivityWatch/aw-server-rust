@@ -10,8 +10,9 @@ use aw_models::Event;
 /// with those key values, and the durations are summed. Events missing any of
 /// the keys are dropped, and an empty key list returns no events. The merged
 /// events come out in the order their first event appeared in the input, so
-/// the result is deterministic (order-sensitive transforms such as
-/// union_no_overlap depend on it).
+/// the result is deterministic. That is not necessarily timestamp order: sort
+/// by timestamp before passing the result to union_no_overlap, which expects
+/// chronological input.
 ///
 /// # Example 1
 /// A simple example only using one key

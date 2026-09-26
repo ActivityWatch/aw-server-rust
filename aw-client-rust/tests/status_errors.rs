@@ -198,24 +198,6 @@ fn setting_keys_are_encoded_as_one_path_segment() {
 }
 
 #[test]
-fn export_bucket_encodes_bucket_id_as_one_path_segment() {
-    let (port, handle) = spawn_mock_server(vec![MockResponse {
-        status_line: "200 OK",
-        content_type: "application/json",
-        body: r#"{"buckets":{}}"#,
-    }]);
-    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
-
-    block_on(client.export_bucket("a#b?c/d")).expect("export bucket");
-
-    let requests = handle.join().expect("join mock server");
-    assert_eq!(
-        requests,
-        vec!["GET /api/0/buckets/a%23b%3Fc%2Fd/export HTTP/1.1"]
-    );
-}
-
-#[test]
 fn query_cached_sends_name_and_cache_params() {
     let result = || MockResponse {
         status_line: "200 OK",
@@ -242,5 +224,23 @@ fn query_cached_sends_name_and_cache_params() {
             "POST /api/0/query HTTP/1.1",
             "POST /api/0/query?name=daily+summary&cache=1 HTTP/1.1",
         ]
+    );
+}
+
+#[test]
+fn export_bucket_encodes_bucket_id_as_one_path_segment() {
+    let (port, handle) = spawn_mock_server(vec![MockResponse {
+        status_line: "200 OK",
+        content_type: "application/json",
+        body: r#"{"buckets":{}}"#,
+    }]);
+    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
+
+    block_on(client.export_bucket("a#b?c/d")).expect("export bucket");
+
+    let requests = handle.join().expect("join mock server");
+    assert_eq!(
+        requests,
+        vec!["GET /api/0/buckets/a%23b%3Fc%2Fd/export HTTP/1.1"]
     );
 }

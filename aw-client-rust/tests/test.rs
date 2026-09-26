@@ -264,6 +264,10 @@ RETURN = events;",
         let timeperiods = (start, end);
         let query_result = client.query(&query, vec![timeperiods]).unwrap();
         println!("Query result: {query_result:?}");
+        let cached_result = client
+            .query_cached(&query, vec![timeperiods], "aw-client-rust-test-query")
+            .unwrap();
+        assert_eq!(cached_result, query_result);
 
         let event_id = events[0].id.unwrap();
         let fetched = client.get_event(&bucketname, event_id).unwrap().unwrap();

@@ -231,7 +231,34 @@ impl AwClient {
         query: &str,
         timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> Result<Vec<serde_json::Value>, reqwest::Error> {
-        let url = reqwest::Url::parse(format!("{}api/0/query", self.baseurl).as_str()).unwrap();
+        self.query_inner(query, timeperiods, None).await
+    }
+
+    /// Like [`query`](Self::query), but sends `?name=<name>&cache=1` to ask the server to
+    /// cache the result under `name`, matching `query(..., name=, cache=True)` in the
+    /// Python client. Neither aw-server-rust nor aw-server-python caches results yet, so
+    /// today this returns the same result as `query`.
+    pub async fn query_cached(
+        &self,
+        query: &str,
+        timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+        name: &str,
+    ) -> Result<Vec<serde_json::Value>, reqwest::Error> {
+        self.query_inner(query, timeperiods, Some(name)).await
+    }
+
+    async fn query_inner(
+        &self,
+        query: &str,
+        timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+        cache_name: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, reqwest::Error> {
+        let mut url = self.api_url(&["query"]);
+        if let Some(name) = cache_name {
+            url.query_pairs_mut()
+                .append_pair("name", name)
+                .append_pair("cache", "1");
+        }
 
         // Format timeperiods as ISO8601 strings, separated by /
         let timeperiods_str: Vec<String> = timeperiods

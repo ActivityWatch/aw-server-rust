@@ -89,6 +89,13 @@ impl AwClient {
         timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>
     );
     proxy_method!(get_event, Option<Event>, bucketname: &str, event_id: i64);
+    proxy_method!(
+        query_cached,
+        Vec<serde_json::Value>,
+        query: &str,
+        timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+        name: &str
+    );
     proxy_method!(insert_event, (), bucketname: &str, event: &Event);
     proxy_method!(insert_events, (), bucketname: &str, events: Vec<Event>);
     proxy_method!(

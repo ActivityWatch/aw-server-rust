@@ -96,6 +96,23 @@ mod query_tests {
     }
 
     #[test]
+    fn test_sum_durations_precision() {
+        // Repro from ActivityWatch/aw-server-rust#745: sum_durations came out 1 ms low
+        let ds = setup_datastore_with_bucket();
+        let event: Event = serde_json::from_str(
+            r#"{"timestamp": "2026-01-01T10:00:00Z", "duration": 515.968, "data": {}}"#,
+        )
+        .unwrap();
+        ds.insert_events(BUCKET_ID, &[event]).unwrap();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+        let code = format!(r#"return sum_durations(query_bucket("{BUCKET_ID}"));"#);
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 515.968),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        }
+    }
+
+    #[test]
     fn test_bool() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();

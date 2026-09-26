@@ -124,7 +124,7 @@ mod import {
                         Err(err) => panic!("Timestamp string {timestamp_str}: {err:?}"),
                     };
 
-                    let duration_ns = (duration_float * 1_000_000_000.0) as i64;
+                    let duration_ns = aw_models::seconds_to_nanos(duration_float);
 
                     let data: serde_json::map::Map<String, serde_json::Value> =
                         match serde_json::from_str(&data_str) {

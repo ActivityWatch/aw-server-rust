@@ -136,4 +136,18 @@ mod tests {
         let e_result = period_union(&[], &[e1]);
         assert_eq!(e_result.len(), 1);
     }
+
+    #[test]
+    fn test_period_union_touching_parsed() {
+        // Repro from ActivityWatch/aw-server-rust#745: durations parsed from JSON used to lose a
+        // nanosecond, leaving a 1 ns gap between these touching events.
+        let parse = |json: &str| -> Event { serde_json::from_str(json).unwrap() };
+        let a =
+            parse(r#"{"timestamp": "2026-01-01T09:56:13.086Z", "duration": 16.964, "data": {}}"#);
+        let b = parse(r#"{"timestamp": "2026-01-01T09:56:30.050Z", "duration": 65, "data": {}}"#);
+        assert_eq!(a.calculate_endtime(), b.timestamp);
+        let res = period_union(&[a], &[b]);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].duration, Duration::milliseconds(16_964 + 65_000));
+    }
 }

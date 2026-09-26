@@ -407,9 +407,14 @@ mod qfunctions {
                 ))),
             }
         }
-        Ok(DataType::Number(
-            (sum_durations.num_milliseconds() as f64) / 1000.0,
-        ))
+        // Nanosecond precision, like event durations are serialized. Flooring to milliseconds made
+        // totals come out up to 1 ms low (ActivityWatch/aw-server-rust#745).
+        let seconds = match sum_durations.num_nanoseconds() {
+            Some(ns) => ns as f64 / 1_000_000_000.0,
+            // Only for sums beyond ~292 years
+            None => sum_durations.num_milliseconds() as f64 / 1000.0,
+        };
+        Ok(DataType::Number(seconds))
     }
 
     pub fn merge_events_by_keys(

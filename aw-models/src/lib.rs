@@ -28,6 +28,7 @@ mod tryvec;
 pub use self::bucket::Bucket;
 pub use self::bucket::BucketMetadata;
 pub use self::bucket::BucketsExport;
+pub use self::duration::seconds_to_nanos;
 pub use self::event::Event;
 pub use self::info::Info;
 pub use self::query::Query;

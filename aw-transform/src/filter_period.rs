@@ -1,3 +1,5 @@
+use std::cmp::max;
+
 use aw_models::Event;
 use chrono::{DateTime, Utc};
 
@@ -30,10 +32,17 @@ pub fn filter_period_intersect(events: Vec<Event>, filter_events: Vec<Event>) ->
     let mut filtered_events = Vec::new();
     let mut i = 0;
     let mut j = 0;
+    // Start of the part of events[i] that has not been emitted yet, so that overlapping filter
+    // events don't emit the same time twice.
+    let mut emitted_until: Option<DateTime<Utc>> = None;
     while i < events.len() && j < filter_events.len() {
         let event = &events[i];
         let filter = &filter_events[j];
-        let (e_start, e_end) = (event.timestamp, event.calculate_endtime());
+        let e_start = match emitted_until {
+            Some(t) => max(t, event.timestamp),
+            None => event.timestamp,
+        };
+        let e_end = event.calculate_endtime();
         let (f_start, f_end) = (filter.timestamp, filter.calculate_endtime());
 
         match intersection(e_start, e_end, f_start, f_end) {
@@ -44,12 +53,17 @@ pub fn filter_period_intersect(events: Vec<Event>, filter_events: Vec<Event>) ->
                 filtered_events.push(e);
                 if e_end <= f_end {
                     i += 1;
+                    emitted_until = None;
                 } else {
                     j += 1;
+                    emitted_until = Some(end);
                 }
             }
             // Event ended before filter event started
-            None if e_end <= f_start => i += 1,
+            None if e_end <= f_start => {
+                i += 1;
+                emitted_until = None;
+            }
             // Event started after filter event ended
             None => j += 1,
         }
@@ -237,6 +251,16 @@ mod tests {
 
         let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(5, 0, "")]);
         assert_eq!(res, vec![ev(5, 0, "x")]);
+    }
+
+    #[test]
+    fn test_filter_period_intersect_overlapping_filters() {
+        // Time covered by several filter events is emitted once
+        let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(0, 6, ""), ev(4, 4, "")]);
+        assert_eq!(res, vec![ev(0, 6, "x"), ev(6, 2, "x")]);
+
+        let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(0, 6, ""), ev(2, 2, "")]);
+        assert_eq!(res, vec![ev(0, 6, "x")]);
     }
 
     #[test]

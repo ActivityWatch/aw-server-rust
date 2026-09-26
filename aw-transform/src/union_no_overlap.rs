@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 pub fn union_no_overlap(events1: Vec<Event>, events2: Vec<Event>) -> Vec<Event> {
     let mut events_union: Vec<Event> = Vec::new();
     let mut events1 = events1.into_iter().peekable();
-    let mut events2 = events2.into_iter();
+    let mut events2 = events2.into_iter().peekable();
     // Keep a split remainder here instead of inserting it ahead of the entire
     // unprocessed suffix. Each step consumes an input or emits a fragment.
     let mut pending = events2.next();
@@ -26,9 +26,19 @@ pub fn union_no_overlap(events1: Vec<Event>, events2: Vec<Event>) -> Vec<Event> 
         let e2_end = e2.timestamp + e2.duration;
         if e2.timestamp < e1.timestamp {
             // e2 starts first: emit the part before e1, keep the rest pending.
-            let (prefix, remainder) = split_event(pending.take().unwrap(), e1.timestamp);
+            let split_at = e1.timestamp;
+            let (prefix, remainder) = split_event(pending.take().unwrap(), split_at);
             events_union.push(prefix);
-            pending = remainder.or_else(|| events2.next());
+            pending = match remainder {
+                Some(remainder) => {
+                    // Points before e1 lie inside the emitted prefix.
+                    while let Some(point) = events2.next_if(|e| is_point_before(e, split_at)) {
+                        events_union.push(point);
+                    }
+                    Some(remainder)
+                }
+                None => events2.next(),
+            };
         } else if e2.timestamp < e1_end {
             // e1 starts first (or together) and covers the start of e2.
             if e2_end <= e1_end {
@@ -40,6 +50,8 @@ pub fn union_no_overlap(events1: Vec<Event>, events2: Vec<Event>) -> Vec<Event> 
             remainder.timestamp = e1_end;
             remainder.duration = e2_end - e1_end;
             remainder.id = None;
+            // Points before e1_end are covered by e1 and dropped.
+            while events2.next_if(|e| is_point_before(e, e1_end)).is_some() {}
             events_union.push(events1.next().unwrap());
         } else {
             // e1 ends before (or where) e2 starts.
@@ -53,6 +65,13 @@ pub fn union_no_overlap(events1: Vec<Event>, events2: Vec<Event>) -> Vec<Event> 
     events_union.extend(events2);
 
     events_union
+}
+
+/// Zero-duration events2 events may sit inside an earlier events2 event. When
+/// that event's start moves forward, points before the new start must be
+/// handled right away, or they would be emitted after it, out of order.
+fn is_point_before(e: &Event, t: DateTime<Utc>) -> bool {
+    e.duration.is_zero() && e.timestamp < t
 }
 
 fn split_event(mut e: Event, timestamp: DateTime<Utc>) -> (Event, Option<Event>) {
@@ -478,6 +497,10 @@ mod tests {
                 for _ in 0..next(6) {
                     let duration = if next(4) == 0 { 0 } else { 1 + next(5_000) };
                     spans.push((t, duration));
+                    if duration > 0 && next(4) == 0 {
+                        // Zero-duration point inside the event just added.
+                        spans.push((t + next(duration as u64), 0));
+                    }
                     t += duration + next(3_000);
                 }
                 lists.push(events_from_unit(
@@ -539,5 +562,49 @@ mod tests {
                 (1_750, 250)
             ]
         );
+    }
+
+    #[test]
+    fn events2_points_inside_events2_stay_sorted() {
+        let now = Utc::now();
+        type Spans = &'static [(i64, i64)];
+        type Expected = Vec<(i64, i64, String)>;
+        let cases: &[(Spans, Spans, Expected)] = &[
+            // point inside the part of an events2 event covered by events1: dropped
+            (
+                &[(0, 1)],
+                &[(0, 3), (0, 0)],
+                vec![(0, 1, "a".into()), (1, 2, "b".into())],
+            ),
+            // point in the part emitted before events1: kept, in order
+            (
+                &[(5, 1)],
+                &[(0, 10), (2, 0)],
+                vec![
+                    (0, 5, "b".into()),
+                    (2, 0, "b".into()),
+                    (5, 1, "a".into()),
+                    (6, 4, "b".into()),
+                ],
+            ),
+            // point in the part after events1: kept, in order
+            (
+                &[(2, 1)],
+                &[(0, 10), (7, 0)],
+                vec![
+                    (0, 2, "b".into()),
+                    (2, 1, "a".into()),
+                    (3, 7, "b".into()),
+                    (7, 0, "b".into()),
+                ],
+            ),
+        ];
+        for (a, b, expected) in cases {
+            let events1 = events_from(now, a, "a");
+            let events2 = events_from(now, b, "b");
+            let result = union_no_overlap(events1.clone(), events2.clone());
+            assert_eq!(&spans(&result, now), expected);
+            assert_union_invariants(&events1, &events2, &result);
+        }
     }
 }

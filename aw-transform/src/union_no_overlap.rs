@@ -343,7 +343,8 @@ mod tests {
     }
 
     /// Checks the union invariants: output is sorted, events with a duration
-    /// never overlap, every `events1` event survives unchanged, and every
+    /// never overlap, every `events1` event survives unchanged, zero-duration
+    /// `events2` events are kept exactly when no `events1` event covers them, and every
     /// second is covered by the result exactly when either input covers it.
     fn assert_union_invariants(events1: &[Event], events2: &[Event], result: &[Event]) {
         let covers = |events: &[Event], t: DateTime<Utc>| {
@@ -366,6 +367,15 @@ mod tests {
         for e in events1 {
             assert!(result.contains(e), "events1 event missing from result");
         }
+        let points: Vec<_> = result
+            .iter()
+            .filter(|e| e.duration.is_zero() && !events1.contains(e))
+            .collect();
+        let expected_points: Vec<_> = events2
+            .iter()
+            .filter(|e| e.duration.is_zero() && covers(events1, e.timestamp) == 0)
+            .collect();
+        assert_eq!(points, expected_points, "wrong events2 points kept");
         // Coverage is constant between consecutive event boundaries, so checking
         // one point inside each gap between boundaries is exact at any resolution.
         let mut bounds: Vec<DateTime<Utc>> = events1

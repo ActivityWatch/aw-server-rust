@@ -24,6 +24,7 @@ mod privacy_filter;
 mod worker;
 
 pub use self::datastore::DatastoreInstance;
+pub use self::datastore::MIN_READ_COMPAT_DB_VERSION;
 pub use self::datastore::NEWEST_DB_VERSION;
 
 pub use self::worker::Datastore;

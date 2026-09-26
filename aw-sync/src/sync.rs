@@ -1730,6 +1730,93 @@ mod peer_isolation_tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// A peer staging db last written by an older aw-sync (user_version 4)
+    /// has the same tables as v6; only indexes differ. It must be imported,
+    /// not skipped as incompatible (regression from #700).
+    #[test]
+    fn pull_imports_v4_peer_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let now = chrono::Utc::now();
+        let now_ns = now.timestamp_nanos_opt().unwrap();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE buckets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    type TEXT NOT NULL,
+                    client TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    created TEXT NOT NULL,
+                    data_deprecated TEXT DEFAULT '{}',
+                    data TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX bucket_id_index ON buckets(id);
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bucketrow INTEGER NOT NULL,
+                    starttime INTEGER NOT NULL,
+                    endtime INTEGER NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+                );
+                CREATE INDEX events_bucketrow_index ON events(bucketrow);
+                CREATE INDEX events_starttime_index ON events(starttime);
+                CREATE INDEX events_endtime_index ON events(endtime);
+                CREATE TABLE key_value (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    last_modified NUMBER NOT NULL
+                );
+                PRAGMA user_version = 4;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO buckets (name, type, client, hostname, created)
+                 VALUES ('aw-watcher-window_host-v4', 'currentwindow', 'aw-watcher-window',
+                         'host-v4', ?1)",
+                [now.to_rfc3339()],
+            )
+            .unwrap();
+            for i in 1..=3i64 {
+                let start = now_ns - i * 3_600_000_000_000;
+                conn.execute(
+                    "INSERT INTO events (bucketrow, starttime, endtime, data)
+                     VALUES (1, ?1, ?2, '{\"app\": \"x\"}')",
+                    [start, start + 60_000_000_000],
+                )
+                .unwrap();
+            }
+        }
+
+        let db = peer_db("dev-v4", "host-v4", path);
+        let mut report = dummy_report();
+        let opened = open_peer_datastores(&[db], &mut report, true).expect("v4 peer must open");
+        assert_eq!(opened.len(), 1, "v4 peer must not be skipped: {report:?}");
+
+        let dest = Datastore::new_in_memory(false);
+        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = opened
+            .iter()
+            .map(|(db, ds)| (db, ds as &dyn AccessMethod))
+            .collect();
+        pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, false)
+            .expect("pull from v4 peer must succeed");
+        let events = dest
+            .get_events(
+                "aw-watcher-window_host-v4-synced-from-host-v4",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(events.len(), 3);
+        for (_, ds) in opened {
+            ds.close();
+        }
+        dest.close();
+    }
 }
 
 /// Regression guard for ActivityWatch/aw-server-rust#709.

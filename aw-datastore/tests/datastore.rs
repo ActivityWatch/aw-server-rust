@@ -1186,27 +1186,199 @@ mod datastore_tests {
         );
     }
 
+    /// Schema exactly as aw-server-rust wrote it at user_version 4 (copied
+    /// from a real v4 aw-sync staging db). Built by hand rather than via the
+    /// migrations so the fixture cannot drift with them.
+    const V4_SCHEMA: &str = "
+        CREATE TABLE buckets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            type TEXT NOT NULL,
+            client TEXT NOT NULL,
+            hostname TEXT NOT NULL,
+            created TEXT NOT NULL,
+            data_deprecated TEXT DEFAULT '{}',
+            data TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX bucket_id_index ON buckets(id);
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bucketrow INTEGER NOT NULL,
+            starttime INTEGER NOT NULL,
+            endtime INTEGER NOT NULL,
+            data TEXT NOT NULL,
+            FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+        );
+        CREATE INDEX events_bucketrow_index ON events(bucketrow);
+        CREATE INDEX events_starttime_index ON events(starttime);
+        CREATE INDEX events_endtime_index ON events(endtime);
+        CREATE TABLE key_value (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            last_modified NUMBER NOT NULL
+        );
+        PRAGMA user_version = 4;
+    ";
+
+    /// v5 = v4 tables with the composite starttime index, no endtime index.
+    const V4_TO_V5_INDEXES: &str = "
+        DROP INDEX events_bucketrow_index;
+        DROP INDEX events_starttime_index;
+        DROP INDEX events_endtime_index;
+        CREATE INDEX events_bucketrow_starttime_endtime_index
+            ON events(bucketrow, starttime DESC, endtime);
+        PRAGMA user_version = 5;
+    ";
+
+    const DAY_NS: i64 = 86_400 * 1_000_000_000;
+
+    /// Write an old-version db with one bucket: an event 100 days ago and
+    /// three in the last day. The wide span makes a recent unlimited query
+    /// take the endtime-index path (`prefer_endtime_index`).
+    fn write_old_fixture(db_path: &std::path::Path, version: i32) -> DateTime<Utc> {
+        let now = Utc::now();
+        let now_ns = now.timestamp_nanos_opt().unwrap();
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute_batch(V4_SCHEMA).unwrap();
+        if version == 5 {
+            conn.execute_batch(V4_TO_V5_INDEXES).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO buckets (name, type, client, hostname, created, data)
+             VALUES ('testid', 'testtype', 'testclient', 'testhost', ?1, '{}')",
+            [now.to_rfc3339()],
+        )
+        .unwrap();
+        let starts = [
+            now_ns - 100 * DAY_NS,
+            now_ns - DAY_NS / 2,
+            now_ns - DAY_NS / 4,
+            now_ns - DAY_NS / 8,
+        ];
+        for start in starts {
+            conn.execute(
+                "INSERT INTO events (bucketrow, starttime, endtime, data)
+                 VALUES (1, ?1, ?2, '{\"k\": \"v\"}')",
+                [start, start + 1_000_000_000],
+            )
+            .unwrap();
+        }
+        let version_now: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version_now, version);
+        now
+    }
+
+    fn write_versioned_db(db_path: &std::path::Path, version: i32) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.pragma_update(None, "user_version", version).unwrap();
+    }
+
+    /// Peers written by an older aw-sync (v4/v5) differ only in indexes, so
+    /// a read-only pull must read them rather than skip them. Every read path
+    /// a pull or export uses must avoid `INDEXED BY` on an index the file
+    /// lacks (that is a prepare error, not an ignored hint).
     #[test]
-    fn test_read_only_open_skips_old_user_version() {
-        let test_dir = tempfile::tempdir().unwrap();
-        let db_path = test_dir.path().join("peer-v4.db");
-        {
+    fn test_read_only_open_reads_older_compatible_versions() {
+        for version in [4, 5] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join(format!("peer-v{version}.db"));
+            let now = write_old_fixture(&db_path, version);
+
+            let ds = Datastore::open_read_only(db_path.to_str().unwrap().to_string())
+                .unwrap_or_else(|e| panic!("v{version} peer must open read-only: {e:?}"));
+            let buckets = ds.get_buckets().unwrap();
+            assert!(buckets.contains_key("testid"), "v{version}: {buckets:?}");
+
+            // Full-range read (starttime index path).
+            let all = ds.get_events("testid", None, None, None).unwrap();
+            assert_eq!(all.len(), 4, "v{version} full read");
+            // Limited read (starttime index path, LIMIT).
+            let limited = ds.get_events("testid", None, None, Some(2)).unwrap();
+            assert_eq!(limited.len(), 2, "v{version} limited read");
+            // Recent unlimited read: endtime index path.
+            let since = now - Duration::days(1);
+            let recent = ds.get_events("testid", Some(since), None, None).unwrap();
+            assert_eq!(recent.len(), 3, "v{version} recent read");
+            let recent_count = ds.get_event_count("testid", Some(since), None).unwrap();
+            assert_eq!(recent_count, 3, "v{version} recent count");
+            let total_count = ds.get_event_count("testid", None, None).unwrap();
+            assert_eq!(total_count, 4, "v{version} total count");
+
+            // Export paths share the index selection.
+            ds.export_to_file(Some("testid"), tempfile::tempfile().unwrap())
+                .unwrap_or_else(|e| panic!("v{version} export: {e:?}"));
+            ds.export_csv_to_file(
+                "testid",
+                Some(since),
+                None,
+                None,
+                tempfile::tempfile().unwrap(),
+            )
+            .unwrap_or_else(|e| panic!("v{version} csv export: {e:?}"));
+            ds.close();
+
+            // Read-only really means read-only: no migration happened.
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            conn.pragma_update(None, "user_version", 4).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, version, "read-only open must not migrate");
+            assert!(!db_path.with_extension("db-wal").exists());
+            assert!(!db_path.with_extension("db-shm").exists());
         }
+    }
 
-        let wal = db_path.with_extension("db-wal");
-        let shm = db_path.with_extension("db-shm");
-        let _ = std::fs::remove_file(&wal);
-        let _ = std::fs::remove_file(&shm);
+    /// A writable open (aw-sync's own staging db, aw-server's db) migrates a
+    /// v4 file to the newest version and then reads through the new indexes.
+    #[test]
+    fn test_writable_open_migrates_v4_fixture() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("staging-v4.db");
+        let now = write_old_fixture(&db_path, 4);
 
-        match Datastore::open_read_only(db_path.to_str().unwrap().to_string()) {
-            Err(DatastoreError::OldDbVersion(msg)) => {
-                assert!(msg.contains("version 4"), "got {msg}");
+        let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+        let since = now - Duration::days(1);
+        assert_eq!(
+            ds.get_events("testid", Some(since), None, None)
+                .unwrap()
+                .len(),
+            3
+        );
+        ds.insert_events("testid", &[test_event(now, Duration::seconds(1))])
+            .unwrap();
+        ds.force_commit().unwrap();
+        ds.close();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let after: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, aw_datastore::NEWEST_DB_VERSION);
+    }
+
+    #[test]
+    fn test_read_only_open_skips_incompatible_versions() {
+        for version in [
+            aw_datastore::MIN_READ_COMPAT_DB_VERSION - 1,
+            aw_datastore::NEWEST_DB_VERSION + 1,
+        ] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join(format!("peer-v{version}.db"));
+            write_versioned_db(&db_path, version);
+
+            let wal = db_path.with_extension("db-wal");
+            let shm = db_path.with_extension("db-shm");
+
+            match Datastore::open_read_only(db_path.to_str().unwrap().to_string()) {
+                Err(DatastoreError::OldDbVersion(msg)) => {
+                    assert!(msg.contains(&format!("version {version}")), "got {msg}");
+                }
+                other => panic!("v{version}: expected OldDbVersion, got {other:?}"),
             }
-            other => panic!("expected OldDbVersion, got {other:?}"),
+            assert!(!wal.exists(), "version probe must not create a WAL sidecar");
+            assert!(!shm.exists(), "version probe must not create a SHM sidecar");
         }
-        assert!(!wal.exists(), "version probe must not create a WAL sidecar");
-        assert!(!shm.exists(), "version probe must not create a SHM sidecar");
     }
 }

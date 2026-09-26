@@ -532,6 +532,70 @@ mod api_tests {
     }
 
     #[test]
+    fn test_import_does_not_overwrite_events_with_the_same_id() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        // An existing bucket whose first event gets id 1
+        let res = client
+            .post("/api/0/buckets/existing")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"id":"existing","type":"type","client":"client","hostname":"hostname"}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let res = client
+            .post("/api/0/buckets/existing/events")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"[{"timestamp":"2000-01-01T00:00:00Z","duration":1.0,"data":{"keep":"me"}}]"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Import a bucket exported elsewhere whose event also has id 1, both into a new
+        // bucket and merged into an existing one
+        for bucket in ["imported", "existing"] {
+            let res = client
+                .post("/api/0/import")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(format!(
+                    r#"{{"buckets": {{"{bucket}": {{"id": "{bucket}", "type": "type",
+                        "client": "client", "hostname": "hostname",
+                        "events": [{{"id": 1, "timestamp": "2001-01-01T00:00:00Z",
+                            "duration": 2.0, "data": {{"from": "export"}}}}]}}}}}}"#
+                ))
+                .dispatch();
+            assert_eq!(
+                res.status(),
+                rocket::http::Status::Ok,
+                "import into {bucket}"
+            );
+        }
+
+        let events = |bucket: &str| -> Vec<serde_json::Value> {
+            let res = client
+                .get(format!("/api/0/buckets/{bucket}/events"))
+                .header(host.clone())
+                .dispatch();
+            serde_json::from_str(&res.into_string().unwrap()).unwrap()
+        };
+        // The original event survived, and the existing bucket gained the merged one
+        let existing = events("existing");
+        assert_eq!(existing.len(), 2, "{existing:?}");
+        assert!(
+            existing.iter().any(|e| e["data"]["keep"] == "me"),
+            "{existing:?}"
+        );
+        // The new bucket got the imported event under a fresh id
+        let imported = events("imported");
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0]["data"]["from"], "export");
+        assert_ne!(imported[0]["id"], 1);
+    }
+
+    #[test]
     fn test_import_export() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

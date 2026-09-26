@@ -596,6 +596,21 @@ mod datastore_tests {
                 .len(),
             1
         );
+        info!("A start after the nanosecond range or an end before it matches nothing");
+        assert_eq!(
+            ds.get_event_count(&bucket.id, Some(far_future), None)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            ds.get_event_count(&bucket.id, None, Some(far_past))
+                .unwrap(),
+            0
+        );
+        assert!(ds
+            .get_events(&bucket.id, Some(far_future), None, None)
+            .unwrap()
+            .is_empty());
 
         info!("An inverted range counts nothing");
         assert_eq!(

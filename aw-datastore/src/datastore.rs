@@ -264,14 +264,26 @@ pub struct DatastoreInstance {
 }
 
 /// Nanoseconds since the epoch for a time filter, clamped to `i64` for dates chrono can't
-/// express in nanoseconds (before 1677 or after 2262): such a bound then means "no
-/// limit" instead of panicking the datastore worker.
+/// express in nanoseconds (before 1677 or after 2262), so such a bound means "no limit"
+/// instead of panicking the datastore worker. Bounds that can't match anything are
+/// caught first by [`filter_excludes_everything`].
 fn filter_nanos(dt: DateTime<Utc>) -> i64 {
     dt.timestamp_nanos_opt().unwrap_or(if dt.timestamp() < 0 {
         i64::MIN
     } else {
         i64::MAX
     })
+}
+
+/// Whether a time filter can't match any stored event: a start after 2262 or an end
+/// before 1677, beyond the range event times are stored in.
+fn filter_excludes_everything(
+    starttime_opt: Option<DateTime<Utc>>,
+    endtime_opt: Option<DateTime<Utc>>,
+) -> bool {
+    let out_of_range = |dt: &DateTime<Utc>| dt.timestamp_nanos_opt().is_none();
+    starttime_opt.is_some_and(|dt| out_of_range(&dt) && dt.timestamp() > 0)
+        || endtime_opt.is_some_and(|dt| out_of_range(&dt) && dt.timestamp() < 0)
 }
 
 fn _datetime_from_nanos(ns: i64) -> DateTime<Utc> {
@@ -1058,6 +1070,9 @@ impl DatastoreInstance {
 
         let mut list = Vec::new();
 
+        if filter_excludes_everything(starttime_opt, endtime_opt) {
+            return Ok(list);
+        }
         let starttime_filter_ns: i64 = starttime_opt.map_or(0, filter_nanos);
         let endtime_filter_ns: i64 = endtime_opt.map_or(i64::MAX, filter_nanos);
         if starttime_filter_ns > endtime_filter_ns {
@@ -1159,6 +1174,9 @@ impl DatastoreInstance {
     ) -> Result<i64, DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
 
+        if filter_excludes_everything(starttime_opt, endtime_opt) {
+            return Ok(0);
+        }
         let starttime_filter_ns: i64 = starttime_opt.map_or(0, filter_nanos);
         let endtime_filter_ns: i64 = endtime_opt.map_or(i64::MAX, filter_nanos);
         // Same bound check as get_events_inner, so a zero-length range counts the

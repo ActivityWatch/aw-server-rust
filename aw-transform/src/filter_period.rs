@@ -259,8 +259,19 @@ mod tests {
         let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(0, 6, ""), ev(4, 4, "")]);
         assert_eq!(res, vec![ev(0, 6, "x"), ev(6, 2, "x")]);
 
-        let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(0, 6, ""), ev(2, 2, "")]);
-        assert_eq!(res, vec![ev(0, 6, "x")]);
+        // A filter event contained in an earlier one adds nothing, also when they end at the
+        // same time
+        for filter in [ev(2, 2, ""), ev(2, 4, "")] {
+            let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(0, 6, ""), filter]);
+            assert_eq!(res, vec![ev(0, 6, "x")]);
+        }
+
+        // A zero-duration filter event within time that was already emitted adds nothing
+        let res = filter_period_intersect(
+            vec![ev(0, 10, "x")],
+            vec![ev(0, 6, ""), ev(4, 4, ""), ev(5, 0, "")],
+        );
+        assert_eq!(res, vec![ev(0, 6, "x"), ev(6, 2, "x")]);
     }
 
     #[test]

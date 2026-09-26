@@ -291,16 +291,21 @@ mod tests {
     /// Builds sorted, internally non-overlapping events from `(start, duration)`
     /// pairs (in seconds), tagging each with `source`.
     fn events_from(now: DateTime<Utc>, spans: &[(i64, i64)], source: &str) -> Vec<Event> {
+        events_from_unit(now, spans, Duration::seconds(1), source)
+    }
+
+    fn events_from_unit(
+        now: DateTime<Utc>,
+        spans: &[(i64, i64)],
+        unit: Duration,
+        source: &str,
+    ) -> Vec<Event> {
         spans
             .iter()
             .map(|&(start, duration)| {
                 let mut data = serde_json::Map::new();
                 data.insert("source".into(), serde_json::json!(source));
-                Event::new(
-                    now + Duration::seconds(start),
-                    Duration::seconds(duration),
-                    data,
-                )
+                Event::new(now + unit * start as i32, unit * duration as i32, data)
             })
             .collect()
     }
@@ -342,23 +347,24 @@ mod tests {
         for e in events1 {
             assert!(result.contains(e), "events1 event missing from result");
         }
-        let start = events1.iter().chain(events2).map(|e| e.timestamp).min();
-        let end = events1
+        // Coverage is constant between consecutive event boundaries, so checking
+        // one point inside each gap between boundaries is exact at any resolution.
+        let mut bounds: Vec<DateTime<Utc>> = events1
             .iter()
             .chain(events2)
-            .map(|e| e.timestamp + e.duration)
-            .max();
-        if let (Some(start), Some(end)) = (start, end) {
-            let mut t = start;
-            while t < end {
-                let expected = if covers(events1, t) > 0 {
-                    1
-                } else {
-                    covers(events2, t).min(1)
-                };
-                assert_eq!(covers(result, t), expected, "wrong coverage at {t}");
-                t += Duration::seconds(1);
-            }
+            .chain(result)
+            .flat_map(|e| [e.timestamp, e.timestamp + e.duration])
+            .collect();
+        bounds.sort();
+        bounds.dedup();
+        for w in bounds.windows(2) {
+            let t = w[0] + (w[1] - w[0]) / 2;
+            let expected = if covers(events1, t) > 0 {
+                1
+            } else {
+                covers(events2, t).min(1)
+            };
+            assert_eq!(covers(result, t), expected, "wrong coverage at {t}");
         }
     }
 
@@ -467,16 +473,71 @@ mod tests {
             let mut lists = Vec::new();
             for source in ["a", "b"] {
                 let mut spans = Vec::new();
-                let mut t = next(3);
+                // Millisecond units so boundaries fall on fractional seconds.
+                let mut t = next(3_000);
                 for _ in 0..next(6) {
-                    let duration = if next(4) == 0 { 0 } else { 1 + next(5) };
+                    let duration = if next(4) == 0 { 0 } else { 1 + next(5_000) };
                     spans.push((t, duration));
-                    t += duration + next(3);
+                    t += duration + next(3_000);
                 }
-                lists.push(events_from(now, &spans, source));
+                lists.push(events_from_unit(
+                    now,
+                    &spans,
+                    Duration::milliseconds(1),
+                    source,
+                ));
             }
             let result = union_no_overlap(lists[0].clone(), lists[1].clone());
             assert_union_invariants(&lists[0], &lists[1], &result);
         }
+    }
+
+    #[test]
+    fn zero_duration_events2_points_yield_to_events1() {
+        // events2 keeps only what events1 does not cover: a point strictly inside
+        // or at the start of an events1 event is dropped, one at its end is kept.
+        let now = Utc::now();
+        type Expected = Vec<(i64, i64, String)>;
+        let cases: &[(i64, Expected)] = &[
+            (5, vec![(0, 10, "a".into())]),
+            (0, vec![(0, 10, "a".into())]),
+            (10, vec![(0, 10, "a".into()), (10, 0, "b".into())]),
+        ];
+        for (point, expected) in cases {
+            let result = union_no_overlap(
+                events_from(now, &[(0, 10)], "a"),
+                events_from(now, &[(*point, 0)], "b"),
+            );
+            assert_eq!(&spans(&result, now), expected, "point at {point}s");
+        }
+    }
+
+    #[test]
+    fn fractional_second_boundaries_split_exactly() {
+        let now = Utc::now();
+        let ms = Duration::milliseconds(1);
+        let result = union_no_overlap(
+            events_from_unit(now, &[(1_250, 0), (1_500, 250)], ms, "a"),
+            events_from_unit(now, &[(1_000, 1_000)], ms, "b"),
+        );
+        let got: Vec<_> = result
+            .iter()
+            .map(|e| {
+                (
+                    (e.timestamp - now).num_milliseconds(),
+                    e.duration.num_milliseconds(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1_000, 250),
+                (1_250, 0),
+                (1_250, 250),
+                (1_500, 250),
+                (1_750, 250)
+            ]
+        );
     }
 }

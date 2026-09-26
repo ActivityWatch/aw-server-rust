@@ -402,11 +402,14 @@ mod query_tests {
         assert_eq!(durations(", 7"), vec![13.5, 13.5]);
         assert_eq!(durations(", 10.5"), vec![13.5, 13.5]);
 
-        let code = format!(r#"return flood(query_bucket("{BUCKET_ID}"), 0 - 1);"#);
-        assert_err_type!(
-            aw_query::query(&code, &interval, &ds),
-            QueryError::InvalidFunctionParameters(_)
-        );
+        // Negative pulsetimes and ones that don't fit in i64 nanoseconds are rejected
+        for pulsetime in ["0 - 1", "1000000000000"] {
+            let code = format!(r#"return flood(query_bucket("{BUCKET_ID}"), {pulsetime});"#);
+            assert_err_type!(
+                aw_query::query(&code, &interval, &ds),
+                QueryError::InvalidFunctionParameters(_)
+            );
+        }
     }
 
     #[test]

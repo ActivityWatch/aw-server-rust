@@ -326,10 +326,8 @@ impl AwClient {
         bucketname: &str,
         event_id: i64,
     ) -> Result<Option<Event>, reqwest::Error> {
-        let url = format!(
-            "{}api/0/buckets/{}/events/{}",
-            self.baseurl, bucketname, event_id
-        );
+        let event_id = event_id.to_string();
+        let url = self.api_url(&["buckets", bucketname, "events", &event_id]);
         let response = self.client.get(url).send().await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);

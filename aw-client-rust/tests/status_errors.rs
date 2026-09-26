@@ -20,15 +20,19 @@ struct MockResponse {
     body: &'static str,
 }
 
-/// Drain the HTTP request fully before responding.
+/// Drain the HTTP request fully before responding, returning its request line.
 ///
 /// Parses Content-Length from headers so POST body data (which may arrive
 /// in a separate TCP segment) is consumed before the mock writes its
 /// response. Without this, reqwest may see a broken pipe on loopback if
 /// the response arrives before the body finishes sending.
-fn drain_request(stream: &mut impl Read) {
+fn drain_request(stream: &mut impl Read) -> String {
     let mut reader = BufReader::new(stream);
     let mut content_length = 0_usize;
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .expect("read request line");
     let mut line = String::new();
     loop {
         line.clear();
@@ -51,15 +55,18 @@ fn drain_request(stream: &mut impl Read) {
             .read_exact(&mut body_buf)
             .expect("drain request body");
     }
+    request_line.trim().to_string()
 }
 
-fn spawn_mock_server(responses: Vec<MockResponse>) -> (u16, thread::JoinHandle<()>) {
+/// The join handle yields the request line of every request the mock served.
+fn spawn_mock_server(responses: Vec<MockResponse>) -> (u16, thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind mock server");
     let port = listener.local_addr().expect("mock server addr").port();
     let handle = thread::spawn(move || {
+        let mut request_lines = Vec::new();
         for response in responses {
             let (mut stream, _) = listener.accept().expect("accept request");
-            drain_request(&mut stream);
+            request_lines.push(drain_request(&mut stream));
             let body = response.body.as_bytes();
             write!(
                 stream,
@@ -72,6 +79,7 @@ fn spawn_mock_server(responses: Vec<MockResponse>) -> (u16, thread::JoinHandle<(
             .expect("write response");
             stream.flush().expect("flush response");
         }
+        request_lines
     });
     (port, handle)
 }
@@ -164,4 +172,27 @@ fn get_event_maps_404_to_none_and_rejects_other_errors() {
     );
 
     handle.join().expect("join mock server");
+}
+
+#[test]
+fn setting_keys_are_encoded_as_one_path_segment() {
+    let ok = || MockResponse {
+        status_line: "200 OK",
+        content_type: "application/json",
+        body: "null",
+    };
+    let (port, handle) = spawn_mock_server(vec![ok(), ok()]);
+    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
+
+    block_on(client.set_setting("ui#theme?x/y", &serde_json::json!("dark"))).expect("set setting");
+    block_on(client.get_setting("ui#theme?x/y")).expect("get setting");
+
+    let requests = handle.join().expect("join mock server");
+    assert_eq!(
+        requests,
+        vec![
+            "POST /api/0/settings/ui%23theme%3Fx%2Fy HTTP/1.1",
+            "GET /api/0/settings/ui%23theme%3Fx%2Fy HTTP/1.1",
+        ]
+    );
 }

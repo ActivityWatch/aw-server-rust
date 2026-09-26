@@ -99,6 +99,12 @@ impl AwClient {
     proxy_method!(get_event_count, i64, bucketname: &str);
     proxy_method!(get_info, aw_models::Info,);
     proxy_method!(get_setting, serde_json::Value, setting: &str);
+    proxy_method!(
+        set_setting,
+        (),
+        setting: &str,
+        value: &serde_json::Value
+    );
     proxy_method!(get_settings, aw_models::Settings,);
 
     pub fn request_queue(&self, testing: bool) -> std::io::Result<crate::queue::RequestQueue> {

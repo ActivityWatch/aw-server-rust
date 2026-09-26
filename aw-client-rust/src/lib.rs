@@ -340,8 +340,19 @@ impl AwClient {
     }
 
     pub async fn get_setting(&self, setting: &str) -> Result<serde_json::Value, reqwest::Error> {
-        let url = format!("{}api/0/settings/{}", self.baseurl, setting);
+        let url = self.api_url(&["settings", setting]);
         Self::send_success(self.client.get(url)).await?.json().await
+    }
+
+    /// Store `value` as JSON under the settings key `setting`.
+    pub async fn set_setting(
+        &self,
+        setting: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), reqwest::Error> {
+        let url = self.api_url(&["settings", setting]);
+        Self::send_success(self.client.post(url).json(value)).await?;
+        Ok(())
     }
 
     pub async fn get_settings(&self) -> Result<aw_models::Settings, reqwest::Error> {

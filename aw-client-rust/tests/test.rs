@@ -202,6 +202,15 @@ mod test {
         let info = client.get_info().unwrap();
         assert!(info.testing);
 
+        let setting_value = serde_json::json!({"enabled": true, "items": [1, 2]});
+        client
+            .set_setting("aw-client-rust-test", &setting_value)
+            .unwrap();
+        assert_eq!(
+            client.get_setting("aw-client-rust-test").unwrap(),
+            setting_value
+        );
+
         let bucketname = format!("aw-client-rust-test_{}", client.hostname);
         let buckettype = "test-type";
         client

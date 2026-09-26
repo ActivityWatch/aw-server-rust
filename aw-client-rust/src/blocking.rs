@@ -71,6 +71,7 @@ impl AwClient {
     proxy_method!(create_bucket, (), bucket: &Bucket);
     proxy_method!(create_bucket_simple, (), bucketname: &str, buckettype: &str);
     proxy_method!(delete_bucket, (), bucketname: &str);
+    proxy_method!(delete_bucket_force, (), bucketname: &str);
     proxy_method!(
         get_events,
         Vec<Event>,

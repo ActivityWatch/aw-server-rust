@@ -457,11 +457,15 @@ mod qfunctions {
         Ok(DataType::List(merged_tagged_events))
     }
 
+    #[allow(deprecated)]
     pub fn chunk_events_by_key(
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        log::warn!(
+            "chunk_events_by_key is deprecated and will be removed, use merge_events_by_keys instead"
+        );
         // typecheck
         validate::args_length(&args, 2)?;
         let mut args = args.into_iter();

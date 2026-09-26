@@ -1162,8 +1162,10 @@ impl DatastoreInstance {
             Some(dt) => dt.timestamp_nanos_opt().unwrap(),
             None => i64::MAX,
         };
-        if starttime_filter_ns >= endtime_filter_ns {
-            warn!("Endtime in event query was same or lower than starttime!");
+        // Same bound check as get_events_inner, so a zero-length range counts the
+        // events that get_events returns for it.
+        if starttime_filter_ns > endtime_filter_ns {
+            warn!("Endtime in event count query was lower than starttime!");
             return Ok(0);
         }
 

@@ -98,6 +98,25 @@ pub fn bucket_new(
     }
 }
 
+/// Parse an optional RFC 3339 query parameter, answering 400 when it doesn't parse.
+fn parse_time_param(
+    name: &str,
+    value: Option<String>,
+) -> Result<Option<DateTime<Utc>>, HttpErrorJson> {
+    match value {
+        Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
+            Ok(dt) => Ok(Some(dt.with_timezone(&Utc))),
+            Err(e) => {
+                let err_msg =
+                    format!("Failed to parse {name}, datetime needs to be in rfc3339 format: {e}");
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::BadRequest, err_msg))
+            }
+        },
+        None => Ok(None),
+    }
+}
+
 #[get("/<bucket_id>/events?<start>&<end>&<limit>")]
 pub fn bucket_events_get(
     bucket_id: &str,
@@ -106,31 +125,8 @@ pub fn bucket_events_get(
     limit: Option<u64>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
-    let starttime: Option<DateTime<Utc>> = match start {
-        Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
-            Ok(dt) => Some(dt.with_timezone(&Utc)),
-            Err(e) => {
-                let err_msg = format!(
-                    "Failed to parse starttime, datetime needs to be in rfc3339 format: {e}"
-                );
-                warn!("{}", err_msg);
-                return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
-            }
-        },
-        None => None,
-    };
-    let endtime: Option<DateTime<Utc>> = match end {
-        Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
-            Ok(dt) => Some(dt.with_timezone(&Utc)),
-            Err(e) => {
-                let err_msg =
-                    format!("Failed to parse endtime, datetime needs to be in rfc3339 format: {e}");
-                warn!("{}", err_msg);
-                return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
-            }
-        },
-        None => None,
-    };
+    let starttime = parse_time_param("starttime", start)?;
+    let endtime = parse_time_param("endtime", end)?;
     let datastore = &state.datastore;
     let res = datastore.get_events(bucket_id, starttime, endtime, limit);
     match res {
@@ -139,9 +135,10 @@ pub fn bucket_events_get(
     }
 }
 
-// Needs unused parameter, otherwise there'll be a route collision
+// Ranked below bucket_event_count so that `/events/count` isn't parsed as an event id;
+// both routes take query parameters, so they would otherwise collide.
 // See: https://api.rocket.rs/master/rocket/struct.Route.html#resolving-collisions
-#[get("/<bucket_id>/events/<event_id>?<_unused..>")]
+#[get("/<bucket_id>/events/<event_id>?<_unused..>", rank = 1)]
 pub fn bucket_events_get_single(
     bucket_id: &str,
     event_id: i64,
@@ -189,13 +186,17 @@ pub fn bucket_events_heartbeat(
     }
 }
 
-#[get("/<bucket_id>/events/count")]
+#[get("/<bucket_id>/events/count?<start>&<end>")]
 pub fn bucket_event_count(
     bucket_id: &str,
+    start: Option<String>,
+    end: Option<String>,
     state: &State<ServerState>,
 ) -> Result<Json<u64>, HttpErrorJson> {
+    let starttime = parse_time_param("starttime", start)?;
+    let endtime = parse_time_param("endtime", end)?;
     let datastore = &state.datastore;
-    let res = datastore.get_event_count(bucket_id, None, None);
+    let res = datastore.get_event_count(bucket_id, starttime, endtime);
     match res {
         Ok(eventcount) => Ok(Json(eventcount as u64)),
         Err(err) => Err(err.into()),

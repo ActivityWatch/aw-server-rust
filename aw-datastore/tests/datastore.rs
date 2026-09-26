@@ -571,6 +571,23 @@ mod datastore_tests {
             .get_event_count(&bucket.id, Some(query_start), Some(query_end))
             .unwrap();
         assert_eq!(event_count, 1);
+
+        info!("A zero-length range inside the event counts it, like get_events");
+        let instant = Some(query_start);
+        assert_eq!(
+            ds.get_events(&bucket.id, instant, instant, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(ds.get_event_count(&bucket.id, instant, instant).unwrap(), 1);
+
+        info!("An inverted range counts nothing");
+        assert_eq!(
+            ds.get_event_count(&bucket.id, Some(query_end), Some(query_start))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

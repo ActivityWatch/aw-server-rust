@@ -343,8 +343,22 @@ impl AwClient {
         Ok(())
     }
 
-    pub async fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
-        let url = format!("{}api/0/buckets/{}/events/count", self.baseurl, bucketname);
+    /// Count events in a bucket, optionally only those between `start` and `stop`.
+    pub async fn get_event_count(
+        &self,
+        bucketname: &str,
+        start: Option<DateTime<Utc>>,
+        stop: Option<DateTime<Utc>>,
+    ) -> Result<i64, reqwest::Error> {
+        let mut url = self.api_url(&["buckets", bucketname, "events", "count"]);
+        if let Some(s) = start {
+            url.query_pairs_mut()
+                .append_pair("start", s.to_rfc3339().as_str());
+        };
+        if let Some(s) = stop {
+            url.query_pairs_mut()
+                .append_pair("end", s.to_rfc3339().as_str());
+        };
         let res = Self::send_success(self.client.get(url))
             .await?
             .text()

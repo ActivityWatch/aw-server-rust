@@ -265,6 +265,26 @@ RETURN = events;",
         let query_result = client.query(&query, vec![timeperiods]).unwrap();
         println!("Query result: {query_result:?}");
 
+        let before: DateTime<Utc> = DateTime::parse_from_rfc3339("2017-12-30T00:00:00+00:00")
+            .unwrap()
+            .into();
+        let after: DateTime<Utc> = DateTime::parse_from_rfc3339("2018-01-01T00:00:00+00:00")
+            .unwrap()
+            .into();
+        assert_eq!(client.get_event_count(&bucketname, None, None).unwrap(), 1);
+        assert_eq!(
+            client
+                .get_event_count(&bucketname, Some(before), Some(after))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            client
+                .get_event_count(&bucketname, Some(after), None)
+                .unwrap(),
+            0
+        );
+
         let event_id = events[0].id.unwrap();
         let fetched = client.get_event(&bucketname, event_id).unwrap().unwrap();
         assert_eq!(fetched.id, Some(event_id));
@@ -273,7 +293,7 @@ RETURN = events;",
         client.delete_event(&bucketname, event_id).unwrap();
         assert!(client.get_event(&bucketname, event_id).unwrap().is_none());
 
-        let count = client.get_event_count(&bucketname).unwrap();
+        let count = client.get_event_count(&bucketname, None, None).unwrap();
         assert_eq!(count, 0);
 
         // Export, delete, and re-import the bucket

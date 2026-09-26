@@ -522,6 +522,13 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
         assert_eq!(res.into_string().unwrap(), "0");
 
+        // Get eventcount with an invalid time filter
+        let res = client
+            .get("/api/0/buckets/id/events/count?start=not-a-date")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+
         // Delete bucket
         let res = client
             .delete("/api/0/buckets/id")

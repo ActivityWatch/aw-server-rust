@@ -114,6 +114,29 @@ fn async_client_rejects_non_success_statuses() {
 }
 
 #[test]
+fn get_event_count_returns_error_for_non_numeric_body() {
+    let (port, handle) = spawn_mock_server(vec![
+        MockResponse {
+            status_line: "200 OK",
+            content_type: "application/json",
+            body: "42\n",
+        },
+        MockResponse {
+            status_line: "200 OK",
+            content_type: "text/html",
+            body: "<html>not a count</html>",
+        },
+    ]);
+    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
+
+    assert_eq!(block_on(client.get_event_count("bucket")).unwrap(), 42);
+    let err = block_on(client.get_event_count("bucket")).expect_err("non-numeric body must fail");
+    assert!(err.is_decode(), "expected a decode error, got {err:?}");
+
+    handle.join().expect("join mock server");
+}
+
+#[test]
 fn blocking_client_rejects_non_success_statuses() {
     let (port, handle) = spawn_mock_server(vec![
         MockResponse {
@@ -213,27 +236,4 @@ fn export_bucket_encodes_bucket_id_as_one_path_segment() {
         requests,
         vec!["GET /api/0/buckets/a%23b%3Fc%2Fd/export HTTP/1.1"]
     );
-}
-
-#[test]
-fn get_event_count_returns_error_for_non_numeric_body() {
-    let (port, handle) = spawn_mock_server(vec![
-        MockResponse {
-            status_line: "200 OK",
-            content_type: "application/json",
-            body: "42\n",
-        },
-        MockResponse {
-            status_line: "200 OK",
-            content_type: "text/html",
-            body: "<html>not a count</html>",
-        },
-    ]);
-    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
-
-    assert_eq!(block_on(client.get_event_count("bucket")).unwrap(), 42);
-    let err = block_on(client.get_event_count("bucket")).expect_err("non-numeric body must fail");
-    assert!(err.is_decode(), "expected a decode error, got {err:?}");
-
-    handle.join().expect("join mock server");
 }

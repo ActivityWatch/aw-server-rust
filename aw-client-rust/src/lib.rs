@@ -345,8 +345,12 @@ impl AwClient {
 
     pub async fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
         let url = format!("{}api/0/buckets/{}/events/count", self.baseurl, bucketname);
-        // The count is a bare JSON number; a body that isn't one becomes a decode error.
-        Self::send_success(self.client.get(url)).await?.json().await
+        let res = Self::send_success(self.client.get(url))
+            .await?
+            // The count is a bare JSON number; a body that isn't one becomes a decode error.
+            .json()
+            .await?;
+        Ok(res)
     }
 
     pub async fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {

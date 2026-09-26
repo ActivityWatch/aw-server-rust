@@ -3,7 +3,7 @@ use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};
 
-use aw_models::{Bucket, Event};
+use aw_models::{Bucket, BucketsExport, Event};
 
 use super::AwClient as AsyncAwClient;
 
@@ -79,6 +79,9 @@ impl AwClient {
         stop: Option<DateTime<Utc>>,
         limit: Option<u64>
     );
+    proxy_method!(export_all, BucketsExport,);
+    proxy_method!(export_bucket, BucketsExport, bucketname: &str);
+    proxy_method!(import_bucket, (), bucket: &Bucket);
     proxy_method!(
         query,
         Vec<serde_json::Value>,

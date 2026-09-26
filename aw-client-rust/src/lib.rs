@@ -20,7 +20,7 @@ use serde_json::{json, Map};
 use single_instance::SingleInstance;
 use std::time::Duration;
 
-pub use aw_models::{Bucket, BucketMetadata, Event};
+pub use aw_models::{Bucket, BucketMetadata, BucketsExport, Event};
 
 pub struct AwClient {
     client: reqwest::Client,
@@ -201,6 +201,28 @@ impl AwClient {
     pub async fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
         let url = format!("{}api/0/buckets/{}", self.baseurl, bucketname);
         Self::send_success(self.client.delete(url)).await?;
+        Ok(())
+    }
+
+    /// Export every bucket, including its events.
+    pub async fn export_all(&self) -> Result<BucketsExport, reqwest::Error> {
+        let url = self.api_url(&["export"]);
+        Self::send_success(self.client.get(url)).await?.json().await
+    }
+
+    /// Export one bucket, including its events.
+    pub async fn export_bucket(&self, bucketname: &str) -> Result<BucketsExport, reqwest::Error> {
+        let url = self.api_url(&["buckets", bucketname, "export"]);
+        Self::send_success(self.client.get(url)).await?.json().await
+    }
+
+    /// Import one bucket (as returned in an export) into the server.
+    pub async fn import_bucket(&self, bucket: &Bucket) -> Result<(), reqwest::Error> {
+        let url = self.api_url(&["import"]);
+        Self::send_success(self.client.post(url).json(&json!({
+            "buckets": { bucket.id.as_str(): bucket },
+        })))
+        .await?;
         Ok(())
     }
 

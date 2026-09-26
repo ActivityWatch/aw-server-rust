@@ -432,16 +432,26 @@ mod tests {
     const INFO_BODY: &str =
         r#"{"hostname":"host","version":"v0.0.0","testing":true,"device_id":"device"}"#;
 
-    /// Accept one connection, read the request head, and answer with `status_line` and `body`.
+    /// Answer the first connection that sends a request with `status_line` and `body`.
+    ///
+    /// Connections closed before sending a request are skipped: on Windows a connect to a
+    /// port that isn't listening yet can hang instead of being refused, so an attempt the
+    /// client already abandoned may be the first one accepted.
     async fn answer_once(listener: &tokio::net::TcpListener, status_line: &str, body: &str) {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        let mut buf = [0_u8; 1024];
-        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-            let n = stream.read(&mut buf).await.unwrap();
-            assert!(n > 0, "client closed before sending a request");
-            request.extend_from_slice(&buf[..n]);
-        }
+        let (mut stream, request) = loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf).await {
+                    Ok(n) if n > 0 => request.extend_from_slice(&buf[..n]),
+                    _ => break,
+                }
+            }
+            if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                break (stream, request);
+            }
+        };
         assert!(request.starts_with(b"GET /api/0/info "));
         let response = format!(
             "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",

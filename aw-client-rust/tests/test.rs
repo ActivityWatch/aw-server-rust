@@ -276,6 +276,31 @@ RETURN = events;",
         let count = client.get_event_count(&bucketname).unwrap();
         assert_eq!(count, 0);
 
+        // Export, delete, and re-import the bucket
+        let mut export_data = Map::new();
+        export_data.insert("app".to_string(), serde_json::json!("firefox"));
+        export_data.insert("title".to_string(), serde_json::json!("ActivityWatch"));
+        let event = Event {
+            id: None,
+            timestamp: event.timestamp,
+            duration: Duration::seconds(42),
+            data: export_data,
+        };
+        client.insert_event(&bucketname, &event).unwrap();
+        let all = client.export_all().unwrap();
+        assert!(all.buckets.contains_key(&bucketname));
+        let export = client.export_bucket(&bucketname).unwrap();
+        let exported = export.buckets[&bucketname].clone();
+        assert_eq!(exported.events.clone().unwrap().take_inner().len(), 1);
+
+        client.delete_bucket(&bucketname).unwrap();
+        client.import_bucket(&exported).unwrap();
+        let reimported = client.get_events(&bucketname, None, None, None).unwrap();
+        assert_eq!(reimported.len(), 1);
+        assert_eq!(reimported[0].timestamp, event.timestamp);
+        assert_eq!(reimported[0].duration, event.duration);
+        assert_eq!(reimported[0].data, event.data);
+
         client.delete_bucket(&bucketname).unwrap();
 
         shutdown_handler.notify();

@@ -170,6 +170,64 @@ fn blocking_client_rejects_non_success_statuses() {
 }
 
 #[test]
+fn bucket_ids_and_setting_keys_are_encoded_as_one_path_segment() {
+    let respond = |body: &'static str| MockResponse {
+        status_line: "200 OK",
+        content_type: "application/json",
+        body,
+    };
+    let (port, handle) = spawn_mock_server(vec![
+        respond("[]"),
+        respond("0"),
+        respond(""),
+        respond(""),
+        respond(""),
+        respond("null"),
+        respond(r#"{"id":7,"timestamp":"2024-01-01T00:00:00Z","duration":0.0,"data":{}}"#),
+    ]);
+    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
+    let bucket = "a#b?c/d";
+    let event = aw_client_rust::Event {
+        id: None,
+        timestamp: chrono::Utc::now(),
+        duration: chrono::Duration::zero(),
+        data: serde_json::Map::new(),
+    };
+
+    block_on(client.get_events(bucket, None, None, Some(1))).expect("get events");
+    block_on(client.get_event_count(bucket, None, None)).expect("count events");
+    block_on(client.heartbeat(bucket, &event, 5.0)).expect("heartbeat");
+    block_on(client.delete_event(bucket, 7)).expect("delete event");
+    block_on(client.delete_bucket(bucket)).expect("delete bucket");
+    block_on(client.get_setting("ui#theme")).expect("get setting");
+    block_on(client.get_event(bucket, 7)).expect("get event");
+
+    let requests = handle.join().expect("join mock server");
+    assert_eq!(
+        requests,
+        vec![
+            "GET /api/0/buckets/a%23b%3Fc%2Fd/events?limit=1 HTTP/1.1",
+            "GET /api/0/buckets/a%23b%3Fc%2Fd/events/count HTTP/1.1",
+            "POST /api/0/buckets/a%23b%3Fc%2Fd/heartbeat?pulsetime=5 HTTP/1.1",
+            "DELETE /api/0/buckets/a%23b%3Fc%2Fd/events/7 HTTP/1.1",
+            "DELETE /api/0/buckets/a%23b%3Fc%2Fd HTTP/1.1",
+            "GET /api/0/settings/ui%23theme HTTP/1.1",
+            "GET /api/0/buckets/a%23b%3Fc%2Fd/events/7 HTTP/1.1",
+        ]
+    );
+}
+
+#[test]
+fn non_hierarchical_base_url_is_an_error_not_a_panic() {
+    let mut client =
+        AwClient::new("127.0.0.1", 5600, "aw-client-rust-test-bad-base").expect("create client");
+    client.baseurl = reqwest::Url::parse("data:text/plain,hello").unwrap();
+
+    assert!(block_on(client.get_info()).is_err());
+    block_on(client.delete_bucket("bucket")).expect_err("a data: base URL must fail");
+}
+
+#[test]
 fn get_event_maps_404_to_none_and_rejects_other_errors() {
     let (port, handle) = spawn_mock_server(vec![
         MockResponse {
@@ -341,62 +399,4 @@ fn get_classes_uses_server_setting_and_falls_back_to_defaults() {
     assert_eq!(failed, default_names);
 
     handle.join().expect("join mock server");
-}
-
-#[test]
-fn bucket_ids_and_setting_keys_are_encoded_as_one_path_segment() {
-    let respond = |body: &'static str| MockResponse {
-        status_line: "200 OK",
-        content_type: "application/json",
-        body,
-    };
-    let (port, handle) = spawn_mock_server(vec![
-        respond("[]"),
-        respond("0"),
-        respond(""),
-        respond(""),
-        respond(""),
-        respond("null"),
-        respond(r#"{"id":7,"timestamp":"2024-01-01T00:00:00Z","duration":0.0,"data":{}}"#),
-    ]);
-    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
-    let bucket = "a#b?c/d";
-    let event = aw_client_rust::Event {
-        id: None,
-        timestamp: chrono::Utc::now(),
-        duration: chrono::Duration::zero(),
-        data: serde_json::Map::new(),
-    };
-
-    block_on(client.get_events(bucket, None, None, Some(1))).expect("get events");
-    block_on(client.get_event_count(bucket, None, None)).expect("count events");
-    block_on(client.heartbeat(bucket, &event, 5.0)).expect("heartbeat");
-    block_on(client.delete_event(bucket, 7)).expect("delete event");
-    block_on(client.delete_bucket(bucket)).expect("delete bucket");
-    block_on(client.get_setting("ui#theme")).expect("get setting");
-    block_on(client.get_event(bucket, 7)).expect("get event");
-
-    let requests = handle.join().expect("join mock server");
-    assert_eq!(
-        requests,
-        vec![
-            "GET /api/0/buckets/a%23b%3Fc%2Fd/events?limit=1 HTTP/1.1",
-            "GET /api/0/buckets/a%23b%3Fc%2Fd/events/count HTTP/1.1",
-            "POST /api/0/buckets/a%23b%3Fc%2Fd/heartbeat?pulsetime=5 HTTP/1.1",
-            "DELETE /api/0/buckets/a%23b%3Fc%2Fd/events/7 HTTP/1.1",
-            "DELETE /api/0/buckets/a%23b%3Fc%2Fd HTTP/1.1",
-            "GET /api/0/settings/ui%23theme HTTP/1.1",
-            "GET /api/0/buckets/a%23b%3Fc%2Fd/events/7 HTTP/1.1",
-        ]
-    );
-}
-
-#[test]
-fn non_hierarchical_base_url_is_an_error_not_a_panic() {
-    let mut client =
-        AwClient::new("127.0.0.1", 5600, "aw-client-rust-test-bad-base").expect("create client");
-    client.baseurl = reqwest::Url::parse("data:text/plain,hello").unwrap();
-
-    assert!(block_on(client.get_info()).is_err());
-    block_on(client.delete_bucket("bucket")).expect_err("a data: base URL must fail");
 }

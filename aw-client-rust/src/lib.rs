@@ -485,10 +485,11 @@ mod tests {
 
     /// Answer the first connection that sends a request with `status_line` and `body`.
     ///
-    /// Connections that close, or send nothing for half a second, are skipped: on Windows
-    /// a connect to a port that isn't listening yet can hang instead of being refused, so
-    /// an attempt the client already abandoned may be the first one accepted, closed or
-    /// half-open.
+    /// Connections that close, or send nothing for 200 ms, are skipped: on Windows a
+    /// connect to a port that isn't listening yet can hang instead of being refused, so an
+    /// attempt the client already abandoned may be the first one accepted, closed or
+    /// half-open. The skip must be shorter than `wait_for_server`'s per-attempt timeout
+    /// (500 ms), or the live attempt behind it would be abandoned before it's answered.
     async fn answer_once(listener: &tokio::net::TcpListener, status_line: &str, body: &str) {
         let (mut stream, request) = loop {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -496,7 +497,7 @@ mod tests {
             let mut buf = [0_u8; 1024];
             while !request.windows(4).any(|w| w == b"\r\n\r\n") {
                 let read = tokio::time::timeout(
-                    std::time::Duration::from_millis(500),
+                    std::time::Duration::from_millis(200),
                     stream.read(&mut buf),
                 );
                 match read.await {

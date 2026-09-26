@@ -281,7 +281,8 @@ mod qfunctions {
             None => 5.0,
         };
         let pulsetime = match aw_models::seconds_to_nanos(pulsetime_secs) {
-            Some(ns) if ns >= 0 => chrono::Duration::nanoseconds(ns),
+            // Check the sign of the input, since tiny negative values round to 0 ns
+            Some(ns) if pulsetime_secs >= 0.0 => chrono::Duration::nanoseconds(ns),
             _ => {
                 return Err(QueryError::InvalidFunctionParameters(format!(
                     "flood pulsetime must be a non-negative number of seconds (at most ~292 years), got {pulsetime_secs}"

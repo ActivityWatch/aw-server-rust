@@ -602,8 +602,10 @@ impl Datastore {
     ///
     /// Uses `file:…?mode=ro&immutable=1`, never runs migrations, never sets
     /// `journal_mode`/`synchronous`. Returns `OldDbVersion` when
-    /// `user_version != NEWEST_DB_VERSION` so a caller can skip that peer
-    /// (ActivityWatch/aw-server-rust#693).
+    /// `user_version` is outside
+    /// `MIN_READ_COMPAT_DB_VERSION..=NEWEST_DB_VERSION` so a caller can skip
+    /// that peer (ActivityWatch/aw-server-rust#693). Older versions in that
+    /// range differ only in indexes, which queries adapt to.
     ///
     /// `immutable=1` means SQLite will not look at a peer's `-wal`/`-shm`.
     /// Committed-but-not-yet-checkpointed frames in that WAL are therefore
@@ -613,10 +615,12 @@ impl Datastore {
     /// `immutable` would reintroduce `-shm` files in a foreign directory.
     pub fn open_read_only(dbpath: String) -> Result<Self, DatastoreError> {
         let version = probe_user_version(&dbpath)?;
-        if version != crate::NEWEST_DB_VERSION {
+        let supported = crate::MIN_READ_COMPAT_DB_VERSION..=crate::NEWEST_DB_VERSION;
+        if !supported.contains(&version) {
             return Err(DatastoreError::OldDbVersion(format!(
                 "Tried to open a database with an incompatible database version! \
-                 Database has version {version} while the supported version is {}",
+                 Database has version {version} while the supported versions are {}..={}",
+                crate::MIN_READ_COMPAT_DB_VERSION,
                 crate::NEWEST_DB_VERSION
             )));
         }

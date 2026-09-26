@@ -34,6 +34,34 @@ fn _get_db_version(conn: &Connection) -> i32 {
  */
 pub const NEWEST_DB_VERSION: i32 = 6;
 
+/// Oldest version a read-only open (aw-sync pulling a peer db) accepts.
+///
+/// v4, v5 and v6 have identical tables and columns; v5 and v6 only changed
+/// indexes. A read-only connection cannot migrate, so queries adapt to the
+/// indexes the file has (see [`events_source`]) instead of rejecting it.
+///
+/// Rule for future migrations: if a migration changes tables or columns that
+/// reads depend on, bump this to the new version. If it only adds or drops
+/// indexes, leave it alone and teach [`events_source`] about the new index.
+pub const MIN_READ_COMPAT_DB_VERSION: i32 = 4;
+
+/// The `FROM` source for event range reads, with an `INDEXED BY` hint only
+/// when this database version is guaranteed to have that index.
+///
+/// `INDEXED BY` on a missing index is a prepare error, not a hint that
+/// SQLite ignores. Writable databases are always migrated to
+/// [`NEWEST_DB_VERSION`], but a read-only peer db (aw-sync pull) can be older:
+/// v4 has only the single-column indexes, v5 lacks the endtime-first index.
+pub(crate) fn events_source(db_version: i32, prefer_endtime: bool) -> &'static str {
+    if db_version >= 6 && prefer_endtime {
+        "events INDEXED BY events_bucketrow_endtime_starttime_index"
+    } else if db_version >= 5 {
+        "events INDEXED BY events_bucketrow_starttime_endtime_index"
+    } else {
+        "events"
+    }
+}
+
 fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;
 
@@ -441,19 +469,23 @@ impl DatastoreInstance {
         migrate_enabled: bool,
     ) -> Result<DatastoreInstance, DatastoreError> {
         let mut first_init = false;
-        let db_version = _get_db_version(conn);
+        let mut db_version = _get_db_version(conn);
 
         if migrate_enabled {
             first_init = _create_tables(conn, db_version);
+            // Queries pick index hints from this, so it must describe the
+            // migrated file, not the version it had before this open.
+            db_version = _get_db_version(conn);
         } else if db_version < 0 {
             return Err(DatastoreError::Uninitialized(
                 "Tried to open an uninitialized datastore with migration disabled".to_string(),
             ));
-        } else if db_version != NEWEST_DB_VERSION {
+        } else if !(MIN_READ_COMPAT_DB_VERSION..=NEWEST_DB_VERSION).contains(&db_version) {
             return Err(DatastoreError::OldDbVersion(format!(
                 "\
                 Tried to open an database with an incompatible database version!
-                Database has version {db_version} while the supported version is {NEWEST_DB_VERSION}"
+                Database has version {db_version} while the supported versions are \
+                {MIN_READ_COMPAT_DB_VERSION}..={NEWEST_DB_VERSION}"
             )));
         }
 
@@ -687,7 +719,13 @@ impl DatastoreInstance {
         bucket_id: Option<&str>,
         writer: impl std::io::Write,
     ) -> Result<Option<String>, DatastoreError> {
-        crate::export::write_export(conn, &self.buckets_cache, bucket_id, writer)?;
+        crate::export::write_export(
+            conn,
+            self.db_version,
+            &self.buckets_cache,
+            bucket_id,
+            writer,
+        )?;
         Ok(bucket_id.map(str::to_owned).or_else(|| {
             (self.buckets_cache.len() == 1)
                 .then(|| self.buckets_cache.keys().next().unwrap().clone())
@@ -708,6 +746,7 @@ impl DatastoreInstance {
     ) -> Result<(), DatastoreError> {
         crate::export::write_events_csv(
             conn,
+            self.db_version,
             &self.buckets_cache,
             bucket_id,
             start,
@@ -1064,19 +1103,17 @@ impl DatastoreInstance {
             None => -1,
         };
 
-        let sql =
-            if prefer_endtime_index(&bucket, starttime_filter_ns, endtime_filter_ns, limit_opt) {
-                "SELECT id, starttime, endtime, data
-             FROM events INDEXED BY events_bucketrow_endtime_starttime_index
+        let source = events_source(
+            self.db_version,
+            prefer_endtime_index(&bucket, starttime_filter_ns, endtime_filter_ns, limit_opt),
+        );
+        let sql = format!(
+            "SELECT id, starttime, endtime, data
+             FROM {source}
              WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3
              ORDER BY starttime DESC, endtime ASC, id ASC LIMIT ?4"
-            } else {
-                "SELECT id, starttime, endtime, data
-             FROM events INDEXED BY events_bucketrow_starttime_endtime_index
-             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3
-             ORDER BY starttime DESC, endtime ASC, id ASC LIMIT ?4"
-            };
-        let mut stmt = match conn.prepare_cached(sql) {
+        );
+        let mut stmt = match conn.prepare_cached(&sql) {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -1167,14 +1204,15 @@ impl DatastoreInstance {
             return Ok(0);
         }
 
-        let sql = if prefer_endtime_index(&bucket, starttime_filter_ns, endtime_filter_ns, None) {
-            "SELECT count(*) FROM events INDEXED BY events_bucketrow_endtime_starttime_index
+        let source = events_source(
+            self.db_version,
+            prefer_endtime_index(&bucket, starttime_filter_ns, endtime_filter_ns, None),
+        );
+        let sql = format!(
+            "SELECT count(*) FROM {source}
              WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3"
-        } else {
-            "SELECT count(*) FROM events INDEXED BY events_bucketrow_starttime_endtime_index
-             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3"
-        };
-        let mut stmt = match conn.prepare_cached(sql) {
+        );
+        let mut stmt = match conn.prepare_cached(&sql) {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(

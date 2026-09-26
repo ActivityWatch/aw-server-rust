@@ -9,25 +9,25 @@ use serde::{
     Serialize, Serializer,
 };
 
-use crate::datastore::{parse_event_row, prefer_endtime_index};
+use crate::datastore::{events_source, parse_event_row, prefer_endtime_index};
 use crate::DatastoreError;
 
 struct EventRows<'a> {
     conn: &'a Connection,
+    db_version: i32,
     bucket: &'a Bucket,
 }
 
 impl Serialize for EventRows<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT id, starttime, endtime, data
-             FROM events INDEXED BY events_bucketrow_starttime_endtime_index
+        let sql = format!(
+            "SELECT id, starttime, endtime, data
+             FROM {}
              WHERE bucketrow = ?1 AND endtime >= 0 AND starttime <= ?2
              ORDER BY starttime DESC, endtime ASC, id ASC",
-            )
-            .map_err(S::Error::custom)?;
+            events_source(self.db_version, false)
+        );
+        let mut stmt = self.conn.prepare_cached(&sql).map_err(S::Error::custom)?;
         let mut rows = stmt
             .query(rusqlite::params![self.bucket.bid.unwrap(), i64::MAX])
             .map_err(S::Error::custom)?;
@@ -45,6 +45,7 @@ impl Serialize for EventRows<'_> {
 
 struct ExportBucket<'a> {
     conn: &'a Connection,
+    db_version: i32,
     bucket: &'a Bucket,
 }
 
@@ -66,6 +67,7 @@ impl Serialize for ExportBucket<'_> {
             "events",
             &EventRows {
                 conn: self.conn,
+                db_version: self.db_version,
                 bucket: self.bucket,
             },
         )?;
@@ -75,6 +77,7 @@ impl Serialize for ExportBucket<'_> {
 
 struct ExportBuckets<'a> {
     conn: &'a Connection,
+    db_version: i32,
     buckets: &'a HashMap<String, Bucket>,
     selected: Option<&'a str>,
 }
@@ -88,6 +91,7 @@ impl Serialize for ExportBuckets<'_> {
                     id,
                     &ExportBucket {
                         conn: self.conn,
+                        db_version: self.db_version,
                         bucket,
                     },
                 )?;
@@ -99,6 +103,7 @@ impl Serialize for ExportBuckets<'_> {
 
 pub(crate) fn write_export(
     conn: &Connection,
+    db_version: i32,
     buckets: &HashMap<String, Bucket>,
     selected: Option<&str>,
     writer: impl Write,
@@ -117,6 +122,7 @@ pub(crate) fn write_export(
         &Export {
             buckets: ExportBuckets {
                 conn,
+                db_version,
                 buckets,
                 selected,
             },
@@ -273,8 +279,10 @@ fn write_csv_event(
 /// `MAX_CSV_DATA_COLUMNS`, a single `data` column holds each event's JSON data
 /// object instead (bounded output, no keys dropped).
 /// Query filters, clipping, and corrupt-row skipping match `get_events`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_events_csv(
     conn: &Connection,
+    db_version: i32,
     buckets: &HashMap<String, Bucket>,
     bucket_id: &str,
     starttime_opt: Option<DateTime<Utc>>,
@@ -302,17 +310,16 @@ pub(crate) fn write_events_csv(
     }
     let limit = sql_limit(limit_opt);
 
-    let sql = if prefer_endtime_index(bucket, starttime_filter_ns, endtime_filter_ns, limit_opt) {
+    let source = events_source(
+        db_version,
+        prefer_endtime_index(bucket, starttime_filter_ns, endtime_filter_ns, limit_opt),
+    );
+    let sql = format!(
         "SELECT id, starttime, endtime, data
-             FROM events INDEXED BY events_bucketrow_endtime_starttime_index
+             FROM {source}
              WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3
              ORDER BY starttime DESC, endtime ASC, id ASC LIMIT ?4"
-    } else {
-        "SELECT id, starttime, endtime, data
-             FROM events INDEXED BY events_bucketrow_starttime_endtime_index
-             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3
-             ORDER BY starttime DESC, endtime ASC, id ASC LIMIT ?4"
-    };
+    );
     // First pass: collect the union of data keys across matched rows so the
     // header includes keys the first event may lack. Rows are still streamed
     // in the second pass, and the key set is bounded by
@@ -365,7 +372,7 @@ pub(crate) fn write_events_csv(
     drop(key_rows);
     drop(keys_stmt);
 
-    let mut stmt = conn.prepare_cached(sql).map_err(|err| {
+    let mut stmt = conn.prepare_cached(&sql).map_err(|err| {
         DatastoreError::InternalError(format!("Failed to prepare CSV export SQL: {err}"))
     })?;
     let mut rows = stmt

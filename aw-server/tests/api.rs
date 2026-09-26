@@ -529,6 +529,25 @@ mod api_tests {
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::BadRequest);
 
+        // Out-of-range dates are rejected rather than reaching the datastore
+        for path in [
+            "/api/0/buckets/id/events/count?start=9999-01-01T00:00:00Z",
+            "/api/0/buckets/id/events?end=1000-01-01T00:00:00Z",
+        ] {
+            let res = client
+                .get(path)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .dispatch();
+            assert_eq!(res.status(), rocket::http::Status::BadRequest, "{path}");
+        }
+
+        // The datastore still answers afterwards
+        let res = client
+            .get("/api/0/buckets/id/events/count")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
         // Delete bucket
         let res = client
             .delete("/api/0/buckets/id")

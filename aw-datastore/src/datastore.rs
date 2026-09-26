@@ -263,6 +263,17 @@ pub struct DatastoreInstance {
     pub db_version: i32,
 }
 
+/// Nanoseconds since the epoch for a time filter, clamped to `i64` for dates chrono can't
+/// express in nanoseconds (before 1677 or after 2262): such a bound then means "no
+/// limit" instead of panicking the datastore worker.
+fn filter_nanos(dt: DateTime<Utc>) -> i64 {
+    dt.timestamp_nanos_opt().unwrap_or(if dt.timestamp() < 0 {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
+}
+
 fn _datetime_from_nanos(ns: i64) -> DateTime<Utc> {
     // Euclidean division so a negative (pre-epoch) timestamp still yields a
     // subnanos remainder in [0, 1_000_000_000) instead of a negative value
@@ -1047,14 +1058,8 @@ impl DatastoreInstance {
 
         let mut list = Vec::new();
 
-        let starttime_filter_ns: i64 = match starttime_opt {
-            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => 0,
-        };
-        let endtime_filter_ns: i64 = match endtime_opt {
-            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => i64::MAX,
-        };
+        let starttime_filter_ns: i64 = starttime_opt.map_or(0, filter_nanos);
+        let endtime_filter_ns: i64 = endtime_opt.map_or(i64::MAX, filter_nanos);
         if starttime_filter_ns > endtime_filter_ns {
             warn!("Starttime in event query was lower than endtime!");
             return Ok(list);
@@ -1154,14 +1159,8 @@ impl DatastoreInstance {
     ) -> Result<i64, DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
 
-        let starttime_filter_ns: i64 = match starttime_opt {
-            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => 0,
-        };
-        let endtime_filter_ns: i64 = match endtime_opt {
-            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => i64::MAX,
-        };
+        let starttime_filter_ns: i64 = starttime_opt.map_or(0, filter_nanos);
+        let endtime_filter_ns: i64 = endtime_opt.map_or(i64::MAX, filter_nanos);
         // Same bound check as get_events_inner, so a zero-length range counts the
         // events that get_events returns for it.
         if starttime_filter_ns > endtime_filter_ns {

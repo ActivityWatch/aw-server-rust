@@ -105,6 +105,13 @@ fn parse_time_param(
 ) -> Result<Option<DateTime<Utc>>, HttpErrorJson> {
     match value {
         Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
+            // Event times are stored as nanoseconds since the epoch, which only covers
+            // 1677-2262; reject anything outside that instead of passing it on.
+            Ok(dt) if dt.timestamp_nanos_opt().is_none() => {
+                let err_msg = format!("{name} {dt_str} is outside the supported range (1677-2262)");
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::BadRequest, err_msg))
+            }
             Ok(dt) => Ok(Some(dt.with_timezone(&Utc))),
             Err(e) => {
                 let err_msg =

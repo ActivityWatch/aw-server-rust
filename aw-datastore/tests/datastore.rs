@@ -582,6 +582,21 @@ mod datastore_tests {
         );
         assert_eq!(ds.get_event_count(&bucket.id, instant, instant).unwrap(), 1);
 
+        info!("Bounds beyond the nanosecond range act as no limit instead of panicking");
+        let far_past = "1000-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let far_future = "9999-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            ds.get_event_count(&bucket.id, Some(far_past), Some(far_future))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            ds.get_events(&bucket.id, Some(far_past), Some(far_future), None)
+                .unwrap()
+                .len(),
+            1
+        );
+
         info!("An inverted range counts nothing");
         assert_eq!(
             ds.get_event_count(&bucket.id, Some(query_end), Some(query_start))

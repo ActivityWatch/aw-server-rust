@@ -617,4 +617,21 @@ mod tests {
             assert_union_invariants(&events1, &events2, &result);
         }
     }
+
+    #[test]
+    fn events1_event_containing_several_events2_events() {
+        // Regression test for the containment bug fixed in #674 (still present in
+        // v0.13.2 and v0.14.0b5/b6): once the first events1 event had been emitted,
+        // the second contained events2 event (5-6 min) was emitted on top of it.
+        let now = Utc::now();
+        let min = Duration::minutes(1);
+        let result = union_no_overlap(
+            events_from_unit(now, &[(0, 10), (20, 10)], min, "A"),
+            events_from_unit(now, &[(2, 1), (5, 1)], min, "b"),
+        );
+        assert_eq!(
+            spans(&result, now),
+            vec![(0, 600, "A".into()), (1200, 600, "A".into())]
+        );
+    }
 }

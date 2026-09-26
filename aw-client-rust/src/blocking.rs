@@ -56,7 +56,17 @@ impl AwClient {
         name: &str,
         api_key: Option<String>,
     ) -> Result<AwClient, Box<dyn Error>> {
-        let async_client = AsyncAwClient::new_with_api_key(host, port, name, api_key)?;
+        Self::new_with_protocol("http", host, port, name, api_key)
+    }
+
+    pub fn new_with_protocol(
+        protocol: &str,
+        host: &str,
+        port: u16,
+        name: &str,
+        api_key: Option<String>,
+    ) -> Result<AwClient, Box<dyn Error>> {
+        let async_client = AsyncAwClient::new_with_protocol(protocol, host, port, name, api_key)?;
 
         Ok(AwClient {
             baseurl: async_client.baseurl.clone(),

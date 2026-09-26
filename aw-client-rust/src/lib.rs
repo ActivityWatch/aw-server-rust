@@ -110,7 +110,25 @@ impl AwClient {
         name: &str,
         api_key: Option<String>,
     ) -> Result<AwClient, Box<dyn Error>> {
-        let baseurl = reqwest::Url::parse(&format!("http://{}:{}", host, port))?;
+        Self::new_with_protocol("http", host, port, name, api_key)
+    }
+
+    /// Like [`new_with_api_key`](Self::new_with_api_key), but with the URL scheme
+    /// (`"http"` or `"https"`) given explicitly, e.g. for a server behind a TLS proxy.
+    pub fn new_with_protocol(
+        protocol: &str,
+        host: &str,
+        port: u16,
+        name: &str,
+        api_key: Option<String>,
+    ) -> Result<AwClient, Box<dyn Error>> {
+        if protocol != "http" && protocol != "https" {
+            return Err(format!(
+                "Unsupported protocol {protocol:?}, expected \"http\" or \"https\""
+            )
+            .into());
+        }
+        let baseurl = reqwest::Url::parse(&format!("{}://{}:{}", protocol, host, port))?;
         let hostname = get_hostname();
         let client = build_client(api_key)?;
         let instance_name = single_instance_name(name, host, port);
@@ -659,5 +677,22 @@ mod tests {
             single_instance_name("aw-watcher-afk", "192.168.1.2", 5600),
             "aw-watcher-afk-at-192.168.1.2-on-5600",
         );
+    }
+
+    #[test]
+    fn test_new_with_protocol() {
+        let client =
+            super::AwClient::new_with_protocol("https", "example.com", 443, "test-https", None)
+                .unwrap();
+        assert_eq!(client.baseurl.as_str(), "https://example.com/");
+
+        let client =
+            super::AwClient::new_with_protocol("http", "127.0.0.1", 5666, "test-http", None)
+                .unwrap();
+        assert_eq!(client.baseurl.as_str(), "http://127.0.0.1:5666/");
+
+        let err = super::AwClient::new_with_protocol("ftp", "127.0.0.1", 5600, "test-ftp", None)
+            .unwrap_err();
+        assert!(err.to_string().contains("Unsupported protocol"));
     }
 }

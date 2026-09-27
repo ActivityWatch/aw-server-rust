@@ -29,7 +29,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
 
 use aw_models::Event;
 
@@ -89,11 +88,19 @@ impl CacheKey {
             end: period.1,
         }
     }
+
+    /// Rough in-memory footprint of the key itself, so request-supplied query
+    /// text is charged against the cache's byte budget instead of being free.
+    fn weight(&self) -> usize {
+        self.query.len() + 2 * std::mem::size_of::<DateTime<Utc>>()
+    }
 }
 
 struct Entry {
     period: TimeRange,
-    result: Arc<aw_query::DataType>,
+    /// The result, already serialized to JSON: it is produced once and reused
+    /// for both the size accounting and the response body.
+    body: Arc<str>,
     size: usize,
     last_used: u64,
 }
@@ -164,40 +171,36 @@ impl QueryCache {
         self.inner.lock().unwrap().generation
     }
 
-    /// Return the cached result. It is shared, not copied: callers must not
-    /// mutate it (the REST layer only serializes it).
-    pub fn get(&self, key: &CacheKey) -> Option<Arc<aw_query::DataType>> {
+    /// Return the cached result, serialized. It is shared, not copied.
+    pub fn get(&self, key: &CacheKey) -> Option<Arc<str>> {
         let mut inner = self.inner.lock().unwrap();
         inner.clock += 1;
         let clock = inner.clock;
-        let result = match inner.entries.get_mut(key) {
+        let body = match inner.entries.get_mut(key) {
             Some(entry) => {
                 entry.last_used = clock;
-                Some(Arc::clone(&entry.result))
+                Some(Arc::clone(&entry.body))
             }
             None => None,
         };
-        if result.is_some() {
+        if body.is_some() {
             inner.hits += 1;
         } else {
             inner.misses += 1;
         }
-        result
+        body
     }
 
-    /// Store `result` unless a write overlapping `period` happened after
+    /// Store `serialized` unless a write overlapping `period` happened after
     /// `started_generation`. Returns whether the entry was stored.
     pub fn put(
         &self,
         key: CacheKey,
         period: TimeRange,
-        result: Arc<aw_query::DataType>,
+        serialized: Arc<str>,
         started_generation: u64,
     ) -> bool {
-        let size = match serialized_size(&*result) {
-            Some(size) => size,
-            None => return false,
-        };
+        let size = serialized.len().saturating_add(key.weight());
         if size > self.max_bytes {
             return false;
         }
@@ -228,7 +231,7 @@ impl QueryCache {
             key,
             Entry {
                 period,
-                result,
+                body: serialized,
                 size,
                 last_used: clock,
             },
@@ -313,10 +316,6 @@ impl Inner {
     }
 }
 
-fn serialized_size<T: Serialize>(value: &T) -> Option<usize> {
-    serde_json::to_vec(value).ok().map(|bytes| bytes.len())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,8 +329,12 @@ mod tests {
         (dt(day, 0, 0), dt(day + 1, 0, 0))
     }
 
-    fn result(value: f64) -> Arc<aw_query::DataType> {
-        Arc::new(aw_query::DataType::Number(value))
+    fn result(value: f64) -> Arc<str> {
+        Arc::from(
+            serde_json::to_string(&aw_query::DataType::Number(value))
+                .unwrap()
+                .as_str(),
+        )
     }
 
     #[test]
@@ -353,10 +356,7 @@ mod tests {
         let gen = cache.generation();
         assert!(cache.put(key.clone(), period(1), result(1.0), gen));
         let hit = cache.get(&key).expect("cached");
-        match &*hit {
-            aw_query::DataType::Number(n) => assert_eq!(*n, 1.0),
-            other => panic!("unexpected {other:?}"),
-        }
+        assert_eq!(&*hit, "1.0");
         assert_eq!(cache.stats().hits, 1);
     }
 
@@ -423,13 +423,17 @@ mod tests {
     }
 
     #[test]
-    fn byte_limit_is_enforced() {
-        // room for roughly one small entry
-        let cache = QueryCache::with_limits(100, 12, Duration::minutes(10), 100);
+    fn byte_limit_is_enforced_and_counts_key_text() {
+        // Room for entries of a couple of bytes plus the ~40-byte key.
+        let cache = QueryCache::with_limits(100, 64, Duration::minutes(10), 100);
         let gen = cache.generation();
         cache.put(CacheKey::new("a", period(1)), period(1), result(1.0), gen);
         cache.put(CacheKey::new("b", period(1)), period(1), result(2.0), gen);
-        assert!(cache.stats().bytes <= 12);
+        assert!(cache.stats().bytes <= 64);
+
+        // A large request-supplied key is charged even when the result is tiny.
+        let tiny = CacheKey::new(&"x".repeat(4096), period(1));
+        assert!(!cache.put(tiny, period(1), result(1.0), gen));
     }
 
     #[test]

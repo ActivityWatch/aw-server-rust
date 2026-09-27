@@ -172,6 +172,9 @@ pub fn bucket_events_create(
     events: Json<Vec<Event>>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
+    // Hold the write lock across (read old ranges + write + invalidate) so a
+    // concurrent replacement cannot move an event to a range we never record.
+    let _guard = state.write_lock.lock().unwrap();
     let datastore = &state.datastore;
     // Every inserted event changes its own extent; an event with an ID replaces
     // a stored one, whose range changes too.
@@ -204,6 +207,7 @@ pub fn bucket_events_heartbeat(
     pulsetime: f64,
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
+    let _guard = state.write_lock.lock().unwrap();
     let heartbeat = heartbeat_json.into_inner();
     // The returned event spans every merged/replaced event, so invalidating its
     // extent covers the stored previous event even if it had a different range.
@@ -243,6 +247,7 @@ pub fn bucket_events_delete_by_id(
     event_id: i64,
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
+    let _guard = state.write_lock.lock().unwrap();
     let datastore = &state.datastore;
     let old = datastore.get_event(bucket_id, event_id).ok();
     match datastore.delete_events_by_id(bucket_id, vec![event_id]) {

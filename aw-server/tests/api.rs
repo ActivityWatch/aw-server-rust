@@ -1151,6 +1151,7 @@ mod api_tests {
 
         let first = post_query(&body);
         assert_eq!(first.status(), Status::Ok);
+        assert_eq!(first.content_type(), Some(ContentType::JSON));
         let first_body = first.into_string().unwrap();
         assert_eq!(cache.stats().misses, 1);
         assert_eq!(cache.stats().entries, 1);

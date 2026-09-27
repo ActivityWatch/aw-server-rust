@@ -49,6 +49,11 @@ pub struct ServerState {
     pub query_cache: std::sync::Arc<query_cache::QueryCache>,
     /// Set to false via config (`query_cache = false`) to bypass the cache.
     pub query_cache_enabled: bool,
+    /// Serializes the read-modify-invalidate sequence in the event write
+    /// handlers. Without it, two concurrent replacements of the same event
+    /// could each invalidate only their own view of the old range and leave an
+    /// intermediate period cached (see `bucket_events_create`).
+    pub write_lock: std::sync::Mutex<()>,
 }
 
 impl ServerState {
@@ -60,6 +65,7 @@ impl ServerState {
             device_id,
             query_cache: std::sync::Arc::new(query_cache::QueryCache::new()),
             query_cache_enabled: true,
+            write_lock: std::sync::Mutex::new(()),
         }
     }
 }

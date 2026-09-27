@@ -26,9 +26,7 @@ encryption-vendored = ["aw-datastore/encryption-vendored"]
 [dependencies]
 rocket = { version = "0.5.0", features = ["json"] }
 rocket_cors = { version = "0.6.0" }
-# "rc" lets the query cache hand out shared `Arc<DataType>` results to the JSON
-# responder without cloning them on every cache hit.
-serde = { version = "1.0", features = ["derive", "rc"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
@@ -48,6 +46,13 @@ aw-datastore = { path = "../aw-datastore", default-features = false }
 aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "query_cache"
+harness = false
 
 [target.'cfg(target_os="linux")'.dependencies]
 sd-notify = "0.4.2"

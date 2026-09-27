@@ -129,8 +129,8 @@ fn get_event_count_returns_error_for_non_numeric_body() {
     ]);
     let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
 
-    assert_eq!(block_on(client.get_event_count("bucket")).unwrap(), 42);
-    let err = block_on(client.get_event_count("bucket")).expect_err("non-numeric body must fail");
+    assert_eq!(block_on(client.get_event_count("bucket", None, None)).unwrap(), 42);
+    let err = block_on(client.get_event_count("bucket", None, None)).expect_err("non-numeric body must fail");
     assert!(err.is_decode(), "expected a decode error, got {err:?}");
 
     handle.join().expect("join mock server");

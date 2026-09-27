@@ -144,6 +144,10 @@ impl AwClient {
         self.client.request_queue_at(path)
     }
 
+    pub fn get_classes(&self) -> Vec<(crate::classes::CategoryId, crate::classes::CategorySpec)> {
+        block_on(self.client.get_classes())
+    }
+
     pub fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
         block_on(self.client.wait_for_start())
     }

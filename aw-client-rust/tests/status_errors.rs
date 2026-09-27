@@ -302,3 +302,43 @@ fn export_bucket_encodes_bucket_id_as_one_path_segment() {
         vec!["GET /api/0/buckets/a%23b%3Fc%2Fd/export HTTP/1.1"]
     );
 }
+
+#[test]
+fn get_classes_uses_server_setting_and_falls_back_to_defaults() {
+    let default_names: Vec<_> = aw_client_rust::classes::default_classes()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    let (port, handle) = spawn_mock_server(vec![
+        MockResponse {
+            status_line: "200 OK",
+            content_type: "application/json",
+            body: r#"[{"name":["Work","Rust"],"rule":{"type":"regex","regex":"cargo"}}]"#,
+        },
+        MockResponse {
+            status_line: "200 OK",
+            content_type: "application/json",
+            body: "null",
+        },
+        MockResponse {
+            status_line: "500 Internal Server Error",
+            content_type: "application/json",
+            body: "{}",
+        },
+    ]);
+    let client =
+        blocking::AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
+
+    let classes = client.get_classes();
+    assert_eq!(classes.len(), 1);
+    assert_eq!(classes[0].0, vec!["Work", "Rust"]);
+    assert_eq!(classes[0].1.regex, "cargo");
+
+    let unset: Vec<_> = client.get_classes().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(unset, default_names);
+
+    let failed: Vec<_> = client.get_classes().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(failed, default_names);
+
+    handle.join().expect("join mock server");
+}

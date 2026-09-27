@@ -433,6 +433,19 @@ impl AwClient {
         Ok(())
     }
 
+    /// Categorization classes from the server's `classes` setting, like `get_classes()` in
+    /// the Python client. Falls back to [`classes::default_classes`] when the request fails
+    /// or the setting is unset, empty or invalid.
+    pub async fn get_classes(&self) -> Vec<(classes::CategoryId, classes::CategorySpec)> {
+        match self.get_setting("classes").await {
+            Ok(value) => classes::classes_from_settings_json(&value),
+            Err(err) => {
+                log::warn!("Failed to get classes from server, using default classes: {err}");
+                classes::default_classes()
+            }
+        }
+    }
+
     pub async fn get_settings(&self) -> Result<aw_models::Settings, reqwest::Error> {
         let url = format!("{}api/0/settings", self.baseurl);
         Self::send_success(self.client.get(url)).await?.json().await

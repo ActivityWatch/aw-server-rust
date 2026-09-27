@@ -365,13 +365,10 @@ impl AwClient {
         let url = format!("{}api/0/buckets/{}/events/count", self.baseurl, bucketname);
         let res = Self::send_success(self.client.get(url))
             .await?
-            .text()
+            // The count is a bare JSON number; a body that isn't one becomes a decode error.
+            .json()
             .await?;
-        let count: i64 = match res.trim().parse() {
-            Ok(count) => count,
-            Err(err) => panic!("could not parse get_event_count response: {err:?}"),
-        };
-        Ok(count)
+        Ok(res)
     }
 
     pub async fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {

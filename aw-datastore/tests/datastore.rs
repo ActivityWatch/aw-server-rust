@@ -571,6 +571,53 @@ mod datastore_tests {
             .get_event_count(&bucket.id, Some(query_start), Some(query_end))
             .unwrap();
         assert_eq!(event_count, 1);
+
+        info!("A zero-length range inside the event counts it, like get_events");
+        let instant = Some(query_start);
+        assert_eq!(
+            ds.get_events(&bucket.id, instant, instant, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(ds.get_event_count(&bucket.id, instant, instant).unwrap(), 1);
+
+        info!("Bounds beyond the nanosecond range act as no limit instead of panicking");
+        let far_past = "1000-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let far_future = "9999-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            ds.get_event_count(&bucket.id, Some(far_past), Some(far_future))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            ds.get_events(&bucket.id, Some(far_past), Some(far_future), None)
+                .unwrap()
+                .len(),
+            1
+        );
+        info!("A start after the nanosecond range or an end before it matches nothing");
+        assert_eq!(
+            ds.get_event_count(&bucket.id, Some(far_future), None)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            ds.get_event_count(&bucket.id, None, Some(far_past))
+                .unwrap(),
+            0
+        );
+        assert!(ds
+            .get_events(&bucket.id, Some(far_future), None, None)
+            .unwrap()
+            .is_empty());
+
+        info!("An inverted range counts nothing");
+        assert_eq!(
+            ds.get_event_count(&bucket.id, Some(query_end), Some(query_start))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

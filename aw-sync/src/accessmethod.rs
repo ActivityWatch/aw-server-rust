@@ -107,7 +107,7 @@ impl AccessMethod for AwClient {
         AwClient::insert_events(self, bucket_id, events).map_err(|e| e.to_string())
     }
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
-        AwClient::get_event_count(self, bucket_id).map_err(|e| e.to_string())
+        AwClient::get_event_count(self, bucket_id, None, None).map_err(|e| e.to_string())
     }
     fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
         AwClient::create_bucket(self, bucket)

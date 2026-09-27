@@ -198,6 +198,41 @@ fn get_event_maps_404_to_none_and_rejects_other_errors() {
 }
 
 #[test]
+fn get_event_count_sends_time_filters() {
+    let count = || MockResponse {
+        status_line: "200 OK",
+        content_type: "application/json",
+        body: "3",
+    };
+    let (port, handle) = spawn_mock_server(vec![count(), count()]);
+    let client =
+        blocking::AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
+    let start = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00+00:00")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let end = chrono::DateTime::parse_from_rfc3339("2024-01-02T00:00:00+00:00")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    assert_eq!(client.get_event_count("bucket", None, None).unwrap(), 3);
+    assert_eq!(
+        client
+            .get_event_count("bucket", Some(start), Some(end))
+            .unwrap(),
+        3
+    );
+
+    let requests = handle.join().expect("join mock server");
+    assert_eq!(
+        requests,
+        vec![
+            "GET /api/0/buckets/bucket/events/count HTTP/1.1",
+            "GET /api/0/buckets/bucket/events/count?start=2024-01-01T00%3A00%3A00%2B00%3A00&end=2024-01-02T00%3A00%3A00%2B00%3A00 HTTP/1.1",
+        ]
+    );
+}
+
+#[test]
 fn setting_keys_are_encoded_as_one_path_segment() {
     let ok = || MockResponse {
         status_line: "200 OK",

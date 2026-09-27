@@ -290,15 +290,18 @@ fn _pick_category(event: &Event, ranked_rules: &[RankedRule<'_>]) -> Vec<String>
 /// An event can have many tags (as opposed to only one category) which will be put into the `$tags` key of
 /// the event data object.
 pub fn tag(mut events: Vec<Event>, rules: &[(String, Rule)]) -> Vec<Event> {
+    // Whether any rule needs shared values does not depend on the event,
+    // so compute it once instead of scanning the rule set per event.
+    let needs_values = rules.iter().any(|(_, rule)| rule.needs_values());
     let mut events_tagged = Vec::new();
     for event in events.drain(..) {
-        events_tagged.push(tag_one(event, rules));
+        events_tagged.push(tag_one(event, rules, needs_values));
     }
     events_tagged
 }
 
-fn tag_one(mut event: Event, rules: &[(String, Rule)]) -> Event {
-    let values = if rules.iter().any(|(_, rule)| rule.needs_values()) {
+fn tag_one(mut event: Event, rules: &[(String, Rule)], needs_values: bool) -> Event {
+    let values = if needs_values {
         MatchValues::from_event(&event)
     } else {
         MatchValues::none()

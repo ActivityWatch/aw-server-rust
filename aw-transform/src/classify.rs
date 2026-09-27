@@ -18,16 +18,30 @@ pub enum Rule {
 }
 
 impl RuleTrait for Rule {
-    fn matches(&self, event: &Event) -> bool {
+    fn matches(&self, event: &Event, values: &MatchValues) -> bool {
         match self {
             Rule::None => false,
-            Rule::Regex(rule) => rule.matches(event),
+            Rule::Regex(rule) => rule.matches(event, values),
         }
     }
 }
 
 trait RuleTrait {
-    fn matches(&self, event: &Event) -> bool;
+    fn matches(&self, event: &Event, values: &MatchValues) -> bool;
+}
+
+/// The string values of an event's data, extracted once and shared across every
+/// rule in the set.
+///
+/// Rules without `select_keys` match against all of an event's values. Extracting
+/// them once here avoids re-iterating `event.data.values()` (and re-running
+/// `as_str()`) for each of the potentially hundreds of rules.
+struct MatchValues<'a>(Vec<&'a str>);
+
+impl<'a> MatchValues<'a> {
+    fn from_event(event: &'a Event) -> Self {
+        Self(event.data.values().filter_map(|v| v.as_str()).collect())
+    }
 }
 
 pub struct RegexRule {
@@ -93,13 +107,18 @@ impl RegexRule {
 /// It's puropse is to make the API easy to extend in the future without having to break backwards
 /// compatibility (or have to maintain "old" query2 functions).
 impl RuleTrait for RegexRule {
-    fn matches(&self, event: &Event) -> bool {
+    fn matches(&self, event: &Event, values: &MatchValues) -> bool {
         match &self.select_keys {
             Some(select_keys) => select_keys
                 .iter()
                 .filter_map(|key| event.data.get(key))
                 .any(|val| self.value_matches(val)),
-            None => event.data.values().any(|val| self.value_matches(val)),
+            // `values` holds the same strings (in the same order) that the
+            // previous `event.data.values()` iteration produced.
+            None => values
+                .0
+                .iter()
+                .any(|value| self.regex.is_match(value).unwrap_or(false)),
         }
     }
 }
@@ -157,11 +176,18 @@ impl From<(Vec<String>, Rule)> for CategoryRule {
 /// slot values between levels). Equal ranks keep the later match, matching
 /// the previous depth-only `>=` comparison.
 ///
-/// Performance: builds an in-memory cache keyed on the event's data JSON so that
-/// events with identical data (same app/title — very common in practice) are only
-/// matched against the rule set once. On a month's data with 50k+ events but only
-/// a few hundred distinct app/title pairs this reduces regex work by >99%.
+/// Performance: two complementary optimizations.
+///
+/// 1. Rules are pre-ranked once per `categorize` call and evaluated in
+///    descending rank order, so the first matching rule *is* the winner and the
+///    remaining (lower-ranked) rules can be skipped. Previously every event was
+///    matched against every rule, even after a top-priority match.
+/// 2. An in-memory cache keyed on the event's data JSON means events with
+///    identical data (same app/title — very common in practice) are only matched
+///    against the rule set once. On a month's data with 50k+ events but only a
+///    few hundred distinct app/title pairs this reduces regex work by >99%.
 pub fn categorize(mut events: Vec<Event>, rules: &[CategoryRule]) -> Vec<Event> {
+    let ranked_rules = _ranked_rules(rules);
     // Cache: serialized event data → assigned category
     let mut category_cache: HashMap<String, Vec<String>> = HashMap::new();
     let mut classified_events = Vec::with_capacity(events.len());
@@ -172,7 +198,7 @@ pub fn categorize(mut events: Vec<Event>, rules: &[CategoryRule]) -> Vec<Event> 
         let cache_key = serde_json::to_string(&event.data).unwrap_or_default();
         let category = category_cache
             .entry(cache_key)
-            .or_insert_with(|| _pick_category(&event, rules))
+            .or_insert_with(|| _pick_category(&event, &ranked_rules))
             .clone();
         event
             .data
@@ -182,26 +208,51 @@ pub fn categorize(mut events: Vec<Event>, rules: &[CategoryRule]) -> Vec<Event> 
     classified_events
 }
 
-fn _pick_category(event: &Event, rules: &[CategoryRule]) -> Vec<String> {
-    let mut category: Vec<String> = vec!["Uncategorized".into()];
-    // Uncategorized loses to any non-empty match, including a match with a very
-    // low explicit priority. i64::MIN is only used as this sentinel.
-    // Empty category paths are skipped so they cannot replace the fallback
-    // (old depth comparison: len 0 does not beat Uncategorized's len 1).
-    let mut rank = i64::MIN;
-    for class in rules {
-        if class.category.is_empty() {
-            continue;
-        }
-        if class.rule.matches(event) {
-            let item_rank = _effective_rank(&class.category, class.priority);
-            if item_rank >= rank {
-                category = class.category.clone();
-                rank = item_rank;
-            }
+/// A [`CategoryRule`] with its rank precomputed, for ordered evaluation.
+struct RankedRule<'a> {
+    rank: i64,
+    index: usize,
+    rule: &'a CategoryRule,
+}
+
+/// Precomputes rule ranks and orders rules so that the first match is the
+/// winner under the historical `>=` semantics.
+///
+/// The old best-of-all loop selected the matching rule with the highest
+/// `_effective_rank`, keeping the *later* rule on a tie. Sorting by rank
+/// descending and breaking ties by descending original index makes the
+/// first match in this order exactly that rule, so `_pick_category` can return
+/// early instead of running every remaining rule.
+///
+/// Rules with an empty category path are dropped up front: they can never
+/// replace the `Uncategorized` fallback (old depth comparison: len 0 does not
+/// beat Uncategorized's len 1).
+fn _ranked_rules(rules: &[CategoryRule]) -> Vec<RankedRule<'_>> {
+    let mut ranked: Vec<RankedRule> = rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| !rule.category.is_empty())
+        .map(|(index, rule)| RankedRule {
+            rank: _effective_rank(&rule.category, rule.priority),
+            index,
+            rule,
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.rank.cmp(&a.rank).then_with(|| b.index.cmp(&a.index)));
+    ranked
+}
+
+fn _pick_category(event: &Event, ranked_rules: &[RankedRule<'_>]) -> Vec<String> {
+    let values = MatchValues::from_event(event);
+    // `Uncategorized` loses to any non-empty match, including one with a very
+    // low explicit priority, so no rank threshold is needed here — the first
+    // match in rank order always wins.
+    for ranked in ranked_rules {
+        if ranked.rule.rule.matches(event, &values) {
+            return ranked.rule.category.clone();
         }
     }
-    category
+    vec!["Uncategorized".into()]
 }
 
 /// Tags a list of events
@@ -217,12 +268,14 @@ pub fn tag(mut events: Vec<Event>, rules: &[(String, Rule)]) -> Vec<Event> {
 }
 
 fn tag_one(mut event: Event, rules: &[(String, Rule)]) -> Event {
+    let values = MatchValues::from_event(&event);
     let mut tags: Vec<String> = Vec::new();
     for (cls, rule) in rules {
-        if rule.matches(&event) {
+        if rule.matches(&event, &values) {
             tags.push(cls.clone());
         }
     }
+    drop(values);
     tags.sort_unstable();
     tags.dedup();
     event.data.insert("$tags".into(), serde_json::json!(tags));
@@ -235,6 +288,11 @@ fn _effective_rank(category: &[String], priority: Option<i64>) -> i64 {
     // unprioritized rules is unchanged.
     // https://github.com/ActivityWatch/aw-server-rust/pull/663#issuecomment-5481349757
     priority.unwrap_or((category.len() as i64) * 10)
+}
+
+#[cfg(test)]
+fn rule_matches(rule: &impl RuleTrait, event: &Event) -> bool {
+    rule.matches(event, &MatchValues::from_event(event))
 }
 
 #[test]
@@ -252,12 +310,12 @@ fn test_rule() {
     let rule_from_regex = Rule::from(Regex::new("test").unwrap());
     let rule_from_new = Rule::Regex(RegexRule::new("test", false, None).unwrap());
     let rule_none = Rule::None;
-    assert!(rule_from_regex.matches(&e_match));
-    assert!(rule_from_new.matches(&e_match));
-    assert!(!rule_from_regex.matches(&e_no_match));
-    assert!(!rule_from_new.matches(&e_no_match));
+    assert!(rule_matches(&rule_from_regex, &e_match));
+    assert!(rule_matches(&rule_from_new, &e_match));
+    assert!(!rule_matches(&rule_from_regex, &e_no_match));
+    assert!(!rule_matches(&rule_from_new, &e_no_match));
 
-    assert!(!rule_none.matches(&e_match));
+    assert!(!rule_matches(&rule_none, &e_match));
 }
 
 #[test]
@@ -269,7 +327,7 @@ fn test_rule_lookahead() {
         .insert("test".into(), serde_json::json!("testing lookahead"));
 
     let rule_from_regex = Rule::from(Regex::new("testing (?!lookahead)").unwrap());
-    assert!(!rule_from_regex.matches(&e_match));
+    assert!(!rule_matches(&rule_from_regex, &e_match));
 }
 
 #[test]
@@ -291,10 +349,10 @@ fn test_rule_select_keys() {
     let non_string_key =
         Rule::Regex(RegexRule::new("123", false, Some(vec!["pid".into()])).unwrap());
 
-    assert!(title_only.matches(&event));
-    assert!(!app_only.matches(&event));
-    assert!(!missing_key.matches(&event));
-    assert!(!non_string_key.matches(&event));
+    assert!(rule_matches(&title_only, &event));
+    assert!(!rule_matches(&app_only, &event));
+    assert!(!rule_matches(&missing_key, &event));
+    assert!(!rule_matches(&non_string_key, &event));
 }
 
 #[test]
@@ -637,6 +695,126 @@ fn test_valid_regex_patterns_are_accepted() {
             "Expected pattern {:?} to be accepted as valid regex, but it was rejected: {:?}",
             pattern,
             result.err()
+        );
+    }
+}
+
+/// Deterministic xorshift RNG, so the randomized equivalence test below is
+/// reproducible without adding a `rand` dependency.
+#[cfg(test)]
+struct Rng(u64);
+
+#[cfg(test)]
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// The previous best-of-all implementation, kept as the reference oracle for
+/// the randomized equivalence test.
+#[cfg(test)]
+fn naive_pick_category(event: &Event, rules: &[CategoryRule]) -> Vec<String> {
+    let mut category: Vec<String> = vec!["Uncategorized".into()];
+    let mut rank = i64::MIN;
+    for class in rules {
+        if class.category.is_empty() {
+            continue;
+        }
+        if rule_matches(&class.rule, event) {
+            let item_rank = _effective_rank(&class.category, class.priority);
+            if item_rank >= rank {
+                category = class.category.clone();
+                rank = item_rank;
+            }
+        }
+    }
+    category
+}
+
+#[test]
+fn test_categorize_matches_naive_best_of_all() {
+    // Randomized cross-check: the rank-ordered early exit must select exactly
+    // the category the old best-of-all (`>=`, later-wins) loop selected —
+    // including ties, explicit priorities, empty paths, `select_keys` and
+    // `ignore_case`.
+    const PATTERNS: [&str; 6] = [
+        "firefox",
+        "chrome",
+        "^term",
+        "code$",
+        "note|slack",
+        "no-match-xyz",
+    ];
+    const KEYS: [&str; 3] = ["app", "title", "pid"];
+
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    for case in 0..200 {
+        let rule_count = 1 + rng.below(12) as usize;
+        let mut rules: Vec<CategoryRule> = Vec::with_capacity(rule_count);
+        for _ in 0..rule_count {
+            let pattern = PATTERNS[rng.below(PATTERNS.len() as u64) as usize];
+            let ignore_case = rng.below(2) == 0;
+            let select_keys = if rng.below(2) == 0 {
+                None
+            } else {
+                Some(vec![KEYS[rng.below(KEYS.len() as u64) as usize].to_string()])
+            };
+            let rule = Rule::Regex(RegexRule::new(pattern, ignore_case, select_keys).unwrap());
+            let depth = 1 + rng.below(3) as usize;
+            let category: Vec<String> = (0..depth).map(|i| format!("Cat{case}_{i}")).collect();
+            let mut cr = CategoryRule::new(category, rule);
+            // Mix unprioritized rules (depth * 10) with explicit priorities,
+            // deliberately including values that collide (ties).
+            if rng.below(2) == 0 {
+                cr = cr.with_priority(rng.below(41) as i64 - 10);
+            }
+            rules.push(cr);
+        }
+
+        let event_count = 1 + rng.below(10) as usize;
+        let events: Vec<Event> = (0..event_count)
+            .map(|_| {
+                let mut e = Event::default();
+                for key in KEYS {
+                    if rng.below(3) == 0 {
+                        continue; // sometimes omit a key
+                    }
+                    let value = if key == "pid" {
+                        serde_json::json!(rng.below(1000))
+                    } else {
+                        serde_json::json!(PATTERNS[rng.below(PATTERNS.len() as u64) as usize])
+                    };
+                    e.data.insert(key.into(), value);
+                }
+                e
+            })
+            .collect();
+
+        let expected: Vec<Vec<String>> = events
+            .iter()
+            .map(|e| naive_pick_category(e, &rules))
+            .collect();
+        let actual: Vec<Vec<String>> = categorize(events.clone(), &rules)
+            .iter()
+            .map(|e| {
+                serde_json::from_value(e.data.get("$category").unwrap().clone())
+                    .expect("$category must be a category array")
+            })
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "case {case}: rank-ordered pick diverged from best-of-all"
         );
     }
 }

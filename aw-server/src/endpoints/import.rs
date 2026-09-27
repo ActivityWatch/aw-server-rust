@@ -124,7 +124,12 @@ pub fn bucket_import_json(
     state: &State<ServerState>,
     json_data: Json<BucketsExport>,
 ) -> Result<(), HttpErrorJson> {
-    import(&state.datastore, json_data.into_inner())
+    let result = import(&state.datastore, json_data.into_inner());
+    if result.is_ok() {
+        // An import can add buckets and events; drop everything cached.
+        state.query_cache.clear();
+    }
+    result
 }
 
 #[derive(FromForm)]
@@ -142,5 +147,9 @@ pub fn bucket_import_form(
     state: &State<ServerState>,
     form: Form<ImportForm>,
 ) -> Result<(), HttpErrorJson> {
-    import(&state.datastore, form.into_inner().import.into_inner())
+    let result = import(&state.datastore, form.into_inner().import.into_inner());
+    if result.is_ok() {
+        state.query_cache.clear();
+    }
+    result
 }

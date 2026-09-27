@@ -215,11 +215,14 @@ async fn main() -> Result<(), rocket::Error> {
     let datastore = aw_datastore::Datastore::new(db_path, legacy_import);
 
     let server_state = endpoints::ServerState {
+        query_cache_enabled: config.query_cache,
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
-        datastore,
-        asset_resolver: endpoints::AssetResolver::new(asset_path),
-        device_id,
+        ..endpoints::ServerState::new(
+            datastore,
+            endpoints::AssetResolver::new(asset_path),
+            device_id,
+        )
     };
 
     let _rocket = endpoints::build_rocket(server_state, config)

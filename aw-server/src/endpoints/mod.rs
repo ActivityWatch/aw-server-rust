@@ -45,6 +45,23 @@ pub struct ServerState {
     pub datastore: Datastore,
     pub asset_resolver: AssetResolver,
     pub device_id: String,
+    /// Cache of query results for finished past periods (see `query_cache`).
+    pub query_cache: std::sync::Arc<query_cache::QueryCache>,
+    /// Set to false via config (`query_cache = false`) to bypass the cache.
+    pub query_cache_enabled: bool,
+}
+
+impl ServerState {
+    /// Build a state with the default (enabled) query cache.
+    pub fn new(datastore: Datastore, asset_resolver: AssetResolver, device_id: String) -> Self {
+        Self {
+            datastore,
+            asset_resolver,
+            device_id,
+            query_cache: std::sync::Arc::new(query_cache::QueryCache::new()),
+            query_cache_enabled: true,
+        }
+    }
 }
 
 #[macro_use]
@@ -57,6 +74,7 @@ mod extension_cors;
 mod hostcheck;
 mod import;
 mod query;
+pub mod query_cache;
 mod settings;
 
 #[cfg(target_os = "android")]

@@ -19,11 +19,11 @@ mod api_tests {
     use rocket::local::blocking::Client;
 
     fn setup_testserver() -> rocket::Rocket<rocket::Build> {
-        let state = endpoints::ServerState {
-            datastore: aw_datastore::Datastore::new_in_memory(false),
-            asset_resolver: endpoints::AssetResolver::new(None),
-            device_id: "test_id".to_string(),
-        };
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
         let aw_config = config::AWConfig::default();
         endpoints::build_rocket(state, aw_config)
     }
@@ -1092,5 +1092,105 @@ mod api_tests {
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
+    /// End-to-end check of the finished-period query cache: a past period is
+    /// served from cache, and a write overlapping it invalidates the entry.
+    #[test]
+    fn query_cache_serves_finished_periods_and_invalidates_on_overlap() {
+        use chrono::{Duration, Utc};
+        use std::sync::Arc;
+
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
+        let cache: Arc<endpoints::query_cache::QueryCache> = Arc::clone(&state.query_cache);
+        let server = endpoints::build_rocket(state, config::AWConfig::default());
+        let datastore = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "cached", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        datastore.create_bucket(&bucket).unwrap();
+
+        // An event two days ago, so the period is well past the 10-minute margin.
+        let start = Utc::now() - Duration::days(2);
+        let event = aw_models::Event {
+            timestamp: start,
+            duration: Duration::hours(1),
+            ..Default::default()
+        };
+        datastore.insert_events("cached", &[event]).unwrap();
+
+        let period = format!(
+            "{}/{}",
+            (start - Duration::hours(1)).to_rfc3339(),
+            (start + Duration::hours(2)).to_rfc3339()
+        );
+        let body = json!({
+            "timeperiods": [period],
+            "query": ["events = query_bucket(\"cached\");\nRETURN = events;"]
+        })
+        .to_string();
+
+        let client = Client::untracked(server).expect("valid instance");
+        let post_query = |body: &str| {
+            client
+                .post("/api/0/query")
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(body)
+                .dispatch()
+        };
+
+        let first = post_query(&body);
+        assert_eq!(first.status(), Status::Ok);
+        let first_body = first.into_string().unwrap();
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().entries, 1);
+
+        // Identical request is served from the cache.
+        let second = post_query(&body);
+        assert_eq!(second.status(), Status::Ok);
+        assert_eq!(second.into_string().unwrap(), first_body);
+        assert_eq!(cache.stats().hits, 1);
+
+        // A write overlapping the cached period drops the entry.
+        let overlapping = aw_models::Event {
+            timestamp: start + Duration::minutes(30),
+            duration: Duration::minutes(5),
+            ..Default::default()
+        };
+        let write = client
+            .post("/api/0/buckets/cached/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(json!([overlapping]).to_string())
+            .dispatch();
+        assert_eq!(write.status(), Status::Ok);
+        assert_eq!(cache.stats().entries, 0);
+
+        // The next query recomputes (and now sees the new event).
+        let third = post_query(&body);
+        assert_eq!(third.status(), Status::Ok);
+        assert_eq!(cache.stats().misses, 2);
+        let events = serde_json::from_str::<Value>(&third.into_string().unwrap()).unwrap();
+        assert_eq!(events[0].as_array().unwrap().len(), 2);
+
+        // Opting out per request bypasses the cache entirely.
+        let bypass = client
+            .post("/api/0/query?cache=false")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(&body)
+            .dispatch();
+        assert_eq!(bypass.status(), Status::Ok);
+        assert_eq!(cache.stats().hits, 1);
     }
 }

@@ -26,7 +26,9 @@ encryption-vendored = ["aw-datastore/encryption-vendored"]
 [dependencies]
 rocket = { version = "0.5.0", features = ["json"] }
 rocket_cors = { version = "0.6.0" }
-serde = { version = "1.0", features = ["derive"] }
+# "rc" lets the query cache hand out shared `Arc<DataType>` results to the JSON
+# responder without cloning them on every cache hit.
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"

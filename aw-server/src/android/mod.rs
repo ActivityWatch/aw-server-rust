@@ -188,11 +188,11 @@ pub mod android {
 
         // FIXME: Why is unsafe needed here? Can we get rid of it?
         unsafe {
-            let server_state: ServerState = endpoints::ServerState {
-                datastore: openDatastore(),
-                asset_resolver: endpoints::AssetResolver::new(None),
-                device_id: device_id::get_device_id(),
-            };
+            let server_state: ServerState = endpoints::ServerState::new(
+                openDatastore(),
+                endpoints::AssetResolver::new(None),
+                device_id::get_device_id(),
+            );
             info!("Using server_state:: device_id: {}", server_state.device_id);
 
             let mut server_config = crate::config::create_config("default", None);

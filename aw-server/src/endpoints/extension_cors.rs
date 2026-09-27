@@ -252,11 +252,11 @@ mod tests {
     const WEBUI_ORIGIN: &str = "http://127.0.0.1:5600";
 
     fn setup_testserver(cors_regex: Vec<String>) -> Rocket<rocket::Build> {
-        let state = endpoints::ServerState {
-            datastore: aw_datastore::Datastore::new_in_memory(false),
-            asset_resolver: endpoints::AssetResolver::new(None),
-            device_id: "test_id".to_string(),
-        };
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
         let mut aw_config = AWConfig::default();
         // Pin the port: the default is derived from a mutable global that other
         // tests flip via create_config(), which would otherwise make the

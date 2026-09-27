@@ -13,6 +13,7 @@ use aw_models::Event;
 use rocket::http::Status;
 use rocket::State;
 
+use crate::endpoints::query_cache::event_range;
 use crate::endpoints::util::{BucketEventsCsvRocket, BucketsExportRocket};
 use crate::endpoints::{HttpErrorJson, ServerState};
 
@@ -93,7 +94,12 @@ pub fn bucket_new(
     let datastore = &state.datastore;
     let ret = datastore.create_bucket(&bucket);
     match ret {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // A new bucket changes what the bucket list resolves to, and a
+            // re-created bucket may have gained events.
+            state.query_cache.clear();
+            Ok(())
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -167,9 +173,22 @@ pub fn bucket_events_create(
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     let datastore = &state.datastore;
+    // Every inserted event changes its own extent; an event with an ID replaces
+    // a stored one, whose range changes too.
+    let mut affected: Vec<_> = events.iter().map(event_range).collect();
+    for event in events.iter() {
+        if let Some(id) = event.id {
+            if let Ok(old) = datastore.get_event(bucket_id, id) {
+                affected.push(event_range(&old));
+            }
+        }
+    }
     let res = datastore.insert_events(bucket_id, &events);
     match res {
-        Ok(events) => Ok(Json(events)),
+        Ok(events) => {
+            state.query_cache.invalidate(affected);
+            Ok(Json(events))
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -186,9 +205,17 @@ pub fn bucket_events_heartbeat(
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let heartbeat = heartbeat_json.into_inner();
+    // The returned event spans every merged/replaced event, so invalidating its
+    // extent covers the stored previous event even if it had a different range.
+    let heartbeat_range = event_range(&heartbeat);
     let datastore = &state.datastore;
     match datastore.heartbeat(bucket_id, heartbeat, pulsetime) {
-        Ok(e) => Ok(Json(e)),
+        Ok(e) => {
+            state
+                .query_cache
+                .invalidate(vec![event_range(&e), heartbeat_range]);
+            Ok(Json(e))
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -217,8 +244,14 @@ pub fn bucket_events_delete_by_id(
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
     let datastore = &state.datastore;
+    let old = datastore.get_event(bucket_id, event_id).ok();
     match datastore.delete_events_by_id(bucket_id, vec![event_id]) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            if let Some(event) = old {
+                state.query_cache.invalidate(vec![event_range(&event)]);
+            }
+            Ok(())
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -278,7 +311,11 @@ pub fn bucket_events_get_csv(
 pub fn bucket_delete(bucket_id: &str, state: &State<ServerState>) -> Result<(), HttpErrorJson> {
     let datastore = &state.datastore;
     match datastore.delete_bucket(bucket_id) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // Removing a bucket changes what the bucket list resolves to.
+            state.query_cache.clear();
+            Ok(())
+        }
         Err(err) => Err(err.into()),
     }
 }

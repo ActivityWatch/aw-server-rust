@@ -337,12 +337,12 @@ RETURN = events;",
         client.insert_event(&odd_bucket, &event).unwrap();
         let odd_events = client.get_events(&odd_bucket, None, None, None).unwrap();
         assert_eq!(odd_events.len(), 1);
-        assert_eq!(client.get_event_count(&odd_bucket).unwrap(), 1);
+        assert_eq!(client.get_event_count(&odd_bucket, None, None).unwrap(), 1);
         client.heartbeat(&odd_bucket, &event, 10.0).unwrap();
         client
             .delete_event(&odd_bucket, odd_events[0].id.unwrap())
             .unwrap();
-        assert_eq!(client.get_event_count(&odd_bucket).unwrap(), 0);
+        assert_eq!(client.get_event_count(&odd_bucket, None, None).unwrap(), 0);
         client.delete_bucket(&odd_bucket).unwrap();
         assert!(!client.get_buckets().unwrap().contains_key(&odd_bucket));
 

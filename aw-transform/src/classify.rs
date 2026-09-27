@@ -17,6 +17,14 @@ pub enum Rule {
     Regex(RegexRule),
 }
 
+trait RuleTrait {
+    fn matches(&self, event: &Event, values: &MatchValues) -> bool;
+
+    /// Whether this rule reads the shared extracted values (i.e. matches
+    /// against all of the event's values rather than `select_keys`).
+    fn needs_values(&self) -> bool;
+}
+
 impl RuleTrait for Rule {
     fn matches(&self, event: &Event, values: &MatchValues) -> bool {
         match self {
@@ -24,10 +32,13 @@ impl RuleTrait for Rule {
             Rule::Regex(rule) => rule.matches(event, values),
         }
     }
-}
 
-trait RuleTrait {
-    fn matches(&self, event: &Event, values: &MatchValues) -> bool;
+    fn needs_values(&self) -> bool {
+        match self {
+            Rule::None => false,
+            Rule::Regex(regex_rule) => regex_rule.select_keys.is_none(),
+        }
+    }
 }
 
 /// The string values of an event's data, extracted once and shared across every
@@ -41,6 +52,11 @@ struct MatchValues<'a>(Vec<&'a str>);
 impl<'a> MatchValues<'a> {
     fn from_event(event: &'a Event) -> Self {
         Self(event.data.values().filter_map(|v| v.as_str()).collect())
+    }
+
+    /// An empty set, for rule sets where no rule reads the shared values.
+    fn none() -> Self {
+        Self(Vec::new())
     }
 }
 
@@ -120,6 +136,10 @@ impl RuleTrait for RegexRule {
                 .iter()
                 .any(|value| self.regex.is_match(value).unwrap_or(false)),
         }
+    }
+
+    fn needs_values(&self) -> bool {
+        self.select_keys.is_none()
     }
 }
 
@@ -243,7 +263,17 @@ fn _ranked_rules(rules: &[CategoryRule]) -> Vec<RankedRule<'_>> {
 }
 
 fn _pick_category(event: &Event, ranked_rules: &[RankedRule<'_>]) -> Vec<String> {
-    let values = MatchValues::from_event(event);
+    // Rules with `select_keys` match against specific keys and never read the
+    // shared values, so skip the extraction entirely when no rule needs it
+    // (including the empty-rule-set case).
+    let values = if ranked_rules
+        .iter()
+        .any(|ranked| ranked.rule.rule.needs_values())
+    {
+        MatchValues::from_event(event)
+    } else {
+        MatchValues::none()
+    };
     // `Uncategorized` loses to any non-empty match, including one with a very
     // low explicit priority, so no rank threshold is needed here — the first
     // match in rank order always wins.
@@ -268,7 +298,11 @@ pub fn tag(mut events: Vec<Event>, rules: &[(String, Rule)]) -> Vec<Event> {
 }
 
 fn tag_one(mut event: Event, rules: &[(String, Rule)]) -> Event {
-    let values = MatchValues::from_event(&event);
+    let values = if rules.iter().any(|(_, rule)| rule.needs_values()) {
+        MatchValues::from_event(&event)
+    } else {
+        MatchValues::none()
+    };
     let mut tags: Vec<String> = Vec::new();
     for (cls, rule) in rules {
         if rule.matches(&event, &values) {
@@ -720,6 +754,31 @@ impl Rng {
     }
 }
 
+/// Independent old-style matching for the test oracle: deliberately does NOT
+/// use the shared `MatchValues` extraction or `RuleTrait::matches`, so a
+/// regression in that path cannot make both sides of the equivalence test
+/// agree on the same wrong answer.
+#[cfg(test)]
+fn naive_rule_matches(rule: &Rule, event: &Event) -> bool {
+    match rule {
+        Rule::None => false,
+        Rule::Regex(r) => {
+            let matches_value = |v: &serde_json::Value| {
+                v.as_str()
+                    .map(|s| r.regex.is_match(s).unwrap_or(false))
+                    .unwrap_or(false)
+            };
+            match &r.select_keys {
+                Some(keys) => keys
+                    .iter()
+                    .filter_map(|key| event.data.get(key))
+                    .any(matches_value),
+                None => event.data.values().any(matches_value),
+            }
+        }
+    }
+}
+
 /// The previous best-of-all implementation, kept as the reference oracle for
 /// the randomized equivalence test.
 #[cfg(test)]
@@ -730,7 +789,7 @@ fn naive_pick_category(event: &Event, rules: &[CategoryRule]) -> Vec<String> {
         if class.category.is_empty() {
             continue;
         }
-        if rule_matches(&class.rule, event) {
+        if naive_rule_matches(&class.rule, event) {
             let item_rank = _effective_rank(&class.category, class.priority);
             if item_rank >= rank {
                 category = class.category.clone();

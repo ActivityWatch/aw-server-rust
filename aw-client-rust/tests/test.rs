@@ -327,6 +327,25 @@ RETURN = events;",
 
         client.delete_bucket(&bucketname).unwrap();
 
+        // IDs with reserved URL characters must reach the server as the same ID
+        let odd_bucket = format!("aw-client-rust-test/a#b?c_{}", client.hostname);
+        client
+            .create_bucket_simple(&odd_bucket, buckettype)
+            .unwrap();
+        assert_eq!(client.get_bucket(&odd_bucket).unwrap().id, odd_bucket);
+        assert!(client.get_buckets().unwrap().contains_key(&odd_bucket));
+        client.insert_event(&odd_bucket, &event).unwrap();
+        let odd_events = client.get_events(&odd_bucket, None, None, None).unwrap();
+        assert_eq!(odd_events.len(), 1);
+        assert_eq!(client.get_event_count(&odd_bucket, None, None).unwrap(), 1);
+        client.heartbeat(&odd_bucket, &event, 10.0).unwrap();
+        client
+            .delete_event(&odd_bucket, odd_events[0].id.unwrap())
+            .unwrap();
+        assert_eq!(client.get_event_count(&odd_bucket, None, None).unwrap(), 0);
+        client.delete_bucket(&odd_bucket).unwrap();
+        assert!(!client.get_buckets().unwrap().contains_key(&odd_bucket));
+
         shutdown_handler.notify();
     }
 

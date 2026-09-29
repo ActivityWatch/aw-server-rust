@@ -137,7 +137,6 @@ pub enum Command {
     GetBucket(String),
     GetBuckets(),
     InsertEvents(String, Vec<Event>),
-    FilterEvents(String, Vec<Event>),
     Heartbeat(String, Event, f64),
     GetEvent(String, i64),
     GetEvents(
@@ -464,10 +463,6 @@ impl DatastoreWorker {
                 Err(e) => Err(e),
             },
             Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets())),
-            Command::FilterEvents(bucketname, events) => {
-                let filtered = self.privacy_engine.filter_events(&bucketname, events);
-                Ok(Response::EventList(filtered))
-            }
             Command::InsertEvents(bucketname, events) => {
                 let filtered = self.privacy_engine.filter_events(&bucketname, events);
                 if filtered.is_empty() {
@@ -766,24 +761,6 @@ impl Datastore {
         events: &[Event],
     ) -> Result<Vec<Event>, DatastoreError> {
         let cmd = Command::InsertEvents(bucket_id.to_string(), events.to_vec());
-        match self.request(cmd)? {
-            Response::EventList(events) => Ok(events),
-            _ => panic!("Invalid response"),
-        }
-    }
-
-    /// Apply this worker's privacy rules to `events` without storing them.
-    ///
-    /// Callers that deduplicate imported events against stored ones must filter
-    /// first: inserts store the *filtered* event, so comparing an unfiltered
-    /// event's identity against a redacted stored event never matches and the
-    /// event is re-inserted on every import.
-    pub fn filter_events(
-        &self,
-        bucket_id: &str,
-        events: Vec<Event>,
-    ) -> Result<Vec<Event>, DatastoreError> {
-        let cmd = Command::FilterEvents(bucket_id.to_string(), events);
         match self.request(cmd)? {
             Response::EventList(events) => Ok(events),
             _ => panic!("Invalid response"),

@@ -45,20 +45,6 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
         // overwrite an unrelated event, so imported events get new ids, except when merging into
         // an existing bucket, where an id may match that bucket's own event (see below).
         let imported = bucket.events.take().map(|e| e.take_inner());
-        // Apply this datastore's privacy rules before deduplication. Inserts store the
-        // *filtered* event, so comparing an unfiltered imported event against a redacted
-        // stored one never matches and every re-import appends a duplicate. Filtering here
-        // makes both sides comparable; the datastore filters again on insert (idempotent),
-        // and any event a drop rule removes is simply never imported.
-        let imported = match imported {
-            Some(events) => Some(datastore.filter_events(&bucket.id, events).map_err(|e| {
-                HttpErrorJson::new(
-                    Status::InternalServerError,
-                    format!("Failed to apply privacy filters to import: {e:?}"),
-                )
-            })?),
-            None => None,
-        };
         // Attach a stripped clone so create_bucket inserts events in the same
         // datastore request (same SQLite transaction). Splitting create + insert
         // across two requests can persist an empty bucket if insert fails or the

@@ -663,6 +663,14 @@ mod api_tests {
         let updated = events();
         assert_eq!(updated.len(), 1, "{updated:?}");
         assert_eq!(updated[0]["duration"], 5.0);
+        assert_eq!(updated[0]["id"].to_string(), id);
+
+        // Older export of the same event must not shrink the longer local one
+        import(1.0, &id);
+        let after_old = events();
+        assert_eq!(after_old.len(), 1, "{after_old:?}");
+        assert_eq!(after_old[0]["duration"], 5.0);
+        assert_eq!(after_old[0]["id"].to_string(), id);
     }
 
     #[test]

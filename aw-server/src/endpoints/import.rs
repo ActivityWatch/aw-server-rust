@@ -45,18 +45,23 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
         // overwrite an unrelated event, so imported events get new ids, except when merging into
         // an existing bucket, where an id may match that bucket's own event (see below).
         let imported = bucket.events.take().map(|e| e.take_inner());
-        bucket.events = imported.as_ref().map(|events| {
-            TryVec::new(
-                events
-                    .iter()
-                    .cloned()
-                    .map(|mut event| {
-                        event.id = None;
-                        event
-                    })
-                    .collect(),
-            )
-        });
+        // create_bucket inserts bucket.events atomically. Only attach a stripped clone when
+        // the bucket is new — an existing-bucket merge uses `imported` and would otherwise
+        // hold a second unused copy of the event list.
+        if datastore.get_bucket(&bucket.id).is_err() {
+            bucket.events = imported.as_ref().map(|events| {
+                TryVec::new(
+                    events
+                        .iter()
+                        .cloned()
+                        .map(|mut event| {
+                            event.id = None;
+                            event
+                        })
+                        .collect(),
+                )
+            });
+        }
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(DatastoreError::BucketAlreadyExists(_)) => {
@@ -101,9 +106,10 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                         // An exported id is only kept if it names an event of this bucket with the
                         // same start time: re-importing an updated export (e.g. a heartbeat-extended
                         // duration) then replaces that event instead of adding an overlapping copy.
-                        let existing_starts: HashMap<i64, _> = existing
+                        // An older/shorter export must not clobber a longer local event.
+                        let existing_by_id: HashMap<i64, &Event> = existing
                             .iter()
-                            .filter_map(|e| e.id.map(|id| (id, e.timestamp)))
+                            .filter_map(|e| e.id.map(|id| (id, e)))
                             .collect();
 
                         // Filter out events already present (matched by timestamp, duration, data)
@@ -116,10 +122,17 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                                 if existing_identities.contains(&identity) {
                                     return None;
                                 }
-                                if event.id.is_some_and(|id| {
-                                    existing_starts.get(&id) != Some(&event.timestamp)
-                                }) {
-                                    event.id = None;
+                                if let Some(id) = event.id {
+                                    match existing_by_id.get(&id) {
+                                        Some(existing_event)
+                                            if existing_event.timestamp == event.timestamp =>
+                                        {
+                                            if event.duration < existing_event.duration {
+                                                return None;
+                                            }
+                                        }
+                                        _ => event.id = None,
+                                    }
                                 }
                                 Some(event)
                             })

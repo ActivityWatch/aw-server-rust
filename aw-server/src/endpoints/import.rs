@@ -5,7 +5,7 @@ use rocket::State;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use aw_models::{BucketsExport, Event};
+use aw_models::{BucketsExport, Event, TryVec};
 
 use aw_datastore::{Datastore, DatastoreError};
 
@@ -45,28 +45,24 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
         // overwrite an unrelated event, so imported events get new ids, except when merging into
         // an existing bucket, where an id may match that bucket's own event (see below).
         let imported = bucket.events.take().map(|e| e.take_inner());
-        // Never attach events to create_bucket. get_bucket is cache-only and can still
-        // report a bucket after a rolled-back create; attaching only then would create
-        // an empty bucket on retry. create_bucket itself reports BucketAlreadyExists.
-        bucket.events = None;
-        match datastore.create_bucket(&bucket) {
-            Ok(_) => {
-                if let Some(mut events) = imported {
-                    if !events.is_empty() {
-                        for event in &mut events {
-                            event.id = None;
-                        }
-                        if let Err(e) = datastore.insert_events(&bucket.id, &events) {
-                            let err_msg = format!(
-                                "Failed to insert events into new bucket '{}': {e:?}",
-                                bucket.id
-                            );
-                            warn!("{}", err_msg);
-                            return Err(HttpErrorJson::new(Status::InternalServerError, err_msg));
-                        }
-                    }
+        // Attach a stripped clone so create_bucket inserts events in the same
+        // datastore request (same SQLite transaction). Splitting create + insert
+        // across two requests can persist an empty bucket if insert fails or the
+        // process dies in between. Keep `imported` with original ids for the
+        // existing-bucket merge path. Do not consult get_bucket: it is cache-only
+        // and can report a bucket after a rolled-back create; create_bucket itself
+        // reports BucketAlreadyExists from the SQL constraint.
+        if let Some(ref events) = imported {
+            if !events.is_empty() {
+                let mut stripped = events.clone();
+                for event in &mut stripped {
+                    event.id = None;
                 }
+                bucket.events = Some(TryVec::new(stripped));
             }
+        }
+        match datastore.create_bucket(&bucket) {
+            Ok(_) => (),
             Err(DatastoreError::BucketAlreadyExists(_)) => {
                 // Bucket already exists — merge events, skipping duplicates
                 info!("Bucket '{}' already exists, merging events", bucket.id);

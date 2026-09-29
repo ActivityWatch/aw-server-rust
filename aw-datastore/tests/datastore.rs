@@ -19,6 +19,7 @@ mod datastore_tests {
     use aw_models::Bucket;
     use aw_models::BucketMetadata;
     use aw_models::Event;
+    use aw_models::TryVec;
 
     fn test_bucket() -> Bucket {
         Bucket {
@@ -1141,6 +1142,33 @@ mod datastore_tests {
             2,
             "deleting the setting should stop filtering"
         );
+    }
+
+    /// create_bucket used to insert attached events without the privacy engine,
+    /// so a new-bucket import could persist titles a drop rule would discard.
+    #[test]
+    fn test_privacy_filter_applies_to_create_bucket_events() {
+        let ds = Datastore::new_in_memory(false);
+        let drop_secret =
+            r#"[{"enabled":true,"field":"title","pattern":"(?i)secret","action":"drop"}]"#;
+        ds.set_key_value("settings.privacy_filters", drop_secret)
+            .unwrap();
+
+        let mut bucket = test_bucket();
+        bucket.id = "import-new".to_string();
+        bucket.events = Some(TryVec::new(vec![
+            privacy_event("my secret file"),
+            privacy_event("readme.md"),
+        ]));
+        ds.create_bucket(&bucket).unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "drop rule should discard matching create_bucket event, got {events:?}"
+        );
+        assert_eq!(events[0].data.get("title").unwrap(), "readme.md");
     }
 
     /// Rules must load at worker startup, not only after a later SetKeyValue.

@@ -682,6 +682,52 @@ mod api_tests {
     }
 
     #[test]
+    fn test_import_new_bucket_applies_privacy_filters() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        let rules = json!([{
+            "enabled": true,
+            "field": "title",
+            "pattern": "(?i)secret",
+            "action": "drop"
+        }]);
+        assert_eq!(
+            set_setting_request(&client, "privacy_filters", &rules),
+            rocket::http::Status::Created
+        );
+
+        let res = client
+            .post("/api/0/import")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(
+                r#"{"buckets":{"aw-watcher-window_test":{
+                    "id":"aw-watcher-window_test","type":"currentwindow",
+                    "client":"aw-watcher-window","hostname":"test",
+                    "events":[
+                        {"timestamp":"2001-01-01T00:00:00Z","duration":1.0,
+                         "data":{"title":"my secret file","app":"Firefox"}},
+                        {"timestamp":"2001-01-01T00:00:01Z","duration":1.0,
+                         "data":{"title":"readme.md","app":"Firefox"}}
+                    ]
+                }}}"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        let res = client
+            .get("/api/0/buckets/aw-watcher-window_test/events")
+            .header(host)
+            .dispatch();
+        let events: Vec<serde_json::Value> =
+            serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["data"]["title"], "readme.md");
+    }
+
+    #[test]
     fn test_import_export() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

@@ -3,7 +3,7 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use aw_models::{BucketsExport, Event, TryVec};
 
@@ -42,21 +42,27 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
     for (_bucketname, mut bucket) in import.buckets {
         // Event ids are unique across all buckets in the datastore, and events are inserted
         // with INSERT OR REPLACE. An exported id (e.g. from another server) could therefore
-        // overwrite an unrelated event here, so imported events always get new ids.
-        if let Some(events) = bucket.events.take() {
-            let mut events = events.take_inner();
-            for event in &mut events {
-                event.id = None;
-            }
-            bucket.events = Some(TryVec::new(events));
-        }
+        // overwrite an unrelated event, so imported events get new ids, except when merging into
+        // an existing bucket, where an id may match that bucket's own event (see below).
+        let imported = bucket.events.take().map(|e| e.take_inner());
+        bucket.events = imported.as_ref().map(|events| {
+            TryVec::new(
+                events
+                    .iter()
+                    .cloned()
+                    .map(|mut event| {
+                        event.id = None;
+                        event
+                    })
+                    .collect(),
+            )
+        });
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(DatastoreError::BucketAlreadyExists(_)) => {
                 // Bucket already exists — merge events, skipping duplicates
                 info!("Bucket '{}' already exists, merging events", bucket.id);
-                if let Some(events) = bucket.events.take() {
-                    let events_vec = events.take_inner();
+                if let Some(events_vec) = imported {
                     if !events_vec.is_empty() {
                         // Determine time range of events to import
                         let start = events_vec.iter().map(|e| e.timestamp).min().unwrap();
@@ -92,14 +98,30 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                             .map(event_identity)
                             .collect::<Result<_, _>>()?;
 
+                        // An exported id is only kept if it names an event of this bucket with the
+                        // same start time: re-importing an updated export (e.g. a heartbeat-extended
+                        // duration) then replaces that event instead of adding an overlapping copy.
+                        let existing_starts: HashMap<i64, _> = existing
+                            .iter()
+                            .filter_map(|e| e.id.map(|id| (id, e.timestamp)))
+                            .collect();
+
                         // Filter out events already present (matched by timestamp, duration, data)
                         let new_events: Vec<_> = events_vec
                             .into_iter()
                             .map(|event| Ok((event_identity(&event)?, event)))
                             .collect::<Result<Vec<_>, HttpErrorJson>>()?
                             .into_iter()
-                            .filter_map(|(identity, event)| {
-                                (!existing_identities.contains(&identity)).then_some(event)
+                            .filter_map(|(identity, mut event)| {
+                                if existing_identities.contains(&identity) {
+                                    return None;
+                                }
+                                if event.id.is_some_and(|id| {
+                                    existing_starts.get(&id) != Some(&event.timestamp)
+                                }) {
+                                    event.id = None;
+                                }
+                                Some(event)
                             })
                             .collect();
 

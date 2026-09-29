@@ -5,7 +5,7 @@ use rocket::State;
 
 use std::collections::{BTreeMap, HashSet};
 
-use aw_models::{BucketsExport, Event};
+use aw_models::{BucketsExport, Event, TryVec};
 
 use aw_datastore::{Datastore, DatastoreError};
 
@@ -40,6 +40,16 @@ fn event_identity(
 
 fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJson> {
     for (_bucketname, mut bucket) in import.buckets {
+        // Event ids are unique across all buckets in the datastore, and events are inserted
+        // with INSERT OR REPLACE. An exported id (e.g. from another server) could therefore
+        // overwrite an unrelated event here, so imported events always get new ids.
+        if let Some(events) = bucket.events.take() {
+            let mut events = events.take_inner();
+            for event in &mut events {
+                event.id = None;
+            }
+            bucket.events = Some(TryVec::new(events));
+        }
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(DatastoreError::BucketAlreadyExists(_)) => {

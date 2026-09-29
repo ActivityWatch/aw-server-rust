@@ -627,7 +627,7 @@ mod api_tests {
         let client = Client::untracked(server).expect("valid instance");
         let host = Header::new("Host", "127.0.0.1:5600");
 
-        let import = |duration: f64, id: &str| {
+        let import = |duration: f64, id: &str, data: &str| {
             let res = client
                 .post("/api/0/import")
                 .header(ContentType::JSON)
@@ -636,7 +636,7 @@ mod api_tests {
                     r#"{{"buckets": {{"b": {{"id": "b", "type": "type", "client": "client",
                         "hostname": "hostname", "events": [{{"id": {id},
                         "timestamp": "2001-01-01T00:00:00Z", "duration": {duration},
-                        "data": {{"a": "b"}}}}]}}}}}}"#
+                        "data": {{{data}}}}}]}}}}}}"#
                 ))
                 .dispatch();
             assert_eq!(res.status(), rocket::http::Status::Ok);
@@ -649,28 +649,36 @@ mod api_tests {
             serde_json::from_str(&res.into_string().unwrap()).unwrap()
         };
 
-        import(1.0, "1");
+        import(1.0, "1", r#""a": "b""#);
         let first = events();
         assert_eq!(first.len(), 1);
         let id = first[0]["id"].to_string();
 
         // Same export re-imported: idempotent
-        import(1.0, &id);
+        import(1.0, &id, r#""a": "b""#);
         assert_eq!(events().len(), 1);
 
         // Updated export (event extended): replaces the event instead of overlapping it
-        import(5.0, &id);
+        import(5.0, &id, r#""a": "b""#);
         let updated = events();
         assert_eq!(updated.len(), 1, "{updated:?}");
         assert_eq!(updated[0]["duration"], 5.0);
         assert_eq!(updated[0]["id"].to_string(), id);
 
         // Older export of the same event must not shrink the longer local one
-        import(1.0, &id);
+        import(1.0, &id, r#""a": "b""#);
         let after_old = events();
         assert_eq!(after_old.len(), 1, "{after_old:?}");
         assert_eq!(after_old[0]["duration"], 5.0);
         assert_eq!(after_old[0]["id"].to_string(), id);
+
+        // Correction: same id+start, shorter duration, different data must replace
+        import(2.0, &id, r#""a": "corrected""#);
+        let corrected = events();
+        assert_eq!(corrected.len(), 1, "{corrected:?}");
+        assert_eq!(corrected[0]["duration"], 2.0);
+        assert_eq!(corrected[0]["data"]["a"], "corrected");
+        assert_eq!(corrected[0]["id"].to_string(), id);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use rocket::State;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use aw_models::{BucketsExport, Event, TryVec};
+use aw_models::{BucketsExport, Event};
 
 use aw_datastore::{Datastore, DatastoreError};
 
@@ -45,25 +45,28 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
         // overwrite an unrelated event, so imported events get new ids, except when merging into
         // an existing bucket, where an id may match that bucket's own event (see below).
         let imported = bucket.events.take().map(|e| e.take_inner());
-        // create_bucket inserts bucket.events atomically. Only attach a stripped clone when
-        // the bucket is new — an existing-bucket merge uses `imported` and would otherwise
-        // hold a second unused copy of the event list.
-        if datastore.get_bucket(&bucket.id).is_err() {
-            bucket.events = imported.as_ref().map(|events| {
-                TryVec::new(
-                    events
-                        .iter()
-                        .cloned()
-                        .map(|mut event| {
-                            event.id = None;
-                            event
-                        })
-                        .collect(),
-                )
-            });
-        }
+        // Never attach events to create_bucket. get_bucket is cache-only and can still
+        // report a bucket after a rolled-back create; attaching only then would create
+        // an empty bucket on retry. create_bucket itself reports BucketAlreadyExists.
+        bucket.events = None;
         match datastore.create_bucket(&bucket) {
-            Ok(_) => (),
+            Ok(_) => {
+                if let Some(mut events) = imported {
+                    if !events.is_empty() {
+                        for event in &mut events {
+                            event.id = None;
+                        }
+                        if let Err(e) = datastore.insert_events(&bucket.id, &events) {
+                            let err_msg = format!(
+                                "Failed to insert events into new bucket '{}': {e:?}",
+                                bucket.id
+                            );
+                            warn!("{}", err_msg);
+                            return Err(HttpErrorJson::new(Status::InternalServerError, err_msg));
+                        }
+                    }
+                }
+            }
             Err(DatastoreError::BucketAlreadyExists(_)) => {
                 // Bucket already exists — merge events, skipping duplicates
                 info!("Bucket '{}' already exists, merging events", bucket.id);
@@ -127,7 +130,13 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                                         Some(existing_event)
                                             if existing_event.timestamp == event.timestamp =>
                                         {
-                                            if event.duration < existing_event.duration {
+                                            // Stale backup of the same activity: keep the
+                                            // longer local event. A data change at the same
+                                            // id+start is a correction and must replace,
+                                            // even if duration shrank.
+                                            if event.duration < existing_event.duration
+                                                && event.data == existing_event.data
+                                            {
                                                 return None;
                                             }
                                         }

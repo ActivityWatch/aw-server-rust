@@ -88,6 +88,11 @@ pub struct AWConfig {
     // custom visualizations are located.
     #[serde(default = "default_custom_static")]
     pub custom_static: std::collections::HashMap<String, String>,
+
+    /// Cache query results for finished past periods in memory.
+    /// See `endpoints::query_cache`. Set to false to disable.
+    #[serde(default = "default_true")]
+    pub query_cache: bool,
 }
 
 impl Default for AWConfig {
@@ -100,6 +105,7 @@ impl Default for AWConfig {
             cors: default_cors(),
             cors_regex: default_cors(),
             custom_static: default_custom_static(),
+            query_cache: true,
         }
     }
 }
@@ -149,6 +155,10 @@ fn default_port() -> u16 {
 
 fn default_custom_static() -> std::collections::HashMap<String, String> {
     std::collections::HashMap::new()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Config filename for a profile.

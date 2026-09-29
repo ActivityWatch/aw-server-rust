@@ -47,6 +47,13 @@ aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
 
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "query_cache"
+harness = false
+
 [target.'cfg(target_os="linux")'.dependencies]
 sd-notify = "0.4.2"
 

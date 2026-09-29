@@ -16,11 +16,11 @@ fn start_server() -> (u16, rocket::Shutdown) {
         .local_addr()
         .unwrap()
         .port();
-    let state = ServerState {
-        datastore: aw_datastore::Datastore::new_in_memory(false),
-        asset_resolver: AssetResolver::new(None),
-        device_id: "test_id".to_string(),
-    };
+    let state = ServerState::new(
+        aw_datastore::Datastore::new_in_memory(false),
+        AssetResolver::new(None),
+        "test_id".to_string(),
+    );
     let config = aw_server::config::AWConfig {
         port,
         testing: true,

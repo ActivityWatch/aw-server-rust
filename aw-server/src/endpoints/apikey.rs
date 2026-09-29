@@ -168,11 +168,11 @@ mod tests {
     use crate::endpoints;
 
     fn setup_testserver(api_key: Option<String>) -> Rocket<rocket::Build> {
-        let state = endpoints::ServerState {
-            datastore: aw_datastore::Datastore::new_in_memory(false),
-            asset_resolver: endpoints::AssetResolver::new(None),
-            device_id: "test_id".to_string(),
-        };
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
         let mut aw_config = AWConfig::default();
         aw_config.auth.api_key = api_key;
         endpoints::build_rocket(state, aw_config)

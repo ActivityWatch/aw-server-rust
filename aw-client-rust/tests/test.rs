@@ -114,11 +114,11 @@ mod test {
         use aw_server::endpoints::AssetResolver;
         use aw_server::endpoints::ServerState;
 
-        let state = ServerState {
-            datastore: aw_datastore::Datastore::new_in_memory(false),
-            asset_resolver: AssetResolver::new(None),
-            device_id: "test_id".to_string(),
-        };
+        let state = ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            AssetResolver::new(None),
+            "test_id".to_string(),
+        );
         let aw_config = aw_server::config::AWConfig {
             port,
             testing: true,

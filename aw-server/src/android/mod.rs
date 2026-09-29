@@ -188,15 +188,17 @@ pub mod android {
 
         // FIXME: Why is unsafe needed here? Can we get rid of it?
         unsafe {
-            let server_state: ServerState = endpoints::ServerState {
-                datastore: openDatastore(),
-                asset_resolver: endpoints::AssetResolver::new(None),
-                device_id: device_id::get_device_id(),
-            };
+            let mut server_state: ServerState = endpoints::ServerState::new(
+                openDatastore(),
+                endpoints::AssetResolver::new(None),
+                device_id::get_device_id(),
+            );
             info!("Using server_state:: device_id: {}", server_state.device_id);
 
             let mut server_config = crate::config::create_config("default", None);
             server_config.port = port;
+            // Apply the configurable opt-out, like the desktop entry point does.
+            server_state.query_cache_enabled = server_config.query_cache;
 
             let _ = endpoints::build_rocket(server_state, server_config)
                 .launch()

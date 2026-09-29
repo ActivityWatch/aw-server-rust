@@ -122,11 +122,11 @@ mod tests {
     use crate::endpoints;
 
     fn setup_testserver(address: String) -> Rocket<rocket::Build> {
-        let state = endpoints::ServerState {
-            datastore: aw_datastore::Datastore::new_in_memory(false),
-            asset_resolver: endpoints::AssetResolver::new(None),
-            device_id: "test_id".to_string(),
-        };
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
         let aw_config = AWConfig {
             address,
             ..AWConfig::default()

@@ -129,18 +129,26 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                                     )
                                 })?;
 
-                        // Filter out events already present (matched by timestamp, duration, data)
+                        // Filter out events already present (matched by timestamp, duration, data).
+                        // Stored rows may predate a privacy rule (raw/unredacted) or postdate it
+                        // (redacted), so match each incoming event against both its raw and its
+                        // filtered form. Comparing only the filtered form would make a rule enabled
+                        // after storage append copies of rows the raw comparison used to skip.
                         let new_events: Vec<_> = events_vec
                             .into_iter()
                             .zip(filtered)
                             .filter_map(|(event, filtered)| filtered.map(|f| (event, f)))
                             .map(|(event, filtered)| {
-                                Ok((event_identity(&filtered)?, event, filtered))
+                                let raw_identity = event_identity(&event)?;
+                                let filtered_identity = event_identity(&filtered)?;
+                                Ok((raw_identity, filtered_identity, event, filtered))
                             })
                             .collect::<Result<Vec<_>, HttpErrorJson>>()?
                             .into_iter()
-                            .filter_map(|(identity, mut event, filtered)| {
-                                if existing_identities.contains(&identity) {
+                            .filter_map(|(raw_identity, filtered_identity, mut event, filtered)| {
+                                if existing_identities.contains(&raw_identity)
+                                    || existing_identities.contains(&filtered_identity)
+                                {
                                     return None;
                                 }
                                 if let Some(id) = event.id {
@@ -151,9 +159,12 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                                             // Stale backup of the same activity: keep the
                                             // longer local event. A data change at the same
                                             // id+start is a correction and must replace,
-                                            // even if duration shrank.
+                                            // even if duration shrank. Compare both forms:
+                                            // a stored row that predates the rule is raw,
+                                            // so the filtered incoming data would not match.
                                             if event.duration < existing_event.duration
-                                                && filtered.data == existing_event.data
+                                                && (filtered.data == existing_event.data
+                                                    || event.data == existing_event.data)
                                             {
                                                 return None;
                                             }

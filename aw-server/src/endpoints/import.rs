@@ -112,13 +112,35 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                             .filter_map(|e| e.id.map(|id| (id, e)))
                             .collect();
 
+                        // Stored events went through the privacy filter, so compare the
+                        // *filtered* form of each incoming event (a redacted title never
+                        // matches its raw source). The raw event is what gets inserted: the
+                        // datastore filters it once on insert, so rules are never applied twice.
+                        // Events the filter would drop are skipped here.
+                        let filtered =
+                            datastore
+                                .filter_events(&bucket.id, &events_vec)
+                                .map_err(|e| {
+                                    HttpErrorJson::new(
+                                        Status::InternalServerError,
+                                        format!(
+                                            "Failed to preview privacy filter for '{}': {e:?}",
+                                            bucket.id
+                                        ),
+                                    )
+                                })?;
+
                         // Filter out events already present (matched by timestamp, duration, data)
                         let new_events: Vec<_> = events_vec
                             .into_iter()
-                            .map(|event| Ok((event_identity(&event)?, event)))
+                            .zip(filtered)
+                            .filter_map(|(event, filtered)| filtered.map(|f| (event, f)))
+                            .map(|(event, filtered)| {
+                                Ok((event_identity(&filtered)?, event, filtered))
+                            })
                             .collect::<Result<Vec<_>, HttpErrorJson>>()?
                             .into_iter()
-                            .filter_map(|(identity, mut event)| {
+                            .filter_map(|(identity, mut event, filtered)| {
                                 if existing_identities.contains(&identity) {
                                     return None;
                                 }
@@ -132,7 +154,7 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                                             // id+start is a correction and must replace,
                                             // even if duration shrank.
                                             if event.duration < existing_event.duration
-                                                && event.data == existing_event.data
+                                                && filtered.data == existing_event.data
                                             {
                                                 return None;
                                             }

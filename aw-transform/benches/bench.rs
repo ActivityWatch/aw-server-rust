@@ -109,10 +109,75 @@ fn bench_merge_events_by_keys(c: &mut Criterion) {
     group.finish();
 }
 
+const SIZES: [i64; 3] = [1_000, 10_000, 100_000];
+
+fn bench_flood(c: &mut Criterion) {
+    let mut group = c.benchmark_group("flood");
+    for n in SIZES {
+        let events = create_events(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &events, |b, events| {
+            b.iter_batched(
+                || events.clone(),
+                |events| flood(events, Duration::seconds(5)),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_sort_by_timestamp(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sort_by_timestamp");
+    for n in SIZES {
+        // Reversed input so the sort has real work to do
+        let mut events = create_events(n);
+        events.reverse();
+        group.bench_with_input(BenchmarkId::from_parameter(n), &events, |b, events| {
+            b.iter_batched(|| events.clone(), sort_by_timestamp, BatchSize::LargeInput);
+        });
+    }
+    group.finish();
+}
+
+fn bench_filter_keyvals(c: &mut Criterion) {
+    let mut group = c.benchmark_group("filter_keyvals");
+    let vals = [json!(1), json!(2), json!(3)];
+    for n in SIZES {
+        let events = create_events(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &events, |b, events| {
+            b.iter_batched(
+                || events.clone(),
+                |events| filter_keyvals(events, "number", &vals),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_chunk_events_by_key(c: &mut Criterion) {
+    let mut group = c.benchmark_group("chunk_events_by_key");
+    for n in SIZES {
+        let events = create_events(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &events, |b, events| {
+            b.iter_batched(
+                || events.clone(),
+                |events| chunk_events_by_key(events, "number"),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_filter_period_intersect,
     bench_union_no_overlap,
-    bench_merge_events_by_keys
+    bench_merge_events_by_keys,
+    bench_flood,
+    bench_sort_by_timestamp,
+    bench_filter_keyvals,
+    bench_chunk_events_by_key
 );
 criterion_main!(benches);

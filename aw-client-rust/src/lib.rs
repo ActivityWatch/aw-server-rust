@@ -244,6 +244,17 @@ impl AwClient {
         Ok(())
     }
 
+    /// Delete a bucket with `?force=1`.
+    ///
+    /// aw-server-python refuses to delete buckets outside testing mode unless forced;
+    /// aw-server-rust deletes either way.
+    pub async fn delete_bucket_force(&self, bucketname: &str) -> Result<(), reqwest::Error> {
+        let mut url = self.api_url(&["buckets", bucketname]);
+        url.query_pairs_mut().append_pair("force", "1");
+        Self::send_success(self.client.delete(url)).await?;
+        Ok(())
+    }
+
     pub async fn query(
         &self,
         query: &str,

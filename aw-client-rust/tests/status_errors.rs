@@ -85,6 +85,36 @@ fn spawn_mock_server(responses: Vec<MockResponse>) -> (u16, thread::JoinHandle<V
 }
 
 #[test]
+fn delete_bucket_force_sends_force_param() {
+    let ok = || MockResponse {
+        status_line: "200 OK",
+        content_type: "application/json",
+        body: "",
+    };
+    let (port, handle) = spawn_mock_server(vec![ok(), ok(), ok()]);
+    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").expect("create client");
+
+    block_on(client.delete_bucket("bucket")).expect("delete bucket");
+    block_on(client.delete_bucket_force("bucket")).expect("force delete bucket");
+    let blocking_client =
+        blocking::AwClient::new("127.0.0.1", port, "aw-client-rust-test-blocking")
+            .expect("create blocking client");
+    blocking_client
+        .delete_bucket_force("a#b")
+        .expect("blocking force delete bucket");
+
+    let requests = handle.join().expect("join mock server");
+    assert_eq!(
+        requests,
+        vec![
+            "DELETE /api/0/buckets/bucket HTTP/1.1",
+            "DELETE /api/0/buckets/bucket?force=1 HTTP/1.1",
+            "DELETE /api/0/buckets/a%23b?force=1 HTTP/1.1",
+        ]
+    );
+}
+
+#[test]
 fn async_client_rejects_non_success_statuses() {
     let (port, handle) = spawn_mock_server(vec![
         MockResponse {

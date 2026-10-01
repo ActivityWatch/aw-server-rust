@@ -164,6 +164,7 @@ pub enum Command {
 /// filters inserts/heartbeats, so every write/delete of this key (and startup)
 /// must reload the engine. RefreshPrivacyFilter exists for explicit reloads.
 const PRIVACY_FILTERS_KEY: &str = "settings.privacy_filters";
+const STOPWATCH_BUCKET_TYPE: &str = "general.stopwatch";
 
 fn _unwrap_empty_response(response: Response) -> Result<(), DatastoreError> {
     match response {
@@ -327,14 +328,8 @@ impl DatastoreWorker {
 
             self.uncommitted_events = 0;
             self.commit = false;
-            // ForceCommit and Close promise the caller that their data is
-            // committed, so their acks are held back until the transaction
-            // below has actually committed. Acking first (as before) let a
-            // caller reopen the database and read a pre-commit snapshot —
-            // harmless under the rollback journal's locking, but a real race
-            // in WAL mode where readers never block on the writer.
-            // All other commands are acked immediately: a watcher heartbeat
-            // must not wait up to 15 s for the batch commit.
+            // Commands that force a commit are acknowledged only after it
+            // succeeds. Other commands can return before the batch commits.
             let mut deferred_ack = None;
             loop {
                 let (request, response_sender) = match self.responder.poll() {
@@ -346,10 +341,8 @@ impl DatastoreWorker {
                         break;
                     }
                 };
-                let ack_after_commit = matches!(request, Command::ForceCommit() | Command::Close());
                 let response = self.handle_request(request, &mut ds, &tx);
-                if ack_after_commit {
-                    // Both commands force a commit, so the loop ends here.
+                if self.commit || self.quit {
                     deferred_ack = Some((response_sender, response));
                     break;
                 }
@@ -458,6 +451,9 @@ impl DatastoreWorker {
                     Ok(events) => {
                         self.uncommitted_events += events.len();
                         self.last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
+
+                        // Manual timer changes must be durable before the UI confirms them.
+                        self.commit |= ds.get_bucket(&bucketname)?._type == STOPWATCH_BUCKET_TYPE;
                         Ok(Response::EventList(events))
                     }
                     Err(e) => Err(e),
@@ -489,6 +485,7 @@ impl DatastoreWorker {
                 ) {
                     Ok(e) => {
                         self.uncommitted_events += 1;
+                        self.commit |= ds.get_bucket(&bucketname)?._type == STOPWATCH_BUCKET_TYPE;
                         Ok(Response::Event(e))
                     }
                     Err(e) => Err(e),
@@ -519,7 +516,10 @@ impl DatastoreWorker {
             }
             Command::DeleteEventsById(bucketname, event_ids) => {
                 match ds.delete_events_by_id(tx, &bucketname, event_ids) {
-                    Ok(()) => Ok(Response::Empty()),
+                    Ok(()) => {
+                        self.commit |= ds.get_bucket(&bucketname)?._type == STOPWATCH_BUCKET_TYPE;
+                        Ok(Response::Empty())
+                    }
                     Err(e) => Err(e),
                 }
             }

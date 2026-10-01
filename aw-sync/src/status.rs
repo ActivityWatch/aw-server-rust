@@ -302,8 +302,13 @@ fn collect_warnings(
             }
         }
         if info.buckets.iter().any(|b| b.id.contains("-synced-from-")) {
+            let fix = if entry.kind == SyncEntryKind::OwnStaging {
+                "; prune with `aw-sync status --clean-legacy --dry-run`"
+            } else {
+                "; only its owning device can prune it"
+            };
             warnings.push(format!(
-                "{} still contains re-exported …-synced-from-… buckets (leftover from before ActivityWatch/aw-server-rust#648)",
+                "{} still contains re-exported …-synced-from-… buckets (leftover from before ActivityWatch/aw-server-rust#648){fix}",
                 entry.path.display()
             ));
         }

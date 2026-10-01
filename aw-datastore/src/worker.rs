@@ -18,6 +18,7 @@ use rusqlite::TransactionBehavior;
 
 use aw_models::Bucket;
 use aw_models::Event;
+use aw_models::TryVec;
 
 use crate::privacy_filter::PrivacyFilterEngine;
 use crate::DatastoreError;
@@ -115,6 +116,7 @@ pub enum Response {
     BucketMap(HashMap<String, Bucket>),
     Event(Event),
     EventList(Vec<Event>),
+    FilteredEvents(Vec<Option<Event>>),
     Count(i64),
     KeyValue(String),
     KeyValues(HashMap<String, String>),
@@ -136,6 +138,7 @@ pub enum Command {
     GetBucket(String),
     GetBuckets(),
     InsertEvents(String, Vec<Event>),
+    FilterEvents(String, Vec<Event>),
     Heartbeat(String, Event, f64),
     GetEvent(String, i64),
     GetEvents(
@@ -430,13 +433,26 @@ impl DatastoreWorker {
                 drop(writer);
                 Ok(Response::ExportCsv(file))
             }
-            Command::CreateBucket(bucket) => match ds.create_bucket(tx, bucket) {
-                Ok(_) => {
-                    self.commit = true;
-                    Ok(Response::Empty())
+            Command::CreateBucket(mut bucket) => {
+                // Attached events (import) must use the same privacy gate as
+                // InsertEvents, or a new-bucket import stores data the rules
+                // would drop or redact.
+                if let Some(events) = bucket.events.take() {
+                    let filtered = self
+                        .privacy_engine
+                        .filter_events(&bucket.id, events.take_inner());
+                    if !filtered.is_empty() {
+                        bucket.events = Some(TryVec::new(filtered));
+                    }
                 }
-                Err(e) => Err(e),
-            },
+                match ds.create_bucket(tx, bucket) {
+                    Ok(_) => {
+                        self.commit = true;
+                        Ok(Response::Empty())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             Command::DeleteBucket(bucketname) => match ds.delete_bucket(tx, &bucketname) {
                 Ok(_) => {
                     self.commit = true;
@@ -463,6 +479,12 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
+            Command::FilterEvents(bucketname, events) => Ok(Response::FilteredEvents(
+                events
+                    .into_iter()
+                    .map(|e| self.privacy_engine.filter_event(&bucketname, e))
+                    .collect(),
+            )),
             Command::Heartbeat(bucketname, event, pulsetime) => {
                 // Apply privacy filter to heartbeat
                 let filtered = match self.privacy_engine.filter_event(&bucketname, event.clone()) {
@@ -749,6 +771,21 @@ impl Datastore {
         let cmd = Command::InsertEvents(bucket_id.to_string(), events.to_vec());
         match self.request(cmd)? {
             Response::EventList(events) => Ok(events),
+            _ => panic!("Invalid response"),
+        }
+    }
+
+    /// Preview what the privacy filter would store for each event (`None` = dropped),
+    /// without inserting anything. Lets callers compare an incoming event against stored
+    /// (already filtered) events while the rules still run exactly once, on insert.
+    pub fn filter_events(
+        &self,
+        bucket_id: &str,
+        events: &[Event],
+    ) -> Result<Vec<Option<Event>>, DatastoreError> {
+        let cmd = Command::FilterEvents(bucket_id.to_string(), events.to_vec());
+        match self.request(cmd)? {
+            Response::FilteredEvents(events) => Ok(events),
             _ => panic!("Invalid response"),
         }
     }

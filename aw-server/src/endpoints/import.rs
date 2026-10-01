@@ -3,7 +3,7 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use aw_models::{BucketsExport, Event, TryVec};
 
@@ -42,21 +42,31 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
     for (_bucketname, mut bucket) in import.buckets {
         // Event ids are unique across all buckets in the datastore, and events are inserted
         // with INSERT OR REPLACE. An exported id (e.g. from another server) could therefore
-        // overwrite an unrelated event here, so imported events always get new ids.
-        if let Some(events) = bucket.events.take() {
-            let mut events = events.take_inner();
-            for event in &mut events {
-                event.id = None;
+        // overwrite an unrelated event, so imported events get new ids, except when merging into
+        // an existing bucket, where an id may match that bucket's own event (see below).
+        let imported = bucket.events.take().map(|e| e.take_inner());
+        // Attach a stripped clone so create_bucket inserts events in the same
+        // datastore request (same SQLite transaction). Splitting create + insert
+        // across two requests can persist an empty bucket if insert fails or the
+        // process dies in between. Keep `imported` with original ids for the
+        // existing-bucket merge path. Do not consult get_bucket: it is cache-only
+        // and can report a bucket after a rolled-back create; create_bucket itself
+        // reports BucketAlreadyExists from the SQL constraint.
+        if let Some(ref events) = imported {
+            if !events.is_empty() {
+                let mut stripped = events.clone();
+                for event in &mut stripped {
+                    event.id = None;
+                }
+                bucket.events = Some(TryVec::new(stripped));
             }
-            bucket.events = Some(TryVec::new(events));
         }
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(DatastoreError::BucketAlreadyExists(_)) => {
                 // Bucket already exists — merge events, skipping duplicates
                 info!("Bucket '{}' already exists, merging events", bucket.id);
-                if let Some(events) = bucket.events.take() {
-                    let events_vec = events.take_inner();
+                if let Some(events_vec) = imported {
                     if !events_vec.is_empty() {
                         // Determine time range of events to import
                         let start = events_vec.iter().map(|e| e.timestamp).min().unwrap();
@@ -92,14 +102,44 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                             .map(event_identity)
                             .collect::<Result<_, _>>()?;
 
+                        // An exported id is only kept if it names an event of this bucket with the
+                        // same start time: re-importing an updated export (e.g. a heartbeat-extended
+                        // duration) then replaces that event instead of adding an overlapping copy.
+                        // An older/shorter export must not clobber a longer local event.
+                        let existing_by_id: HashMap<i64, &Event> = existing
+                            .iter()
+                            .filter_map(|e| e.id.map(|id| (id, e)))
+                            .collect();
+
                         // Filter out events already present (matched by timestamp, duration, data)
                         let new_events: Vec<_> = events_vec
                             .into_iter()
                             .map(|event| Ok((event_identity(&event)?, event)))
                             .collect::<Result<Vec<_>, HttpErrorJson>>()?
                             .into_iter()
-                            .filter_map(|(identity, event)| {
-                                (!existing_identities.contains(&identity)).then_some(event)
+                            .filter_map(|(identity, mut event)| {
+                                if existing_identities.contains(&identity) {
+                                    return None;
+                                }
+                                if let Some(id) = event.id {
+                                    match existing_by_id.get(&id) {
+                                        Some(existing_event)
+                                            if existing_event.timestamp == event.timestamp =>
+                                        {
+                                            // Stale backup of the same activity: keep the
+                                            // longer local event. A data change at the same
+                                            // id+start is a correction and must replace,
+                                            // even if duration shrank.
+                                            if event.duration < existing_event.duration
+                                                && event.data == existing_event.data
+                                            {
+                                                return None;
+                                            }
+                                        }
+                                        _ => event.id = None,
+                                    }
+                                }
+                                Some(event)
                             })
                             .collect();
 

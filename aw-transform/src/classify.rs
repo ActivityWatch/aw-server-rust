@@ -874,7 +874,36 @@ fn test_categorize_matches_naive_best_of_all() {
             } else {
                 Some(vec![KEYS[rng.below(KEYS.len() as u64) as usize].to_string()])
             };
-            let rule = Rule::Regex(RegexRule::new(pattern, ignore_case, select_keys).unwrap());
+            let mut rule = Rule::Regex(RegexRule::new(pattern, ignore_case, select_keys).unwrap());
+            // Occasionally combine rules logically, so the naive oracle cross-check
+            // also covers the new and/or branch (including nesting).
+            if rng.below(3) == 0 {
+                let pattern2 = PATTERNS[rng.below(PATTERNS.len() as u64) as usize];
+                let ignore_case2 = rng.below(2) == 0;
+                let select_keys2 = if rng.below(2) == 0 {
+                    None
+                } else {
+                    Some(vec![KEYS[rng.below(KEYS.len() as u64) as usize].to_string()])
+                };
+                let second =
+                    Rule::Regex(RegexRule::new(pattern2, ignore_case2, select_keys2).unwrap());
+                let mut subrules = vec![rule, second];
+                if rng.below(4) == 0 {
+                    let pattern3 = PATTERNS[rng.below(PATTERNS.len() as u64) as usize];
+                    let third = Rule::Regex(RegexRule::new(pattern3, false, None).unwrap());
+                    let inner = Rule::Logical(
+                        LogicalRule::new(vec![subrules.pop().unwrap(), third], LogicalOperator::Or)
+                            .unwrap(),
+                    );
+                    subrules.push(inner);
+                }
+                let operator = if rng.below(2) == 0 {
+                    LogicalOperator::And
+                } else {
+                    LogicalOperator::Or
+                };
+                rule = Rule::Logical(LogicalRule::new(subrules, operator).unwrap());
+            }
             let depth = 1 + rng.below(3) as usize;
             let category: Vec<String> = (0..depth).map(|i| format!("Cat{case}_{i}")).collect();
             let mut cr = CategoryRule::new(category, rule);

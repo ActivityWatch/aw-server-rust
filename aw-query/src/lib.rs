@@ -15,13 +15,13 @@ mod ast;
 mod functions;
 mod interpret;
 mod lexer;
+// `unknown_lints` and `clippy::block_scrutinee` are already allowed inside
+// parser.rs itself (inner `#![allow(...)]`); listing them here too is what
+// triggered clippy::duplicated_attributes (ActivityWatch/aw-server-rust#771).
 #[allow(
-    clippy::block_scrutinee,
     clippy::match_single_binding,
     clippy::redundant_closure_call,
-    unused_braces,
-    unknown_lints,
-    clippy::block_scrutinee
+    unused_braces
 )]
 mod parser;
 

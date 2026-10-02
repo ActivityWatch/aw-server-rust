@@ -20,10 +20,15 @@ fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     // could not parse and therefore silently skipped.
     let addr = SocketAddr::new(host.parse::<IpAddr>().ok()?, port);
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
-    // A per-read timeout bounds each read, not the whole response; the response
-    // is additionally size-bounded below so a chatty listener cannot stall startup.
+    // A per-read/write timeout bounds each operation, not the whole exchange; the
+    // response is additionally size-bounded below so a chatty listener cannot stall
+    // startup, and the write timeout stops a listener that accepts but never reads
+    // from blocking us in write_all.
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
         .ok()?;
 
     // IPv6 literals must be bracketed in the Host header (RFC 7230).

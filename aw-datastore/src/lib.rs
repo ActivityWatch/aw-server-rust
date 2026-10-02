@@ -28,6 +28,7 @@ pub use self::datastore::MIN_READ_COMPAT_DB_VERSION;
 pub use self::datastore::NEWEST_DB_VERSION;
 
 pub use self::worker::Datastore;
+pub use self::worker::LegacyImportOptions;
 
 #[derive(Clone)]
 pub enum DatastoreMethod {

@@ -63,6 +63,11 @@ impl<'a> MatchValues<'a> {
 pub struct RegexRule {
     regex: Arc<Regex>,
     select_keys: Option<Vec<String>>,
+    // An empty pattern compiles to a match-all regex, which would silently
+    // categorize every event. aw-core's Python `Rule` deliberately never
+    // matches on an empty regex (see ActivityWatch/aw-webui#1026); mirror
+    // that here instead of diverging between the two servers.
+    never_matches: bool,
 }
 
 impl RegexRule {
@@ -82,6 +87,8 @@ impl RegexRule {
                 ));
             }
         }
+
+        let never_matches = regex_str.is_empty();
 
         // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
         // so we need to prefix with `(?i)` to make it case insensitive.
@@ -106,10 +113,17 @@ impl RegexRule {
             re
         };
 
-        Ok(RegexRule { regex, select_keys })
+        Ok(RegexRule {
+            regex,
+            select_keys,
+            never_matches,
+        })
     }
 
     fn value_matches(&self, value: &serde_json::Value) -> bool {
+        if self.never_matches {
+            return false;
+        }
         match value.as_str() {
             Some(value) => self.regex.is_match(value).unwrap_or(false),
             None => false,
@@ -124,6 +138,9 @@ impl RegexRule {
 /// compatibility (or have to maintain "old" query2 functions).
 impl RuleTrait for RegexRule {
     fn matches(&self, event: &Event, values: &MatchValues) -> bool {
+        if self.never_matches {
+            return false;
+        }
         match &self.select_keys {
             Some(select_keys) => select_keys
                 .iter()
@@ -145,9 +162,14 @@ impl RuleTrait for RegexRule {
 
 impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
+        // Mirror `RegexRule::new`: derive `never_matches` from the source
+        // pattern so an empty regex passed through this public conversion
+        // cannot silently match every event.
+        let never_matches = re.as_str().is_empty();
         Rule::Regex(RegexRule {
             regex: Arc::new(re),
             select_keys: None,
+            never_matches,
         })
     }
 }
@@ -398,6 +420,44 @@ fn test_rule_select_keys_empty_list() {
     // silently producing a rule that never matches anything.
     let result = RegexRule::new("test", false, Some(vec![]));
     assert!(result.is_err());
+}
+
+#[test]
+fn test_empty_regex_never_matches() {
+    // An empty pattern compiles to a match-all regex in fancy_regex. aw-core's
+    // Python `Rule` deliberately never matches on an empty regex (it would
+    // "erroneously match everything"); aw-server-rust must agree, or the two
+    // servers categorize the same rule set differently.
+    let mut event = Event::default();
+    event
+        .data
+        .insert("test".into(), serde_json::json!("just a test"));
+
+    let no_select_keys = Rule::Regex(RegexRule::new("", false, None).unwrap());
+    assert!(!rule_matches(&no_select_keys, &event));
+
+    let with_select_keys =
+        Rule::Regex(RegexRule::new("", false, Some(vec!["test".into()])).unwrap());
+    assert!(!rule_matches(&with_select_keys, &event));
+
+    // The public `Rule::from(Regex)` conversion must not bypass the guard:
+    // `Regex::new("")` compiles to a match-all regex, so the derived flag has
+    // to come from the source pattern, not default to `false`.
+    let via_from = Rule::from(Regex::new("").unwrap());
+    assert!(!rule_matches(&via_from, &event));
+
+    // Also verify it never matches via the public `categorize` entry point.
+    let events = categorize(
+        vec![event],
+        &[CategoryRule::new(
+            vec!["Everything".into()],
+            Rule::Regex(RegexRule::new("", false, None).unwrap()),
+        )],
+    );
+    assert_eq!(
+        category_of(&events),
+        &serde_json::json!(vec!["Uncategorized"])
+    );
 }
 #[test]
 fn test_categorize() {

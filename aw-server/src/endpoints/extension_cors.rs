@@ -257,12 +257,14 @@ mod tests {
             endpoints::AssetResolver::new(None),
             "test_id".to_string(),
         );
-        let mut aw_config = AWConfig::default();
         // Pin the port: the default is derived from a mutable global that other
         // tests flip via create_config(), which would otherwise make the
         // allowed webui origin depend on test execution order.
-        aw_config.port = 5600;
-        aw_config.cors_regex = cors_regex;
+        let aw_config = AWConfig {
+            port: 5600,
+            cors_regex,
+            ..Default::default()
+        };
         endpoints::build_rocket(state, aw_config)
     }
 

@@ -722,7 +722,7 @@ mod tests {
 
         // Confirm segment exists in manifest
         {
-            let m = Manifest::load_or_default(dir.path(), device_id, &hostname).unwrap();
+            let m = Manifest::load_or_default(dir.path(), device_id, hostname).unwrap();
             assert_eq!(m.buckets[&bucket.id].segments.len(), 1);
         }
 
@@ -738,7 +738,7 @@ mod tests {
         let events_b = vec![make_event(120, 2)];
         writer.write_events(&bucket, &events_b).unwrap();
 
-        let m = Manifest::load_or_default(dir.path(), device_id, &hostname).unwrap();
+        let m = Manifest::load_or_default(dir.path(), device_id, hostname).unwrap();
         let entry = &m.buckets[&bucket.id];
         // Gen 1 entry must not be present — it would have a stale/empty sha256
         for seg in &entry.segments {

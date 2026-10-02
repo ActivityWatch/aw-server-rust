@@ -268,6 +268,9 @@ async fn main() -> Result<(), rocket::Error> {
         );
     }
 
+    // Rocket owns the server state; keep a handle so the DB can be closed
+    // (final commit + WAL checkpoint) after a graceful shutdown.
+    let datastore_handle = datastore.clone();
     let server_state = endpoints::ServerState {
         query_cache_enabled: config.query_cache,
         // Even if legacy_import is set to true it is disabled on Android so
@@ -280,7 +283,12 @@ async fn main() -> Result<(), rocket::Error> {
         .await?;
     #[cfg(target_os = "linux")]
     let _ = sd_notify::notify(true, &[NotifyState::Ready]);
-    _rocket.launch().await?;
+    let launched = _rocket.launch().await;
+    // Commit the open batch and checkpoint the WAL before exiting. Otherwise
+    // the worker only notices the dropped handles (logging a spurious
+    // "DB worker quitting" ERROR) and commits in a race with process exit.
+    datastore_handle.close();
+    launched?;
 
     Ok(())
 }

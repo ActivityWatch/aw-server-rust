@@ -254,6 +254,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 bucket::bucket_event_count,
                 bucket::bucket_events_get_single,
                 bucket::bucket_events_delete_by_id,
+                bucket::bucket_events_delete_many,
                 bucket::bucket_export
             ],
         )

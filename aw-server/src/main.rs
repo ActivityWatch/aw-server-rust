@@ -4,6 +4,78 @@ extern crate log;
 use std::env;
 use std::path::PathBuf;
 
+/// Probe `host:port` to see whether ActivityWatch is already listening there.
+///
+/// Sends a plain HTTP/1.0 GET to `/api/0/info` using only std networking (no
+/// extra dependency). Returns a human-readable message if the endpoint responds
+/// as an ActivityWatch server; `None` when the port is free or is owned by
+/// something unrecognised.
+fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    // Rocket binds `address` as an IpAddr, so parse it the same way. This also
+    // handles IPv6 literals, which the previous `format!("{host}:{port}")` form
+    // could not parse and therefore silently skipped.
+    let addr = SocketAddr::new(host.parse::<IpAddr>().ok()?, port);
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
+    // A per-read/write timeout bounds each operation, not the whole exchange; the
+    // response is additionally size-bounded below so a chatty listener cannot stall
+    // startup, and the write timeout stops a listener that accepts but never reads
+    // from blocking us in write_all.
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+
+    // IPv6 literals must be bracketed in the Host header (RFC 7230).
+    let host_header = match addr.ip() {
+        IpAddr::V6(_) => format!("[{}]", addr.ip()),
+        ip => ip.to_string(),
+    };
+    let req = format!(
+        "GET /api/0/info HTTP/1.0\r\nHost: {host_header}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+
+    // `set_read_timeout` applies to each read, not the whole response, so cap the
+    // bytes buffered from a port owned by an unknown process.
+    let mut buf = String::new();
+    let _ = stream.take(16 * 1024).read_to_string(&mut buf);
+
+    // Body starts after the first blank line.
+    let body = buf.split("\r\n\r\n").nth(1)?;
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+
+    // Verify it looks like an ActivityWatch info payload. Requiring the
+    // AW-specific hostname/device_id fields (not just a version substring)
+    // avoids misreading an unrelated service that happens to serve JSON.
+    let version = v["version"].as_str()?;
+    let hostname = v["hostname"].as_str()?;
+    v["device_id"].as_str()?;
+    if !version.contains("rust") && !version.contains("python") {
+        return None;
+    }
+    Some(format!(
+        "ActivityWatch server {version} ({hostname}) is already running on \
+         port {port}; open http://localhost:{port} in your browser or stop it first"
+    ))
+}
+
+/// Returns a per-OS hint for locating the process that owns a port.
+fn port_owner_hint(port: u16) -> String {
+    if cfg!(target_os = "windows") {
+        format!("netstat -ano | findstr :{port}")
+    } else if cfg!(target_os = "macos") {
+        format!("lsof -i :{port}")
+    } else {
+        format!("ss -ltnp | grep :{port}  (or: lsof -i :{port})")
+    }
+}
+
 use clap::crate_version;
 use clap::Parser;
 
@@ -156,6 +228,35 @@ async fn main() -> Result<(), rocket::Error> {
             if !std::path::Path::new(path).exists() {
                 error!("custom_static path for {} does not exist ({})", name, path);
                 config.custom_static.remove(name);
+            }
+        }
+    }
+
+    // If the port is already occupied, emit a helpful message before Rocket
+    // produces a generic "Address already in use" IO error. This runs before the
+    // datastore is opened so a port conflict never interrupts a legacy import or
+    // leaves a half-initialised database behind, and so exit() has nothing to clean up.
+    {
+        use std::net::{IpAddr, SocketAddr, TcpStream};
+        use std::time::Duration;
+        if let Ok(ip) = config.address.parse::<IpAddr>() {
+            let addr = SocketAddr::new(ip, config.port);
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+                match probe_aw_on_port(&config.address, config.port) {
+                    Some(msg) => {
+                        error!("{}", msg);
+                        std::process::exit(1);
+                    }
+                    None => {
+                        error!(
+                            "Port {} is already in use by another program. \
+                             To identify it, run: {}",
+                            config.port,
+                            port_owner_hint(config.port)
+                        );
+                        std::process::exit(1);
+                    }
+                }
             }
         }
     }

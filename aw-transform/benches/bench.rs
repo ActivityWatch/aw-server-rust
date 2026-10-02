@@ -40,6 +40,53 @@ fn create_events(num_events: i64) -> Vec<Event> {
     event_list
 }
 
+/// Events separated by a gap shorter than the `pulsetime` used by `bench_flood`,
+/// with runs of equal data. `create_events` overlaps every event with its
+/// neighbours, so it never reaches flood's gap-filling or same-data merging.
+fn create_sparse_events(num_events: i64) -> Vec<Event> {
+    let now = chrono::Utc::now();
+    (0..num_events)
+        .map(|i| {
+            let number = (i / 3) % 2;
+            Event {
+                id: None,
+                timestamp: now + Duration::seconds(i * 15),
+                duration: Duration::seconds(10),
+                data: json_map! {"number": number},
+            }
+        })
+        .collect()
+}
+
+/// Events with runs of adjacent events sharing the same `number`, so
+/// `chunk_events_by_key` has durations to aggregate. `create_events` cycles its
+/// keys, so neighbouring events never compare equal.
+fn create_chunkable_events(num_events: i64) -> Vec<Event> {
+    let now = chrono::Utc::now();
+    (0..num_events)
+        .map(|i| {
+            let number = (i / 5) % 10;
+            Event {
+                id: None,
+                timestamp: now + Duration::seconds(i * 10),
+                duration: Duration::seconds(10),
+                data: json_map! {"number": number},
+            }
+        })
+        .collect()
+}
+
+/// Deterministic xorshift shuffle, so the sort benchmark gets genuinely
+/// non-monotone input without pulling in a random-number dependency.
+fn shuffle<T>(v: &mut [T], mut seed: u64) {
+    for i in (1..v.len()).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        v.swap(i, (seed % (i as u64 + 1)) as usize);
+    }
+}
+
 fn bench_filter_period_intersect(c: &mut Criterion) {
     let events2 = create_events(1000);
     c.bench_function("1000 events", |b| {
@@ -109,10 +156,84 @@ fn bench_merge_events_by_keys(c: &mut Criterion) {
     group.finish();
 }
 
+const SIZES: [i64; 3] = [1_000, 10_000, 100_000];
+
+fn bench_flood(c: &mut Criterion) {
+    let mut group = c.benchmark_group("flood");
+    for n in SIZES {
+        let events = create_sparse_events(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &events, |b, events| {
+            b.iter_batched(
+                || events.clone(),
+                |events| flood(events, Duration::seconds(5)),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_sort_by_timestamp(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sort_by_timestamp");
+    for n in SIZES {
+        // A reversed input is one descending run, which the adaptive sort
+        // handles in near-linear time; it is kept as a best case.
+        let mut reversed = create_events(n);
+        reversed.reverse();
+        group.bench_with_input(BenchmarkId::new("reversed", n), &reversed, |b, events| {
+            b.iter_batched(|| events.clone(), sort_by_timestamp, BatchSize::LargeInput);
+        });
+
+        // Shuffled input mixes ascending and descending runs, so the sort
+        // cannot take its cheap nearly-sorted path.
+        let mut shuffled = create_events(n);
+        shuffle(&mut shuffled, 0x9E37_79B9_7F4A_7C15);
+        group.bench_with_input(BenchmarkId::new("shuffled", n), &shuffled, |b, events| {
+            b.iter_batched(|| events.clone(), sort_by_timestamp, BatchSize::LargeInput);
+        });
+    }
+    group.finish();
+}
+
+fn bench_filter_keyvals(c: &mut Criterion) {
+    let mut group = c.benchmark_group("filter_keyvals");
+    let vals = [json!(1), json!(2), json!(3)];
+    for n in SIZES {
+        let events = create_events(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &events, |b, events| {
+            b.iter_batched(
+                || events.clone(),
+                |events| filter_keyvals(events, "number", &vals),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_chunk_events_by_key(c: &mut Criterion) {
+    let mut group = c.benchmark_group("chunk_events_by_key");
+    for n in SIZES {
+        let events = create_chunkable_events(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &events, |b, events| {
+            b.iter_batched(
+                || events.clone(),
+                |events| chunk_events_by_key(events, "number"),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_filter_period_intersect,
     bench_union_no_overlap,
-    bench_merge_events_by_keys
+    bench_merge_events_by_keys,
+    bench_flood,
+    bench_sort_by_timestamp,
+    bench_filter_keyvals,
+    bench_chunk_events_by_key
 );
 criterion_main!(benches);

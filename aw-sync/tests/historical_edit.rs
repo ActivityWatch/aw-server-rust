@@ -87,11 +87,13 @@ fn edit_title(ds: &Datastore, bucket_id: &str, ts: DateTime<Utc>, new_title: &st
 }
 
 fn sync_push(src: &Datastore, dest: &Datastore) {
-    let _ = aw_sync::sync_datastores(src, dest, true, Some("device-phone"), &SyncSpec::default());
+    aw_sync::sync_datastores(src, dest, true, Some("device-phone"), &SyncSpec::default())
+        .expect("sync_push failed");
 }
 
 fn sync_pull(src: &Datastore, dest: &Datastore) {
-    let _ = aw_sync::sync_datastores(src, dest, false, None, &SyncSpec::default());
+    aw_sync::sync_datastores(src, dest, false, None, &SyncSpec::default())
+        .expect("sync_pull failed");
 }
 
 #[test]

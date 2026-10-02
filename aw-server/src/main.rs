@@ -50,12 +50,15 @@ fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     let body = buf.split("\r\n\r\n").nth(1)?;
     let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
 
-    // Verify it looks like an ActivityWatch info payload.
+    // Verify it looks like an ActivityWatch info payload. Requiring the
+    // AW-specific hostname/device_id fields (not just a version substring)
+    // avoids misreading an unrelated service that happens to serve JSON.
     let version = v["version"].as_str()?;
+    let hostname = v["hostname"].as_str()?;
+    v["device_id"].as_str()?;
     if !version.contains("rust") && !version.contains("python") {
         return None;
     }
-    let hostname = v["hostname"].as_str().unwrap_or("unknown");
     Some(format!(
         "ActivityWatch server {version} ({hostname}) is already running on \
          port {port}; open http://localhost:{port} in your browser or stop it first"

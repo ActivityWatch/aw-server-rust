@@ -76,6 +76,86 @@ fn open_readonly_connection(path: &str) -> rusqlite::Result<Connection> {
     )
 }
 
+/// `PRAGMA quick_check` on a separate read-only connection.
+///
+/// Returns the problems found (empty when the database is healthy). A file
+/// too damaged to even prepare the statement is reported as a problem rather
+/// than an error, so callers can tell "corrupt" from "could not check".
+fn quick_check(path: &str) -> rusqlite::Result<Vec<String>> {
+    let run = || -> rusqlite::Result<Vec<String>> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let mut stmt = conn.prepare("PRAGMA quick_check(20)")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    };
+    match run() {
+        Ok(rows) if rows == ["ok"] => Ok(vec![]),
+        Ok(rows) => Ok(rows),
+        Err(rusqlite::Error::SqliteFailure(e, msg))
+            if matches!(
+                e.code,
+                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+            ) =>
+        {
+            Ok(vec![msg.unwrap_or_else(|| e.to_string())])
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Check the database for corruption without delaying startup.
+///
+/// A forced kill (e.g. Windows Update rebooting the machine) can leave a
+/// damaged database behind. The server then keeps running, slowly and with
+/// gaps, and nothing says why (ActivityWatch/aw-server-rust#467). The check
+/// reads the whole file, so it runs on its own read-only connection in the
+/// background: WAL readers never block the writer.
+fn spawn_integrity_check(path: String) {
+    let spawned = thread::Builder::new()
+        .name("aw-datastore-quick-check".to_string())
+        .spawn(move || {
+            let start = std::time::Instant::now();
+            match quick_check(&path) {
+                Ok(problems) if problems.is_empty() => info!(
+                    "Database integrity check (quick_check) passed in {:.2?}",
+                    start.elapsed()
+                ),
+                Ok(problems) => error!(
+                    "Database integrity check FAILED for {path}: {}. \
+                     ActivityWatch may be slow or lose data. Stop aw-server, back up \
+                     the file, then recover it with \
+                     `sqlite3 <db> .recover | sqlite3 <new db>` \
+                     (https://sqlite.org/recovery.html) or restore a backup.",
+                    problems.join("; ")
+                ),
+                Err(e) => warn!("Could not run database integrity check on {path}: {e}"),
+            }
+        });
+    if let Err(e) = spawned {
+        warn!("Could not start database integrity check thread: {e}");
+    }
+}
+
+/// Fold the WAL back into the main file on a clean close, so a forced kill
+/// later has nothing pending to replay.
+fn checkpoint_wal(conn: &Connection) {
+    let result = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+    match result {
+        Ok((0, _, _)) => debug!("Checkpointed WAL on close"),
+        Ok((busy, log, done)) => warn!(
+            "WAL checkpoint on close incomplete (busy={busy}, log={log}, checkpointed={done})"
+        ),
+        Err(e) => warn!("WAL checkpoint on close failed: {e}"),
+    }
+}
+
 /// Read `user_version` without mutating the file.
 fn probe_user_version(path: &str) -> Result<i32, DatastoreError> {
     let conn = open_readonly_connection(path).map_err(|e| {
@@ -265,6 +345,12 @@ impl DatastoreWorker {
                 .expect("Failed to set synchronous=FULL");
         }
 
+        // After the WAL switch: that needs an exclusive lock a concurrent
+        // reader would hold up. Encrypted files would need the key; skipped.
+        if let DatastoreMethod::File(path) = &method {
+            spawn_integrity_check(path.clone());
+        }
+
         let mut ds = DatastoreInstance::new(&conn, !read_only).unwrap();
 
         // Load persisted privacy filters before serving inserts. The engine
@@ -371,6 +457,10 @@ impl DatastoreWorker {
             );
             match tx.commit() {
                 Ok(_) => {
+                    // Before acking Close: the caller may exit right after.
+                    if self.quit && !read_only {
+                        checkpoint_wal(&conn);
+                    }
                     if let Some((sender, response)) = deferred_ack.take() {
                         sender.respond(response);
                     }
@@ -954,5 +1044,72 @@ mod sqlite_readonly_uri_tests {
             sqlite_readonly_uri(r"\\server\share\peer.db"),
             "file:////server/share/peer.db?mode=ro&immutable=1"
         );
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::{quick_check, Datastore};
+    use rusqlite::Connection;
+    use std::io::{Seek, SeekFrom, Write};
+
+    #[test]
+    fn quick_check_passes_on_fresh_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.db").to_str().unwrap().to_string();
+        let ds = Datastore::new(path.clone(), false);
+        ds.force_commit().unwrap();
+        assert_eq!(quick_check(&path).unwrap(), Vec::<String>::new());
+        ds.close();
+    }
+
+    #[test]
+    fn quick_check_reports_corrupt_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY, data TEXT);
+                 CREATE INDEX t_data ON t (data);",
+            )
+            .unwrap();
+            let tx = conn.transaction().unwrap();
+            for i in 0..2000 {
+                tx.execute(
+                    "INSERT INTO t (data) VALUES (?1)",
+                    [format!("row {i:0>64}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        // Overwrite a stretch of b-tree pages (not the header page) with garbage.
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(4096 * 3)).unwrap();
+        file.write_all(&[0xAB; 4096 * 4]).unwrap();
+        drop(file);
+
+        let problems = quick_check(path.to_str().unwrap()).unwrap();
+        assert!(!problems.is_empty(), "corruption went unreported");
+    }
+
+    #[test]
+    fn close_truncates_wal_while_another_connection_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.db");
+        let path_str = path.to_str().unwrap().to_string();
+        let ds = Datastore::new(path_str.clone(), false);
+        ds.set_key_value("test.key", "value").unwrap();
+        ds.force_commit().unwrap();
+
+        // A second open connection stops SQLite's last-close auto-checkpoint,
+        // as a reader (aw-sync, the integrity check) would in production.
+        let _reader = Connection::open(&path).unwrap();
+        let wal = dir.path().join("wal.db-wal");
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+
+        ds.close();
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
     }
 }

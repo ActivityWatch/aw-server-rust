@@ -3,11 +3,14 @@ use std::io::{copy, pipe, Cursor, PipeReader, PipeWriter, Seek, SeekFrom};
 use std::thread;
 
 use chrono::{DateTime, Utc};
+use rocket::data::{self, Data, FromData};
 use rocket::http::ContentType;
 use rocket::http::Header;
 use rocket::http::Status;
 use rocket::request::Request;
 use rocket::response::{self, Responder, Response};
+use rocket::serde::json::Json;
+use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Serialize, Debug)]
@@ -38,6 +41,55 @@ impl<'r> Responder<'r, 'static> for HttpErrorJson {
             .header(ContentType::new("application", "json"))
             .ok()
     }
+}
+
+/// Reason a JSON request body was rejected, stashed in the request-local cache
+/// so the `/api` error catchers can report it (Rocket only logs it).
+#[derive(Default)]
+struct BodyError(std::sync::Mutex<Option<String>>);
+
+/// Drop-in replacement for `Json<T>` as a data guard: identical parsing, but the
+/// serde error is kept so [`api_error_json`] can return it to the client.
+pub struct ApiJson<T>(pub T);
+
+impl<T> ApiJson<T> {
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> std::ops::Deref for ApiJson<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+#[rocket::async_trait]
+impl<'r, T: Deserialize<'r>> FromData<'r> for ApiJson<T> {
+    type Error = String;
+
+    async fn from_data(req: &'r Request<'_>, data: Data<'r>) -> data::Outcome<'r, Self> {
+        match <Json<T> as FromData>::from_data(req, data).await {
+            data::Outcome::Success(json) => data::Outcome::Success(ApiJson(json.into_inner())),
+            data::Outcome::Error((status, err)) => {
+                let msg = err.to_string();
+                *req.local_cache(BodyError::default).0.lock().unwrap() = Some(msg.clone());
+                data::Outcome::Error((status, msg))
+            }
+            data::Outcome::Forward(data) => data::Outcome::Forward(data),
+        }
+    }
+}
+
+/// Build the JSON error body shared by the `/api` catchers.
+pub fn api_error_json(status: Status, req: &Request) -> HttpErrorJson {
+    let reason = req.local_cache(BodyError::default).0.lock().unwrap().take();
+    let message = match reason {
+        Some(detail) => format!("{}: {}", status.reason_lossy(), detail),
+        None => status.reason_lossy().to_string(),
+    };
+    HttpErrorJson::new(status, message)
 }
 
 pub struct BucketsExportRocket {

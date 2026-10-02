@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use rocket::http::Status;
 use rocket::response::content::RawJson;
-use rocket::serde::json::Json;
 use rocket::State;
 
 use aw_models::Query;
 use aw_query::QueryError;
 
 use crate::endpoints::query_cache::CacheKey;
+use crate::endpoints::util::ApiJson;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 fn query_error_status(e: &QueryError) -> Status {
@@ -59,7 +59,7 @@ mod tests {
 /// cache miss does not pay a second full serialization for the response.
 #[post("/?<cache>", data = "<query_req>", format = "application/json")]
 pub fn query(
-    query_req: Json<Query>,
+    query_req: ApiJson<Query>,
     cache: Option<bool>,
     state: &State<ServerState>,
 ) -> Result<RawJson<String>, HttpErrorJson> {

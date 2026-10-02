@@ -9,6 +9,7 @@ use aw_models::{BucketsExport, Event, TryVec};
 
 use aw_datastore::{Datastore, DatastoreError};
 
+use crate::endpoints::util::ApiJson;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 /// Computes a dedup identity tuple for an event.
@@ -132,7 +133,7 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
 #[post("/", data = "<json_data>", format = "application/json")]
 pub fn bucket_import_json(
     state: &State<ServerState>,
-    json_data: Json<BucketsExport>,
+    json_data: ApiJson<BucketsExport>,
 ) -> Result<(), HttpErrorJson> {
     let result = import(&state.datastore, json_data.into_inner());
     // Clear even on failure: a multi-bucket import can write earlier buckets

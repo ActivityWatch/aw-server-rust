@@ -280,25 +280,32 @@ pub fn bucket_events_delete_many(
     body: Json<BulkDeleteRequest>,
     state: &State<ServerState>,
 ) -> Result<Json<u64>, HttpErrorJson> {
-    let _guard = state.write_lock.lock().unwrap();
     let datastore = &state.datastore;
-    let mut existing = Vec::new();
+
+    // Validate bucket exists before iterating (handles empty-ids case too).
+    datastore
+        .get_bucket(bucket_id)
+        .map_err(HttpErrorJson::from)?;
+
+    // Collect existing events outside the write lock to minimise lock hold time.
+    let mut existing: Vec<Event> = Vec::new();
     for id in body.ids.iter() {
         if existing.iter().any(|e: &Event| e.id == Some(*id)) {
             continue;
         }
         match datastore.get_event(bucket_id, *id) {
             Ok(event) => existing.push(event),
-            Err(DatastoreError::NoSuchBucket(name)) => {
-                return Err(DatastoreError::NoSuchBucket(name).into())
-            }
-            Err(_) => {}
+            Err(DatastoreError::NoSuchEvent(_, _)) => {}
+            Err(err) => return Err(err.into()),
         }
     }
     let ids: Vec<i64> = existing.iter().filter_map(|e| e.id).collect();
     if ids.is_empty() {
         return Ok(Json(0));
     }
+
+    // Hold the write lock only for the actual delete and cache invalidation.
+    let _guard = state.write_lock.lock().unwrap();
     match datastore.delete_events_by_id(bucket_id, ids.clone()) {
         Ok(_) => {
             state
@@ -306,7 +313,14 @@ pub fn bucket_events_delete_many(
                 .invalidate(existing.iter().map(event_range).collect());
             Ok(Json(ids.len() as u64))
         }
-        Err(err) => Err(err.into()),
+        Err(err) => {
+            // Invalidate cache even on failure: some events may have been
+            // deleted by the datastore worker before the error was returned.
+            state
+                .query_cache
+                .invalidate(existing.iter().map(event_range).collect());
+            Err(err.into())
+        }
     }
 }
 

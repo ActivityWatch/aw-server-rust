@@ -979,6 +979,16 @@ mod api_tests {
         assert_eq!(res.content_type(), Some(ContentType::JSON));
         let body: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
         assert_eq!(body["message"], "Not Found");
+
+        // Rocket-generated 400 (invalid request URI) -> JSON from the 400 catcher
+        let res = client
+            .get("/api/0/bad path")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::BadRequest);
+        assert_eq!(res.content_type(), Some(ContentType::JSON));
+        let body: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(body["message"], "Bad Request");
     }
 
     #[test]

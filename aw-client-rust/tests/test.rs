@@ -10,7 +10,7 @@ extern crate tokio_test;
 mod test {
     use aw_client_rust::blocking::AwClient;
     use aw_client_rust::Event;
-    use chrono::{DateTime, Duration, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use serde_json::Map;
     use std::cell::RefCell;
     use std::fs;

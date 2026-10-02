@@ -225,11 +225,10 @@ mod test {
         println!("Buckets: {buckets:?}");
         let mut event = Event {
             id: None,
-            timestamp: DateTime::from_utc(
-                DateTime::parse_from_rfc3339("2017-12-30T01:00:00+00:00")
+            timestamp: Utc.from_utc_datetime(
+                &DateTime::parse_from_rfc3339("2017-12-30T01:00:00+00:00")
                     .unwrap()
                     .naive_utc(),
-                Utc,
             ),
             duration: Duration::seconds(0),
             data: Map::new(),
@@ -237,11 +236,10 @@ mod test {
         println!("{event:?}");
         client.insert_event(&bucketname, &event).unwrap();
         // Ugly way to create a UTC from timestamp, see https://github.com/chronotope/chrono/issues/263
-        event.timestamp = DateTime::from_utc(
-            DateTime::parse_from_rfc3339("2017-12-30T01:00:01+00:00")
+        event.timestamp = Utc.from_utc_datetime(
+            &DateTime::parse_from_rfc3339("2017-12-30T01:00:01+00:00")
                 .unwrap()
                 .naive_utc(),
-            Utc,
         );
         client.heartbeat(&bucketname, &event, 10.0).unwrap();
 

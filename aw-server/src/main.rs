@@ -68,6 +68,22 @@ struct Opts {
     #[clap(long)]
     no_legacy_import: bool,
 
+    /// Explicitly (re-)run the legacy (Python aw-server) database import,
+    /// even if this datastore was already initialized. Use this when the
+    /// automatic import did not run because aw-server-rust had already
+    /// started once before (ActivityWatch/aw-server-rust#546), or to pull
+    /// in a legacy database with `--dbpath` set (which otherwise implies
+    /// `--no-legacy-import`). Re-running is safe: already-imported events
+    /// are skipped instead of duplicated.
+    #[clap(long)]
+    import_legacy: bool,
+
+    /// Override the path to the legacy aw-server (Python) database to
+    /// import from. Defaults to the standard
+    /// `<data-dir>/activitywatch/aw-server/peewee-sqlite.v2.db` location.
+    #[clap(long)]
+    legacy_dbpath: Option<String>,
+
     /// Encryption key for the database (requires 'encryption' feature).
     /// Can also be set via the AW_DB_PASSWORD environment variable.
     /// WARNING: passing a password on the command line may expose it in process listings.
@@ -175,10 +191,26 @@ async fn main() -> Result<(), rocket::Error> {
     let asset_path = opts.webpath.map(PathBuf::from);
     info!("Using aw-webui assets at path {:?}", asset_path);
 
-    // Only use legacy import if opts.dbpath is not set
-    let legacy_import = !opts.no_legacy_import && opts.dbpath.is_none();
-    if opts.dbpath.is_some() {
-        info!("Since custom dbpath is set, --no-legacy-import is implied");
+    // --import-legacy always wins; --no-legacy-import is ignored when
+    // --import-legacy is also supplied.
+    if opts.import_legacy && opts.no_legacy_import {
+        warn!(
+            "--import-legacy and --no-legacy-import were both supplied; \
+             --import-legacy takes precedence and the import will run."
+        );
+    }
+    // Only use legacy import if opts.dbpath is not set, unless the user
+    // explicitly asked for it via --import-legacy.
+    let legacy_import_opts = aw_datastore::LegacyImportOptions {
+        enabled: opts.import_legacy || (!opts.no_legacy_import && opts.dbpath.is_none()),
+        force: opts.import_legacy,
+        db_path_override: opts.legacy_dbpath.clone(),
+    };
+    if opts.dbpath.is_some() && !opts.import_legacy {
+        info!(
+            "Since custom dbpath is set, --no-legacy-import is implied \
+             (pass --import-legacy to run it anyway)"
+        );
     }
 
     let device_id: String = if let Some(id) = opts.device_id {
@@ -196,9 +228,13 @@ async fn main() -> Result<(), rocket::Error> {
         }
         Some(key) => {
             info!("Using encrypted database (SQLCipher)");
-            aw_datastore::Datastore::new_encrypted(db_path, key, legacy_import)
+            aw_datastore::Datastore::new_encrypted_with_legacy_import_opts(
+                db_path,
+                key,
+                legacy_import_opts,
+            )
         }
-        None => aw_datastore::Datastore::new(db_path, legacy_import),
+        None => aw_datastore::Datastore::new_with_legacy_import_opts(db_path, legacy_import_opts),
     };
     #[cfg(not(any(feature = "encryption", feature = "encryption-vendored")))]
     {
@@ -212,7 +248,8 @@ async fn main() -> Result<(), rocket::Error> {
         }
     }
     #[cfg(not(any(feature = "encryption", feature = "encryption-vendored")))]
-    let datastore = aw_datastore::Datastore::new(db_path, legacy_import);
+    let datastore =
+        aw_datastore::Datastore::new_with_legacy_import_opts(db_path, legacy_import_opts);
 
     let server_state = endpoints::ServerState {
         query_cache_enabled: config.query_cache,

@@ -598,7 +598,7 @@ mod tests {
             socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let url = info_url(socket.local_addr().unwrap());
             let server = tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 let listener = socket.listen(8).unwrap();
                 answer_once(&listener, "200 OK", INFO_BODY).await;
             });

@@ -4,6 +4,56 @@ extern crate log;
 use std::env;
 use std::path::PathBuf;
 
+/// Probe `host:port` to see whether ActivityWatch is already listening there.
+///
+/// Sends a plain HTTP/1.0 GET to `/api/0/info` using only std networking (no
+/// extra dependency). Returns a human-readable message if the endpoint responds
+/// as an ActivityWatch server; `None` when the port is free or is owned by
+/// something unrecognised.
+fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let addr: SocketAddr = format!("{host}:{port}").parse().ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+
+    let req = format!(
+        "GET /api/0/info HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+
+    let mut buf = String::new();
+    let _ = stream.read_to_string(&mut buf);
+
+    // Body starts after the first blank line.
+    let body = buf.split("\r\n\r\n").nth(1)?;
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+
+    // Verify it looks like an ActivityWatch info payload.
+    let version = v["version"].as_str()?;
+    if !version.contains("rust") && !version.contains("python") {
+        return None;
+    }
+    let hostname = v["hostname"].as_str().unwrap_or("unknown");
+    Some(format!(
+        "ActivityWatch server {version} ({hostname}) is already running on \
+         port {port}; open http://localhost:{port} in your browser or stop it first"
+    ))
+}
+
+/// Returns a per-OS hint for locating the process that owns a port.
+fn port_owner_hint(port: u16) -> String {
+    if cfg!(target_os = "windows") {
+        format!("netstat -ano | findstr :{port}")
+    } else if cfg!(target_os = "macos") {
+        format!("lsof -i :{port}")
+    } else {
+        format!("ss -ltnp | grep :{port}  (or: lsof -i :{port})")
+    }
+}
+
 use clap::crate_version;
 use clap::Parser;
 
@@ -274,6 +324,34 @@ async fn main() -> Result<(), rocket::Error> {
         // it will not happen there
         ..endpoints::ServerState::new(datastore, asset_resolver, device_id)
     };
+
+    // If the port is already occupied, emit a helpful message before Rocket
+    // produces a generic "Address already in use" IO error.
+    {
+        use std::net::TcpStream;
+        use std::time::Duration;
+        if let Ok(addr) =
+            format!("{}:{}", config.address, config.port).parse::<std::net::SocketAddr>()
+        {
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+                match probe_aw_on_port(&config.address, config.port) {
+                    Some(msg) => {
+                        error!("{}", msg);
+                        std::process::exit(1);
+                    }
+                    None => {
+                        error!(
+                            "Port {} is already in use by another program. \
+                             To identify it, run: {}",
+                            config.port,
+                            port_owner_hint(config.port)
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
 
     let _rocket = endpoints::build_rocket(server_state, config)
         .ignite()

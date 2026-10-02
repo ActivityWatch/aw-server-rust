@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use gethostname::gethostname;
 use rocket::fs::FileServer;
-use rocket::http::ContentType;
+use rocket::http::{ContentType, Status};
 use rocket::serde::json::Json;
 use rocket::State;
 
@@ -34,6 +34,37 @@ impl AssetResolver {
             }
         }
         Some(EmbeddedAssets::get(file_path)?.data.to_vec())
+    }
+
+    /// The web UI entry point, or an explanatory page (503) when this build
+    /// has no web UI assets, instead of Rocket's bare 404.
+    fn index_or_placeholder(&self) -> (Status, ContentType, Vec<u8>) {
+        match self.resolve("index.html") {
+            Some(data) => (Status::Ok, ContentType::HTML, data),
+            None => {
+                let checked = self
+                    .asset_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(none; --webpath not set)".to_string());
+                let html = format!(
+                    "<!DOCTYPE html><html><head><title>ActivityWatch: web UI missing</title></head>\
+<body><h1>The web UI is not installed</h1>\
+<p>aw-server is running, but this build has no <code>index.html</code>, \
+neither embedded nor in the <code>--webpath</code> directory that was checked: \
+<code>{checked}</code>.</p>\
+<p>The API still works: <a href=\"/api/0/info\">/api/0/info</a>. \
+Build with <code>AW_WEBUI_DIR</code> pointing at a built aw-webui, or pass \
+<code>--webpath</code>. See the <a href=\"https://docs.activitywatch.net/\">docs</a>.</p>\
+</body></html>"
+                );
+                (
+                    Status::ServiceUnavailable,
+                    ContentType::HTML,
+                    html.into_bytes(),
+                )
+            }
+        }
     }
 }
 
@@ -88,8 +119,9 @@ pub(crate) use settings::settings_datastore_key;
 pub use util::HttpErrorJson;
 
 #[get("/")]
-fn root_index(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
-    get_file("index.html".into(), state)
+fn root_index(state: &State<ServerState>) -> (Status, (ContentType, Vec<u8>)) {
+    let (status, content_type, body) = state.asset_resolver.index_or_placeholder();
+    (status, (content_type, body))
 }
 
 #[get("/css/<file..>")]
@@ -248,6 +280,22 @@ mod tests {
         let content = resolver.resolve("Cargo.toml").unwrap();
 
         assert!(String::from_utf8(content).unwrap().contains("aw-server"));
+    }
+
+    #[test]
+    fn test_missing_index_serves_placeholder() {
+        let resolver = super::AssetResolver::new(Some("/nonexistent-webpath".into()));
+        // An embedded index.html (a build with AW_WEBUI_DIR) is served as-is.
+        if resolver.resolve("index.html").is_some() {
+            return;
+        }
+
+        let (status, _, body) = resolver.index_or_placeholder();
+        let body = String::from_utf8(body).unwrap();
+
+        assert_eq!(status, rocket::http::Status::ServiceUnavailable);
+        assert!(body.contains("/nonexistent-webpath"));
+        assert!(body.contains("/api/0/info"));
     }
 
     #[test]

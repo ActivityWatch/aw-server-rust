@@ -12,12 +12,13 @@ use std::path::PathBuf;
 /// something unrecognised.
 fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     use std::io::{Read, Write};
-    use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+    use std::net::{IpAddr, SocketAddr, TcpStream};
     use std::time::Duration;
 
-    // Resolve hostnames too: config.address is normally an IP, but may be a name
-    // such as "localhost" (which the previous parse-only form silently ignored).
-    let addr = (host, port).to_socket_addrs().ok()?.next()?;
+    // Rocket binds `address` as an IpAddr, so parse it the same way. This also
+    // handles IPv6 literals, which the previous `format!("{host}:{port}")` form
+    // could not parse and therefore silently skipped.
+    let addr = SocketAddr::new(host.parse::<IpAddr>().ok()?, port);
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
     // A per-read timeout bounds each read, not the whole response; the response
     // is additionally size-bounded below so a chatty listener cannot stall startup.
@@ -228,13 +229,10 @@ async fn main() -> Result<(), rocket::Error> {
     // datastore is opened so a port conflict never interrupts a legacy import or
     // leaves a half-initialised database behind, and so exit() has nothing to clean up.
     {
-        use std::net::{TcpStream, ToSocketAddrs};
+        use std::net::{IpAddr, SocketAddr, TcpStream};
         use std::time::Duration;
-        if let Some(addr) = (config.address.as_str(), config.port)
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut addrs| addrs.next())
-        {
+        if let Ok(ip) = config.address.parse::<IpAddr>() {
+            let addr = SocketAddr::new(ip, config.port);
             if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
                 match probe_aw_on_port(&config.address, config.port) {
                     Some(msg) => {

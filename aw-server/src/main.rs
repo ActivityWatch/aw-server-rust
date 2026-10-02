@@ -191,10 +191,18 @@ async fn main() -> Result<(), rocket::Error> {
     let asset_path = opts.webpath.map(PathBuf::from);
     info!("Using aw-webui assets at path {:?}", asset_path);
 
+    // --import-legacy always wins; --no-legacy-import is ignored when
+    // --import-legacy is also supplied.
+    if opts.import_legacy && opts.no_legacy_import {
+        warn!(
+            "--import-legacy and --no-legacy-import were both supplied; \
+             --import-legacy takes precedence and the import will run."
+        );
+    }
     // Only use legacy import if opts.dbpath is not set, unless the user
     // explicitly asked for it via --import-legacy.
     let legacy_import_opts = aw_datastore::LegacyImportOptions {
-        enabled: !opts.no_legacy_import && (opts.dbpath.is_none() || opts.import_legacy),
+        enabled: opts.import_legacy || (!opts.no_legacy_import && opts.dbpath.is_none()),
         force: opts.import_legacy,
         db_path_override: opts.legacy_dbpath.clone(),
     };

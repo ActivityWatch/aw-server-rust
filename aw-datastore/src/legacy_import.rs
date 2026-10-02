@@ -254,16 +254,16 @@ mod import {
             let num_events = events.len(); // Save len before lending events to insert_events
             match new_ds.create_bucket(new_conn, bucket.clone()) {
                 Ok(_) => {
-                    info!(
-                        "Imported legacy bucket '{}' ({} events)",
-                        bucket.id, num_events
-                    );
                     if let Err(err) = new_ds.insert_events(new_conn, &bucket.id, events) {
                         panic!(
                             "Failed to insert events to bucket '{}': {:?}",
                             bucket.id, err
                         );
                     }
+                    info!(
+                        "Imported legacy bucket '{}' ({} events)",
+                        bucket.id, num_events
+                    );
                 }
                 Err(DatastoreError::BucketAlreadyExists(_)) => {
                     // Idempotent re-import (e.g. `aw-server --import-legacy` run

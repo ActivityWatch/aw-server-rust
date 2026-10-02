@@ -162,10 +162,14 @@ impl RuleTrait for RegexRule {
 
 impl From<Regex> for Rule {
     fn from(re: Regex) -> Self {
+        // Mirror `RegexRule::new`: derive `never_matches` from the source
+        // pattern so an empty regex passed through this public conversion
+        // cannot silently match every event.
+        let never_matches = re.as_str().is_empty();
         Rule::Regex(RegexRule {
             regex: Arc::new(re),
             select_keys: None,
-            never_matches: false,
+            never_matches,
         })
     }
 }
@@ -435,6 +439,12 @@ fn test_empty_regex_never_matches() {
     let with_select_keys =
         Rule::Regex(RegexRule::new("", false, Some(vec!["test".into()])).unwrap());
     assert!(!rule_matches(&with_select_keys, &event));
+
+    // The public `Rule::from(Regex)` conversion must not bypass the guard:
+    // `Regex::new("")` compiles to a match-all regex, so the derived flag has
+    // to come from the source pattern, not default to `false`.
+    let via_from = Rule::from(Regex::new("").unwrap());
+    assert!(!rule_matches(&via_from, &event));
 
     // Also verify it never matches via the public `categorize` entry point.
     let events = categorize(

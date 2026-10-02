@@ -1463,6 +1463,55 @@ mod datastore_tests {
     /// A writable open (aw-sync's own staging db, aw-server's db) migrates a
     /// v4 file to the newest version and then reads through the new indexes.
     #[test]
+    fn test_writable_open_handles_dump_restored_db() {
+        // `sqlite3 .dump` drops PRAGMA user_version; the restored DB must not
+        // re-run v0 migrations (which panic on duplicate column / table).
+        for version in [4, 5] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join("restored.db");
+            let now = write_old_fixture(&db_path, version);
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                conn.pragma_update(None, "user_version", 0).unwrap();
+            }
+
+            let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+            let since = now - Duration::days(1);
+            assert_eq!(
+                ds.get_events("testid", Some(since), None, None)
+                    .unwrap()
+                    .len(),
+                3,
+                "v{version}"
+            );
+            ds.close();
+
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, aw_datastore::NEWEST_DB_VERSION);
+        }
+    }
+
+    #[test]
+    fn test_writable_open_handles_dump_restored_current_db() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("restored-current.db");
+        let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+        create_test_bucket(&ds);
+        ds.close();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 0).unwrap();
+        }
+
+        let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+        assert_eq!(ds.get_buckets().unwrap().len(), 1);
+        ds.close();
+    }
+
+    #[test]
     fn test_writable_open_migrates_v4_fixture() {
         let test_dir = tempfile::tempdir().unwrap();
         let db_path = test_dir.path().join("staging-v4.db");

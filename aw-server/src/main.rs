@@ -12,20 +12,33 @@ use std::path::PathBuf;
 /// something unrecognised.
 fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpStream};
+    use std::net::{IpAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    let addr: SocketAddr = format!("{host}:{port}").parse().ok()?;
+    // Resolve hostnames too: config.address is normally an IP, but may be a name
+    // such as "localhost" (which the previous parse-only form silently ignored).
+    let addr = (host, port).to_socket_addrs().ok()?.next()?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    // A per-read timeout bounds each read, not the whole response; the response
+    // is additionally size-bounded below so a chatty listener cannot stall startup.
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
 
+    // IPv6 literals must be bracketed in the Host header (RFC 7230).
+    let host_header = match addr.ip() {
+        IpAddr::V6(_) => format!("[{}]", addr.ip()),
+        ip => ip.to_string(),
+    };
     let req = format!(
-        "GET /api/0/info HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "GET /api/0/info HTTP/1.0\r\nHost: {host_header}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).ok()?;
 
+    // `set_read_timeout` applies to each read, not the whole response, so cap the
+    // bytes buffered from a port owned by an unknown process.
     let mut buf = String::new();
-    let _ = stream.read_to_string(&mut buf);
+    let _ = stream.take(16 * 1024).read_to_string(&mut buf);
 
     // Body starts after the first blank line.
     let body = buf.split("\r\n\r\n").nth(1)?;
@@ -210,6 +223,38 @@ async fn main() -> Result<(), rocket::Error> {
         }
     }
 
+    // If the port is already occupied, emit a helpful message before Rocket
+    // produces a generic "Address already in use" IO error. This runs before the
+    // datastore is opened so a port conflict never interrupts a legacy import or
+    // leaves a half-initialised database behind, and so exit() has nothing to clean up.
+    {
+        use std::net::{TcpStream, ToSocketAddrs};
+        use std::time::Duration;
+        if let Some(addr) = (config.address.as_str(), config.port)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+        {
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+                match probe_aw_on_port(&config.address, config.port) {
+                    Some(msg) => {
+                        error!("{}", msg);
+                        std::process::exit(1);
+                    }
+                    None => {
+                        error!(
+                            "Port {} is already in use by another program. \
+                             To identify it, run: {}",
+                            config.port,
+                            port_owner_hint(config.port)
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
+
     // Set db path if overridden
     let db_path: String = if let Some(dbpath) = opts.dbpath.clone() {
         dbpath
@@ -274,34 +319,6 @@ async fn main() -> Result<(), rocket::Error> {
             device_id,
         )
     };
-
-    // If the port is already occupied, emit a helpful message before Rocket
-    // produces a generic "Address already in use" IO error.
-    {
-        use std::net::TcpStream;
-        use std::time::Duration;
-        if let Ok(addr) =
-            format!("{}:{}", config.address, config.port).parse::<std::net::SocketAddr>()
-        {
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
-                match probe_aw_on_port(&config.address, config.port) {
-                    Some(msg) => {
-                        error!("{}", msg);
-                        std::process::exit(1);
-                    }
-                    None => {
-                        error!(
-                            "Port {} is already in use by another program. \
-                             To identify it, run: {}",
-                            config.port,
-                            port_owner_hint(config.port)
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
-        }
-    }
 
     let _rocket = endpoints::build_rocket(server_state, config)
         .ignite()

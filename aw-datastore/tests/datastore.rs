@@ -1460,8 +1460,6 @@ mod datastore_tests {
         }
     }
 
-    /// A writable open (aw-sync's own staging db, aw-server's db) migrates a
-    /// v4 file to the newest version and then reads through the new indexes.
     #[test]
     fn test_writable_open_handles_dump_restored_db() {
         // `sqlite3 .dump` drops PRAGMA user_version; the restored DB must not
@@ -1511,6 +1509,84 @@ mod datastore_tests {
         ds.close();
     }
 
+    /// The v1-v3 schemas differ only in the bucket `data` columns and the
+    /// missing `key_value` table; inference must pick the right version for
+    /// each so the remaining (non-idempotent) ALTER migrations run exactly once.
+    #[test]
+    fn test_writable_open_handles_dump_restored_early_schemas() {
+        const V1_SCHEMA: &str = "
+            CREATE TABLE buckets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                type TEXT NOT NULL,
+                client TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                created TEXT NOT NULL
+            );
+            CREATE INDEX bucket_id_index ON buckets(id);
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bucketrow INTEGER NOT NULL,
+                starttime INTEGER NOT NULL,
+                endtime INTEGER NOT NULL,
+                data TEXT NOT NULL,
+                FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+            );
+            CREATE INDEX events_bucketrow_index ON events(bucketrow);
+            CREATE INDEX events_starttime_index ON events(starttime);
+            CREATE INDEX events_endtime_index ON events(endtime);
+        ";
+        const V1_TO_V2: &str = "ALTER TABLE buckets ADD COLUMN data TEXT DEFAULT '{}';";
+        const V2_TO_V3: &str = "
+            ALTER TABLE buckets RENAME COLUMN data TO data_deprecated;
+            ALTER TABLE buckets ADD COLUMN data TEXT NOT NULL DEFAULT '{}';
+        ";
+
+        for version in [1, 2, 3] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join("restored-early.db");
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                conn.execute_batch(V1_SCHEMA).unwrap();
+                if version >= 2 {
+                    conn.execute_batch(V1_TO_V2).unwrap();
+                }
+                if version >= 3 {
+                    conn.execute_batch(V2_TO_V3).unwrap();
+                }
+                conn.execute(
+                    "INSERT INTO buckets (name, type, client, hostname, created)
+                     VALUES ('testid', 'testtype', 'testclient', 'testhost', ?1)",
+                    [Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO events (bucketrow, starttime, endtime, data)
+                     VALUES (1, 0, 1000000000, '{\"k\": \"v\"}')",
+                    [],
+                )
+                .unwrap();
+                // user_version stays 0, as after `sqlite3 .dump` + restore.
+            }
+
+            let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+            assert_eq!(
+                ds.get_events("testid", None, None, None).unwrap().len(),
+                1,
+                "v{version}"
+            );
+            ds.close();
+
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, aw_datastore::NEWEST_DB_VERSION, "v{version}");
+        }
+    }
+
+    /// A writable open (aw-sync's own staging db, aw-server's db) migrates a
+    /// v4 file to the newest version and then reads through the new indexes.
     #[test]
     fn test_writable_open_migrates_v4_fixture() {
         let test_dir = tempfile::tempdir().unwrap();

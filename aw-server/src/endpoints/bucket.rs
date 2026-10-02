@@ -224,6 +224,11 @@ pub fn bucket_events_heartbeat(
     }
 }
 
+#[derive(serde::Deserialize)]
+pub struct BulkDeleteRequest {
+    pub ids: Vec<i64>,
+}
+
 #[get("/<bucket_id>/events/count?<start>&<end>")]
 pub fn bucket_event_count(
     bucket_id: &str,
@@ -256,6 +261,50 @@ pub fn bucket_events_delete_by_id(
                 state.query_cache.invalidate(vec![event_range(&event)]);
             }
             Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Delete many events from one bucket in a single request.
+///
+/// Body: `{"ids": [1, 2, 3]}`. Unknown ids are ignored; the response is the
+/// number of events that actually existed and were deleted.
+#[post(
+    "/<bucket_id>/events/delete",
+    data = "<body>",
+    format = "application/json"
+)]
+pub fn bucket_events_delete_many(
+    bucket_id: &str,
+    body: Json<BulkDeleteRequest>,
+    state: &State<ServerState>,
+) -> Result<Json<u64>, HttpErrorJson> {
+    let _guard = state.write_lock.lock().unwrap();
+    let datastore = &state.datastore;
+    let mut existing = Vec::new();
+    for id in body.ids.iter() {
+        if existing.iter().any(|e: &Event| e.id == Some(*id)) {
+            continue;
+        }
+        match datastore.get_event(bucket_id, *id) {
+            Ok(event) => existing.push(event),
+            Err(DatastoreError::NoSuchBucket(name)) => {
+                return Err(DatastoreError::NoSuchBucket(name).into())
+            }
+            Err(_) => {}
+        }
+    }
+    let ids: Vec<i64> = existing.iter().filter_map(|e| e.id).collect();
+    if ids.is_empty() {
+        return Ok(Json(0));
+    }
+    match datastore.delete_events_by_id(bucket_id, ids.clone()) {
+        Ok(_) => {
+            state
+                .query_cache
+                .invalidate(existing.iter().map(event_range).collect());
+            Ok(Json(ids.len() as u64))
         }
         Err(err) => Err(err.into()),
     }

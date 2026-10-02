@@ -417,6 +417,72 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
     }
     #[test]
+    fn test_bulk_delete_events() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        let res = client
+            .post("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"id":"id","type":"type","client":"client","hostname":"hostname"}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Five non-mergeable events, ids 1..=5
+        let events: Vec<String> = (1..=5)
+            .map(|i| {
+                format!(
+                    r#"{{"timestamp":"2018-01-01T01:01:0{i}Z","duration":0.5,"data":{{"n":{i}}}}}"#
+                )
+            })
+            .collect();
+        let res = client
+            .post("/api/0/buckets/id/events")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(format!("[{}]", events.join(",")))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Mixed known, unknown and duplicate ids: only the 3 distinct existing ones count
+        let res = client
+            .post("/api/0/buckets/id/events/delete")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"ids":[1,3,3,5,999]}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.into_string().unwrap(), "3");
+
+        let res = client
+            .get("/api/0/buckets/id/events/count")
+            .header(host.clone())
+            .dispatch();
+        assert_eq!(res.into_string().unwrap(), "2");
+
+        // Empty list is a no-op
+        let res = client
+            .post("/api/0/buckets/id/events/delete")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"ids":[]}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.into_string().unwrap(), "0");
+
+        // Unknown bucket is a 404
+        let res = client
+            .post("/api/0/buckets/nope/events/delete")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"ids":[1]}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+    }
+
+    #[test]
     fn test_events() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

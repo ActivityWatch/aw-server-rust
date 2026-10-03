@@ -163,3 +163,32 @@ fn app_summary_keeps_manual_and_automatic_categories_apart() {
     assert_eq!(merged[1].duration, Duration::seconds(10));
     assert_eq!(merged[1].data["$category"], json!(["Work"]));
 }
+
+#[test]
+fn app_and_title_merge_folds_manual_and_automatic_of_same_category() {
+    // When the manual override agrees with the automatic classification, the
+    // merge must not split otherwise-identical events apart: a desktop app or
+    // title summary would otherwise return two rows with equal totals keys.
+    let mut automatic = Event::default();
+    automatic.duration = Duration::seconds(30);
+    automatic.data.insert("app".into(), json!("browser"));
+    automatic.data.insert("title".into(), json!("page"));
+    let mut manual = automatic.clone();
+    manual.duration = Duration::seconds(10);
+    manual
+        .data
+        .insert("$manual_category".into(), json!(["Uncategorized"]));
+    let classified = categorize(vec![automatic, manual], &[]);
+    assert_eq!(classified[0].data["$category"], json!(["Uncategorized"]));
+    assert_eq!(classified[1].data["$category"], json!(["Uncategorized"]));
+    let merged = merge_events_by_keys(classified.clone(), vec!["app".into(), "title".into()]);
+    assert_eq!(
+        merged.len(),
+        1,
+        "events that agree on the final category must fold into one row"
+    );
+    assert_eq!(merged[0].duration, Duration::seconds(40));
+    let app_merged = merge_events_by_keys(classified, vec!["app".into()]);
+    assert_eq!(app_merged.len(), 1);
+    assert_eq!(app_merged[0].duration, Duration::seconds(40));
+}

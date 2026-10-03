@@ -1377,6 +1377,44 @@ mod datastore_tests {
         }
     }
 
+    /// A `.dump`-restored peer has `user_version` 0 but a v4/v5 schema. The
+    /// read-only pull path (aw-sync) probes the pragma before opening, so it
+    /// must infer the version too; otherwise the peer is skipped as
+    /// unsupported even though v4/v5 are meant to be pullable.
+    #[test]
+    fn test_read_only_open_reads_dump_restored_older_versions() {
+        for version in [4, 5] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join(format!("restored-peer-v{version}.db"));
+            let now = write_old_fixture(&db_path, version);
+            write_versioned_db(&db_path, 0);
+
+            let ds = Datastore::open_read_only(db_path.to_str().unwrap().to_string())
+                .unwrap_or_else(|e| panic!("restored v{version} peer must open read-only: {e:?}"));
+            let since = now - Duration::days(1);
+            assert_eq!(
+                ds.get_events("testid", Some(since), None, None)
+                    .unwrap()
+                    .len(),
+                3,
+                "v{version} recent read"
+            );
+            ds.close();
+
+            // Inference never writes: no pragma update, no WAL sidecars.
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                after, 0,
+                "read-only open must not persist the inferred version"
+            );
+            assert!(!db_path.with_extension("db-wal").exists());
+            assert!(!db_path.with_extension("db-shm").exists());
+        }
+    }
+
     #[test]
     fn test_writable_open_handles_dump_restored_db() {
         // `sqlite3 .dump` drops PRAGMA user_version; the restored DB must not

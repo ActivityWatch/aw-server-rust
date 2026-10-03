@@ -541,6 +541,13 @@ mod tests {
         Some((stream, request))
     }
 
+    /// How long the mock waits for a live request before giving up.
+    ///
+    /// Above every client deadline the tests pass to `wait_for_server`, so a client
+    /// that gave up first fails the test instead of leaving the mock (and therefore
+    /// `tokio::join!`) waiting forever.
+    const REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
     /// Answer the first connection that sends a request with `status_line` and `body`.
     ///
     /// Connections are read concurrently, so ones that close or never send anything
@@ -548,21 +555,25 @@ mod tests {
     /// can hang instead of being refused, so attempts the client already abandoned may
     /// be accepted ahead of the live one, closed or half-open. Reading them one at a time
     /// let enough of them queue up that the live attempt timed out before it was reached,
-    /// on every retry.
+    /// on every retry. The wait is bounded by `REPLY_DEADLINE`.
     async fn answer_once(listener: &tokio::net::TcpListener, status_line: &str, body: &str) {
         let mut readers = tokio::task::JoinSet::new();
-        let (mut stream, request) = loop {
-            tokio::select! {
-                accepted = listener.accept() => {
-                    readers.spawn(read_request(accepted.unwrap().0));
-                }
-                Some(read) = readers.join_next() => {
-                    if let Some(answered) = read.unwrap() {
-                        break answered;
+        let (mut stream, request) = tokio::time::timeout(REPLY_DEADLINE, async {
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        readers.spawn(read_request(accepted.unwrap().0));
+                    }
+                    Some(read) = readers.join_next() => {
+                        if let Some(answered) = read.unwrap() {
+                            break answered;
+                        }
                     }
                 }
             }
-        };
+        })
+        .await
+        .expect("answer_once: no request arrived before the mock's reply deadline");
         assert!(request.starts_with(b"GET /api/0/info "));
         let response = format!(
             "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
@@ -579,14 +590,18 @@ mod tests {
         runtime().block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
+            // Enough silent connections that a serial mock (which skips one at a time,
+            // 200 ms each) cannot clear them within the client's deadline: 16 x 200 ms
+            // is well past 2 s, while the concurrent mock answers the live one at once.
+            // The deadline stays generous so a loaded runner still has retry margin.
             let mut silent = Vec::new();
-            for _ in 0..8 {
+            for _ in 0..16 {
                 silent.push(tokio::net::TcpStream::connect(addr).await.unwrap());
             }
             let url = info_url(addr);
             let server = async { answer_once(&listener, "200 OK", INFO_BODY).await };
             let client = reqwest::Client::new();
-            let wait = super::wait_for_server(&client, url, std::time::Duration::from_secs(1));
+            let wait = super::wait_for_server(&client, url, std::time::Duration::from_secs(2));
             let (_, result) = tokio::join!(server, wait);
             result.unwrap();
         });

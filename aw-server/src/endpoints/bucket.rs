@@ -225,6 +225,13 @@ pub fn bucket_events_heartbeat(
     }
 }
 
+/// Upper bound on the number of ids accepted by the bulk-delete endpoint.
+///
+/// Each id costs one datastore round-trip while the write lock is held, so an
+/// unbounded list would let a single request stall all event writes. Clients
+/// deleting more than this should issue several requests.
+const MAX_BULK_DELETE_IDS: usize = 10_000;
+
 #[derive(serde::Deserialize)]
 pub struct BulkDeleteRequest {
     pub ids: Vec<i64>,
@@ -281,6 +288,18 @@ pub fn bucket_events_delete_many(
     body: Json<BulkDeleteRequest>,
     state: &State<ServerState>,
 ) -> Result<Json<u64>, HttpErrorJson> {
+    // Reject oversized requests before taking the lock: the cap bounds the
+    // lock-held work, so it must be checked outside the critical section.
+    if body.ids.len() > MAX_BULK_DELETE_IDS {
+        return Err(HttpErrorJson::new(
+            Status::PayloadTooLarge,
+            format!(
+                "Too many ids in bulk delete request: {} (max {MAX_BULK_DELETE_IDS})",
+                body.ids.len()
+            ),
+        ));
+    }
+
     // Hold the write lock across (read old ranges + delete + invalidate), as
     // bucket_events_create and bucket_events_delete_by_id do. If the read ran
     // outside the lock, a concurrent insert/heartbeat could replace an event

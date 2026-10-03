@@ -480,6 +480,16 @@ mod api_tests {
             .body(r#"{"ids":[1]}"#)
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::NotFound);
+
+        // Oversized id lists are rejected before any work is done
+        let huge: Vec<String> = (0..10_001).map(|i| i.to_string()).collect();
+        let res = client
+            .post("/api/0/buckets/id/events/delete")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(format!(r#"{{"ids":[{}]}}"#, huge.join(",")))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::PayloadTooLarge);
     }
 
     #[test]

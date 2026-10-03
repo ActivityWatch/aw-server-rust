@@ -60,7 +60,10 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
                 None => continue 'event,
             }
         }
-        let summed_key = key_values.join(".");
+        // Pre-categorization aggregation (notably Android's app totals) must
+        // not collapse manually assigned events into an automatic group.
+        let category = crate::classify::manual_category(&event);
+        let summed_key = serde_json::to_string(&(key_values, category)).unwrap();
         match index.entry(summed_key) {
             std::collections::hash_map::Entry::Occupied(entry) => {
                 merged[*entry.get()].duration += event.duration;

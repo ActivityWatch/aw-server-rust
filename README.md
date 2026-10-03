@@ -123,3 +123,33 @@ cors_regex = ["chrome-extension://.*"]
 ### Syncing
 
 For details about aw-sync-rust, see the [README](./aw-sync/README.md) in its subdirectory.
+
+### Local manual event categories
+
+The Rust backend advertises `manual_event_category: true` in `/api/0/info`.
+Clients must check this flag before exposing an editor; the Python backend does
+not yet implement this contract.
+
+`/api/0/buckets/{bucket_id}/events/{event_id}/category` supports:
+
+- GET: category path as a JSON array, or `null` when no override exists.
+- PUT: a non-empty JSON array of non-blank names, e.g. `["Work", "Client"]`.
+- DELETE: remove the override; repeated deletion is successful.
+
+Missing events, including IDs owned by another bucket, return 404. Invalid
+paths return 400. An explicit `["Uncategorized"]` is an override, distinct
+from deleting one. Writes leave the event's watcher data, timestamp, duration,
+and heartbeat identity unchanged. Replacement of an existing event ID retains
+its override; deleting the event or bucket removes it. Category paths remain
+as assigned even if category rules are renamed or removed.
+
+`query_bucket` overlays a reserved, derived `$manual_category` field before
+transforms; `categorize` gives it precedence over rules. Stored copies of that
+field cannot spoof annotations. Pre-aggregation by app/title keeps manual
+paths separate so durations are not assigned to the wrong category.
+
+**Local database only:** overrides persist through restart, but are deliberately
+absent from raw-event exports and aw-sync transport. Export/import onto a new
+database and sync reconciliation that deletes/recreates events do not preserve
+them. Back up the SQLite database to retain annotations. This is not a portable
+annotation format or a guarantee of annotation survival during sync.

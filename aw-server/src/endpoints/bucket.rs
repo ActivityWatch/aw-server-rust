@@ -300,6 +300,13 @@ pub fn bucket_events_delete_many(
     body: Json<BulkDeleteRequest>,
     state: &State<ServerState>,
 ) -> Result<Json<u64>, HttpErrorJson> {
+    // Hold the write lock across (read old ranges + delete + invalidate), as
+    // bucket_events_create and bucket_events_delete_by_id do. If the read ran
+    // outside the lock, a concurrent insert/heartbeat could replace an event
+    // with one of the same id at a different range; the delete would remove
+    // that new event while only the stale range was invalidated, and the
+    // returned count could include ids another request had already deleted.
+    let _guard = state.write_lock.lock().unwrap();
     let datastore = &state.datastore;
 
     // Validate bucket exists before iterating (handles empty-ids case too).
@@ -307,7 +314,7 @@ pub fn bucket_events_delete_many(
         .get_bucket(bucket_id)
         .map_err(HttpErrorJson::from)?;
 
-    // Collect existing events outside the write lock to minimise lock hold time.
+    // Collect the events that exist. Duplicate ids collapse to one entry.
     let mut existing: Vec<Event> = Vec::new();
     for id in body.ids.iter() {
         if existing.iter().any(|e: &Event| e.id == Some(*id)) {
@@ -324,21 +331,18 @@ pub fn bucket_events_delete_many(
         return Ok(Json(0));
     }
 
-    // Hold the write lock only for the actual delete and cache invalidation.
-    let _guard = state.write_lock.lock().unwrap();
+    // Ranges are collected under the same lock that deletes, so they describe
+    // exactly the events that the delete removes.
+    let ranges: Vec<_> = existing.iter().map(event_range).collect();
     match datastore.delete_events_by_id(bucket_id, ids.clone()) {
         Ok(_) => {
-            state
-                .query_cache
-                .invalidate(existing.iter().map(event_range).collect());
+            state.query_cache.invalidate(ranges);
             Ok(Json(ids.len() as u64))
         }
         Err(err) => {
             // Invalidate cache even on failure: some events may have been
             // deleted by the datastore worker before the error was returned.
-            state
-                .query_cache
-                .invalidate(existing.iter().map(event_range).collect());
+            state.query_cache.invalidate(ranges);
             Err(err.into())
         }
     }

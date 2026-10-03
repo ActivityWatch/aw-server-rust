@@ -61,13 +61,17 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
             }
         }
         // Pre-categorization aggregation (notably Android's app totals) must
-        // not collapse manually assigned events into an automatic group. Once
-        // an event has been classified (`$category` present) its final category
-        // is what separates groups, so the manual marker must no longer split
-        // otherwise-identical events — a report merged by `$category` has to
-        // sum a manual and an automatic event that landed in the same category
-        // into one row instead of leaving two rows with equal totals keys.
-        let manual = if event.data.contains_key("$category") {
+        // not collapse manually assigned events into an automatic group.
+        //
+        // The manual marker is part of the merge key for every grouping except
+        // a `$category` merge. A category-totals merge intentionally ignores it
+        // so a manual and an automatic event that landed in the same final
+        // category sum into one row. But app/title summaries also run after
+        // `categorize`, and there the grouping is *not* by category — keeping
+        // the marker there stops two events for the same app/title but
+        // different manual categories from collapsing into one row that keeps
+        // only the first event's category and misattributes the summed time.
+        let manual = if keys.iter().any(|key| key == "$category") {
             None
         } else {
             crate::classify::manual_category(&event)

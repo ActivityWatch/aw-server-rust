@@ -526,30 +526,41 @@ mod tests {
     const INFO_BODY: &str =
         r#"{"hostname":"host","version":"v0.0.0","testing":true,"device_id":"device"}"#;
 
+    /// Read one request's headers, or `None` if the connection closes first.
+    async fn read_request(
+        mut stream: tokio::net::TcpStream,
+    ) -> Option<(tokio::net::TcpStream, Vec<u8>)> {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buf).await {
+                Ok(n) if n > 0 => request.extend_from_slice(&buf[..n]),
+                _ => return None,
+            }
+        }
+        Some((stream, request))
+    }
+
     /// Answer the first connection that sends a request with `status_line` and `body`.
     ///
-    /// Connections that close, or send nothing for 200 ms, are skipped: on Windows a
-    /// connect to a port that isn't listening yet can hang instead of being refused, so an
-    /// attempt the client already abandoned may be the first one accepted, closed or
-    /// half-open. The skip must be shorter than `wait_for_server`'s per-attempt timeout
-    /// (500 ms), or the live attempt behind it would be abandoned before it's answered.
+    /// Connections are read concurrently, so ones that close or never send anything
+    /// don't delay the others. On Windows a connect to a port that isn't listening yet
+    /// can hang instead of being refused, so attempts the client already abandoned may
+    /// be accepted ahead of the live one, closed or half-open. Reading them one at a time
+    /// let enough of them queue up that the live attempt timed out before it was reached,
+    /// on every retry.
     async fn answer_once(listener: &tokio::net::TcpListener, status_line: &str, body: &str) {
+        let mut readers = tokio::task::JoinSet::new();
         let (mut stream, request) = loop {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut buf = [0_u8; 1024];
-            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                let read = tokio::time::timeout(
-                    std::time::Duration::from_millis(200),
-                    stream.read(&mut buf),
-                );
-                match read.await {
-                    Ok(Ok(n)) if n > 0 => request.extend_from_slice(&buf[..n]),
-                    _ => break,
+            tokio::select! {
+                accepted = listener.accept() => {
+                    readers.spawn(read_request(accepted.unwrap().0));
                 }
-            }
-            if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                break (stream, request);
+                Some(read) = readers.join_next() => {
+                    if let Some(answered) = read.unwrap() {
+                        break answered;
+                    }
+                }
             }
         };
         assert!(request.starts_with(b"GET /api/0/info "));
@@ -561,17 +572,21 @@ mod tests {
     }
 
     #[test]
-    fn test_answer_once_skips_a_silent_connection() {
-        // A connection that never sends anything (like an attempt abandoned mid-handshake
-        // on Windows) must not keep the mock from answering the next one.
+    fn test_answer_once_skips_silent_connections() {
+        // Connections that never send anything (like attempts abandoned mid-handshake on
+        // Windows) must not delay the mock from answering the next one, however many are
+        // queued ahead of it.
         runtime().block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
-            let _silent = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let mut silent = Vec::new();
+            for _ in 0..8 {
+                silent.push(tokio::net::TcpStream::connect(addr).await.unwrap());
+            }
             let url = info_url(addr);
             let server = async { answer_once(&listener, "200 OK", INFO_BODY).await };
             let client = reqwest::Client::new();
-            let wait = super::wait_for_server(&client, url, std::time::Duration::from_secs(3));
+            let wait = super::wait_for_server(&client, url, std::time::Duration::from_secs(1));
             let (_, result) = tokio::join!(server, wait);
             result.unwrap();
         });

@@ -183,17 +183,20 @@ fn root_manifest(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
 }
 
 #[get("/")]
-fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Info> {
+fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<serde_json::Value> {
     #[allow(clippy::or_fun_call)]
     let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
 
-    Json(Info {
+    let mut info = serde_json::to_value(Info {
         hostname,
         version: crate::version::version_string(),
         testing: config.testing,
         profile: crate::config::get_profile().to_string(),
         device_id: state.device_id.clone(),
     })
+    .expect("server info is serializable");
+    info["manual_event_category"] = serde_json::json!(true);
+    Json(info)
 }
 
 fn get_file(file: PathBuf, state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
@@ -259,7 +262,10 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 bucket::bucket_event_count,
                 bucket::bucket_events_get_single,
                 bucket::bucket_events_delete_by_id,
-                bucket::bucket_export
+                bucket::bucket_export,
+                bucket::event_category_get,
+                bucket::event_category_set,
+                bucket::event_category_delete
             ],
         )
         .mount("/api/0/query", routes![query::query])

@@ -344,3 +344,50 @@ pub fn bucket_delete(bucket_id: &str, state: &State<ServerState>) -> Result<(), 
         Err(err) => Err(err.into()),
     }
 }
+
+/// Local-database annotation only; raw events and exports remain unchanged.
+#[get("/<bucket_id>/events/<event_id>/category")]
+pub fn event_category_get(
+    bucket_id: &str,
+    event_id: i64,
+    state: &State<ServerState>,
+) -> Result<Json<Option<Vec<String>>>, HttpErrorJson> {
+    state
+        .datastore
+        .get_event_category(bucket_id, event_id)
+        .map(Json)
+        .map_err(Into::into)
+}
+
+#[put(
+    "/<bucket_id>/events/<event_id>/category",
+    data = "<category>",
+    format = "application/json"
+)]
+pub fn event_category_set(
+    bucket_id: &str,
+    event_id: i64,
+    category: Json<Vec<String>>,
+    state: &State<ServerState>,
+) -> Result<(), HttpErrorJson> {
+    let _guard = state.write_lock.lock().unwrap();
+    state
+        .datastore
+        .set_event_category(bucket_id, event_id, category.into_inner())?;
+    // Queries may reference this event through arbitrary transforms. Clearing
+    // the cache also covers changes to categories in historical periods.
+    state.query_cache.clear();
+    Ok(())
+}
+
+#[delete("/<bucket_id>/events/<event_id>/category")]
+pub fn event_category_delete(
+    bucket_id: &str,
+    event_id: i64,
+    state: &State<ServerState>,
+) -> Result<(), HttpErrorJson> {
+    let _guard = state.write_lock.lock().unwrap();
+    state.datastore.delete_event_category(bucket_id, event_id)?;
+    state.query_cache.clear();
+    Ok(())
+}

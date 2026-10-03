@@ -127,6 +127,7 @@ pub enum Response {
     Event(Event),
     EventList(Vec<Event>),
     FilteredEvents(Vec<Option<Event>>),
+    EventCategory(Option<Vec<String>>),
     Count(i64),
     KeyValue(String),
     KeyValues(HashMap<String, String>),
@@ -159,6 +160,15 @@ pub enum Command {
         bool,
     ),
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
+    GetEventCategory(String, i64),
+    SetEventCategory(String, i64, Vec<String>),
+    DeleteEventCategory(String, i64),
+    GetEventsWithCategories(
+        String,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+        Option<u64>,
+    ),
     DeleteEventsById(String, Vec<i64>),
     ForceCommit(),
     GetKeyValues(String),
@@ -559,6 +569,23 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
+            Command::GetEventCategory(bucket, id) => ds
+                .get_event_category(tx, &bucket, id)
+                .map(Response::EventCategory),
+            Command::SetEventCategory(bucket, id, path) => {
+                // Even errors end the current transaction before acknowledging.
+                self.commit = true;
+                ds.set_event_category(tx, &bucket, id, path)?;
+                Ok(Response::Empty())
+            }
+            Command::DeleteEventCategory(bucket, id) => {
+                self.commit = true;
+                ds.delete_event_category(tx, &bucket, id)?;
+                Ok(Response::Empty())
+            }
+            Command::GetEventsWithCategories(bucket, start, end, limit) => ds
+                .get_events_with_categories(tx, &bucket, start, end, limit)
+                .map(Response::EventList),
             Command::GetEventCount(bucketname, starttime_opt, endtime_opt) => {
                 match ds.get_event_count(tx, &bucketname, starttime_opt, endtime_opt) {
                     Ok(n) => Ok(Response::Count(n)),
@@ -916,6 +943,62 @@ impl Datastore {
         );
         match self.request(cmd)? {
             Response::EventList(el) => Ok(el),
+            _ => panic!("Invalid response"),
+        }
+    }
+
+    pub fn get_event_category(
+        &self,
+        bucket_id: &str,
+        event_id: i64,
+    ) -> Result<Option<Vec<String>>, DatastoreError> {
+        match self.request(Command::GetEventCategory(bucket_id.into(), event_id))? {
+            Response::EventCategory(path) => Ok(path),
+            _ => panic!("Invalid response"),
+        }
+    }
+
+    /// Persist a manual annotation without changing watcher data.
+    /// Returns only after the transaction commits.
+    pub fn set_event_category(
+        &self,
+        bucket_id: &str,
+        event_id: i64,
+        path: Vec<String>,
+    ) -> Result<(), DatastoreError> {
+        _unwrap_empty_response(self.request(Command::SetEventCategory(
+            bucket_id.into(),
+            event_id,
+            path,
+        ))?)
+    }
+
+    /// Clear an annotation; absent annotations are a successful no-op.
+    /// Returns only after the transaction commits.
+    pub fn delete_event_category(
+        &self,
+        bucket_id: &str,
+        event_id: i64,
+    ) -> Result<(), DatastoreError> {
+        _unwrap_empty_response(
+            self.request(Command::DeleteEventCategory(bucket_id.into(), event_id))?,
+        )
+    }
+
+    pub fn get_events_with_categories(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, DatastoreError> {
+        match self.request(Command::GetEventsWithCategories(
+            bucket_id.into(),
+            start,
+            end,
+            limit,
+        ))? {
+            Response::EventList(events) => Ok(events),
             _ => panic!("Invalid response"),
         }
     }

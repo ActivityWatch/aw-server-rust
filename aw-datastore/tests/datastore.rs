@@ -1377,6 +1377,217 @@ mod datastore_tests {
         }
     }
 
+    /// A `.dump`-restored peer has `user_version` 0 but a v4/v5 schema. The
+    /// read-only pull path (aw-sync) probes the pragma before opening, so it
+    /// must infer the version too; otherwise the peer is skipped as
+    /// unsupported even though v4/v5 are meant to be pullable.
+    #[test]
+    fn test_read_only_open_reads_dump_restored_older_versions() {
+        for version in [4, 5] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join(format!("restored-peer-v{version}.db"));
+            let now = write_old_fixture(&db_path, version);
+            write_versioned_db(&db_path, 0);
+
+            let ds = Datastore::open_read_only(db_path.to_str().unwrap().to_string())
+                .unwrap_or_else(|e| panic!("restored v{version} peer must open read-only: {e:?}"));
+            let since = now - Duration::days(1);
+            assert_eq!(
+                ds.get_events("testid", Some(since), None, None)
+                    .unwrap()
+                    .len(),
+                3,
+                "v{version} recent read"
+            );
+            ds.close();
+
+            // Inference never writes: no pragma update, no WAL sidecars.
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                after, 0,
+                "read-only open must not persist the inferred version"
+            );
+            assert!(!db_path.with_extension("db-wal").exists());
+            assert!(!db_path.with_extension("db-shm").exists());
+        }
+    }
+
+    #[test]
+    fn test_writable_open_handles_dump_restored_db() {
+        // `sqlite3 .dump` drops PRAGMA user_version; the restored DB must not
+        // re-run v0 migrations (which panic on duplicate column / table).
+        for version in [4, 5] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join("restored.db");
+            let now = write_old_fixture(&db_path, version);
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                conn.pragma_update(None, "user_version", 0).unwrap();
+            }
+
+            let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+            let since = now - Duration::days(1);
+            assert_eq!(
+                ds.get_events("testid", Some(since), None, None)
+                    .unwrap()
+                    .len(),
+                3,
+                "v{version}"
+            );
+            ds.close();
+
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, aw_datastore::NEWEST_DB_VERSION);
+        }
+    }
+
+    #[test]
+    fn test_writable_open_handles_dump_restored_current_db() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("restored-current.db");
+        let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+        create_test_bucket(&ds);
+        ds.close();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 0).unwrap();
+        }
+
+        let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+        assert_eq!(ds.get_buckets().unwrap().len(), 1);
+        ds.close();
+    }
+
+    /// The v1-v3 schemas differ only in the bucket `data` columns and the
+    /// missing `key_value` table; inference must pick the right version for
+    /// each so the remaining (non-idempotent) ALTER migrations run exactly once.
+    #[test]
+    fn test_writable_open_handles_dump_restored_early_schemas() {
+        const V1_SCHEMA: &str = "
+            CREATE TABLE buckets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                type TEXT NOT NULL,
+                client TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                created TEXT NOT NULL
+            );
+            CREATE INDEX bucket_id_index ON buckets(id);
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bucketrow INTEGER NOT NULL,
+                starttime INTEGER NOT NULL,
+                endtime INTEGER NOT NULL,
+                data TEXT NOT NULL,
+                FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+            );
+            CREATE INDEX events_bucketrow_index ON events(bucketrow);
+            CREATE INDEX events_starttime_index ON events(starttime);
+            CREATE INDEX events_endtime_index ON events(endtime);
+        ";
+        const V1_TO_V2: &str = "ALTER TABLE buckets ADD COLUMN data TEXT DEFAULT '{}';";
+        const V2_TO_V3: &str = "
+            ALTER TABLE buckets RENAME COLUMN data TO data_deprecated;
+            ALTER TABLE buckets ADD COLUMN data TEXT NOT NULL DEFAULT '{}';
+        ";
+
+        for version in [1, 2, 3] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join("restored-early.db");
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                conn.execute_batch(V1_SCHEMA).unwrap();
+                if version >= 2 {
+                    conn.execute_batch(V1_TO_V2).unwrap();
+                }
+                if version >= 3 {
+                    conn.execute_batch(V2_TO_V3).unwrap();
+                }
+                conn.execute(
+                    "INSERT INTO buckets (name, type, client, hostname, created)
+                     VALUES ('testid', 'testtype', 'testclient', 'testhost', ?1)",
+                    [Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+                if version >= 2 {
+                    // A distinct payload in the pre-rename `data` column: the
+                    // v2->v3 migration renames it to `data_deprecated`, and no
+                    // later migration touches either column, so both must
+                    // survive to the newest version with this value intact.
+                    // For a v3 fixture the rename already happened, so the
+                    // payload goes straight into `data_deprecated`.
+                    let col = if version == 2 {
+                        "data"
+                    } else {
+                        "data_deprecated"
+                    };
+                    conn.execute(
+                        &format!("UPDATE buckets SET {col} = '{{\"legacy\": true}}'"),
+                        [],
+                    )
+                    .unwrap();
+                }
+                conn.execute(
+                    "INSERT INTO events (bucketrow, starttime, endtime, data)
+                     VALUES (1, 0, 1000000000, '{\"k\": \"v\"}')",
+                    [],
+                )
+                .unwrap();
+                // user_version stays 0, as after `sqlite3 .dump` + restore.
+            }
+
+            let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+            assert_eq!(
+                ds.get_events("testid", None, None, None).unwrap().len(),
+                1,
+                "v{version}"
+            );
+            ds.close();
+
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, aw_datastore::NEWEST_DB_VERSION, "v{version}");
+
+            if version >= 2 {
+                // `data_deprecated` survived the rename and still carries the
+                // pre-migration payload; the new `data` column holds the
+                // migration default and is never NULL.
+                let has_deprecated: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM pragma_table_info('buckets') WHERE name = 'data_deprecated'",
+                        [],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                assert!(has_deprecated, "v{version}: data_deprecated missing");
+                let legacy: String = conn
+                    .query_row(
+                        "SELECT data_deprecated FROM buckets WHERE name = 'testid'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(legacy, r#"{"legacy": true}"#, "v{version}");
+                let data: String = conn
+                    .query_row(
+                        "SELECT data FROM buckets WHERE name = 'testid'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(data, "{}", "v{version}");
+            }
+        }
+    }
+
     /// A writable open (aw-sync's own staging db, aw-server's db) migrates a
     /// v4 file to the newest version and then reads through the new indexes.
     #[test]

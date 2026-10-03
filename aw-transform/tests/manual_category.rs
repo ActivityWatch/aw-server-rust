@@ -132,3 +132,34 @@ fn merging_by_category_sums_manual_and_automatic_events() {
     );
     assert_eq!(merged[0].duration, Duration::seconds(40));
 }
+
+#[test]
+fn app_summary_keeps_manual_and_automatic_categories_apart() {
+    // Desktop app/title summaries merge by app/title *after* categorization,
+    // so their events carry `$category` and the merge is not grouping by
+    // category. A manually assigned event must then not be folded into an
+    // automatically classified one for the same app/title — that merge would
+    // keep only the first event's category and misattribute the summed time.
+    let mut automatic = Event::default();
+    automatic.duration = Duration::seconds(30);
+    automatic.data.insert("app".into(), json!("browser"));
+    automatic.data.insert("title".into(), json!("page"));
+    let mut manual = automatic.clone();
+    manual.duration = Duration::seconds(10);
+    manual
+        .data
+        .insert("$manual_category".into(), json!(["Work"]));
+    let classified = categorize(vec![automatic, manual], &[]);
+    assert_eq!(classified[0].data["$category"], json!(["Uncategorized"]));
+    assert_eq!(classified[1].data["$category"], json!(["Work"]));
+    let merged = merge_events_by_keys(classified, vec!["app".into()]);
+    assert_eq!(
+        merged.len(),
+        2,
+        "app summary must not fold events with different manual categories together"
+    );
+    assert_eq!(merged[0].duration, Duration::seconds(30));
+    assert_eq!(merged[0].data["$category"], json!(["Uncategorized"]));
+    assert_eq!(merged[1].duration, Duration::seconds(10));
+    assert_eq!(merged[1].data["$category"], json!(["Work"]));
+}

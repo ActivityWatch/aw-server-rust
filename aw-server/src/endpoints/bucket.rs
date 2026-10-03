@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use gethostname::gethostname;
 use rocket::serde::json::Json;
@@ -316,8 +317,9 @@ pub fn bucket_events_delete_many(
 
     // Collect the events that exist. Duplicate ids collapse to one entry.
     let mut existing: Vec<Event> = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
     for id in body.ids.iter() {
-        if existing.iter().any(|e: &Event| e.id == Some(*id)) {
+        if !seen.insert(*id) {
             continue;
         }
         match datastore.get_event(bucket_id, *id) {

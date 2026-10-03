@@ -150,7 +150,7 @@ mod qfunctions {
         let bucket_id: String = args.into_iter().next().unwrap().try_into()?;
         let interval = validate::get_timeinterval(env)?;
 
-        let events = match ds.get_events(
+        let events = match ds.get_events_with_categories(
             bucket_id.as_str(),
             Some(*interval.start()),
             Some(*interval.end()),

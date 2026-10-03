@@ -79,6 +79,11 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
  */
 pub const NEWEST_DB_VERSION: i32 = 7;
 
+/// Max bound parameters per statement when building an `IN (...)` lookup.
+/// SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` was 999 before 3.32, so stay
+/// under that to remain portable across the bundled and system SQLite builds.
+const SQLITE_PARAM_CHUNK: usize = 900;
+
 /// Oldest version a read-only open (aw-sync pulling a peer db) accepts.
 ///
 /// v4, v5 and v6 have identical tables and columns; v5 and v6 only changed
@@ -1333,31 +1338,33 @@ impl DatastoreInstance {
         if self.db_version < 7 || events.is_empty() {
             return Ok(events);
         }
-        let bucket = self.get_bucket(bucket_id)?;
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT o.event_id, o.category_path
-             FROM event_category_overrides o
-             JOIN events e ON e.id = o.event_id
-             WHERE e.bucketrow = ?1 AND e.endtime >= ?2 AND e.starttime <= ?3",
-            )
-            .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
-        let rows = stmt
-            .query_map(
-                params![
-                    bucket.bid,
-                    start.map_or(0, filter_nanos),
-                    end.map_or(i64::MAX, filter_nanos)
-                ],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            )
-            .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+        // Look up sidecars only for the events actually returned, so a limited
+        // read pays for its result set instead of scanning the whole queried
+        // interval on every read. `event_id` is the primary key of
+        // `event_category_overrides`, so each id is an index lookup. Chunked to
+        // stay under SQLite's bound-parameter limit.
+        let ids: Vec<i64> = events.iter().filter_map(|event| event.id).collect();
         let mut overrides = HashMap::new();
-        for row in rows {
-            let (id, json) = row.map_err(|e| DatastoreError::InternalError(e.to_string()))?;
-            if let Ok(path) = serde_json::from_str::<Vec<String>>(&json) {
-                if !path.is_empty() && path.iter().all(|p| !p.trim().is_empty()) {
-                    overrides.insert(id, path);
+        for chunk in ids.chunks(SQLITE_PARAM_CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT event_id, category_path FROM event_category_overrides \
+                 WHERE event_id IN ({placeholders})"
+            );
+            let mut stmt = conn
+                .prepare_cached(&sql)
+                .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+            for row in rows {
+                let (id, json) = row.map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+                if let Ok(path) = serde_json::from_str::<Vec<String>>(&json) {
+                    if !path.is_empty() && path.iter().all(|p| !p.trim().is_empty()) {
+                        overrides.insert(id, path);
+                    }
                 }
             }
         }

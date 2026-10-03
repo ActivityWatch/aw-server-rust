@@ -60,7 +60,29 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
                 None => continue 'event,
             }
         }
-        let summed_key = key_values.join(".");
+        // The category component of the merge key is what keeps events with
+        // the same grouping values but different final categories from
+        // collapsing into one row that keeps only the first event's category
+        // and misattributes the summed duration.
+        //
+        // - A `$category` merge already groups by the final category, so no
+        //   extra component is needed: a manual and an automatic event that
+        //   landed in the same category must sum into one row.
+        // - After classification (`$category` present, e.g. the app/title
+        //   summaries that run after `categorize`) the final category itself is
+        //   the component, so events that agree on it still merge while events
+        //   that differ stay apart.
+        // - Before classification (`$category` absent) the manual marker is
+        //   what separates groups, so pre-categorization aggregation (notably
+        //   Android's app totals) does not erase manual boundaries.
+        let split = if keys.iter().any(|key| key == "$category") {
+            None
+        } else if let Some(category) = event.data.get("$category") {
+            Some(category.clone())
+        } else {
+            crate::classify::manual_category(&event).map(|path| serde_json::json!(path))
+        };
+        let summed_key = serde_json::to_string(&(key_values, split)).unwrap();
         match index.entry(summed_key) {
             std::collections::hash_map::Entry::Occupied(entry) => {
                 merged[*entry.get()].duration += event.duration;

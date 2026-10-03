@@ -956,7 +956,7 @@ mod datastore_tests {
             let version: i32 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 6);
+            assert_eq!(version, aw_datastore::NEWEST_DB_VERSION);
             let old_indexes: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN

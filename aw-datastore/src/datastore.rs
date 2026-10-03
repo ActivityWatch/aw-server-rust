@@ -31,8 +31,14 @@ fn _get_db_version(conn: &Connection) -> i32 {
  * 4: Added 'key_value' table for storing key - value pairs
  * 5: Replaced single-column events indexes with a composite index
  * 6: Added an endtime-first index for recent interval reads
+ * 7: Added event category overrides and explicit event deletion cleanup
  */
-pub const NEWEST_DB_VERSION: i32 = 6;
+pub const NEWEST_DB_VERSION: i32 = 7;
+
+/// Max bound parameters per statement when building an `IN (...)` lookup.
+/// SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` was 999 before 3.32, so stay
+/// under that to remain portable across the bundled and system SQLite builds.
+const SQLITE_PARAM_CHUNK: usize = 900;
 
 /// Oldest version a read-only open (aw-sync pulling a peer db) accepts.
 ///
@@ -88,6 +94,23 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 6 {
         _migrate_v5_to_v6(conn);
+    }
+    if version < 7 {
+        conn.execute_batch(
+            "BEGIN EXCLUSIVE TRANSACTION;
+             CREATE TABLE event_category_overrides (
+                 event_id INTEGER PRIMARY KEY,
+                 category_path TEXT NOT NULL
+             );
+             CREATE TRIGGER events_delete_category_override
+             AFTER DELETE ON events
+             BEGIN
+                 DELETE FROM event_category_overrides WHERE event_id = OLD.id;
+             END;
+             PRAGMA user_version = 7;
+             COMMIT;",
+        )
+        .expect("Failed to run v7 migration transaction");
     }
 
     first_init
@@ -787,10 +810,35 @@ impl DatastoreInstance {
     ) -> Result<Vec<Event>, DatastoreError> {
         let mut bucket = self.get_bucket(bucket_id)?;
 
+        // Explicit IDs may update an event in this bucket, but must never
+        // move another bucket's event (and its category sidecar). Validate
+        // the whole batch before writing so a collision cannot partially
+        // apply preceding events.
+        {
+            use rusqlite::OptionalExtension;
+            let mut ownership = conn
+                .prepare_cached("SELECT bucketrow FROM events WHERE id = ?1")
+                .map_err(|err| DatastoreError::InternalError(err.to_string()))?;
+            for id in events.iter().filter_map(|event| event.id) {
+                let owner: Option<i64> = ownership
+                    .query_row([id], |row| row.get(0))
+                    .optional()
+                    .map_err(|err| DatastoreError::InternalError(err.to_string()))?;
+                if owner.is_some_and(|owner| Some(owner) != bucket.bid) {
+                    return Err(DatastoreError::NoSuchEvent(bucket_id.to_owned(), id));
+                }
+            }
+        }
+
         let mut stmt = match conn.prepare_cached(
             "
-                INSERT OR REPLACE INTO events(bucketrow, id, starttime, endtime, data)
-                VALUES (?1, ?2, ?3, ?4, ?5)",
+                INSERT INTO events(bucketrow, id, starttime, endtime, data)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(id) DO UPDATE SET
+                    bucketrow = excluded.bucketrow,
+                    starttime = excluded.starttime,
+                    endtime = excluded.endtime,
+                    data = excluded.data",
         ) {
             Ok(stmt) => stmt,
             Err(err) => {
@@ -822,7 +870,7 @@ impl DatastoreInstance {
                 Ok(_) => {
                     self.update_endtime(&mut bucket, event);
                     let rowid = conn.last_insert_rowid();
-                    event.id = Some(rowid);
+                    event.id = Some(event.id.unwrap_or(rowid));
                 }
                 Err(err) => {
                     return Err(DatastoreError::InternalError(format!(
@@ -1182,6 +1230,128 @@ impl DatastoreInstance {
         limit_opt: Option<u64>,
     ) -> Result<Vec<Event>, DatastoreError> {
         self.get_events_inner(conn, bucket_id, starttime_opt, endtime_opt, limit_opt, true)
+    }
+
+    /// Query-only view: never exposes a watcher-supplied reserved marker.
+    /// Sidecars are fetched once for this bucket in the caller's transaction.
+    pub fn get_events_with_categories(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, DatastoreError> {
+        let mut events = self.get_events(conn, bucket_id, start, end, limit)?;
+        for event in &mut events {
+            event.data.remove("$manual_category");
+        }
+        // Peer files from v4-v6 do not contain the sidecar table.
+        if self.db_version < 7 || events.is_empty() {
+            return Ok(events);
+        }
+        // Look up sidecars only for the events actually returned, so a limited
+        // read pays for its result set instead of scanning the whole queried
+        // interval on every read. `event_id` is the primary key of
+        // `event_category_overrides`, so each id is an index lookup. Chunked to
+        // stay under SQLite's bound-parameter limit.
+        let ids: Vec<i64> = events.iter().filter_map(|event| event.id).collect();
+        let mut overrides = HashMap::new();
+        for chunk in ids.chunks(SQLITE_PARAM_CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT event_id, category_path FROM event_category_overrides \
+                 WHERE event_id IN ({placeholders})"
+            );
+            let mut stmt = conn
+                .prepare_cached(&sql)
+                .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+            for row in rows {
+                let (id, json) = row.map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+                if let Ok(path) = serde_json::from_str::<Vec<String>>(&json) {
+                    if !path.is_empty() && path.iter().all(|p| !p.trim().is_empty()) {
+                        overrides.insert(id, path);
+                    }
+                }
+            }
+        }
+        for event in &mut events {
+            if let Some(path) = event.id.and_then(|id| overrides.remove(&id)) {
+                event
+                    .data
+                    .insert("$manual_category".into(), serde_json::json!(path));
+            }
+        }
+        Ok(events)
+    }
+
+    pub fn get_event_category(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        event_id: i64,
+    ) -> Result<Option<Vec<String>>, DatastoreError> {
+        self.get_event(conn, bucket_id, event_id)?;
+        if self.db_version < 7 {
+            return Ok(None);
+        }
+        use rusqlite::OptionalExtension;
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT category_path FROM event_category_overrides WHERE event_id = ?1",
+                [event_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+        json.map(|json| {
+            serde_json::from_str(&json).map_err(|e| DatastoreError::InternalError(e.to_string()))
+        })
+        .transpose()
+    }
+
+    pub fn set_event_category(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        event_id: i64,
+        path: Vec<String>,
+    ) -> Result<(), DatastoreError> {
+        self.get_event(conn, bucket_id, event_id)?;
+        if path.is_empty() || path.iter().any(|p| p.trim().is_empty()) {
+            return Err(DatastoreError::InvalidCategory(
+                "Category path must contain nonblank components".into(),
+            ));
+        }
+        let json = serde_json::to_string(&path)
+            .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO event_category_overrides(event_id, category_path) VALUES (?1, ?2)
+             ON CONFLICT(event_id) DO UPDATE SET category_path = excluded.category_path",
+            params![event_id, json],
+        )
+        .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn delete_event_category(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        event_id: i64,
+    ) -> Result<(), DatastoreError> {
+        self.get_event(conn, bucket_id, event_id)?;
+        conn.execute(
+            "DELETE FROM event_category_overrides WHERE event_id = ?1",
+            [event_id],
+        )
+        .map_err(|e| DatastoreError::InternalError(e.to_string()))?;
+        Ok(())
     }
 
     pub fn get_events_unclipped(

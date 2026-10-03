@@ -46,7 +46,9 @@ fn category_lifecycle_preserves_raw_events_and_heartbeat() {
     assert_eq!(merged.id, Some(id));
     assert_eq!(merged.data, original.data);
     assert_eq!(ds.get_event_category("a", id).unwrap(), Some(path.clone()));
-    let replaced = ds.insert_events("a", &[merged.clone()]).unwrap();
+    let replaced = ds
+        .insert_events("a", std::slice::from_ref(&merged))
+        .unwrap();
     assert_eq!(replaced[0].id, Some(id));
     assert_eq!(ds.get_event_category("a", id).unwrap(), Some(path.clone()));
     assert_eq!(
@@ -204,5 +206,35 @@ fn colliding_event_id_cannot_move_an_annotation_to_another_bucket() {
         Some(vec!["Work".into()])
     );
     assert_eq!(ds.get_event_count("b", None, None).unwrap(), 0);
+    ds.close();
+}
+
+#[test]
+fn limited_read_applies_overrides_to_returned_events() {
+    let ds = Datastore::new_in_memory(false);
+    bucket(&ds, "a");
+    let base = Utc::now();
+    let mut older = event();
+    older.timestamp = base;
+    older.data = serde_json::from_value(json!({"app": "editor"})).unwrap();
+    let mut newer = older.clone();
+    newer.timestamp = base + Duration::seconds(10);
+    let inserted = ds.insert_events("a", &[older, newer]).unwrap();
+    let newer_id = inserted
+        .iter()
+        .max_by_key(|e| e.timestamp)
+        .unwrap()
+        .id
+        .unwrap();
+    ds.set_event_category("a", newer_id, vec!["Work".into()])
+        .unwrap();
+    // `limit` returns only the most recent event; its sidecar must still be
+    // applied even though the override lookup is now scoped to the result set.
+    let limited = ds
+        .get_events_with_categories("a", None, None, Some(1))
+        .unwrap();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].id, Some(newer_id));
+    assert_eq!(limited[0].data["$manual_category"], json!(["Work"]));
     ds.close();
 }

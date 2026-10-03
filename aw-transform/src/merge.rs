@@ -61,9 +61,18 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
             }
         }
         // Pre-categorization aggregation (notably Android's app totals) must
-        // not collapse manually assigned events into an automatic group.
-        let category = crate::classify::manual_category(&event);
-        let summed_key = serde_json::to_string(&(key_values, category)).unwrap();
+        // not collapse manually assigned events into an automatic group. Once
+        // an event has been classified (`$category` present) its final category
+        // is what separates groups, so the manual marker must no longer split
+        // otherwise-identical events — a report merged by `$category` has to
+        // sum a manual and an automatic event that landed in the same category
+        // into one row instead of leaving two rows with equal totals keys.
+        let manual = if event.data.contains_key("$category") {
+            None
+        } else {
+            crate::classify::manual_category(&event)
+        };
+        let summed_key = serde_json::to_string(&(key_values, manual)).unwrap();
         match index.entry(summed_key) {
             std::collections::hash_map::Entry::Occupied(entry) => {
                 merged[*entry.get()].duration += event.duration;

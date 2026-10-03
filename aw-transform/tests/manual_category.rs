@@ -106,3 +106,29 @@ fn legacy_chunking_does_not_erase_manual_category_boundaries() {
         json!(["Work"])
     );
 }
+
+#[test]
+fn merging_by_category_sums_manual_and_automatic_events() {
+    // Once events are classified, the manual marker must not keep a manually
+    // assigned event and an automatically classified event in the same
+    // category apart: a category-totals merge (`merge_events_by_keys(["$category"])`)
+    // has to return one summed row.
+    let mut automatic = Event::default();
+    automatic.duration = Duration::seconds(30);
+    automatic.data.insert("app".into(), json!("browser"));
+    let mut manual = automatic.clone();
+    manual.duration = Duration::seconds(10);
+    manual
+        .data
+        .insert("$manual_category".into(), json!(["Uncategorized"]));
+    let classified = categorize(vec![automatic, manual], &[]);
+    assert_eq!(classified[0].data["$category"], json!(["Uncategorized"]));
+    assert_eq!(classified[1].data["$category"], json!(["Uncategorized"]));
+    let merged = merge_events_by_keys(classified, vec!["$category".into()]);
+    assert_eq!(
+        merged.len(),
+        1,
+        "manual and automatic events in the same category must sum into one row"
+    );
+    assert_eq!(merged[0].duration, Duration::seconds(40));
+}

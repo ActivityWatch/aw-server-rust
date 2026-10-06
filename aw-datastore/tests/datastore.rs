@@ -1820,7 +1820,7 @@ mod datastore_tests {
     fn test_device_id_local_default() {
         // Buckets created locally via create_bucket should always end up with
         // device_id "local", regardless of whether the caller supplies it.
-        let ds = setup_datastore_empty();
+        let ds = Datastore::new_in_memory(false);
 
         let mut b = test_bucket();
         b.device_id = String::new(); // empty → should be stamped "local"
@@ -1836,7 +1836,7 @@ mod datastore_tests {
     #[test]
     fn test_device_id_explicit_preserved() {
         // An explicit device_id (non-empty) must survive the round-trip.
-        let ds = setup_datastore_empty();
+        let ds = Datastore::new_in_memory(false);
 
         let mut b = test_bucket();
         b.device_id = "peer-abc".to_string();
@@ -1855,7 +1855,7 @@ mod datastore_tests {
         // buckets_cache is keyed by name only. A second insert with the same
         // name and a different device_id must be rejected to prevent silent
         // cache corruption / history hiding.
-        let ds = setup_datastore_empty();
+        let ds = Datastore::new_in_memory(false);
 
         let mut b1 = test_bucket();
         b1.device_id = "device-A".to_string();

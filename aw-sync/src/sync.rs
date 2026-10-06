@@ -9,7 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -67,17 +67,6 @@ fn open_or_create_cursor_ds(root: &Path, device_id: &str) -> Result<Datastore, S
     create_datastore(&dir.join("cursors.db"))
 }
 
-/// Root directory for cursor databases.
-/// When `path_db` is set (targeted pull_db path), cursors live next to the peer
-/// folder (`path.parent()`). In daemon mode they live at `path` directly.
-fn cursor_db_root(sync_spec: &SyncSpec) -> &Path {
-    if sync_spec.path_db.is_some() {
-        sync_spec.path.parent().unwrap_or(sync_spec.path.as_path())
-    } else {
-        sync_spec.path.as_path()
-    }
-}
-
 /// Key identifying the last-synced source rowid for a given (device, bucket) pair.
 fn cursor_key(src_device_id: &str, bucket_id: &str) -> String {
     format!("sync.cursor.{src_device_id}.{bucket_id}")
@@ -110,10 +99,27 @@ pub(crate) fn discover_peers(
 /// A `Ok` report is complete. On error, a partial report (failed peer, any
 /// peers already imported) is persisted so `aw-sync status` can show the
 /// failure without the process having to stay alive.
+///
+/// Pull cursors are stored under `sync_spec.path`, which must be the sync root.
+/// Callers whose `path` is a host subfolder use [`sync_run_with_cursor_root`].
 pub fn sync_run(
     client: &AwClient,
     sync_spec: &SyncSpec,
     mode: SyncMode,
+) -> Result<SyncReport, Box<dyn Error>> {
+    sync_run_with_cursor_root(client, sync_spec, mode, sync_spec.path.as_path())
+}
+
+/// [`sync_run`] with an explicit root for the pull-cursor store.
+///
+/// Every pull of a given peer must resolve the same cursor store, whatever
+/// `sync_spec.path` points at; otherwise one pull mode replays rows another
+/// mode already copied. Pass the sync root.
+pub(crate) fn sync_run_with_cursor_root(
+    client: &AwClient,
+    sync_spec: &SyncSpec,
+    mode: SyncMode,
+    cursor_root: &Path,
 ) -> Result<SyncReport, Box<dyn Error>> {
     let mut report = SyncReport::new(mode);
     let info = client.get_info()?;
@@ -223,7 +229,7 @@ pub fn sync_run(
         // newest timestamp — fixing late-arriving backfill blindness (#696).
         // Non-fatal: if cursor_ds creation fails we fall back to the
         // timestamp-based path silently.
-        let cursor_ds = open_or_create_cursor_ds(cursor_db_root(sync_spec), device_id)
+        let cursor_ds = open_or_create_cursor_ds(cursor_root, device_id)
             .map_err(|e| {
                 warn!("Could not open cursor datastore: {e}; falling back to timestamp-based sync");
             })
@@ -918,15 +924,21 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
 /// also re-fetched as a start-clipped fragment, and heartbeat() refuses to
 /// merge different data, which would insert a duplicate unless dest already
 /// holds the new payload.
+///
+/// Returns the source ids of every in-window event that is now present on
+/// dest (already matching, or just inserted as a replacement). The rowid
+/// cursor path skips these: an edit is a new source row with a rowid above the
+/// cursor, so without the skip it would be inserted a second time.
 fn reconcile_updated_events(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
-) -> Result<(), String> {
+) -> Result<HashSet<i64>, String> {
+    let mut on_dest: HashSet<i64> = HashSet::new();
     let Some(resume) = resume_sync_at else {
-        return Ok(());
+        return Ok(on_dest);
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
 
@@ -984,6 +996,9 @@ fn reconcile_updated_events(
             Some(dsts) if !dsts.is_empty() => dsts,
             _ => continue,
         };
+        // Every source row in a group that exists on dest ends up on dest:
+        // either it already matches or it is inserted below.
+        on_dest.extend(srcs.iter().filter_map(|src| src.id));
         let mut to_insert = Vec::new();
         for src in srcs {
             if let Some(idx) = dsts.iter().position(|dst| dst.data == src.data) {
@@ -1016,7 +1031,7 @@ fn reconcile_updated_events(
         }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
-    Ok(())
+    Ok(on_dest)
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -1051,7 +1066,8 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    let reconciled =
+        reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
 
     // ── Rowid cursor fast path ──────────────────────────────────────────────
     // When the source is a file-based Datastore and a cursor_ds is provided,
@@ -1133,6 +1149,8 @@ fn sync_one(
                 // path, so an event crossing the start boundary is kept.  The
                 // cursor still advances past skipped rows (max_rowid already set
                 // above) so they are not re-fetched on subsequent passes.
+                // Rows reconcile_updated_events already placed on dest (edits
+                // are new source rows above the cursor) are skipped too.
                 let chunk: Vec<Event> = current_batch
                     .into_iter()
                     .filter(|e| {
@@ -1140,6 +1158,7 @@ fn sync_one(
                             .start
                             .is_none_or(|start| e.timestamp + e.duration >= start)
                     })
+                    .filter(|e| e.id.is_none_or(|id| !reconciled.contains(&id)))
                     .map(|mut e| {
                         e.id = None;
                         e
@@ -2380,6 +2399,81 @@ mod rowid_cursor_tests {
             "second pull must import both the backfill (T5) and the new event (T40); \
              count was {after_second} (expected 5 = 3 initial + 2 new)"
         );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A source-side edit (delete + insert at the same timestamp and duration)
+    /// is a new source row above the cursor. reconcile_updated_events already
+    /// copies the replacement, so the rowid loop must not insert it again.
+    #[test]
+    fn edited_event_is_not_copied_twice() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-edit-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        let initial: Vec<Event> = [10i64, 20, 30].iter().map(|&s| make_event(s)).collect();
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Edit the middle event: delete it and insert a replacement with the
+        // same timestamp and duration but different data.
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.data["seq"] == 20)
+            .unwrap();
+        let mut edited = original.clone();
+        edited.id = None;
+        edited.data =
+            serde_json::from_value(serde_json::json!({"seq": 20, "edited": true})).unwrap();
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src.insert_events(bucket_id, &[edited]).unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let seq20: Vec<&Event> = dest.iter().filter(|e| e.data["seq"] == 20).collect();
+        assert_eq!(dest.len(), 3, "edit must not duplicate rows: {dest:?}");
+        assert_eq!(seq20.len(), 1);
+        assert_eq!(seq20[0].data.get("edited"), Some(&serde_json::json!(true)));
 
         cursor_ds.close();
         ds_src.close();

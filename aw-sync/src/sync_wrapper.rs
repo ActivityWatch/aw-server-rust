@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::report::{PeerReport, SyncMode, SyncReport};
-use crate::sync::{sync_run, SyncSpec};
+use crate::sync::{sync_run, sync_run_with_cursor_root, SyncSpec};
 use aw_client_rust::blocking::AwClient;
 
 pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
@@ -137,7 +137,9 @@ fn pull_db(client: &AwClient, host: &str, db_path: &Path) -> Result<SyncReport, 
         buckets: None, // Sync all buckets by default
         start: None,
     };
-    sync_run(client, &sync_spec, SyncMode::Pull)
+    // `path` is the peer's host folder here; keep cursors at the sync root so
+    // this pull and `sync_run` from the root share one cursor store.
+    sync_run_with_cursor_root(client, &sync_spec, SyncMode::Pull, &sync_root_dir)
 }
 
 pub fn push(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {

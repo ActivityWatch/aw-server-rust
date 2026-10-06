@@ -49,6 +49,8 @@ aw-query = { path = "../aw-query" }
 
 [dev-dependencies]
 criterion = "0.5.1"
+# Same version as aw-datastore; tests build real WAL databases to migrate.
+rusqlite = "0.30"
 
 [[bench]]
 name = "query_cache"

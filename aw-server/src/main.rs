@@ -191,11 +191,26 @@ async fn main() -> Result<(), rocket::Error> {
     let asset_path = opts.webpath.map(PathBuf::from);
     info!("Using aw-webui assets at path {:?}", asset_path);
 
-    // Only use legacy import if opts.dbpath is not set, unless the user
-    // explicitly asked for it via --import-legacy.
+    // Only use legacy import if opts.dbpath is not set and this is the
+    // default profile (the python database it reads is the default one, so a
+    // fresh named/testing profile would otherwise copy in the user's real
+    // data), unless the user explicitly asked for it via --import-legacy.
+    let auto_legacy_import = opts.dbpath.is_none() && profile == "default";
+    // Windows: a database just migrated out of v0.14.0's Roaming location was
+    // created by v0.14.0, whose first-start import looked for the Python
+    // database in the wrong place and so imported nothing. Run that import
+    // once now (idempotent: events already present are skipped). This can
+    // only happen once, since the migration itself only happens once.
+    let recover_v0140_import = auto_legacy_import && dirs::migrated_v0140_default_database();
+    if recover_v0140_import && !opts.no_legacy_import {
+        info!(
+            "Database was migrated from the v0.14.0 location; running the Python \
+             aw-server import that v0.14.0 skipped (if a Python database exists)"
+        );
+    }
     let legacy_import_opts = aw_datastore::LegacyImportOptions {
-        enabled: !opts.no_legacy_import && (opts.dbpath.is_none() || opts.import_legacy),
-        force: opts.import_legacy,
+        enabled: !opts.no_legacy_import && (auto_legacy_import || opts.import_legacy),
+        force: opts.import_legacy || recover_v0140_import,
         db_path_override: opts.legacy_dbpath.clone(),
     };
     if opts.dbpath.is_some() && !opts.import_legacy {

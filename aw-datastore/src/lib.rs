@@ -68,3 +68,36 @@ pub enum DatastoreError {
     Uninitialized(String),
     OldDbVersion(String),
 }
+
+/// Run `PRAGMA quick_check` on a plain (unencrypted) SQLite file.
+///
+/// Returns `Ok(true)` if the check passed, `Ok(false)` if `path` is not a
+/// plain SQLite file (e.g. SQLCipher-encrypted, which cannot be checked
+/// without the key), and `Err` if it is a SQLite file that fails the check
+/// or cannot be opened. Opens the file read-write so a sibling `-wal` is
+/// applied: only call it on a copy you own (aw-server uses it to verify a
+/// migrated database before switching to it).
+pub fn sqlite_quick_check(path: &std::path::Path) -> Result<bool, String> {
+    use std::io::Read;
+    let mut header = [0u8; 16];
+    let is_plain_sqlite = std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut header))
+        .map(|_| &header == b"SQLite format 3\0")
+        .unwrap_or(false);
+    if !is_plain_sqlite {
+        return Ok(false);
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("could not open {path:?}: {e}"))?;
+    let result: String = conn
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|e| format!("quick_check failed on {path:?}: {e}"))?;
+    if result == "ok" {
+        Ok(true)
+    } else {
+        Err(format!("quick_check on {path:?} reported: {result}"))
+    }
+}

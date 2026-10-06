@@ -470,6 +470,7 @@ async fn wait_for_server(
         let t0 = std::time::Instant::now();
         loop {
             let ta = t0.elapsed();
+            eprintln!("DIAG attempt start={:?} sending...", ta);
             // Bound each attempt, so a server that accepts connections but doesn't
             // answer yet is retried rather than waited on for the client's full timeout.
             let attempt = client
@@ -477,7 +478,12 @@ async fn wait_for_server(
                 .timeout(retry_delay.max(Duration::from_millis(500)))
                 .send()
                 .await;
-            eprintln!("DIAG attempt start={:?} took={:?} result={:?}", ta, t0.elapsed() - ta, attempt.as_ref().map(|r| r.status()));
+            eprintln!(
+                "DIAG attempt start={:?} took={:?} result={:?}",
+                ta,
+                t0.elapsed() - ta,
+                attempt.as_ref().map(|r| r.status())
+            );
             match attempt {
                 Ok(response) => {
                     // A body cut short or stalled past the attempt timeout while the server
@@ -500,6 +506,7 @@ async fn wait_for_server(
     tokio::time::timeout(max_wait, attempts)
         .await
         .map_err(|_| -> Box<dyn Error> {
+            eprintln!("DIAG deadline expired after {:?}", max_wait);
             format!(
                 "Server at {} not responding after {} seconds of retrying",
                 info_url.origin().ascii_serialization(),

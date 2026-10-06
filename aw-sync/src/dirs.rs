@@ -39,14 +39,20 @@ pub fn resolve_profile(
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, Box<dyn Error>> {
     let dir = config_dir_path()?;
-    // Windows: recover config v0.14.0 wrote under Roaming %APPDATA%.
+    // Windows: recover config v0.14.0 wrote under Roaming %APPDATA%; if the
+    // move fails, keep using it there rather than start from defaults.
     #[cfg(windows)]
-    if let Some(roaming) = dirs::config_dir() {
-        aw_server::dirs::migrate_misplaced_dir(
-            &dir,
-            &roaming.join(aw_server::dirs::appname()).join("aw-sync"),
-        );
-    }
+    let dir = match dirs::config_dir() {
+        Some(roaming) => {
+            let misplaced = roaming.join(aw_server::dirs::appname()).join("aw-sync");
+            if aw_server::dirs::migrate_misplaced_dir(&dir, &misplaced) {
+                dir
+            } else {
+                misplaced
+            }
+        }
+        None => dir,
+    };
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -162,11 +168,28 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
     // master already reads this path for the embedded server's api_key (#666).
     #[cfg(not(target_os = "android"))]
     {
-        let dir = aw_server::dirs::user_config_root()
+        let appname = aw_server::dirs::appname_for(effective);
+        let path = aw_server::dirs::user_config_root()
             .ok_or(())?
-            .join(aw_server::dirs::appname_for(effective))
-            .join("aw-server-rust");
-        Ok(dir.join(filename))
+            .join(&appname)
+            .join("aw-server-rust")
+            .join(&filename);
+        // Windows: the server moves its config out of Roaming (v0.14.0) on
+        // its own startup. If aw-sync gets here first, read it in place
+        // (read-only; aw-sync never moves the server's files).
+        #[cfg(windows)]
+        if !path.exists() {
+            if let Some(roaming) = dirs::config_dir() {
+                let old = roaming
+                    .join(&appname)
+                    .join("aw-server-rust")
+                    .join(&filename);
+                if old.exists() {
+                    return Ok(old);
+                }
+            }
+        }
+        Ok(path)
     }
     #[cfg(target_os = "android")]
     {

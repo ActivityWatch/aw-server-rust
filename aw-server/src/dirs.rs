@@ -98,10 +98,15 @@ pub fn user_config_root() -> Option<PathBuf> {
 /// `%APPDATA%` equivalent (see [`migrate_misplaced_dir`]).
 #[cfg(not(target_os = "android"))]
 pub fn module_dir(root: PathBuf, appname: &str, module: &str) -> PathBuf {
-    let dir = root.join(appname).join(module);
+    #[allow(unused_mut)]
+    let mut dir = root.join(appname).join(module);
     #[cfg(target_os = "windows")]
     if let Some(roaming) = dirs::data_dir() {
-        migrate_misplaced_dir(&dir, &roaming.join(appname).join(module));
+        let misplaced = roaming.join(appname).join(module);
+        if !migrate_misplaced_dir(&dir, &misplaced) {
+            // Keep using the old location rather than start empty.
+            dir = misplaced;
+        }
     }
     fs::create_dir_all(&dir).expect("Unable to create dir");
     dir
@@ -116,19 +121,41 @@ fn migration_group(name: &str) -> &str {
     }
 }
 
+/// Move a file, falling back to copy + delete when `rename` cannot (e.g.
+/// Roaming redirected to another drive or a network share).
+fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    if from.is_dir() {
+        // Not expected in these dirs; don't attempt a recursive copy.
+        return fs::rename(from, to);
+    }
+    fs::copy(from, to)?;
+    if let Err(e) = fs::remove_file(from) {
+        let _ = fs::remove_file(to);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Move entries from `misplaced` into `target`, never overwriting.
 ///
-/// Entries are moved per group (see [`migration_group`]): if `target`
-/// already has any member of a group, the whole group stays put and a
-/// warning is logged, so a database is never mixed with another one's WAL.
-/// A group that fails to move part-way is rolled back. `misplaced` is
+/// Entries are grouped (see [`migration_group`]): if `target` already has
+/// any member of a group, that group stays put and a warning is logged, so
+/// a database is never mixed with another one's WAL ("Local wins").
+///
+/// All-or-nothing otherwise: if any move fails, everything moved by this
+/// call is moved back and `false` is returned, so the caller can keep using
+/// `misplaced` instead of starting from an empty `target`. Returns `true`
+/// when nothing is left to migrate (or only conflicts are). `misplaced` is
 /// removed if it ends up empty.
 ///
 /// Used on Windows to recover data that v0.14.0 put under Roaming
 /// `%APPDATA%` instead of `%LOCALAPPDATA%` (ActivityWatch/aw-server-rust#562).
-pub fn migrate_misplaced_dir(target: &Path, misplaced: &Path) {
+pub fn migrate_misplaced_dir(target: &Path, misplaced: &Path) -> bool {
     let Ok(entries) = fs::read_dir(misplaced) else {
-        return;
+        return true;
     };
     let mut names: Vec<String> = entries
         .flatten()
@@ -136,12 +163,12 @@ pub fn migrate_misplaced_dir(target: &Path, misplaced: &Path) {
         .collect();
     if names.is_empty() {
         let _ = fs::remove_dir(misplaced);
-        return;
+        return true;
     }
     names.sort();
     if let Err(e) = fs::create_dir_all(target) {
-        warn!("Could not create {target:?}, leaving {misplaced:?} in place: {e}");
-        return;
+        warn!("Could not create {target:?}, keeping {misplaced:?}: {e}");
+        return false;
     }
     let existing: Vec<String> = fs::read_dir(target)
         .map(|it| {
@@ -151,50 +178,32 @@ pub fn migrate_misplaced_dir(target: &Path, misplaced: &Path) {
         })
         .unwrap_or_default();
 
-    let mut groups: Vec<(&str, Vec<&String>)> = Vec::new();
+    let mut moved: Vec<&String> = Vec::new();
     for name in &names {
         let key = migration_group(name);
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, members)) => members.push(name),
-            None => groups.push((key, vec![name])),
-        }
-    }
-
-    for (key, members) in groups {
         if existing.iter().any(|e| migration_group(e) == key) {
             warn!(
                 "Not migrating {:?}: {target:?} already has {key}. \
                  Both copies are kept; merge them manually if needed.",
-                misplaced.join(key)
+                misplaced.join(name)
             );
             continue;
         }
-        let mut moved: Vec<&String> = Vec::new();
-        let mut failed = None;
-        for name in &members {
-            match fs::rename(misplaced.join(name), target.join(name)) {
-                Ok(()) => moved.push(name),
-                Err(e) => {
-                    failed = Some(e);
-                    break;
-                }
+        if let Err(e) = move_file(&misplaced.join(name), &target.join(name)) {
+            for done in moved.iter().rev() {
+                let _ = move_file(&target.join(done), &misplaced.join(done));
             }
+            warn!("Could not migrate {misplaced:?} to {target:?}, keeping it in place: {e}");
+            return false;
         }
-        match failed {
-            None => info!("Migrated {:?} to {target:?}", misplaced.join(key)),
-            Some(e) => {
-                for name in moved {
-                    let _ = fs::rename(target.join(name), misplaced.join(name));
-                }
-                warn!(
-                    "Could not migrate {:?} to {target:?}: {e}",
-                    misplaced.join(key)
-                );
-            }
-        }
+        moved.push(name);
+    }
+    if !moved.is_empty() {
+        info!("Migrated {misplaced:?} to {target:?}");
     }
     // Only succeeds if everything moved.
     let _ = fs::remove_dir(misplaced);
+    true
 }
 
 fn is_legacy_testing_filename(name: &str) -> bool {
@@ -268,12 +277,21 @@ pub fn using_legacy_testing_root_in(
 
 /// Whether `profile=testing` should stay on the shared `activitywatch` root.
 pub fn using_legacy_testing_root(profile: &str) -> bool {
-    match platform_roots() {
+    let local = match platform_roots() {
         Some((data, config, cache)) => {
             using_legacy_testing_root_in(profile, &data, &config, &cache)
         }
         None => false,
+    };
+    // Windows: v0.14.0 kept data/config under Roaming; its legacy testing
+    // files must still select the legacy layout (module_dir then migrates them).
+    #[cfg(target_os = "windows")]
+    if !local {
+        if let Some(roaming) = dirs::data_dir() {
+            return using_legacy_testing_root_in(profile, &roaming, &roaming, &roaming);
+        }
     }
+    local
 }
 
 /// `"-testing"` only when testing data still shares the default root.
@@ -750,7 +768,7 @@ fn test_migrate_moves_everything_into_missing_target() {
     fs::write(misplaced.join("sqlite.db"), b"db").unwrap();
     fs::write(misplaced.join("sqlite.db-wal"), b"wal").unwrap();
     fs::write(misplaced.join("config.toml"), b"cfg").unwrap();
-    migrate_misplaced_dir(&target, &misplaced);
+    assert!(migrate_misplaced_dir(&target, &misplaced));
     assert_eq!(fs::read(target.join("sqlite.db")).unwrap(), b"db");
     assert_eq!(fs::read(target.join("sqlite.db-wal")).unwrap(), b"wal");
     assert_eq!(fs::read(target.join("config.toml")).unwrap(), b"cfg");
@@ -767,7 +785,7 @@ fn test_migrate_never_overwrites_or_mixes_databases() {
     fs::write(misplaced.join("sqlite.db"), b"new").unwrap();
     fs::write(misplaced.join("sqlite.db-wal"), b"new-wal").unwrap();
     fs::write(misplaced.join("device_id"), b"id").unwrap();
-    migrate_misplaced_dir(&target, &misplaced);
+    assert!(migrate_misplaced_dir(&target, &misplaced));
     assert_eq!(fs::read(target.join("sqlite.db")).unwrap(), b"old");
     assert!(
         !target.join("sqlite.db-wal").exists(),
@@ -783,11 +801,33 @@ fn test_migrate_never_overwrites_or_mixes_databases() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn test_migrate_failure_rolls_back_and_reports() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, target, misplaced) = migration_dirs();
+    fs::write(misplaced.join("config.toml"), b"cfg").unwrap();
+    fs::write(misplaced.join("sqlite.db"), b"db").unwrap();
+    // Read-only target: every move (rename and copy fallback) fails.
+    fs::create_dir_all(&target).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o500)).unwrap();
+    let ok = migrate_misplaced_dir(&target, &misplaced);
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        !ok,
+        "a failed move must be reported so the caller keeps the old dir"
+    );
+    assert_eq!(fs::read(misplaced.join("config.toml")).unwrap(), b"cfg");
+    assert_eq!(fs::read(misplaced.join("sqlite.db")).unwrap(), b"db");
+    assert!(!target.join("sqlite.db").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn test_migrate_noop_without_misplaced_dir() {
     let (root, target, misplaced) = migration_dirs();
     fs::remove_dir_all(&misplaced).unwrap();
-    migrate_misplaced_dir(&target, &misplaced);
+    assert!(migrate_misplaced_dir(&target, &misplaced));
     assert!(!target.exists());
     let _ = fs::remove_dir_all(root);
 }

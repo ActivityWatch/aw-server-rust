@@ -1178,7 +1178,16 @@ mod integrity_tests {
 
         // A second open connection stops SQLite's last-close auto-checkpoint,
         // as a reader (aw-sync, the integrity check) would in production.
-        let _reader = Connection::open(&path).unwrap();
+        // `Connection::open` is lazy: only a first read makes the reader take
+        // its WAL-mode shared lock. Without it the worker's connection is the
+        // last one and deletes the WAL when dropped, which races the assert
+        // below (Close is acked before the connection drops).
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
         let wal = dir.path().join("wal.db-wal");
         assert!(std::fs::metadata(&wal).unwrap().len() > 0);
 

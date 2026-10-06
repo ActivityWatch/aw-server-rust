@@ -16,9 +16,11 @@ mod functions;
 mod interpret;
 mod lexer;
 #[allow(
+    clippy::block_scrutinee,
     clippy::match_single_binding,
     clippy::redundant_closure_call,
-    unused_braces
+    unused_braces,
+    unknown_lints
 )]
 mod parser;
 

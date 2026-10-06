@@ -74,7 +74,6 @@ fn platform_roots() -> Option<(PathBuf, PathBuf, PathBuf)> {
 /// `dirs::data_dir()` returns. That matches the `appdirs` crate used before
 /// #562 (`roaming = false`) and the python modules (platformdirs), so
 /// existing installs keep finding their data.
-#[cfg(not(target_os = "android"))]
 pub fn user_data_root() -> Option<PathBuf> {
     if cfg!(windows) {
         dirs::data_local_dir()
@@ -85,7 +84,6 @@ pub fn user_data_root() -> Option<PathBuf> {
 
 /// Parent dir for per-user config. `%LOCALAPPDATA%` on Windows, see
 /// [`user_data_root`].
-#[cfg(not(target_os = "android"))]
 pub fn user_config_root() -> Option<PathBuf> {
     if cfg!(windows) {
         dirs::data_local_dir()

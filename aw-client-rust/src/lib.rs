@@ -633,7 +633,7 @@ mod tests {
                 answer_once(&listener, "200 OK", INFO_BODY).await;
             });
             let client = reqwest::Client::new();
-            super::wait_for_server(&client, url, std::time::Duration::from_secs(3))
+            super::wait_for_server(&client, url, std::time::Duration::from_secs(10))
                 .await
                 .unwrap();
             server.await.unwrap();

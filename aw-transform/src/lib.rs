@@ -31,6 +31,7 @@ mod merge;
 pub use merge::merge_events_by_keys;
 
 mod chunk;
+#[allow(deprecated)]
 pub use chunk::chunk_events_by_key;
 
 mod sort;

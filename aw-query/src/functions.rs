@@ -457,11 +457,21 @@ mod qfunctions {
         Ok(DataType::List(merged_tagged_events))
     }
 
+    #[allow(deprecated)]
     pub fn chunk_events_by_key(
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        // Queries run repeatedly (e.g. on every dashboard refresh): warn once.
+        static DEPRECATION_WARNING: std::sync::Once = std::sync::Once::new();
+        DEPRECATION_WARNING.call_once(|| {
+            log::warn!(
+                "chunk_events_by_key is deprecated and will be removed. There is no drop-in \
+                 replacement: merge_events_by_keys merges all events with the same value \
+                 (also across gaps)."
+            );
+        });
         // typecheck
         validate::args_length(&args, 2)?;
         let mut args = args.into_iter();

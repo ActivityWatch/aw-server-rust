@@ -558,6 +558,56 @@ mod api_tests {
     }
 
     #[test]
+    fn test_negative_duration_rejected() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+
+        // Create bucket
+        client
+            .post("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"id":"id","type":"test","client":"test","hostname":"127.0.0.1"}"#)
+            .dispatch();
+
+        // Insert event with negative duration — must be rejected with 400
+        let res = client
+            .post("/api/0/buckets/id/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"[{"timestamp":"2018-01-01T01:01:01Z","duration":-5.0,"data":{}}]"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+
+        // Zero duration is allowed
+        let res = client
+            .post("/api/0/buckets/id/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"[{"timestamp":"2018-01-01T01:01:01Z","duration":0.0,"data":{}}]"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Heartbeat with negative pulsetime — must be rejected with 400
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=-1")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+
+        // Heartbeat with zero pulsetime is allowed
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=0")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
+
+    #[test]
     fn test_import_does_not_overwrite_events_with_the_same_id() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

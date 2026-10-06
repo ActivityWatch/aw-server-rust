@@ -76,7 +76,7 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
  * 5: Replaced single-column events indexes with a composite index
  * 6: Added an endtime-first index for recent interval reads
  */
-pub const NEWEST_DB_VERSION: i32 = 6;
+pub const NEWEST_DB_VERSION: i32 = 7;
 
 /// Oldest version a read-only open (aw-sync pulling a peer db) accepts.
 ///
@@ -132,6 +132,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 6 {
         _migrate_v5_to_v6(conn);
+    }
+
+    if version < 7 {
+        _migrate_v6_to_v7(conn);
     }
 
     first_init
@@ -293,6 +297,45 @@ fn _migrate_v5_to_v6(conn: &Connection) {
          COMMIT;",
     )
     .expect("Failed to run v6 migration transaction");
+}
+
+fn _migrate_v6_to_v7(conn: &Connection) {
+    // Add device_id column and change uniqueness from (name) to (device_id, name).
+    // SQLite cannot drop a UNIQUE column constraint in-place, so we recreate the
+    // table. Existing buckets are all locally-created, so they get device_id='local'.
+    // The deprecated data_deprecated column (unused since v3) is also dropped here.
+    //
+    // PRAGMA foreign_keys must be disabled outside any transaction for the table
+    // recreation to succeed: events→buckets(id) is an IMMEDIATE FK, and even with
+    // defer_foreign_keys=ON the constraint fires during DROP TABLE inside the batch.
+    // All IDs are preserved by the copy, so re-enabling FK checks after COMMIT is safe.
+    info!("Upgrading database to v7, adding device_id to buckets");
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("Failed to disable foreign_keys for v7 migration");
+    conn.execute_batch(
+        "BEGIN EXCLUSIVE TRANSACTION;
+         CREATE TABLE buckets_v7 (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             name TEXT NOT NULL,
+             device_id TEXT NOT NULL DEFAULT 'local',
+             type TEXT NOT NULL,
+             client TEXT NOT NULL,
+             hostname TEXT NOT NULL,
+             created TEXT NOT NULL,
+             data TEXT NOT NULL DEFAULT '{}',
+             UNIQUE(device_id, name)
+         );
+         INSERT INTO buckets_v7 (id, name, device_id, type, client, hostname, created, data)
+             SELECT id, name, 'local', type, client, hostname, created, data FROM buckets;
+         DROP TABLE buckets;
+         ALTER TABLE buckets_v7 RENAME TO buckets;
+         CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id);
+         PRAGMA user_version = 7;
+         COMMIT;",
+    )
+    .expect("Failed to run v7 migration transaction");
+    conn.pragma_update(None, "foreign_keys", true)
+        .expect("Failed to re-enable foreign_keys after v7 migration");
 }
 
 // Both indexes can bound only one of the two interval predicates. Use the
@@ -618,17 +661,25 @@ impl DatastoreInstance {
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
         // Read before the list so a concurrent change lands in the next check.
         let signature = Self::read_buckets_signature(conn)?;
-        let mut stmt = match conn.prepare_cached(
+        // Read-only opens of peer DBs (aw-sync) may be at v4-v6, which pre-date the
+        // device_id column. Use a literal 'local' for those; v7+ reads the real column.
+        let device_id_expr = if self.db_version >= 7 {
+            "buckets.device_id"
+        } else {
+            "'local'"
+        };
+        let sql = format!(
             "
             SELECT  buckets.id, buckets.name, buckets.type, buckets.client,
                     buckets.hostname, buckets.created,
                     min(events.starttime), max(events.endtime),
-                    buckets.data
+                    buckets.data, {device_id_expr}
             FROM buckets
             LEFT OUTER JOIN events ON buckets.id = events.bucketrow
             GROUP BY buckets.id
-            ;",
-        ) {
+            ;"
+        );
+        let mut stmt = match conn.prepare_cached(&sql) {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -675,6 +726,7 @@ impl DatastoreInstance {
                 client: row.get(3)?,
                 hostname: row.get(4)?,
                 created: row.get(5)?,
+                device_id: row.get(9)?,
                 data: data_json,
                 metadata: BucketMetadata {
                     start: opt_start,
@@ -762,10 +814,15 @@ impl DatastoreInstance {
             Some(created) => Some(created),
             None => Some(Utc::now()),
         };
+        // Stamp device_id = "local" for locally-created buckets.
+        // Peer buckets from aw-sync will carry their own device_id via import.
+        if bucket.device_id.is_empty() {
+            bucket.device_id = "local".to_string();
+        }
         let mut stmt = match conn.prepare_cached(
             "
-                INSERT INTO buckets (name, type, client, hostname, created, data)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         ) {
             Ok(buckets) => buckets,
             Err(err) => {
@@ -777,6 +834,7 @@ impl DatastoreInstance {
         let data = serde_json::to_string(&bucket.data).unwrap();
         let res = stmt.execute([
             &bucket.id,
+            &bucket.device_id,
             &bucket._type,
             &bucket.client,
             &bucket.hostname,

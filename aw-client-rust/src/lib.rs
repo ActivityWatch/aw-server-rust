@@ -207,6 +207,7 @@ impl AwClient {
             client: self.name.clone(),
             _type: buckettype.to_string(),
             hostname: self.hostname.clone(),
+            device_id: String::new(),
             data: Map::default(),
             metadata: BucketMetadata::default(),
             events: None,

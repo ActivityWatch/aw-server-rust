@@ -128,6 +128,7 @@ mod import {
                 _type: row.get(2)?,
                 client: row.get(3)?,
                 hostname: row.get(4)?,
+                device_id: "local".to_string(),
                 created: row.get(5)?,
                 data: json_map! {},
                 events: None,

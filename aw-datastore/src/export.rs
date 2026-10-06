@@ -442,6 +442,7 @@ mod tests {
                     _type: "test".into(),
                     client: "test".into(),
                     hostname: "host".into(),
+                    device_id: "local".into(),
                     created: None,
                     data: Default::default(),
                     metadata: BucketMetadata::default(),

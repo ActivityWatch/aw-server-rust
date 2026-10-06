@@ -28,6 +28,7 @@ mod datastore_tests {
             _type: "testtype".to_string(),
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
+            device_id: "local".to_string(),
             created: None,
             data: json_map! {},
             metadata: BucketMetadata::default(),
@@ -1045,7 +1046,7 @@ mod datastore_tests {
             let version: i32 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 6);
+            assert_eq!(version, 7);
             let old_indexes: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN

@@ -1290,6 +1290,53 @@ impl DatastoreInstance {
         )
     }
 
+    /// Fetch up to `limit` events with `id > since_rowid`, ordered ASC by rowid.
+    /// This is the cursor used by aw-sync to detect late-arriving backfill events
+    /// that would be invisible to timestamp-based resume logic.
+    pub fn get_events_since_rowid(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        since_rowid: i64,
+        limit_opt: Option<u64>,
+    ) -> Result<Vec<Event>, DatastoreError> {
+        let bucket = self.get_bucket(bucket_id)?;
+        let bucket_bid = match bucket.bid {
+            Some(bid) => bid,
+            None => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Bucket '{bucket_id}' has no internal rowid"
+                )))
+            }
+        };
+        let limit: i64 = limit_opt.map(|l| l as i64).unwrap_or(-1);
+        let source = events_source(self.db_version, false);
+        let sql = format!(
+            "SELECT id, starttime, endtime, data FROM {source} \
+             WHERE bucketrow = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3"
+        );
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| {
+            DatastoreError::InternalError(format!("Failed to prepare get_events_since_rowid: {e}"))
+        })?;
+        let rows = stmt
+            .query_map([&bucket_bid, &since_rowid, &limit], |row| {
+                parse_event_row(row, None)
+            })
+            .map_err(|e| {
+                DatastoreError::InternalError(format!(
+                    "Failed to query get_events_since_rowid: {e}"
+                ))
+            })?;
+        let mut list = Vec::new();
+        for row in rows {
+            match row {
+                Ok(event) => list.push(event),
+                Err(err) => warn!("Corrupt event in bucket {bucket_id} (rowid scan): {err}"),
+            }
+        }
+        Ok(list)
+    }
+
     pub fn get_event_count(
         &self,
         conn: &Connection,

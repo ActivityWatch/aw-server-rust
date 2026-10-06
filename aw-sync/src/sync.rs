@@ -54,6 +54,30 @@ impl Default for SyncSpec {
     }
 }
 
+/// Open (or create) the cursors.db for a given source device under `root`.
+fn open_or_create_cursor_ds(root: &Path, device_id: &str) -> Result<Datastore, String> {
+    let dir = root.join(device_id);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create cursor dir {}: {e}", dir.display()))?;
+    create_datastore(&dir.join("cursors.db"))
+}
+
+/// Root directory for cursor databases.
+/// When `path_db` is set (targeted pull_db path), cursors live next to the peer
+/// folder (`path.parent()`). In daemon mode they live at `path` directly.
+fn cursor_db_root(sync_spec: &SyncSpec) -> &Path {
+    if sync_spec.path_db.is_some() {
+        sync_spec.path.parent().unwrap_or(sync_spec.path.as_path())
+    } else {
+        sync_spec.path.as_path()
+    }
+}
+
+/// Key identifying the last-synced source rowid for a given (device, bucket) pair.
+fn cursor_key(src_device_id: &str, bucket_id: &str) -> String {
+    format!("sync.cursor.{src_device_id}.{bucket_id}")
+}
+
 /// Discover all sync peers reachable from `sync_root`, excluding `own_device_id`.
 ///
 /// Unions the 3-level Android/new-desktop walker (`list_remote_dbs`) with the
@@ -189,11 +213,31 @@ pub fn sync_run(
             .iter()
             .map(|(db, ds)| (db, ds as &dyn AccessMethod))
             .collect();
-        if let Err(e) = pull_from_remotes(&remotes, client, sync_spec, &mut report, true) {
+        // Open a cursor datastore for each peer's device_id so aw-sync can
+        // resume from the last-seen source rowid rather than the destination's
+        // newest timestamp — fixing late-arriving backfill blindness (#696).
+        // Non-fatal: if cursor_ds creation fails we fall back to the
+        // timestamp-based path silently.
+        let cursor_ds = open_or_create_cursor_ds(cursor_db_root(sync_spec), device_id)
+            .map_err(|e| {
+                warn!("Could not open cursor datastore: {e}; falling back to timestamp-based sync");
+            })
+            .ok();
+        if let Err(e) = pull_from_remotes(
+            &remotes,
+            client,
+            sync_spec,
+            &mut report,
+            true,
+            cursor_ds.as_ref(),
+        ) {
             report.finish();
             crate::report::persist_last_report_warn(&report);
             close_opened_datastores(&ds_remotes, &ds_localremote);
             return Err(e.into());
+        }
+        if let Some(cds) = cursor_ds {
+            cds.close();
         }
     }
 
@@ -406,13 +450,17 @@ fn pull_from_remotes(
     sync_spec: &SyncSpec,
     report: &mut SyncReport,
     record_peers: bool,
+    cursor_ds: Option<&Datastore>,
 ) -> Result<(), String> {
     let mut attempted = 0usize;
     let mut succeeded = 0usize;
     let mut last_err: Option<String> = None;
     for (db, ds_from) in remotes {
         attempted += 1;
-        match sync_datastores(*ds_from, dest, false, None, sync_spec) {
+        let src_did = Some(db.device_id.as_str());
+        match sync_datastores_with_cursor(
+            *ds_from, dest, false, None, sync_spec, cursor_ds, src_did,
+        ) {
             Ok(buckets) => {
                 succeeded += 1;
                 if record_peers {
@@ -814,7 +862,126 @@ pub fn sync_datastores(
                 continue;
             }
         };
-        match sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec) {
+        match sync_one(
+            ds_from,
+            ds_to,
+            bucket_from,
+            bucket_to,
+            sync_spec,
+            None,
+            None,
+        ) {
+            Ok(synced) => {
+                succeeded += 1;
+                buckets.push(synced);
+            }
+            Err(e) => {
+                warn!(
+                    " ! Skipping sync for bucket '{bucket_id}': {e}. \
+                     Destination may already contain a partial write; next pass resumes from dest newest"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    if attempted > 0 && succeeded == 0 {
+        return Err(format!(
+            "all {attempted} buckets failed; last error: {}",
+            last_err.as_deref().unwrap_or("unknown")
+        ));
+    }
+
+    Ok(buckets)
+}
+
+/// Internal variant of `sync_datastores` that threads cursor state through the
+/// per-bucket sync when the source is a file-based datastore and a cursor_ds is
+/// provided.  The public `sync_datastores` delegates here with `(None, None)` so
+/// the external API is unchanged.
+fn sync_datastores_with_cursor(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    is_push: bool,
+    src_did: Option<&str>,
+    sync_spec: &SyncSpec,
+    cursor_ds: Option<&Datastore>,
+    src_device_id: Option<&str>,
+) -> Result<Vec<BucketReport>, String> {
+    info!("Syncing {:?} to {:?} (cursor path)", ds_from, ds_to);
+    let mut buckets_from: Vec<Bucket> = ds_from
+        .get_buckets()
+        .map_err(|e| format!("Failed to list buckets in {ds_from:?}: {e}"))?
+        .iter_mut()
+        .filter(|tup| {
+            if is_synced_bucket(tup.1) {
+                debug!(" - Skipping already-synced bucket '{}'", tup.1.id);
+                false
+            } else {
+                true
+            }
+        })
+        .filter(|tup| {
+            let bucket = &tup.1;
+            if let Some(buckets) = &sync_spec.buckets {
+                if buckets.iter().any(|b_id| b_id == "*") || buckets.is_empty() {
+                    true
+                } else {
+                    buckets.iter().any(|b_id| b_id == &bucket.id)
+                }
+            } else {
+                true
+            }
+        })
+        .map(|tup| {
+            if tup.1.hostname == "unknown" {
+                let did = src_did.ok_or_else(|| {
+                    format!(
+                        "Bucket '{}' has an unknown hostname/device ID and there is no source \
+                         device ID to substitute; refusing to sync it without provenance",
+                        tup.1.id
+                    )
+                })?;
+                warn!(" ! Bucket hostname/device ID was invalid, setting to device ID/hostname");
+                tup.1.hostname = did.to_string();
+            }
+            Ok(tup.1.clone())
+        })
+        .collect::<Result<Vec<Bucket>, String>>()?;
+
+    if let Some(buckets) = &sync_spec.buckets {
+        for b_id in buckets {
+            if !buckets_from.iter().any(|b| b.id == *b_id) {
+                error!(" ! Bucket \"{}\" not found in source datastore", b_id);
+            }
+        }
+    }
+
+    buckets_from.sort_by_key(|b| b.metadata.end);
+
+    let mut buckets = Vec::with_capacity(buckets_from.len());
+    let mut attempted = 0usize;
+    let mut succeeded = 0usize;
+    let mut last_err: Option<String> = None;
+    for bucket_from in buckets_from {
+        attempted += 1;
+        let bucket_id = bucket_from.id.clone();
+        let bucket_to = match get_or_create_sync_bucket(&bucket_from, ds_to, is_push) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(" ! Skipping bucket '{}': {}", bucket_id, e);
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match sync_one(
+            ds_from,
+            ds_to,
+            bucket_from,
+            bucket_to,
+            sync_spec,
+            cursor_ds,
+            src_device_id,
+        ) {
             Ok(synced) => {
                 succeeded += 1;
                 buckets.push(synced);
@@ -969,6 +1136,8 @@ fn sync_one(
     bucket_from: Bucket,
     bucket_to: Bucket,
     sync_spec: &SyncSpec,
+    cursor_ds: Option<&Datastore>,
+    src_device_id: Option<&str>,
 ) -> Result<BucketReport, String> {
     let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
@@ -993,6 +1162,100 @@ fn sync_one(
     }
 
     reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+
+    // ── Rowid cursor fast path ──────────────────────────────────────────────
+    // When the source is a file-based Datastore and a cursor_ds is provided,
+    // resume from the last persisted source rowid instead of the destination's
+    // newest timestamp.  This catches late-arriving events (backfills, retroactive
+    // edits) that have old timestamps but newer rowids, which the
+    // destination-as-marker path permanently misses (#696).
+    //
+    // Falls through to the timestamp-based path below when:
+    //   - cursor_ds or src_device_id is None (AwClient source, HTTP-only path), or
+    //   - ds_from.get_events_since_rowid returns None (AwClient impl).
+    if let (Some(ck_did), Some(cds)) = (src_device_id, cursor_ds) {
+        let ck = cursor_key(ck_did, &bucket_from.id);
+        let saved_rowid: i64 = cds
+            .get_key_value(&ck)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if let Some(first_result) = ds_from.get_events_since_rowid(
+            bucket_from.id.as_str(),
+            saved_rowid,
+            Some(BATCH_SIZE as u64),
+        ) {
+            let first_batch = first_result.map_err(|e| {
+                format!(
+                    "get_events_since_rowid failed for '{}': {e}",
+                    bucket_from.id
+                )
+            })?;
+            let mut current_batch = first_batch;
+            let mut max_rowid = saved_rowid;
+            let mut events_sent = 0usize;
+            loop {
+                if current_batch.is_empty() {
+                    break;
+                }
+                let is_last = current_batch.len() < BATCH_SIZE;
+                let batch_last_rowid = current_batch
+                    .iter()
+                    .filter_map(|e| e.id)
+                    .fold(max_rowid, |acc, id| acc.max(id));
+                max_rowid = batch_last_rowid;
+                let chunk: Vec<Event> = current_batch
+                    .into_iter()
+                    .map(|mut e| {
+                        e.id = None;
+                        e
+                    })
+                    .collect();
+                events_sent += chunk.len();
+                for batch in chunk.chunks(BATCH_SIZE) {
+                    ds_to.insert_events(bucket_to.id.as_str(), batch.to_vec())?;
+                }
+                if is_last {
+                    break;
+                }
+                current_batch = ds_from
+                    .get_events_since_rowid(
+                        bucket_from.id.as_str(),
+                        batch_last_rowid,
+                        Some(BATCH_SIZE as u64),
+                    )
+                    .unwrap_or_else(|| Ok(vec![]))
+                    .map_err(|e| {
+                        format!(
+                            "get_events_since_rowid (page) failed for '{}': {e}",
+                            bucket_from.id
+                        )
+                    })?;
+            }
+            // Persist the cursor for next pass (even if no new events: advances
+            // the saved rowid to cover events already synced by prior passes).
+            cds.set_key_value(&ck, &max_rowid.to_string())
+                .map_err(|e| {
+                    format!(
+                        "Failed to persist sync cursor for '{}': {e:?}",
+                        bucket_from.id
+                    )
+                })?;
+            let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str())?;
+            let new_events_count = eventcount_to_new - eventcount_to_old;
+            if new_events_count > 0 {
+                info!("  = Synced {} new events (rowid cursor)", events_sent);
+            } else {
+                info!("  ✓ Already up to date (rowid cursor)!");
+            }
+            return Ok(BucketReport {
+                bucket_id: bucket_to.id,
+                events_new: new_events_count,
+                resumed_at: resume_sync_at,
+            });
+        }
+    }
+    // ── End rowid cursor fast path; fall through to timestamp-based path ────
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch
@@ -1582,8 +1845,15 @@ mod peer_isolation_tests {
         let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> =
             vec![(&db_a, &broken), (&db_b, &healthy)];
         let mut report = dummy_report();
-        pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, false)
-            .expect("partial failure must be Ok");
+        pull_from_remotes(
+            &remotes,
+            &dest,
+            &SyncSpec::default(),
+            &mut report,
+            false,
+            None,
+        )
+        .expect("partial failure must be Ok");
 
         let dest_buckets = dest.get_buckets().unwrap();
         assert!(
@@ -1607,8 +1877,15 @@ mod peer_isolation_tests {
         let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> =
             vec![(&db_a, &broken_a), (&db_b, &broken_b)];
         let mut report = dummy_report();
-        let err = pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, false)
-            .expect_err("total failure must be Err");
+        let err = pull_from_remotes(
+            &remotes,
+            &dest,
+            &SyncSpec::default(),
+            &mut report,
+            false,
+            None,
+        )
+        .expect_err("total failure must be Err");
         assert!(
             err.contains("all 2 peers failed"),
             "error should report total failure, got: {err}"
@@ -1801,8 +2078,15 @@ mod peer_isolation_tests {
             .iter()
             .map(|(db, ds)| (db, ds as &dyn AccessMethod))
             .collect();
-        pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, false)
-            .expect("pull from v4 peer must succeed");
+        pull_from_remotes(
+            &remotes,
+            &dest,
+            &SyncSpec::default(),
+            &mut report,
+            false,
+            None,
+        )
+        .expect("pull from v4 peer must succeed");
         let events = dest
             .get_events(
                 "aw-watcher-window_host-v4-synced-from-host-v4",
@@ -2033,5 +2317,208 @@ mod daemon_peer_discovery_tests {
         );
 
         let _ = fs::remove_dir_all(&sync_root);
+    }
+}
+
+#[cfg(test)]
+mod rowid_cursor_tests {
+    //! Tests for the per-source rowid cursor introduced in #696.
+    //!
+    //! These tests live here (not in `tests/sync.rs`) to access the private
+    //! `sync_datastores_with_cursor` function.  The integration test file uses
+    //! only the public `sync_datastores` API, which does not thread cursor
+    //! state (cursor support is only available on the `sync_run` pull path).
+
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn make_bucket(id: &str, hostname: &str) -> Bucket {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": "test",
+            "hostname": hostname,
+            "client": "test"
+        }))
+        .unwrap()
+    }
+
+    fn make_event(ts_offset_secs: i64) -> Event {
+        let ts = Utc::now() - Duration::seconds(3600) + Duration::seconds(ts_offset_secs);
+        serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 1,
+            "data": {"seq": ts_offset_secs}
+        }))
+        .unwrap()
+    }
+
+    /// Core invariant: late-arriving events (old timestamps, new insertion order)
+    /// must reach the destination on the second pull.
+    ///
+    /// Timeline:
+    ///   1. Insert events T10, T20, T30 into source.
+    ///   2. Pull with cursor — establishes cursor at rowid 3 (3 events seen).
+    ///   3. Insert BACKFILL event T5 (timestamp OLDER than everything already
+    ///      synced) plus new event T40 into source.
+    ///   4. Pull again with the same cursor — cursor was at rowid 3, so both
+    ///      the backfill (rowid 4) and T40 (rowid 5) must be fetched.
+    ///
+    /// Without the rowid cursor, step 4 would use `resume_sync_at = T30+1s`
+    /// (dest newest end-time), and T5 would be permanently invisible.
+    #[test]
+    fn late_arriving_backfill_syncs_on_second_pull() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        // Cursor database lives in a temporary directory.
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-test-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        // Source bucket hostname must match what sync builds the dest bucket id from.
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        // ── First batch: three events with well-separated timestamps ──────────
+        let batch1: Vec<Event> = [10i64, 20, 30].iter().map(|&s| make_event(s)).collect();
+        ds_src.insert_events(bucket_id, &batch1).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let src_did = src_hostname;
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_did),
+        )
+        .expect("first pull must succeed");
+
+        let after_first = ds_dest
+            .get_event_count(&dest_bucket_id, None, None)
+            .unwrap();
+        assert_eq!(
+            after_first, 3,
+            "first pull must import the 3 initial events"
+        );
+
+        // ── Backfill: insert T5 (OLDER timestamp) AND T40 (newer timestamp) ──
+        // T5 has an insertion-order rowid > 3, so the cursor catches it.
+        // Without cursor, `resume_sync_at = T30+1s` would miss T5 forever.
+        let backfill = make_event(5); // timestamp older than already-synced T10
+        let new_event = make_event(40); // timestamp newer than everything
+        ds_src
+            .insert_events(bucket_id, &[backfill, new_event])
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_did),
+        )
+        .expect("second pull must succeed");
+
+        let after_second = ds_dest
+            .get_event_count(&dest_bucket_id, None, None)
+            .unwrap();
+        assert_eq!(
+            after_second, 5,
+            "second pull must import both the backfill (T5) and the new event (T40); \
+             count was {after_second} (expected 5 = 3 initial + 2 new)"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// Cursor is stored per (device_id, bucket_id) so two different source
+    /// devices do not share a cursor.
+    #[test]
+    fn cursors_are_device_scoped() {
+        let ds_a = Datastore::new_in_memory(false);
+        let ds_b = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-scope-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-host").expect("cursor_ds must open");
+
+        let bucket_id = "aw-watcher-test";
+        ds_a.create_bucket(&make_bucket(bucket_id, "device-a"))
+            .unwrap();
+        ds_b.create_bucket(&make_bucket(bucket_id, "device-b"))
+            .unwrap();
+        ds_a.force_commit().unwrap();
+        ds_b.force_commit().unwrap();
+
+        let ev_a: Vec<Event> = [10i64, 20].iter().map(|&s| make_event(s)).collect();
+        let ev_b: Vec<Event> = [15i64, 25].iter().map(|&s| make_event(s)).collect();
+        ds_a.insert_events(bucket_id, &ev_a).unwrap();
+        ds_b.insert_events(bucket_id, &ev_b).unwrap();
+        ds_a.force_commit().unwrap();
+        ds_b.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+
+        sync_datastores_with_cursor(
+            &ds_a,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some("device-a"),
+        )
+        .expect("pull from device-a must succeed");
+        sync_datastores_with_cursor(
+            &ds_b,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some("device-b"),
+        )
+        .expect("pull from device-b must succeed");
+
+        // Each device's bucket gets its own cursor key; synced event counts are independent.
+        let count_a = ds_dest
+            .get_event_count("aw-watcher-test-synced-from-device-a", None, None)
+            .unwrap();
+        let count_b = ds_dest
+            .get_event_count("aw-watcher-test-synced-from-device-b", None, None)
+            .unwrap();
+        assert_eq!(count_a, 2, "device-a bucket must have 2 events");
+        assert_eq!(count_b, 2, "device-b bucket must have 2 events");
+
+        cursor_ds.close();
+        ds_a.close();
+        ds_b.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
     }
 }

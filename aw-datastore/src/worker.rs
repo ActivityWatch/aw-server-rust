@@ -159,6 +159,7 @@ pub enum Command {
         bool,
     ),
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
+    GetEventsSinceRowid(String, i64, Option<u64>),
     DeleteEventsById(String, Vec<i64>),
     ForceCommit(),
     GetKeyValues(String),
@@ -565,6 +566,12 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
+            Command::GetEventsSinceRowid(bucketname, since_rowid, limit) => {
+                match ds.get_events_since_rowid(tx, &bucketname, since_rowid, limit) {
+                    Ok(events) => Ok(Response::EventList(events)),
+                    Err(e) => Err(e),
+                }
+            }
             Command::DeleteEventsById(bucketname, event_ids) => {
                 match ds.delete_events_by_id(tx, &bucketname, event_ids) {
                     Ok(()) => {
@@ -930,6 +937,21 @@ impl Datastore {
         match self.request(cmd)? {
             Response::Count(n) => Ok(n),
             _ => panic!("Invalid response"),
+        }
+    }
+
+    pub fn get_events_since_rowid(
+        &self,
+        bucket_id: &str,
+        since_rowid: i64,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, DatastoreError> {
+        let cmd = Command::GetEventsSinceRowid(bucket_id.to_string(), since_rowid, limit);
+        match self.request(cmd)? {
+            Response::EventList(events) => Ok(events),
+            e => Err(DatastoreError::InternalError(format!(
+                "Unexpected response to GetEventsSinceRowid: {e:?}"
+            ))),
         }
     }
 

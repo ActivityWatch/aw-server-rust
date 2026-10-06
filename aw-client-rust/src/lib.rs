@@ -467,7 +467,9 @@ async fn wait_for_server(
 ) -> Result<(), Box<dyn Error>> {
     let attempts = async {
         let mut retry_delay = Duration::from_millis(100);
+        let t0 = std::time::Instant::now();
         loop {
+            let ta = t0.elapsed();
             // Bound each attempt, so a server that accepts connections but doesn't
             // answer yet is retried rather than waited on for the client's full timeout.
             let attempt = client
@@ -475,6 +477,7 @@ async fn wait_for_server(
                 .timeout(retry_delay.max(Duration::from_millis(500)))
                 .send()
                 .await;
+            eprintln!("DIAG attempt start={:?} took={:?} result={:?}", ta, t0.elapsed() - ta, attempt.as_ref().map(|r| r.status()));
             match attempt {
                 Ok(response) => {
                     // A body cut short or stalled past the attempt timeout while the server

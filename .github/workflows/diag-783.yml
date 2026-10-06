@@ -1,0 +1,21 @@
+name: diag-783
+on:
+  push:
+    branches: [ diag/783-windows-attempts ]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p aw-client-rust --lib --no-run
+      - name: Loop the flaky test with per-attempt logging
+        shell: bash
+        run: |
+          fails=0
+          for i in $(seq 1 20); do
+            echo "=== run $i"
+            if ! cargo test -q -p aw-client-rust --lib test_wait_for_start_retries_without_blocking_executor -- --nocapture > out.txt 2>&1; then fails=$((fails+1)); fi
+            grep -E "DIAG|panicked|test result" out.txt || true
+          done
+          echo "FAILS=$fails/20"

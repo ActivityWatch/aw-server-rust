@@ -13,7 +13,7 @@ use std::path::PathBuf;
 fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     use std::io::{Read, Write};
     use std::net::{IpAddr, SocketAddr, TcpStream};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // Rocket binds `address` as an IpAddr, so parse it the same way. This also
     // handles IPv6 literals, which the previous `format!("{host}:{port}")` form
@@ -21,8 +21,8 @@ fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     let addr = SocketAddr::new(host.parse::<IpAddr>().ok()?, port);
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
     // A per-read/write timeout bounds each operation, not the whole exchange; the
-    // response is additionally size-bounded below so a chatty listener cannot stall
-    // startup, and the write timeout stops a listener that accepts but never reads
+    // response read below is additionally size- and deadline-bounded so a chatty
+    // listener cannot stall startup, and the write timeout stops a listener that accepts but never reads
     // from blocking us in write_all.
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
@@ -41,10 +41,21 @@ fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     );
     stream.write_all(req.as_bytes()).ok()?;
 
-    // `set_read_timeout` applies to each read, not the whole response, so cap the
-    // bytes buffered from a port owned by an unknown process.
-    let mut buf = String::new();
-    let _ = stream.take(16 * 1024).read_to_string(&mut buf);
+    // `set_read_timeout` applies to each read, not the whole response, so a listener
+    // trickling one byte per read would otherwise keep us here for hours. Bound both
+    // the bytes buffered and the total time spent reading.
+    const MAX_RESPONSE: usize = 16 * 1024;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    while buf.len() < MAX_RESPONSE && Instant::now() < deadline {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n.min(MAX_RESPONSE - buf.len())]),
+            Err(_) => break,
+        }
+    }
+    let buf = String::from_utf8_lossy(&buf);
 
     // Body starts after the first blank line.
     let body = buf.split("\r\n\r\n").nth(1)?;

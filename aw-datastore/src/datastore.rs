@@ -194,7 +194,7 @@ fn _migrate_v2_to_v3(conn: &Connection) {
 fn _migrate_v3_to_v4(conn: &Connection) {
     info!("Upgrading database to v4, adding table for key-value storage");
     conn.execute(
-        "CREATE TABLE key_value (
+        "CREATE TABLE IF NOT EXISTS key_value (
         key TEXT PRIMARY KEY,
         value TEXT,
         last_modified NUMBER NOT NULL

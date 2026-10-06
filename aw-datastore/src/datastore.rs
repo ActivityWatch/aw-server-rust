@@ -194,7 +194,7 @@ fn _migrate_v2_to_v3(conn: &Connection) {
 fn _migrate_v3_to_v4(conn: &Connection) {
     info!("Upgrading database to v4, adding table for key-value storage");
     conn.execute(
-        "CREATE TABLE key_value (
+        "CREATE TABLE IF NOT EXISTS key_value (
         key TEXT PRIMARY KEY,
         value TEXT,
         last_modified NUMBER NOT NULL
@@ -612,18 +612,41 @@ impl DatastoreInstance {
         Ok(())
     }
 
+    /// Imports a legacy (Python aw-server) database, if one is found.
+    ///
+    /// By default this only runs once, the first time the datastore is
+    /// created (`first_init`) — if aw-server-rust had already run before,
+    /// nothing happens and nothing is logged beyond an INFO line explaining
+    /// why the import was skipped (ActivityWatch/aw-server-rust#546). Pass
+    /// `force = true` (`aw-server --import-legacy`) to run the import
+    /// regardless of `first_init`; re-running is idempotent, since matching
+    /// events are deduped against what's already in the bucket.
+    ///
+    /// `legacy_db_path_override` overrides the default
+    /// `peewee-sqlite.v2.db` lookup location (`aw-server --legacy-dbpath`).
     #[allow(clippy::result_unit_err)]
-    pub fn ensure_legacy_import(&mut self, conn: &Connection) -> Result<bool, ()> {
+    pub fn ensure_legacy_import(
+        &mut self,
+        conn: &Connection,
+        legacy_db_path_override: Option<&str>,
+        force: bool,
+    ) -> Result<bool, ()> {
         use super::legacy_import::legacy_import;
-        if !self.first_init {
+        if !self.first_init && !force {
+            info!(
+                "Datastore was already initialized, skipping legacy import \
+                 (use `aw-server --import-legacy` to run it explicitly)"
+            );
             Ok(false)
         } else {
             self.first_init = false;
-            match legacy_import(self, conn) {
-                Ok(_) => {
-                    info!("Successfully imported legacy database");
-                    self.get_stored_buckets(conn).unwrap();
-                    Ok(true)
+            match legacy_import(self, conn, legacy_db_path_override) {
+                Ok(imported) => {
+                    if imported {
+                        info!("Successfully imported legacy database");
+                        self.get_stored_buckets(conn).unwrap();
+                    }
+                    Ok(imported)
                 }
                 Err(err) => {
                     warn!("Failed to import legacy database: {:?}", err);
@@ -1542,5 +1565,86 @@ impl DatastoreInstance {
             self.get_stored_buckets(conn)?;
         }
         Ok(migrated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal legacy (Python aw-server/peewee) sqlite db fixture: one
+    /// bucket, one event. Schema mirrors what `legacy_import` expects.
+    fn write_fixture_legacy_db(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE bucketmodel (
+                key INTEGER PRIMARY KEY,
+                id TEXT,
+                type TEXT,
+                client TEXT,
+                hostname TEXT,
+                created TEXT
+            );
+            CREATE TABLE eventmodel (
+                id INTEGER PRIMARY KEY,
+                bucket_id INTEGER,
+                timestamp TEXT,
+                duration REAL,
+                datastr TEXT
+            );
+            ",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bucketmodel (id, type, client, hostname, created) \
+             VALUES ('aw-watcher-afk_testhost', 'afkstatus', 'aw-watcher-afk', 'testhost', '2026-01-01T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let bucket_key = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO eventmodel (bucket_id, timestamp, duration, datastr) VALUES (?1, ?2, ?3, ?4)",
+            params![bucket_key, "2026-01-01 10:00:00+00:00", 5.0, "{}"],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ensure_legacy_import_skips_after_first_init_unless_forced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy_path = tmp.path().join("legacy.db");
+        write_fixture_legacy_db(&legacy_path);
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+
+        // First call: first_init is true (freshly created datastore), so the
+        // import runs automatically.
+        assert!(ds
+            .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), false)
+            .unwrap());
+        assert_eq!(ds.get_buckets().len(), 1);
+
+        // Second call without force: first_init is now false (this is
+        // exactly ActivityWatch/aw-server-rust#546 — a restart of an
+        // already-initialized datastore). Must skip, not re-run or panic.
+        assert!(!ds
+            .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), false)
+            .unwrap());
+
+        // With force=true (`aw-server --import-legacy`): runs again. The
+        // fixture is unchanged, so this also proves the merge path is
+        // idempotent instead of panicking on BucketAlreadyExists.
+        assert!(ds
+            .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), true)
+            .unwrap());
+        let bucket_id = ds.get_buckets().keys().next().unwrap().clone();
+        let events = ds.get_events(&conn, &bucket_id, None, None, None).unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "forced re-import must not duplicate events"
+        );
     }
 }

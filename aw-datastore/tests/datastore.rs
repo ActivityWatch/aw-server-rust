@@ -990,6 +990,89 @@ mod datastore_tests {
             .expect("Failed to remove datastore-unittest-migration-v4.db file");
     }
 
+    /// Regression test for the Android double-start race: a v3 database that
+    /// already has a `key_value` table must open without panicking, and any
+    /// existing row must survive through the migration to the newest version.
+    #[test]
+    fn test_v3_to_v4_migration_idempotent() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir
+            .path()
+            .join("datastore-unittest-migration-v3-with-kv.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+
+        // Build a v3 database that *already* has key_value (simulates a
+        // partially-completed startup that crashed after CREATE TABLE but
+        // before PRAGMA user_version = 4).
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE buckets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    type TEXT NOT NULL,
+                    client TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    created TEXT NOT NULL,
+                    data_deprecated TEXT DEFAULT '{}',
+                    data TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX bucket_id_index ON buckets(id);
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bucketrow INTEGER NOT NULL,
+                    starttime INTEGER NOT NULL,
+                    endtime INTEGER NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+                );
+                CREATE INDEX events_bucketrow_index ON events(bucketrow);
+                CREATE INDEX events_starttime_index ON events(starttime);
+                CREATE INDEX events_endtime_index ON events(endtime);
+                CREATE TABLE key_value (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    last_modified NUMBER NOT NULL
+                );
+                INSERT INTO key_value (key, value, last_modified) VALUES ('sentinel', 'survives', 0);
+                INSERT INTO buckets (name, type, client, hostname, created, data)
+                    VALUES ('testid', 'testtype', 'testclient', 'testhost',
+                            '2024-01-01T00:00:00+00:00', '{}');
+                INSERT INTO events (bucketrow, starttime, endtime, data)
+                    VALUES (1, 1000000000, 2000000000, '{"key": "value"}');
+                PRAGMA user_version = 3;
+            "#,
+            )
+            .unwrap();
+        }
+
+        // Opening must not panic even though key_value already exists.
+        {
+            let ds = Datastore::new(db_path_str, false);
+            let events = ds.get_events("testid", None, None, None).unwrap();
+            assert_eq!(events.len(), 1);
+            ds.close();
+        }
+
+        // Verify version reached newest and the pre-existing row survived.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let version: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, aw_datastore::NEWEST_DB_VERSION);
+            let value: String = conn
+                .query_row(
+                    "SELECT value FROM key_value WHERE key = 'sentinel'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(value, "survives");
+        }
+    }
+
     #[test]
     fn test_datastore_reload() {
         // Create tmp datastore path

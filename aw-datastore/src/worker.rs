@@ -172,9 +172,24 @@ fn _unwrap_empty_response(response: Response) -> Result<(), DatastoreError> {
     }
 }
 
+/// Controls whether/how `Datastore::new*` attempts a legacy (Python
+/// aw-server) database import on startup. See `ensure_legacy_import` for the
+/// semantics of `force` and `db_path_override`.
+#[derive(Clone, Debug, Default)]
+pub struct LegacyImportOptions {
+    /// Whether a legacy import should be attempted at all.
+    pub enabled: bool,
+    /// Run the import even if the datastore was not freshly created.
+    /// Corresponds to `aw-server --import-legacy`.
+    pub force: bool,
+    /// Override the default `peewee-sqlite.v2.db` lookup path.
+    /// Corresponds to `aw-server --legacy-dbpath <PATH>`.
+    pub db_path_override: Option<String>,
+}
+
 struct DatastoreWorker {
     responder: RequestReceiver,
-    legacy_import: bool,
+    legacy_import_opts: LegacyImportOptions,
     quit: bool,
     uncommitted_events: usize,
     commit: bool,
@@ -185,11 +200,11 @@ struct DatastoreWorker {
 impl DatastoreWorker {
     pub fn new(
         responder: mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>,
-        legacy_import: bool,
+        legacy_import_opts: LegacyImportOptions,
     ) -> Self {
         DatastoreWorker {
             responder,
-            legacy_import,
+            legacy_import_opts,
             quit: false,
             uncommitted_events: 0,
             commit: false,
@@ -273,14 +288,18 @@ impl DatastoreWorker {
         self.reload_privacy_engine(&ds, &conn);
 
         // Ensure legacy import
-        if self.legacy_import {
+        if self.legacy_import_opts.enabled {
             let transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
                 Ok(transaction) => transaction,
                 Err(err) => {
                     panic!("Unable to start immediate transaction on SQLite database! {err}")
                 }
             };
-            match ds.ensure_legacy_import(&transaction) {
+            match ds.ensure_legacy_import(
+                &transaction,
+                self.legacy_import_opts.db_path_override.as_deref(),
+                self.legacy_import_opts.force,
+            ) {
                 Ok(_) => (),
                 Err(err) => error!("Failed to do legacy import: {:?}", err),
             }
@@ -594,8 +613,24 @@ impl DatastoreWorker {
 
 impl Datastore {
     pub fn new(dbpath: String, legacy_import: bool) -> Self {
+        Datastore::new_with_legacy_import_opts(
+            dbpath,
+            LegacyImportOptions {
+                enabled: legacy_import,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Like [`Datastore::new`], but with full control over the legacy
+    /// import behavior (forcing it, overriding the lookup path). Used by
+    /// `aw-server --import-legacy` / `--legacy-dbpath`.
+    pub fn new_with_legacy_import_opts(
+        dbpath: String,
+        legacy_import_opts: LegacyImportOptions,
+    ) -> Self {
         let method = DatastoreMethod::File(dbpath);
-        Datastore::_new_internal(method, legacy_import)
+        Datastore::_new_internal(method, legacy_import_opts)
     }
 
     /// Open an existing database without writing to it.
@@ -626,13 +661,19 @@ impl Datastore {
         }
         Ok(Datastore::_new_internal(
             DatastoreMethod::FileReadOnly(dbpath),
-            false,
+            LegacyImportOptions::default(),
         ))
     }
 
     pub fn new_in_memory(legacy_import: bool) -> Self {
         let method = DatastoreMethod::Memory();
-        Datastore::_new_internal(method, legacy_import)
+        Datastore::_new_internal(
+            method,
+            LegacyImportOptions {
+                enabled: legacy_import,
+                ..Default::default()
+            },
+        )
     }
 
     /// Create an encrypted datastore using SQLCipher.
@@ -641,15 +682,33 @@ impl Datastore {
     /// Build with: `cargo build --no-default-features --features encryption`
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
     pub fn new_encrypted(dbpath: String, key: String, legacy_import: bool) -> Self {
-        let method = DatastoreMethod::FileEncrypted(dbpath, zeroize::Zeroizing::new(key));
-        Datastore::_new_internal(method, legacy_import)
+        Datastore::new_encrypted_with_legacy_import_opts(
+            dbpath,
+            key,
+            LegacyImportOptions {
+                enabled: legacy_import,
+                ..Default::default()
+            },
+        )
     }
 
-    fn _new_internal(method: DatastoreMethod, legacy_import: bool) -> Self {
+    /// Like [`Datastore::new_encrypted`], but with full control over the
+    /// legacy import behavior. See [`Datastore::new_with_legacy_import_opts`].
+    #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+    pub fn new_encrypted_with_legacy_import_opts(
+        dbpath: String,
+        key: String,
+        legacy_import_opts: LegacyImportOptions,
+    ) -> Self {
+        let method = DatastoreMethod::FileEncrypted(dbpath, zeroize::Zeroizing::new(key));
+        Datastore::_new_internal(method, legacy_import_opts)
+    }
+
+    fn _new_internal(method: DatastoreMethod, legacy_import_opts: LegacyImportOptions) -> Self {
         let (requester, responder) =
             mpsc_requests::channel::<Command, Result<Response, DatastoreError>>();
         let _thread = thread::spawn(move || {
-            let mut di = DatastoreWorker::new(responder, legacy_import);
+            let mut di = DatastoreWorker::new(responder, legacy_import_opts);
             di.work_loop(method);
         });
         Datastore { requester }

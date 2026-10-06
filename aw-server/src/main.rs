@@ -191,10 +191,13 @@ async fn main() -> Result<(), rocket::Error> {
     let asset_path = opts.webpath.map(PathBuf::from);
     info!("Using aw-webui assets at path {:?}", asset_path);
 
-    // Only use legacy import if opts.dbpath is not set, unless the user
-    // explicitly asked for it via --import-legacy.
+    // Only use legacy import if opts.dbpath is not set and this is the
+    // default profile (the python database it reads is the default one, so a
+    // fresh named/testing profile would otherwise copy in the user's real
+    // data), unless the user explicitly asked for it via --import-legacy.
     let legacy_import_opts = aw_datastore::LegacyImportOptions {
-        enabled: !opts.no_legacy_import && (opts.dbpath.is_none() || opts.import_legacy),
+        enabled: !opts.no_legacy_import
+            && ((opts.dbpath.is_none() && profile == "default") || opts.import_legacy),
         force: opts.import_legacy,
         db_path_override: opts.legacy_dbpath.clone(),
     };

@@ -243,15 +243,21 @@ async fn main() -> Result<(), rocket::Error> {
     let datastore =
         aw_datastore::Datastore::new_with_legacy_import_opts(db_path, legacy_import_opts);
 
+    let asset_resolver = endpoints::AssetResolver::new(asset_path.clone());
+    if !asset_resolver.has_index() {
+        warn!(
+            "No aw-webui index.html found (checked --webpath {:?} and the embedded bundle); \
+             the API works, but / will show a 'web UI missing' page. \
+             Rebuild with AW_WEBUI_DIR set or pass --webpath.",
+            asset_path
+        );
+    }
+
     let server_state = endpoints::ServerState {
         query_cache_enabled: config.query_cache,
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
-        ..endpoints::ServerState::new(
-            datastore,
-            endpoints::AssetResolver::new(asset_path),
-            device_id,
-        )
+        ..endpoints::ServerState::new(datastore, asset_resolver, device_id)
     };
 
     let _rocket = endpoints::build_rocket(server_state, config)

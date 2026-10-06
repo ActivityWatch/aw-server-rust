@@ -578,6 +578,12 @@ mod api_tests {
             .body(r#"[{"timestamp":"2018-01-01T01:01:01Z","duration":-5.0,"data":{}}]"#)
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::BadRequest);
+        // Confirm the rejected event was NOT stored
+        let count_res = client
+            .get("/api/0/buckets/id/events/count")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(count_res.into_string().unwrap(), "0");
 
         // Zero duration is allowed
         let res = client
@@ -596,6 +602,12 @@ mod api_tests {
             .body(r#"{"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}"#)
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::BadRequest);
+        // Confirm the rejected heartbeat did not alter stored events
+        let count_res = client
+            .get("/api/0/buckets/id/events/count")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(count_res.into_string().unwrap(), "1");
 
         // Heartbeat with zero pulsetime is allowed
         let res = client

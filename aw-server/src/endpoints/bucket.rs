@@ -182,7 +182,7 @@ pub fn bucket_events_create(
         if event.duration < Duration::zero() {
             let err_msg = format!(
                 "Invalid event: duration must be non-negative, got {}s",
-                event.duration.num_seconds()
+                event.duration.num_milliseconds() as f64 / 1000.0
             );
             warn!("{}", err_msg);
             return Err(HttpErrorJson::new(Status::BadRequest, err_msg));

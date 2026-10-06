@@ -1128,13 +1128,18 @@ fn sync_one(
                     break;
                 }
                 let is_last = current_batch.len() < BATCH_SIZE;
-                // P4: Honour sync_spec.start: skip events whose timestamp is
-                // before the requested start date.  The cursor still advances past
-                // those rows (max_rowid already set above) so they are not
-                // re-fetched on subsequent passes.
+                // P4: Honour sync_spec.start: skip events that end before the
+                // requested start date.  Overlap semantics match the timestamp
+                // path, so an event crossing the start boundary is kept.  The
+                // cursor still advances past skipped rows (max_rowid already set
+                // above) so they are not re-fetched on subsequent passes.
                 let chunk: Vec<Event> = current_batch
                     .into_iter()
-                    .filter(|e| sync_spec.start.is_none_or(|start| e.timestamp >= start))
+                    .filter(|e| {
+                        sync_spec
+                            .start
+                            .is_none_or(|start| e.timestamp + e.duration > start)
+                    })
                     .map(|mut e| {
                         e.id = None;
                         e

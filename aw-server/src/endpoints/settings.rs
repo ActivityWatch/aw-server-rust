@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use aw_datastore::DatastoreError;
 
+use crate::endpoints::util::ApiJson;
 use crate::endpoints::HttpErrorJson;
 
 /// Map a settings API key to the datastore key (`settings.<key>`).
@@ -107,7 +108,7 @@ pub fn setting_get(
 pub fn setting_set(
     state: &State<ServerState>,
     key: String,
-    value: Json<serde_json::Value>,
+    value: ApiJson<serde_json::Value>,
 ) -> Result<Status, HttpErrorJson> {
     let setting_key = parse_key(key)?;
     let value_str = match serde_json::to_string(&value.0) {

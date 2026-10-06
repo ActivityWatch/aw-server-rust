@@ -1004,6 +1004,56 @@ mod api_tests {
     }
 
     #[test]
+    fn test_api_errors_are_json_with_reason() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).unwrap();
+
+        // Malformed event body -> 422 JSON carrying the serde error
+        let res = client
+            .post("/api/0/buckets/b1/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body("{\"duration\": 0}")
+            .dispatch();
+        assert_eq!(res.status(), Status::UnprocessableEntity);
+        assert_eq!(res.content_type(), Some(ContentType::JSON));
+        let body: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        let msg = body["message"].as_str().unwrap();
+        assert!(msg.starts_with("Unprocessable Entity: "), "{msg}");
+        assert!(msg.contains("line 1"), "{msg}");
+
+        // Syntactically invalid JSON -> JSON too
+        let res = client
+            .post("/api/0/buckets/b1/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body("{not json")
+            .dispatch();
+        assert_eq!(res.status(), Status::UnprocessableEntity);
+        assert_eq!(res.content_type(), Some(ContentType::JSON));
+
+        // Unknown API route -> 404 JSON
+        let res = client
+            .get("/api/0/nope")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::NotFound);
+        assert_eq!(res.content_type(), Some(ContentType::JSON));
+        let body: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(body["message"], "Not Found");
+
+        // Rocket-generated 400 (invalid request URI) -> JSON from the 400 catcher
+        let res = client
+            .get("/api/0/bad path")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::BadRequest);
+        assert_eq!(res.content_type(), Some(ContentType::JSON));
+        let body: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(body["message"], "Bad Request");
+    }
+
+    #[test]
     fn test_illegally_long_key() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

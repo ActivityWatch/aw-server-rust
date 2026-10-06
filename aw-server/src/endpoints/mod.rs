@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use gethostname::gethostname;
 use rocket::fs::FileServer;
 use rocket::http::{ContentType, Status};
+use rocket::request::Request;
 use rocket::serde::json::Json;
 use rocket::State;
 
@@ -271,7 +272,11 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 settings::settings_get,
             ],
         )
-        .mount("/", rocket_cors::catch_all_options_routes());
+        .mount("/", rocket_cors::catch_all_options_routes())
+        .register(
+            "/api",
+            catchers![api_bad_request, api_not_found, api_unprocessable],
+        );
 
     // for each custom static directory, mount it at the given name
     for (name, dir) in custom_static {
@@ -282,6 +287,21 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
         rocket = rocket.mount(&format!("/pages/{name}"), FileServer::from(dir));
     }
     rocket
+}
+
+#[catch(400)]
+fn api_bad_request(req: &Request) -> util::HttpErrorJson {
+    util::api_error_json(Status::BadRequest, req)
+}
+
+#[catch(404)]
+fn api_not_found(req: &Request) -> util::HttpErrorJson {
+    util::api_error_json(Status::NotFound, req)
+}
+
+#[catch(422)]
+fn api_unprocessable(req: &Request) -> util::HttpErrorJson {
+    util::api_error_json(Status::UnprocessableEntity, req)
 }
 
 mod tests {

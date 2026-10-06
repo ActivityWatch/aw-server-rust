@@ -15,7 +15,7 @@ use rocket::http::Status;
 use rocket::State;
 
 use crate::endpoints::query_cache::event_range;
-use crate::endpoints::util::{BucketEventsCsvRocket, BucketsExportRocket};
+use crate::endpoints::util::{ApiJson, BucketEventsCsvRocket, BucketsExportRocket};
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[get("/")]
@@ -48,7 +48,7 @@ pub fn bucket_get(
 #[post("/<bucket_id>", data = "<message>", format = "application/json")]
 pub fn bucket_new(
     bucket_id: &str,
-    message: Json<Bucket>,
+    message: ApiJson<Bucket>,
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
     let mut bucket = message.into_inner();
@@ -170,7 +170,7 @@ pub fn bucket_events_get_single(
 #[post("/<bucket_id>/events", data = "<events>", format = "application/json")]
 pub fn bucket_events_create(
     bucket_id: &str,
-    events: Json<Vec<Event>>,
+    events: ApiJson<Vec<Event>>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     // Hold the write lock across (read old ranges + write + invalidate) so a
@@ -216,7 +216,7 @@ pub fn bucket_events_create(
 )]
 pub fn bucket_events_heartbeat(
     bucket_id: &str,
-    heartbeat_json: Json<Event>,
+    heartbeat_json: ApiJson<Event>,
     pulsetime: f64,
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {

@@ -277,7 +277,11 @@ mod tests {
     #[cfg(not(target_os = "android"))]
     #[test]
     fn status_and_daemon_resolve_the_same_sync_config_dir() {
-        assert_eq!(config_dir_path().unwrap(), get_config_dir().unwrap());
+        // Daemon first: on Windows it may migrate a v0.14.0 Roaming dir,
+        // after which status must see the migrated location. Migration
+        // states themselves are covered with temp dirs in aw-server's dirs.rs.
+        let daemon = get_config_dir().unwrap();
+        assert_eq!(config_dir_path().unwrap(), daemon);
     }
 
     #[test]

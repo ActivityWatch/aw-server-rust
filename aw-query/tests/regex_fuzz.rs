@@ -21,6 +21,7 @@ fn setup_datastore_with_bucket() -> Datastore {
         _type: "testtype".to_string(),
         client: "testclient".to_string(),
         hostname: "testhost".to_string(),
+        device_id: "local".to_string(),
         created: Some(chrono::Utc::now()),
         data: json!({}).as_object().unwrap().clone(),
         metadata: BucketMetadata::default(),

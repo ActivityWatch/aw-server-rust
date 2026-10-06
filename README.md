@@ -145,8 +145,10 @@ as assigned even if category rules are renamed or removed.
 
 `query_bucket` overlays a reserved, derived `$manual_category` field before
 transforms; `categorize` gives it precedence over rules. Stored copies of that
-field cannot spoof annotations. Pre-aggregation by app/title keeps manual
-paths separate so durations are not assigned to the wrong category.
+field cannot spoof annotations. `query_bucket` also drops a watcher-stored
+`$category`, so `$category` in a query always comes from `categorize`; raw
+event reads are unchanged. Pre-aggregation by app/title keeps manual paths
+separate so durations are not assigned to the wrong category.
 
 **Local database only:** overrides persist through restart, but are deliberately
 absent from raw-event exports and aw-sync transport. Export/import onto a new

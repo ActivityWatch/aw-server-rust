@@ -73,9 +73,9 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
         //   `categorize` this equals `$category` (a valid manual override
         //   always wins there), so a manual and an automatic event that agree
         //   on the final category still fold into one row. Before
-        //   classification it keeps manual boundaries even when the watcher
-        //   stored its own `$category`, which `query_bucket` passes through and
-        //   which must not mask differing overrides.
+        //   classification `query_bucket` events carry no `$category` (stored
+        //   copies are stripped), so manual events stay apart from automatic
+        //   ones and from each other.
         let split = if keys.iter().any(|key| key == "$category") {
             None
         } else {

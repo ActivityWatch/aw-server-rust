@@ -1322,6 +1322,12 @@ impl DatastoreInstance {
 
     /// Query-only view: never exposes a watcher-supplied reserved marker.
     /// Sidecars are fetched once for this bucket in the caller's transaction.
+    ///
+    /// `$category` is stripped as well: it is the output of `categorize`, so a
+    /// stored copy would be indistinguishable from this query's classification.
+    /// Transforms that run before `categorize` (e.g. merging app totals) could
+    /// then fold a manually categorized event into automatic time whose stored
+    /// value happens to match. Raw reads (`get_events`) still return it.
     pub fn get_events_with_categories(
         &mut self,
         conn: &Connection,
@@ -1333,6 +1339,7 @@ impl DatastoreInstance {
         let mut events = self.get_events(conn, bucket_id, start, end, limit)?;
         for event in &mut events {
             event.data.remove("$manual_category");
+            event.data.remove("$category");
         }
         // Peer files from v4-v6 do not contain the sidecar table.
         if self.db_version < 7 || events.is_empty() {

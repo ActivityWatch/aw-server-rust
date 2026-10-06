@@ -801,7 +801,12 @@ fn test_migrate_noop_without_misplaced_dir() {
 ///
 /// Returns (data, config, log, cache) parents for the default profile.
 /// These are the paths documented at
-/// <https://docs.activitywatch.net/en/latest/directories.html>; keep both in sync.
+/// <https://docs.activitywatch.net/en/latest/directories.html>. Keep in sync
+/// with that page and the sibling pins (change them together):
+/// - aw-core `tests/test_dirs_pinned.py` (Python modules; on Windows one
+///   extra `activitywatch` level, since platformdirs uses appname as author)
+/// - aw-tauri `src-tauri/src/dirs.rs` `test_default_paths_are_pinned`
+/// - `aw-datastore/src/legacy_import.rs` `test_legacy_dbfile_path_is_pinned`
 #[cfg(all(test, not(target_os = "android")))]
 fn expected_default_dirs() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     #[cfg(target_os = "windows")]

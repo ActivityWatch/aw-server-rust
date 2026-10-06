@@ -306,7 +306,9 @@ mod import {
     /// Pins where python aw-server's database is looked for. Derived from the
     /// environment, not the `dirs` crate, so a dependency change that moves
     /// it (as #562 did on Windows) fails here instead of silently skipping
-    /// the import for every migrating user.
+    /// the import for every migrating user. Must equal the Python side's
+    /// pin: aw-core `tests/test_dirs_pinned.py` `test_peewee_db_path_is_pinned`
+    /// (see also <https://docs.activitywatch.net/en/latest/directories.html>).
     #[test]
     fn test_legacy_dbfile_path_is_pinned() {
         #[cfg(windows)]

@@ -23,6 +23,17 @@ pub trait AccessMethod: std::fmt::Debug {
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
     fn delete_events_by_id(&self, bucket_id: &str, event_ids: Vec<i64>) -> Result<(), String>;
+
+    /// Fetch up to `limit` events with source rowid > `since_rowid`, ordered ASC by rowid.
+    /// Returns `None` when the backend does not support rowid queries (e.g. AwClient over HTTP).
+    fn get_events_since_rowid(
+        &self,
+        _bucket_id: &str,
+        _since_rowid: i64,
+        _limit: Option<u64>,
+    ) -> Option<Result<Vec<Event>, String>> {
+        None
+    }
 }
 
 /// Every method here returns a `Result`, so a datastore failure must be reported
@@ -70,6 +81,18 @@ impl AccessMethod for Datastore {
         Datastore::delete_events_by_id(self, bucket_id, event_ids).map_err(|e| format!("{e:?}"))?;
         self.force_commit().map_err(|e| format!("{e:?}"))?;
         Ok(())
+    }
+
+    fn get_events_since_rowid(
+        &self,
+        bucket_id: &str,
+        since_rowid: i64,
+        limit: Option<u64>,
+    ) -> Option<Result<Vec<Event>, String>> {
+        Some(
+            Datastore::get_events_since_rowid(self, bucket_id, since_rowid, limit)
+                .map_err(|e| format!("{e:?}")),
+        )
     }
 }
 

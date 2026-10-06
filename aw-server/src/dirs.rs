@@ -325,15 +325,15 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
     }
 }
 
-/// Cross-process lock around choosing and migrating one dir: an
-/// exclusively created `<name>.migration-lock` file next to `target`,
-/// removed on drop. Two processes starting at once (e.g. two servers sharing
-/// a legacy testing dir) therefore never migrate the same dir concurrently;
-/// the loser keeps using the dir the shared rule picks. A lock older than
-/// [`STALE_LOCK`] is assumed left behind by a crash and taken over.
-struct MigrationLock(PathBuf);
-
-const STALE_LOCK: std::time::Duration = std::time::Duration::from_secs(3600);
+/// Cross-process lock around choosing and migrating one dir: an exclusive
+/// OS file lock (`File::lock`) on `<name>.migration-lock` next to `target`.
+/// The OS releases it when the holder exits, also on a crash, so there is no
+/// staleness to guess at; the file itself is never deleted (deleting a lock
+/// file by path can let two processes hold "the" lock). A second process
+/// starting meanwhile (e.g. default and legacy testing servers sharing a
+/// dir) blocks until the migration is done and then re-applies the rule,
+/// instead of falling back to the old dir while it is being copied.
+struct MigrationLock(#[allow(dead_code)] fs::File);
 
 impl MigrationLock {
     fn path_for(target: &Path) -> PathBuf {
@@ -349,32 +349,20 @@ impl MigrationLock {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        match fs::File::create_new(&path) {
-            Ok(_) => Ok(MigrationLock(path)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age > STALE_LOCK);
-                if stale {
-                    warn!("Removing stale migration lock {path:?}");
-                    let _ = fs::remove_file(&path);
-                    fs::File::create_new(&path).map(|_| MigrationLock(path))
-                } else {
-                    Err(io_err(format!(
-                        "{path:?} exists: another process is migrating this dir"
-                    )))
-                }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                info!("Waiting for another process to finish migrating {target:?}");
+                file.lock()?;
             }
-            Err(e) => Err(e),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
-    }
-}
-
-impl Drop for MigrationLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        Ok(MigrationLock(file))
     }
 }
 
@@ -1244,28 +1232,24 @@ fn test_concurrent_migration_never_moves_a_database_aside() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// A migration in progress elsewhere (lock held) is never raced: this
-/// process changes nothing and uses the dir the shared rule picks. A stale
-/// lock (crash) is taken over.
+/// A migration in progress elsewhere (lock held) is waited for, then the
+/// rule is re-applied: no fallback to the dir being copied, no second copy.
 #[test]
-fn test_migration_lock_prevents_concurrent_migration() {
+fn test_migration_lock_waits_for_concurrent_migration() {
     let (root, target, misplaced) = migration_dirs();
     fs::write(misplaced.join("sqlite.db"), b"db").unwrap();
-    let lock = MigrationLock::path_for(&target);
-    fs::create_dir_all(lock.parent().unwrap()).unwrap();
-    let f = fs::File::create(&lock).unwrap();
-    let out = resolve_or_migrate(&target, &misplaced, &real_copy);
-    assert_eq!(out.dir, misplaced);
-    assert!(!target.exists());
-    assert!(lock.exists(), "someone else's lock is not removed");
-
-    f.set_modified(std::time::SystemTime::now() - 2 * STALE_LOCK)
-        .unwrap();
-    drop(f);
-    let out = resolve_or_migrate(&target, &misplaced, &real_copy);
+    let held = MigrationLock::acquire(&target).unwrap();
+    let (t2, m2) = (target.clone(), misplaced.clone());
+    let waiter = std::thread::spawn(move || resolve_or_migrate(&t2, &m2, &real_copy));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(!waiter.is_finished(), "must wait while the lock is held");
+    // The holder completes the migration, then releases the lock.
+    migrate_dir(&target, &misplaced, &real_copy).unwrap();
+    drop(held);
+    let out = waiter.join().unwrap();
     assert_eq!(out.dir, target);
     assert_eq!(fs::read(target.join("sqlite.db")).unwrap(), b"db");
-    assert!(!lock.exists(), "lock released after migrating");
+    assert!(sibling_with(&target, PRE_MIGRATION_TAG).is_none());
     let _ = fs::remove_dir_all(root);
 }
 

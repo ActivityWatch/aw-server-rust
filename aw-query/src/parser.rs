@@ -1,5 +1,6 @@
 #![allow(clippy::ptr_arg)]
 #![allow(clippy::vec_init_then_push)]
+#![allow(clippy::block_scrutinee)]
 
 use crate::ast::*;
 use crate::lexer::Token::*;

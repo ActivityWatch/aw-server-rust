@@ -35,35 +35,36 @@ pub fn resolve_profile(
 /// Uses the same profile appname as aw-server so a named profile (e.g.
 /// `research`) does not share prod's sync config. `testing` follows the
 /// same new-root-plus-legacy-fallback rule as aw-server.
+///
+/// For the daemon, which is about to write `config.toml` there: creates the
+/// dir and, on Windows, migrates what v0.14.0 wrote under Roaming
+/// `%APPDATA%` (or keeps using it there if that fails), via the same
+/// resolver as aw-server (`aw_server::dirs::module_dir`).
 #[allow(dead_code)] // used by the aw-sync binary; the lib copy is unused (status.rs uses config_dir_path)
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, Box<dyn Error>> {
-    let dir = config_dir_path()?;
-    // Windows: recover config v0.14.0 wrote under Roaming %APPDATA%; if the
-    // move fails, keep using it there rather than start from defaults.
-    #[cfg(windows)]
-    let dir = match dirs::config_dir() {
-        Some(roaming) => {
-            let misplaced = roaming.join(aw_server::dirs::appname()).join("aw-sync");
-            if aw_server::dirs::migrate_misplaced_dir(&dir, &misplaced) {
-                dir
-            } else {
-                misplaced
-            }
-        }
-        None => dir,
-    };
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
+    let root = aw_server::dirs::user_config_root().ok_or("Unable to read user config dir")?;
+    Ok(aw_server::dirs::module_dir(
+        root,
+        &aw_server::dirs::appname(),
+        "aw-sync",
+    ))
 }
 
-/// Path to aw-sync's own config dir — construction only, does not create it.
-/// For read-only callers (e.g. `status`) that must never mutate the
-/// filesystem just to look at it; `get_config_dir` is for the daemon path,
-/// which is about to write `config.toml` there anyway.
+/// Path to aw-sync's own config dir — resolution only, does not create or
+/// migrate anything. For read-only callers (e.g. `status`) that must never
+/// mutate the filesystem just to look at it. Resolves with the same rule as
+/// [`get_config_dir`] (`aw_server::dirs::module_dir_readonly`), so `status`
+/// reports the file the daemon actually uses, also when a v0.14.0 Roaming
+/// dir has not been (or could not be) migrated.
 #[cfg(not(target_os = "android"))]
 pub fn config_dir_path() -> Result<PathBuf, Box<dyn Error>> {
-    sync_config_dir(&aw_server::dirs::appname())
+    let root = aw_server::dirs::user_config_root().ok_or("Unable to read user config dir")?;
+    Ok(aw_server::dirs::module_dir_readonly(
+        root,
+        &aw_server::dirs::appname(),
+        "aw-sync",
+    ))
 }
 
 /// `[daemon]` settings — namespaced (rather than top-level) so future
@@ -141,15 +142,6 @@ pub fn effective_daemon_mode(
     })
 }
 
-/// Path construction only — does not create directories (so tests stay off-disk).
-#[cfg(not(target_os = "android"))]
-fn sync_config_dir(appname: &str) -> Result<PathBuf, Box<dyn Error>> {
-    Ok(aw_server::dirs::user_config_root()
-        .ok_or("Unable to read user config dir")?
-        .join(appname)
-        .join("aw-sync"))
-}
-
 /// Path to the embedded/local aw-server config. On Android this is
 /// `filesDir/config.toml` (same file ConfigManager and the server use).
 #[allow(dead_code)]
@@ -168,28 +160,17 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
     // master already reads this path for the embedded server's api_key (#666).
     #[cfg(not(target_os = "android"))]
     {
-        let appname = aw_server::dirs::appname_for(effective);
-        let path = aw_server::dirs::user_config_root()
-            .ok_or(())?
-            .join(&appname)
-            .join("aw-server-rust")
-            .join(&filename);
-        // Windows: the server moves its config out of Roaming (v0.14.0) on
-        // its own startup. If aw-sync gets here first, read it in place
-        // (read-only; aw-sync never moves the server's files).
-        #[cfg(windows)]
-        if !path.exists() {
-            if let Some(roaming) = dirs::config_dir() {
-                let old = roaming
-                    .join(&appname)
-                    .join("aw-server-rust")
-                    .join(&filename);
-                if old.exists() {
-                    return Ok(old);
-                }
-            }
-        }
-        Ok(path)
+        // Same resolver as the server's own get_config_dir, read-only: on
+        // Windows this is the v0.14.0 Roaming dir while that still holds the
+        // server's data (before the server migrated it, or if migration
+        // failed and the server keeps using it), so both read the same file.
+        // aw-sync never moves the server's files.
+        let dir = aw_server::dirs::module_dir_readonly(
+            aw_server::dirs::user_config_root().ok_or(())?,
+            &aw_server::dirs::appname_for(effective),
+            "aw-server-rust",
+        );
+        Ok(dir.join(filename))
     }
     #[cfg(target_os = "android")]
     {
@@ -290,6 +271,13 @@ mod tests {
             get_server_config_path(false).unwrap(),
             server.join("config.toml")
         );
+    }
+
+    /// `status` (read-only) must report the same config dir the daemon uses.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn status_and_daemon_resolve_the_same_sync_config_dir() {
+        assert_eq!(config_dir_path().unwrap(), get_config_dir().unwrap());
     }
 
     #[test]

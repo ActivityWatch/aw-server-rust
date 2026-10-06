@@ -349,7 +349,9 @@ pub fn last_report_path() -> Result<PathBuf, Box<dyn Error>> {
             return Ok(PathBuf::from(p));
         }
     }
-    let dir = aw_server::dirs::get_data_dir().map_err(|_| "Could not get data dir")?;
+    // Read-only resolution: aw-sync must not migrate (or create) the
+    // server's data dir; it follows whichever dir the server uses.
+    let dir = aw_server::dirs::data_dir_path().map_err(|_| "Could not get data dir")?;
     Ok(dir.join("aw-sync").join("last-sync-report.json"))
 }
 

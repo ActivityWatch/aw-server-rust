@@ -292,6 +292,7 @@ dependencies = [
  "regex",
  "rocket",
  "rocket_cors",
+ "rusqlite",
  "rust-embed",
  "sd-notify",
  "serde",

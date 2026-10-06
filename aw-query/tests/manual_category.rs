@@ -63,3 +63,44 @@ fn sidecar_precedence_preaggregation_and_clear_restore_rules() {
     .unwrap();
     assert!(matches!(sum, DataType::Number(n) if n == 30.0));
 }
+
+#[test]
+fn stored_category_does_not_merge_automatic_time_into_manual_override() {
+    // A watcher-stored `$category` must not stand in for classification: a
+    // merge before `categorize` would otherwise fold automatic time whose
+    // stored value matches a manual override into the manual row.
+    let ds = Datastore::new_in_memory(false);
+    let bucket: Bucket = serde_json::from_value(
+        json!({"id":"test","type":"test","client":"test","hostname":"test"}),
+    )
+    .unwrap();
+    ds.create_bucket(&bucket).unwrap();
+    let mut manual = Event::default();
+    manual.timestamp = "2026-01-01T10:00:00Z".parse().unwrap();
+    manual.duration = Duration::seconds(10);
+    manual.data.insert("app".into(), json!("browser"));
+    let mut automatic = manual.clone();
+    automatic.timestamp += Duration::seconds(10);
+    automatic.duration = Duration::seconds(20);
+    automatic.data.insert("$category".into(), json!(["Work"]));
+    let rows = ds.insert_events("test", &[manual, automatic]).unwrap();
+    ds.set_event_category("test", rows[0].id.unwrap(), vec!["Work".into()])
+        .unwrap();
+    let interval =
+        TimeInterval::new_from_string("2026-01-01T10:00:00Z/2026-01-01T11:00:00Z").unwrap();
+    let code = r#"events = merge_events_by_keys(sort_by_timestamp(query_bucket("test")), ["app"]); return categorize(events, [[["Play"], {"type":"regex","regex":"browser"}]]);"#;
+    let events: Vec<Event> = aw_query::query(code, &interval, &ds)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].data["$category"], json!(["Work"]));
+    assert_eq!(events[0].duration, Duration::seconds(10));
+    assert_eq!(events[1].data["$category"], json!(["Play"]));
+    assert_eq!(events[1].duration, Duration::seconds(20));
+    // Raw reads still return the watcher's stored value.
+    assert_eq!(
+        ds.get_events("test", None, None, None).unwrap()[0].data["$category"],
+        json!(["Work"])
+    );
+}

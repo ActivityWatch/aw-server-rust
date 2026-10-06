@@ -192,3 +192,26 @@ fn app_and_title_merge_folds_manual_and_automatic_of_same_category() {
     assert_eq!(app_merged.len(), 1);
     assert_eq!(app_merged[0].duration, Duration::seconds(40));
 }
+
+#[test]
+fn stored_category_does_not_mask_manual_overrides_before_categorize() {
+    // A watcher may store its own `$category`, which `query_bucket` passes
+    // through. A merge that runs before `categorize` (Android's app totals)
+    // must still keep events with different manual overrides apart instead of
+    // treating the stored value as the final classification.
+    let mut work = Event::default();
+    work.duration = Duration::seconds(30);
+    work.data.insert("app".into(), json!("browser"));
+    work.data.insert("$category".into(), json!(["Raw"]));
+    let mut play = work.clone();
+    play.duration = Duration::seconds(10);
+    work.data.insert("$manual_category".into(), json!(["Work"]));
+    play.data.insert("$manual_category".into(), json!(["Play"]));
+    let merged = merge_events_by_keys(vec![work, play], vec!["app".into()]);
+    assert_eq!(merged.len(), 2, "differing manual overrides must not merge");
+    let classified = categorize(merged, &[]);
+    assert_eq!(classified[0].data["$category"], json!(["Work"]));
+    assert_eq!(classified[0].duration, Duration::seconds(30));
+    assert_eq!(classified[1].data["$category"], json!(["Play"]));
+    assert_eq!(classified[1].duration, Duration::seconds(10));
+}

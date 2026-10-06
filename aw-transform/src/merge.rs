@@ -61,26 +61,27 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
             }
         }
         // The category component of the merge key is what keeps events with
-        // the same grouping values but different final categories from
-        // collapsing into one row that keeps only the first event's category
-        // and misattributes the summed duration.
+        // the same grouping values but different categories from collapsing
+        // into one row that keeps only the first event's category and
+        // misattributes the summed duration.
         //
         // - A `$category` merge already groups by the final category, so no
         //   extra component is needed: a manual and an automatic event that
         //   landed in the same category must sum into one row.
-        // - After classification (`$category` present, e.g. the app/title
-        //   summaries that run after `categorize`) the final category itself is
-        //   the component, so events that agree on it still merge while events
-        //   that differ stay apart.
-        // - Before classification (`$category` absent) the manual marker is
-        //   what separates groups, so pre-categorization aggregation (notably
-        //   Android's app totals) does not erase manual boundaries.
+        // - Otherwise the component is the event's effective category: its
+        //   manual override if it has one, else its `$category`. After
+        //   `categorize` this equals `$category` (a valid manual override
+        //   always wins there), so a manual and an automatic event that agree
+        //   on the final category still fold into one row. Before
+        //   classification it keeps manual boundaries even when the watcher
+        //   stored its own `$category`, which `query_bucket` passes through and
+        //   which must not mask differing overrides.
         let split = if keys.iter().any(|key| key == "$category") {
             None
-        } else if let Some(category) = event.data.get("$category") {
-            Some(category.clone())
         } else {
-            crate::classify::manual_category(&event).map(|path| serde_json::json!(path))
+            crate::classify::manual_category(&event)
+                .map(|path| serde_json::json!(path))
+                .or_else(|| event.data.get("$category").cloned())
         };
         let summed_key = serde_json::to_string(&(key_values, split)).unwrap();
         match index.entry(summed_key) {

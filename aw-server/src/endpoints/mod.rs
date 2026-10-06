@@ -37,6 +37,11 @@ impl AssetResolver {
         Some(EmbeddedAssets::get(file_path)?.data.to_vec())
     }
 
+    /// Whether `index.html` resolves, from `--webpath` or the embedded bundle.
+    pub fn has_index(&self) -> bool {
+        self.resolve("index.html").is_some()
+    }
+
     /// The web UI entry point, or an explanatory page (503) when this build
     /// has no web UI assets, instead of Rocket's bare 404.
     fn index_or_placeholder(&self) -> (Status, ContentType, Vec<u8>) {
@@ -339,5 +344,16 @@ mod tests {
         let content = resolver.resolve("Cargo.json");
 
         assert!(content.is_none());
+    }
+
+    #[test]
+    fn test_has_index_matches_placeholder() {
+        let resolver = super::AssetResolver::new(Some("/nonexistent-webpath".into()));
+        let (status, _, _) = resolver.index_or_placeholder();
+        assert_eq!(
+            resolver.has_index(),
+            status == rocket::http::Status::Ok,
+            "has_index() must agree with what / serves"
+        );
     }
 }

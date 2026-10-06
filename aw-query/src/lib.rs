@@ -20,8 +20,7 @@ mod lexer;
     clippy::match_single_binding,
     clippy::redundant_closure_call,
     unused_braces,
-    unknown_lints,
-    clippy::block_scrutinee
+    unknown_lints
 )]
 mod parser;
 

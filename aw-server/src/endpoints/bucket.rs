@@ -4,6 +4,7 @@ use gethostname::gethostname;
 use rocket::serde::json::Json;
 
 use chrono::DateTime;
+use chrono::Duration;
 use chrono::Utc;
 
 use aw_datastore::DatastoreError;
@@ -175,6 +176,18 @@ pub fn bucket_events_create(
     // Hold the write lock across (read old ranges + write + invalidate) so a
     // concurrent replacement cannot move an event to a range we never record.
     let _guard = state.write_lock.lock().unwrap();
+    // Reject events with negative duration; they cannot represent a valid time span
+    // and silently corrupt totals in the Activity view (#602, #239).
+    for event in events.iter() {
+        if event.duration < Duration::zero() {
+            let err_msg = format!(
+                "Invalid event: duration must be non-negative, got {}s",
+                event.duration.num_milliseconds() as f64 / 1000.0
+            );
+            warn!("{}", err_msg);
+            return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
+        }
+    }
     let datastore = &state.datastore;
     // Every inserted event changes its own extent; an event with an ID replaces
     // a stored one, whose range changes too.
@@ -208,6 +221,13 @@ pub fn bucket_events_heartbeat(
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let _guard = state.write_lock.lock().unwrap();
+    // Reject negative pulsetime; it has no meaningful interpretation and is
+    // almost always a client bug (negated constant, sign-flip on subtraction).
+    if pulsetime < 0.0 {
+        let err_msg = format!("Invalid pulsetime: must be non-negative, got {pulsetime}");
+        warn!("{}", err_msg);
+        return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
+    }
     let heartbeat = heartbeat_json.into_inner();
     // The returned event spans every merged/replaced event, so invalidating its
     // extent covers the stored previous event even if it had a different range.

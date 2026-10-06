@@ -27,6 +27,7 @@ fn setup() -> (Datastore, TimeInterval) {
         _type: "test".into(),
         client: "test".into(),
         hostname: "test".into(),
+        device_id: "local".into(),
         created: Some(Utc::now()),
         data: Map::new(),
         metadata: BucketMetadata::default(),

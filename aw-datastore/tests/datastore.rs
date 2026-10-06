@@ -1817,6 +1817,61 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_device_id_local_default() {
+        // Buckets created locally via create_bucket should always end up with
+        // device_id "local", regardless of whether the caller supplies it.
+        let ds = setup_datastore_empty();
+
+        let mut b = test_bucket();
+        b.device_id = String::new(); // empty → should be stamped "local"
+        ds.create_bucket(&b).unwrap();
+
+        let buckets = ds.get_buckets().unwrap();
+        assert_eq!(
+            buckets[&b.id].device_id, "local",
+            "empty device_id must be stamped 'local' on creation"
+        );
+    }
+
+    #[test]
+    fn test_device_id_explicit_preserved() {
+        // An explicit device_id (non-empty) must survive the round-trip.
+        let ds = setup_datastore_empty();
+
+        let mut b = test_bucket();
+        b.device_id = "peer-abc".to_string();
+        ds.create_bucket(&b).unwrap();
+
+        let buckets = ds.get_buckets().unwrap();
+        assert_eq!(
+            buckets[&b.id].device_id, "peer-abc",
+            "explicit device_id must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_name_different_device_id_rejected() {
+        // UNIQUE(device_id, name) allows (A, "x") and (B, "x"), but the
+        // buckets_cache is keyed by name only. A second insert with the same
+        // name and a different device_id must be rejected to prevent silent
+        // cache corruption / history hiding.
+        let ds = setup_datastore_empty();
+
+        let mut b1 = test_bucket();
+        b1.device_id = "device-A".to_string();
+        ds.create_bucket(&b1).unwrap();
+
+        let mut b2 = test_bucket(); // same id/name as b1
+        b2.device_id = "device-B".to_string();
+        match ds.create_bucket(&b2) {
+            Err(DatastoreError::BucketAlreadyExists(_)) => {}
+            other => panic!(
+                "expected BucketAlreadyExists for same-name different device_id, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn test_read_only_open_skips_incompatible_versions() {
         for version in [
             aw_datastore::MIN_READ_COMPAT_DB_VERSION - 1,

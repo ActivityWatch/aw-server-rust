@@ -26,12 +26,20 @@ pub trait AccessMethod: std::fmt::Debug {
 
     /// Fetch up to `limit` events with source rowid > `since_rowid`, ordered ASC by rowid.
     /// Returns `None` when the backend does not support rowid queries (e.g. AwClient over HTTP).
+    /// On success returns `(events, max_scanned_rowid)` — the max rowid includes rows whose
+    /// data was corrupt, so callers should use it as the next cursor even when `events` is short.
     fn get_events_since_rowid(
         &self,
         _bucket_id: &str,
         _since_rowid: i64,
         _limit: Option<u64>,
-    ) -> Option<Result<Vec<Event>, String>> {
+    ) -> Option<Result<(Vec<Event>, i64), String>> {
+        None
+    }
+
+    /// Return the highest rowid currently stored for `bucket_id`, or 0 for an empty bucket.
+    /// Returns `None` when the backend does not support rowid queries.
+    fn get_max_event_rowid(&self, _bucket_id: &str) -> Option<Result<i64, String>> {
         None
     }
 }
@@ -88,11 +96,15 @@ impl AccessMethod for Datastore {
         bucket_id: &str,
         since_rowid: i64,
         limit: Option<u64>,
-    ) -> Option<Result<Vec<Event>, String>> {
+    ) -> Option<Result<(Vec<Event>, i64), String>> {
         Some(
             Datastore::get_events_since_rowid(self, bucket_id, since_rowid, limit)
                 .map_err(|e| format!("{e:?}")),
         )
+    }
+
+    fn get_max_event_rowid(&self, bucket_id: &str) -> Option<Result<i64, String>> {
+        Some(Datastore::get_max_event_rowid(self, bucket_id).map_err(|e| format!("{e:?}")))
     }
 }
 

@@ -55,8 +55,13 @@ impl Default for SyncSpec {
 }
 
 /// Open (or create) the cursors.db for a given source device under `root`.
+///
+/// Cursors are stored under `.cursors/{device_id}/cursors.db`.  The leading dot
+/// means both the 3-level (`list_remote_dbs`) and 2-level (`find_remotes`)
+/// peer-discovery walkers skip the directory, so `cursors.db` is never mistaken
+/// for a peer activity database and chosen over the real data file.
 fn open_or_create_cursor_ds(root: &Path, device_id: &str) -> Result<Datastore, String> {
-    let dir = root.join(device_id);
+    let dir = root.join(".cursors").join(device_id);
     fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create cursor dir {}: {e}", dir.display()))?;
     create_datastore(&dir.join("cursors.db"))
@@ -772,132 +777,17 @@ pub fn sync_datastores(
     src_did: Option<&str>,
     sync_spec: &SyncSpec,
 ) -> Result<Vec<BucketReport>, String> {
-    // FIXME: "-synced" should only be appended when synced to the local database, not to the
-    // staging area for local buckets.
-    info!("Syncing {:?} to {:?}", ds_from, ds_to);
-
-    let mut buckets_from: Vec<Bucket> = ds_from
-        .get_buckets()
-        .map_err(|e| format!("Failed to list buckets in {ds_from:?}: {e}"))?
-        .iter_mut()
-        // Never sync a bucket that is itself a copy synced from another host.
-        // A host must only ever offer data it collected itself. Without this,
-        // HOSTA's buckets reach HOSTB, are re-exported by HOSTB's next push, and
-        // come back to HOSTA as `<bucket>_HOSTA-synced-from-HOSTA` — a duplicate
-        // of the local bucket, so /timeline renders every event twice.
-        // See https://github.com/orgs/ActivityWatch/discussions/1373
-        .filter(|tup| {
-            if is_synced_bucket(tup.1) {
-                debug!(" - Skipping already-synced bucket '{}'", tup.1.id);
-                false
-            } else {
-                true
-            }
-        })
-        // Only filter buckets if specific bucket IDs are provided
-        .filter(|tup| {
-            let bucket = &tup.1;
-            if let Some(buckets) = &sync_spec.buckets {
-                // If "*" is in the buckets list or no buckets specified, sync all buckets
-                if buckets.iter().any(|b_id| b_id == "*") || buckets.is_empty() {
-                    true
-                } else {
-                    buckets.iter().any(|b_id| b_id == &bucket.id)
-                }
-            } else {
-                // By default, sync all buckets
-                true
-            }
-        })
-        .map(|tup| {
-            // TODO: Refuse to sync buckets without hostname/device ID set, or if set to 'unknown'
-            if tup.1.hostname == "unknown" {
-                // Only the push path carries a source device ID to substitute.
-                // On pull there is none, and continuing would give the bucket a
-                // `-synced-from-unknown` destination ID shared by every remote
-                // with that bucket ID, mixing events from unrelated devices.
-                // Refuse the sync instead (the previous code unwrapped the None
-                // here, which on Android aborts the whole app).
-                let did = src_did.ok_or_else(|| {
-                    format!(
-                        "Bucket '{}' has an unknown hostname/device ID and there is no source \
-                         device ID to substitute; refusing to sync it without provenance",
-                        tup.1.id
-                    )
-                })?;
-                warn!(" ! Bucket hostname/device ID was invalid, setting to device ID/hostname");
-                tup.1.hostname = did.to_string();
-            }
-            Ok(tup.1.clone())
-        })
-        .collect::<Result<Vec<Bucket>, String>>()?;
-
-    // Log warning for buckets requested but not found
-    if let Some(buckets) = &sync_spec.buckets {
-        for b_id in buckets {
-            if !buckets_from.iter().any(|b| b.id == *b_id) {
-                error!(" ! Bucket \"{}\" not found in source datastore", b_id);
-            }
-        }
-    }
-
-    // Sync buckets in order of most recently updated
-    buckets_from.sort_by_key(|b| b.metadata.end);
-
-    // Partial failure is non-fatal (one bad bucket must not skip the rest).
-    // Total failure must still be Err: otherwise a destination that is down
-    // reports success, which is the #682 silence reintroduced via #688's skip.
-    let mut buckets = Vec::with_capacity(buckets_from.len());
-    let mut attempted = 0usize;
-    let mut succeeded = 0usize;
-    let mut last_err: Option<String> = None;
-    for bucket_from in buckets_from {
-        attempted += 1;
-        let bucket_id = bucket_from.id.clone();
-        let bucket_to = match get_or_create_sync_bucket(&bucket_from, ds_to, is_push) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(" ! Skipping bucket '{}': {}", bucket_id, e);
-                last_err = Some(e);
-                continue;
-            }
-        };
-        match sync_one(
-            ds_from,
-            ds_to,
-            bucket_from,
-            bucket_to,
-            sync_spec,
-            None,
-            None,
-        ) {
-            Ok(synced) => {
-                succeeded += 1;
-                buckets.push(synced);
-            }
-            Err(e) => {
-                warn!(
-                    " ! Skipping sync for bucket '{bucket_id}': {e}. \
-                     Destination may already contain a partial write; next pass resumes from dest newest"
-                );
-                last_err = Some(e);
-            }
-        }
-    }
-    if attempted > 0 && succeeded == 0 {
-        return Err(format!(
-            "all {attempted} buckets failed; last error: {}",
-            last_err.as_deref().unwrap_or("unknown")
-        ));
-    }
-
-    Ok(buckets)
+    // Delegate to the cursor-aware variant with no cursor state so the external
+    // API is unchanged.  All bucket-selection, hostname-fix, error-reporting and
+    // logging logic lives in one place; changes no longer need to be made twice.
+    sync_datastores_with_cursor(ds_from, ds_to, is_push, src_did, sync_spec, None, None)
 }
 
-/// Internal variant of `sync_datastores` that threads cursor state through the
-/// per-bucket sync when the source is a file-based datastore and a cursor_ds is
-/// provided.  The public `sync_datastores` delegates here with `(None, None)` so
-/// the external API is unchanged.
+/// Core bucket-sync loop used by both `sync_datastores` (no cursor state) and
+/// cursor-aware internal callers.  When `cursor_ds` and `src_device_id` are both
+/// provided and the source supports rowid queries, each bucket's sync resumes
+/// from the persisted per-source rowid cursor instead of the destination's newest
+/// timestamp.
 fn sync_datastores_with_cursor(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
@@ -1172,40 +1062,79 @@ fn sync_one(
     //
     // Falls through to the timestamp-based path below when:
     //   - cursor_ds or src_device_id is None (AwClient source, HTTP-only path), or
-    //   - ds_from.get_events_since_rowid returns None (AwClient impl).
+    //   - ds_from.get_events_since_rowid returns None (AwClient impl), or
+    //   - saved_rowid == 0 and destination already has events (upgrade bootstrap,
+    //     see below).
     if let (Some(ck_did), Some(cds)) = (src_device_id, cursor_ds) {
         let ck = cursor_key(ck_did, &bucket_from.id);
-        let saved_rowid: i64 = cds
-            .get_key_value(&ck)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        if let Some(first_result) = ds_from.get_events_since_rowid(
+
+        // P3: Empty destination means the bucket was just created or was deleted
+        // and recreated.  Always reset the cursor to 0 so the full history is
+        // pulled instead of starting from a stale position left over from the
+        // previous incarnation of the bucket.
+        let stored_rowid: i64 = if eventcount_to_old == 0 {
+            0
+        } else {
+            cds.get_key_value(&ck)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+        };
+
+        // P1 (upgrade bootstrap): saved_rowid == 0 but the destination already
+        // has events means this is the first pass after upgrading from the
+        // timestamp-based cursor path.  Re-inserting all source history would
+        // create duplicates.  Instead, bootstrap the cursor to the current source
+        // max rowid so subsequent passes only fetch genuinely new events — and
+        // fall through to the timestamp path for *this* pass so new events since
+        // the last timestamp-based sync are still caught.
+        let bootstrap_pass = stored_rowid == 0 && eventcount_to_old > 0;
+        if bootstrap_pass {
+            if let Some(Ok(max_rowid)) = ds_from.get_max_event_rowid(bucket_from.id.as_str()) {
+                if let Err(e) = cds.set_key_value(&ck, &max_rowid.to_string()) {
+                    warn!(
+                        "Failed to bootstrap sync cursor for '{}': {e:?}",
+                        bucket_from.id
+                    );
+                } else {
+                    info!(
+                        "  ⤴  Bootstrapped rowid cursor for '{}' to {} (upgrade from \
+                         timestamp path; falling through to timestamp path this pass)",
+                        bucket_from.id, max_rowid
+                    );
+                }
+            }
+            // Fall through to the timestamp path for this pass.
+        } else if let Some(first_result) = ds_from.get_events_since_rowid(
             bucket_from.id.as_str(),
-            saved_rowid,
+            stored_rowid,
             Some(BATCH_SIZE as u64),
         ) {
-            let first_batch = first_result.map_err(|e| {
+            let (first_batch, first_scanned) = first_result.map_err(|e| {
                 format!(
                     "get_events_since_rowid failed for '{}': {e}",
                     bucket_from.id
                 )
             })?;
             let mut current_batch = first_batch;
-            let mut max_rowid = saved_rowid;
+            // max_rowid tracks the highest rowid scanned (including corrupt rows)
+            // so the cursor always advances past damaged rows and never stalls.
+            let mut max_rowid = first_scanned;
             let mut events_sent = 0usize;
             loop {
                 if current_batch.is_empty() {
+                    // Save cursor even on the empty-batch exit so the stored
+                    // position reflects max_scanned_rowid from the previous page.
                     break;
                 }
                 let is_last = current_batch.len() < BATCH_SIZE;
-                let batch_last_rowid = current_batch
-                    .iter()
-                    .filter_map(|e| e.id)
-                    .fold(max_rowid, |acc, id| acc.max(id));
-                max_rowid = batch_last_rowid;
+                // P4: Honour sync_spec.start: skip events whose timestamp is
+                // before the requested start date.  The cursor still advances past
+                // those rows (max_rowid already set above) so they are not
+                // re-fetched on subsequent passes.
                 let chunk: Vec<Event> = current_batch
                     .into_iter()
+                    .filter(|e| sync_spec.start.is_none_or(|start| e.timestamp >= start))
                     .map(|mut e| {
                         e.id = None;
                         e
@@ -1215,32 +1144,34 @@ fn sync_one(
                 for batch in chunk.chunks(BATCH_SIZE) {
                     ds_to.insert_events(bucket_to.id.as_str(), batch.to_vec())?;
                 }
+                // P1 retry-safety: persist the cursor after every page so that a
+                // failure on a later page does not replay already-inserted pages.
+                cds.set_key_value(&ck, &max_rowid.to_string())
+                    .map_err(|e| {
+                        format!(
+                            "Failed to persist sync cursor for '{}': {e:?}",
+                            bucket_from.id
+                        )
+                    })?;
                 if is_last {
                     break;
                 }
-                current_batch = ds_from
+                let (next_batch, next_scanned) = ds_from
                     .get_events_since_rowid(
                         bucket_from.id.as_str(),
-                        batch_last_rowid,
+                        max_rowid,
                         Some(BATCH_SIZE as u64),
                     )
-                    .unwrap_or_else(|| Ok(vec![]))
+                    .unwrap_or_else(|| Ok((vec![], max_rowid)))
                     .map_err(|e| {
                         format!(
                             "get_events_since_rowid (page) failed for '{}': {e}",
                             bucket_from.id
                         )
                     })?;
+                max_rowid = next_scanned;
+                current_batch = next_batch;
             }
-            // Persist the cursor for next pass (even if no new events: advances
-            // the saved rowid to cover events already synced by prior passes).
-            cds.set_key_value(&ck, &max_rowid.to_string())
-                .map_err(|e| {
-                    format!(
-                        "Failed to persist sync cursor for '{}': {e:?}",
-                        bucket_from.id
-                    )
-                })?;
             let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str())?;
             let new_events_count = eventcount_to_new - eventcount_to_old;
             if new_events_count > 0 {

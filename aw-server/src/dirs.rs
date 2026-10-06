@@ -65,7 +65,138 @@ pub fn appname_for_in(profile: &str, data: &Path, config: &Path, cache: &Path) -
 }
 
 fn platform_roots() -> Option<(PathBuf, PathBuf, PathBuf)> {
-    Some((dirs::data_dir()?, dirs::config_dir()?, dirs::cache_dir()?))
+    Some((user_data_root()?, user_config_root()?, dirs::cache_dir()?))
+}
+
+/// Parent dir for per-user data (`<root>/<appname>/<module>`).
+///
+/// On Windows this is `%LOCALAPPDATA%`, not the Roaming `%APPDATA%` that
+/// `dirs::data_dir()` returns. That matches the `appdirs` crate used before
+/// #562 (`roaming = false`) and the python modules (platformdirs), so
+/// existing installs keep finding their data.
+#[cfg(not(target_os = "android"))]
+pub fn user_data_root() -> Option<PathBuf> {
+    if cfg!(windows) {
+        dirs::data_local_dir()
+    } else {
+        dirs::data_dir()
+    }
+}
+
+/// Parent dir for per-user config. `%LOCALAPPDATA%` on Windows, see
+/// [`user_data_root`].
+#[cfg(not(target_os = "android"))]
+pub fn user_config_root() -> Option<PathBuf> {
+    if cfg!(windows) {
+        dirs::data_local_dir()
+    } else {
+        dirs::config_dir()
+    }
+}
+
+/// `<root>/<appname>/<module>` for data/config, creating it.
+///
+/// On Windows, first moves over anything v0.14.0 wrote to the Roaming
+/// `%APPDATA%` equivalent (see [`migrate_misplaced_dir`]).
+#[cfg(not(target_os = "android"))]
+pub fn module_dir(root: PathBuf, appname: &str, module: &str) -> PathBuf {
+    let dir = root.join(appname).join(module);
+    #[cfg(target_os = "windows")]
+    if let Some(roaming) = dirs::data_dir() {
+        migrate_misplaced_dir(&dir, &roaming.join(appname).join(module));
+    }
+    fs::create_dir_all(&dir).expect("Unable to create dir");
+    dir
+}
+
+/// Group key for files that must move together: a SQLite database and its
+/// `-wal`/`-shm`/`-journal` siblings share the name up to `.db`.
+fn migration_group(name: &str) -> &str {
+    match name.find(".db") {
+        Some(i) => &name[..i + 3],
+        None => name,
+    }
+}
+
+/// Move entries from `misplaced` into `target`, never overwriting.
+///
+/// Entries are moved per group (see [`migration_group`]): if `target`
+/// already has any member of a group, the whole group stays put and a
+/// warning is logged, so a database is never mixed with another one's WAL.
+/// A group that fails to move part-way is rolled back. `misplaced` is
+/// removed if it ends up empty.
+///
+/// Used on Windows to recover data that v0.14.0 put under Roaming
+/// `%APPDATA%` instead of `%LOCALAPPDATA%` (ActivityWatch/aw-server-rust#562).
+pub fn migrate_misplaced_dir(target: &Path, misplaced: &Path) {
+    let Ok(entries) = fs::read_dir(misplaced) else {
+        return;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    if names.is_empty() {
+        let _ = fs::remove_dir(misplaced);
+        return;
+    }
+    names.sort();
+    if let Err(e) = fs::create_dir_all(target) {
+        warn!("Could not create {target:?}, leaving {misplaced:?} in place: {e}");
+        return;
+    }
+    let existing: Vec<String> = fs::read_dir(target)
+        .map(|it| {
+            it.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut groups: Vec<(&str, Vec<&String>)> = Vec::new();
+    for name in &names {
+        let key = migration_group(name);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push(name),
+            None => groups.push((key, vec![name])),
+        }
+    }
+
+    for (key, members) in groups {
+        if existing.iter().any(|e| migration_group(e) == key) {
+            warn!(
+                "Not migrating {:?}: {target:?} already has {key}. \
+                 Both copies are kept; merge them manually if needed.",
+                misplaced.join(key)
+            );
+            continue;
+        }
+        let mut moved: Vec<&String> = Vec::new();
+        let mut failed = None;
+        for name in &members {
+            match fs::rename(misplaced.join(name), target.join(name)) {
+                Ok(()) => moved.push(name),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        match failed {
+            None => info!("Migrated {:?} to {target:?}", misplaced.join(key)),
+            Some(e) => {
+                for name in moved {
+                    let _ = fs::rename(target.join(name), misplaced.join(name));
+                }
+                warn!(
+                    "Could not migrate {:?} to {target:?}: {e}",
+                    misplaced.join(key)
+                );
+            }
+        }
+    }
+    // Only succeeds if everything moved.
+    let _ = fs::remove_dir(misplaced);
 }
 
 fn is_legacy_testing_filename(name: &str) -> bool {
@@ -190,12 +321,11 @@ pub fn config_filename(profile: &str) -> String {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, ()> {
-    let dir = dirs::config_dir()
-        .ok_or(())?
-        .join(appname())
-        .join("aw-server-rust");
-    fs::create_dir_all(&dir).expect("Unable to create config dir");
-    Ok(dir)
+    Ok(module_dir(
+        user_config_root().ok_or(())?,
+        &appname(),
+        "aw-server-rust",
+    ))
 }
 
 #[cfg(target_os = "android")]
@@ -205,12 +335,11 @@ pub fn get_config_dir() -> Result<PathBuf, ()> {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_data_dir() -> Result<PathBuf, ()> {
-    let dir = dirs::data_dir()
-        .ok_or(())?
-        .join(appname())
-        .join("aw-server-rust");
-    fs::create_dir_all(&dir).expect("Unable to create data dir");
-    Ok(dir)
+    Ok(module_dir(
+        user_data_root().ok_or(())?,
+        &appname(),
+        "aw-server-rust",
+    ))
 }
 
 #[cfg(target_os = "android")]
@@ -220,10 +349,17 @@ pub fn get_data_dir() -> Result<PathBuf, ()> {
 
 #[cfg(not(target_os = "android"))]
 pub fn get_cache_dir() -> Result<PathBuf, ()> {
-    let dir = dirs::cache_dir()
+    // Windows: %LOCALAPPDATA%\<appname>\Cache\<module>, as with `appdirs`
+    // before #562 (`dirs::cache_dir()` is the bare %LOCALAPPDATA%, which would
+    // put the cache in the data dir).
+    #[cfg(windows)]
+    let root = dirs::data_local_dir()
         .ok_or(())?
         .join(appname())
-        .join("aw-server-rust");
+        .join("Cache");
+    #[cfg(not(windows))]
+    let root = dirs::cache_dir().ok_or(())?.join(appname());
+    let dir = root.join("aw-server-rust");
     fs::create_dir_all(&dir).expect("Unable to create cache dir");
     Ok(dir)
 }
@@ -308,12 +444,11 @@ pub fn validate_profile(name: &str) -> Result<(), String> {
 /// has not run yet.
 #[cfg(not(target_os = "android"))]
 fn get_data_dir_for(profile: &str) -> Result<PathBuf, ()> {
-    let dir = dirs::data_dir()
-        .ok_or(())?
-        .join(appname_for(profile))
-        .join("aw-server-rust");
-    fs::create_dir_all(&dir).expect("Unable to create data dir");
-    Ok(dir)
+    Ok(module_dir(
+        user_data_root().ok_or(())?,
+        &appname_for(profile),
+        "aw-server-rust",
+    ))
 }
 
 #[cfg(target_os = "android")]
@@ -579,5 +714,153 @@ fn test_log_dir_has_log_component() {
         path_str.contains("activitywatch\\Logs\\") || path_str.contains("activitywatch/Logs/"),
         "Windows log path should contain activitywatch/Logs, got: {}",
         path_str
+    );
+}
+
+#[cfg(test)]
+fn migration_dirs() -> (PathBuf, PathBuf, PathBuf) {
+    let root = std::env::temp_dir()
+        .join("aw-windows-dir-migration")
+        .join(uuid::Uuid::new_v4().to_string());
+    let target = root
+        .join("local")
+        .join("activitywatch")
+        .join("aw-server-rust");
+    let misplaced = root
+        .join("roaming")
+        .join("activitywatch")
+        .join("aw-server-rust");
+    fs::create_dir_all(&misplaced).unwrap();
+    (root, target, misplaced)
+}
+
+#[test]
+fn test_migration_group_keeps_sqlite_siblings_together() {
+    assert_eq!(migration_group("sqlite.db"), "sqlite.db");
+    assert_eq!(migration_group("sqlite.db-wal"), "sqlite.db");
+    assert_eq!(migration_group("sqlite.db-shm"), "sqlite.db");
+    assert_eq!(
+        migration_group("sqlite-testing.db-wal"),
+        "sqlite-testing.db"
+    );
+    assert_eq!(migration_group("config.toml"), "config.toml");
+}
+
+#[test]
+fn test_migrate_moves_everything_into_missing_target() {
+    let (root, target, misplaced) = migration_dirs();
+    fs::write(misplaced.join("sqlite.db"), b"db").unwrap();
+    fs::write(misplaced.join("sqlite.db-wal"), b"wal").unwrap();
+    fs::write(misplaced.join("config.toml"), b"cfg").unwrap();
+    migrate_misplaced_dir(&target, &misplaced);
+    assert_eq!(fs::read(target.join("sqlite.db")).unwrap(), b"db");
+    assert_eq!(fs::read(target.join("sqlite.db-wal")).unwrap(), b"wal");
+    assert_eq!(fs::read(target.join("config.toml")).unwrap(), b"cfg");
+    assert!(!misplaced.exists(), "emptied source dir should be removed");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_migrate_never_overwrites_or_mixes_databases() {
+    let (root, target, misplaced) = migration_dirs();
+    fs::create_dir_all(&target).unwrap();
+    // Target has an older database (no WAL); misplaced has a newer one + WAL.
+    fs::write(target.join("sqlite.db"), b"old").unwrap();
+    fs::write(misplaced.join("sqlite.db"), b"new").unwrap();
+    fs::write(misplaced.join("sqlite.db-wal"), b"new-wal").unwrap();
+    fs::write(misplaced.join("device_id"), b"id").unwrap();
+    migrate_misplaced_dir(&target, &misplaced);
+    assert_eq!(fs::read(target.join("sqlite.db")).unwrap(), b"old");
+    assert!(
+        !target.join("sqlite.db-wal").exists(),
+        "a WAL must never be moved next to another database"
+    );
+    assert_eq!(fs::read(misplaced.join("sqlite.db")).unwrap(), b"new");
+    assert_eq!(
+        fs::read(misplaced.join("sqlite.db-wal")).unwrap(),
+        b"new-wal"
+    );
+    // Non-conflicting entries still move.
+    assert_eq!(fs::read(target.join("device_id")).unwrap(), b"id");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_migrate_noop_without_misplaced_dir() {
+    let (root, target, misplaced) = migration_dirs();
+    fs::remove_dir_all(&misplaced).unwrap();
+    migrate_misplaced_dir(&target, &misplaced);
+    assert!(!target.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Expected per-user roots, derived from the environment rather than the
+/// `dirs` crate, so the pins below fail if a dependency swap or bump moves
+/// them (as happened in #562: `appdirs` → `dirs` silently moved Windows from
+/// `%LOCALAPPDATA%` to Roaming `%APPDATA%`).
+///
+/// Returns (data, config, log, cache) parents for the default profile.
+/// These are the paths documented at
+/// <https://docs.activitywatch.net/en/latest/directories.html>; keep both in sync.
+#[cfg(all(test, not(target_os = "android")))]
+fn expected_default_dirs() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    #[cfg(target_os = "windows")]
+    {
+        let local = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap());
+        let app = local.join("activitywatch");
+        (
+            app.clone(),
+            app.clone(),
+            app.join("Logs"),
+            app.join("Cache"),
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let support = home.join("Library/Application Support/activitywatch");
+        (
+            support.clone(),
+            support,
+            home.join("Library/Logs/activitywatch"),
+            home.join("Library/Caches/activitywatch"),
+        )
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let xdg = |var: &str, fallback: &str| {
+            std::env::var(var)
+                .ok()
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| home.join(fallback))
+        };
+        (
+            xdg("XDG_DATA_HOME", ".local/share").join("activitywatch"),
+            xdg("XDG_CONFIG_HOME", ".config").join("activitywatch"),
+            xdg("XDG_CACHE_HOME", ".cache").join("activitywatch/log"),
+            xdg("XDG_CACHE_HOME", ".cache").join("activitywatch"),
+        )
+    }
+}
+
+/// Pins the on-disk locations of existing installs. If this fails, users'
+/// data is about to be orphaned: do not update the expectations without a
+/// migration (see [`migrate_misplaced_dir`]).
+#[cfg(not(target_os = "android"))]
+#[test]
+fn test_default_paths_are_pinned() {
+    let (data, config, log, cache) = expected_default_dirs();
+    assert_eq!(get_data_dir().unwrap(), data.join("aw-server-rust"));
+    assert_eq!(get_config_dir().unwrap(), config.join("aw-server-rust"));
+    assert_eq!(
+        get_log_dir("aw-server-rust").unwrap(),
+        log.join("aw-server-rust")
+    );
+    assert_eq!(get_cache_dir().unwrap(), cache.join("aw-server-rust"));
+    assert_eq!(
+        db_path("default").unwrap(),
+        data.join("aw-server-rust").join("sqlite.db")
     );
 }

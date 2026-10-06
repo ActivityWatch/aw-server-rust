@@ -48,12 +48,25 @@ mod import {
     fn dbfile_path(override_path: Option<&str>) -> PathBuf {
         match override_path {
             Some(p) => PathBuf::from(p),
-            None => dirs::data_dir()
-                .expect("Unable to read user data dir")
-                .join("activitywatch")
-                .join("aw-server")
-                .join("peewee-sqlite.v2.db"),
+            None => default_dbfile_path(),
         }
+    }
+
+    /// Where python aw-server keeps its database: platformdirs
+    /// `user_data_dir("activitywatch")`. On Windows that is
+    /// `%LOCALAPPDATA%\\activitywatch\\activitywatch` (appauthor defaults to
+    /// appname), not Roaming `%APPDATA%` (what `dirs::data_dir()` returns).
+    fn default_dbfile_path() -> PathBuf {
+        #[cfg(windows)]
+        let root = dirs::data_local_dir()
+            .expect("Unable to read user data dir")
+            .join("activitywatch")
+            .join("activitywatch");
+        #[cfg(not(windows))]
+        let root = dirs::data_dir()
+            .expect("Unable to read user data dir")
+            .join("activitywatch");
+        root.join("aw-server").join("peewee-sqlite.v2.db")
     }
 
     /// Dedup identity tuple for an event: (timestamp, duration_ns, canonical
@@ -288,6 +301,32 @@ mod import {
             };
         }
         Ok(true)
+    }
+
+    /// Pins where python aw-server's database is looked for. Derived from the
+    /// environment, not the `dirs` crate, so a dependency change that moves
+    /// it (as #562 did on Windows) fails here instead of silently skipping
+    /// the import for every migrating user.
+    #[test]
+    fn test_legacy_dbfile_path_is_pinned() {
+        #[cfg(windows)]
+        let expected = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap())
+            .join("activitywatch")
+            .join("activitywatch");
+        #[cfg(target_os = "macos")]
+        let expected = PathBuf::from(std::env::var("HOME").unwrap())
+            .join("Library/Application Support/activitywatch");
+        #[cfg(target_os = "linux")]
+        let expected = std::env::var("XDG_DATA_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share"))
+            .join("activitywatch");
+        assert_eq!(
+            dbfile_path(None),
+            expected.join("aw-server").join("peewee-sqlite.v2.db")
+        );
     }
 
     /* This test is disabled because it requires manual set-up of a old aw-server database

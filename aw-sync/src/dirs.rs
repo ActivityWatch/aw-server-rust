@@ -39,6 +39,14 @@ pub fn resolve_profile(
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, Box<dyn Error>> {
     let dir = config_dir_path()?;
+    // Windows: recover config v0.14.0 wrote under Roaming %APPDATA%.
+    #[cfg(windows)]
+    if let Some(roaming) = dirs::config_dir() {
+        aw_server::dirs::migrate_misplaced_dir(
+            &dir,
+            &roaming.join(aw_server::dirs::appname()).join("aw-sync"),
+        );
+    }
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -130,7 +138,7 @@ pub fn effective_daemon_mode(
 /// Path construction only — does not create directories (so tests stay off-disk).
 #[cfg(not(target_os = "android"))]
 fn sync_config_dir(appname: &str) -> Result<PathBuf, Box<dyn Error>> {
-    Ok(dirs::config_dir()
+    Ok(aw_server::dirs::user_config_root()
         .ok_or("Unable to read user config dir")?
         .join(appname)
         .join("aw-sync"))
@@ -154,7 +162,7 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
     // master already reads this path for the embedded server's api_key (#666).
     #[cfg(not(target_os = "android"))]
     {
-        let dir = dirs::config_dir()
+        let dir = aw_server::dirs::user_config_root()
             .ok_or(())?
             .join(aw_server::dirs::appname_for(effective))
             .join("aw-server-rust");
@@ -243,6 +251,22 @@ mod tests {
         assert_ne!(testing_app, default_app);
         assert_ne!(research_app, default_app);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// aw-sync's config sits next to aw-server's, whose location is pinned
+    /// per platform in aw-server's `test_default_paths_are_pinned`.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn sync_config_dir_is_sibling_of_pinned_server_config_dir() {
+        let server = aw_server::dirs::get_config_dir().unwrap();
+        assert_eq!(
+            config_dir_path().unwrap(),
+            server.parent().unwrap().join("aw-sync")
+        );
+        assert_eq!(
+            get_server_config_path(false).unwrap(),
+            server.join("config.toml")
+        );
     }
 
     #[test]

@@ -45,9 +45,14 @@ mod test {
 
     fn get_server_config_dir() -> Option<PathBuf> {
         Some(
-            dirs::config_dir()?
-                .join("activitywatch")
-                .join("aw-server-rust"),
+            // %LOCALAPPDATA% on Windows, like aw_server::dirs::user_config_root.
+            (if cfg!(windows) {
+                dirs::data_local_dir()
+            } else {
+                dirs::config_dir()
+            })?
+            .join("activitywatch")
+            .join("aw-server-rust"),
         )
     }
 

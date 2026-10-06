@@ -18,6 +18,7 @@ use rusqlite::TransactionBehavior;
 
 use aw_models::Bucket;
 use aw_models::Event;
+use aw_models::TryVec;
 
 use crate::privacy_filter::PrivacyFilterEngine;
 use crate::DatastoreError;
@@ -442,13 +443,26 @@ impl DatastoreWorker {
                 drop(writer);
                 Ok(Response::ExportCsv(file))
             }
-            Command::CreateBucket(bucket) => match ds.create_bucket(tx, bucket) {
-                Ok(_) => {
-                    self.commit = true;
-                    Ok(Response::Empty())
+            Command::CreateBucket(mut bucket) => {
+                // Attached events (import) must use the same privacy gate as
+                // InsertEvents, or a new-bucket import stores data the rules
+                // would drop or redact.
+                if let Some(events) = bucket.events.take() {
+                    let filtered = self
+                        .privacy_engine
+                        .filter_events(&bucket.id, events.take_inner());
+                    if !filtered.is_empty() {
+                        bucket.events = Some(TryVec::new(filtered));
+                    }
                 }
-                Err(e) => Err(e),
-            },
+                match ds.create_bucket(tx, bucket) {
+                    Ok(_) => {
+                        self.commit = true;
+                        Ok(Response::Empty())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             Command::DeleteBucket(bucketname) => match ds.delete_bucket(tx, &bucketname) {
                 Ok(_) => {
                     self.commit = true;

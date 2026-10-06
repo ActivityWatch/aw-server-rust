@@ -1138,7 +1138,7 @@ fn sync_one(
                     .filter(|e| {
                         sync_spec
                             .start
-                            .is_none_or(|start| e.timestamp + e.duration > start)
+                            .is_none_or(|start| e.timestamp + e.duration >= start)
                     })
                     .map(|mut e| {
                         e.id = None;

@@ -596,6 +596,43 @@ mod tests {
     }
 
     #[test]
+    fn streamed_csv_prefixed_columns_carry_original_key_values() {
+        let (conn, mut ds) = setup();
+        let event = Event::new(
+            DateTime::from_timestamp(0, 0).unwrap(),
+            Duration::seconds(1),
+            serde_json::from_value(serde_json::json!({
+                "id": "data-id",
+                "timestamp": "data-timestamp",
+                "duration": "data-duration",
+                "data.id": "data-dot-id",
+            }))
+            .unwrap(),
+        );
+        ds.insert_events(&conn, "empty", vec![event]).unwrap();
+
+        let mut output = Vec::new();
+        ds.write_events_csv(&conn, "empty", None, None, None, &mut output)
+            .unwrap();
+        let csv = String::from_utf8(output).unwrap();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let row: Vec<&str> = lines.next().unwrap().split(',').collect();
+        assert_eq!(header.len(), row.len(), "{csv}");
+        let column: HashMap<&str, &str> = header.into_iter().zip(row).collect();
+
+        assert_eq!(column["timestamp"], "1970-01-01T00:00:00+00:00", "{csv}");
+        assert_eq!(column["duration"], "1.000000000", "{csv}");
+        assert!(column["id"].parse::<i64>().is_ok(), "{csv}");
+        // Keys arrive sorted, so the literal `data.id` key claims `data.id`
+        // first and the `id` key is pushed on to `data.data.id`.
+        assert_eq!(column["data.id"], "data-dot-id", "{csv}");
+        assert_eq!(column["data.data.id"], "data-id", "{csv}");
+        assert_eq!(column["data.timestamp"], "data-timestamp", "{csv}");
+        assert_eq!(column["data.duration"], "data-duration", "{csv}");
+    }
+
+    #[test]
     fn streamed_csv_columns_use_union_of_keys_across_events() {
         let (conn, mut ds) = setup();
         let events = [

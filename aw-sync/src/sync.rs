@@ -1091,13 +1091,34 @@ fn sync_one(
         // and recreated.  Always reset the cursor to 0 so the full history is
         // pulled instead of starting from a stale position left over from the
         // previous incarnation of the bucket.
+        // A source bucket that was deleted and recreated restarts its rowid
+        // sequence at 1. A stored cursor above the current source max rowid
+        // therefore means the cursor refers to a previous incarnation of the
+        // bucket: keep it and every new row below it would be skipped forever.
+        // Reset to 0; the empty-destination and bootstrap logic below then
+        // re-establishes a sane position.
+        let source_max_rowid = ds_from
+            .get_max_event_rowid(bucket_from.id.as_str())
+            .and_then(|r| r.ok())
+            .unwrap_or(i64::MAX);
         let stored_rowid: i64 = if eventcount_to_old == 0 {
             0
         } else {
-            cds.get_key_value(&ck)
+            let stored: i64 = cds
+                .get_key_value(&ck)
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(0)
+                .unwrap_or(0);
+            if stored > source_max_rowid {
+                warn!(
+                    "Stored cursor {} for '{}' is above source max rowid {}; \
+                     source bucket was likely recreated — resetting cursor",
+                    stored, bucket_from.id, source_max_rowid
+                );
+                0
+            } else {
+                stored
+            }
         };
 
         // P1 (upgrade bootstrap): saved_rowid == 0 but the destination already
@@ -2546,6 +2567,9 @@ mod rowid_cursor_tests {
         // so the next pull re-fetches row 3, which already exists at dest.
         let ck = cursor_key(src_hostname, bucket_id);
         cursor_ds.set_key_value(&ck, "2").unwrap();
+        // The cursor datastore commits asynchronously via its worker thread;
+        // force the rollback durable so the replay actually happens.
+        cursor_ds.force_commit().unwrap();
 
         sync_datastores_with_cursor(
             &ds_src,

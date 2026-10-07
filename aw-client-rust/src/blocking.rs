@@ -89,6 +89,14 @@ impl AwClient {
         stop: Option<DateTime<Utc>>,
         limit: Option<u64>
     );
+    proxy_method!(
+        get_events_unclipped,
+        Vec<Event>,
+        bucketname: &str,
+        start: Option<DateTime<Utc>>,
+        stop: Option<DateTime<Utc>>,
+        limit: Option<u64>
+    );
     proxy_method!(export_all, BucketsExport,);
     proxy_method!(export_bucket, BucketsExport, bucketname: &str);
     proxy_method!(import_bucket, (), bucket: &Bucket);

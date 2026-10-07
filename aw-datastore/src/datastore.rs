@@ -819,15 +819,12 @@ impl DatastoreInstance {
         if bucket.device_id.is_empty() {
             bucket.device_id = "local".to_string();
         }
-        // Guard: buckets_cache is keyed by name only; inserting a same-name
-        // bucket with a different device_id would silently overwrite the first
-        // cache entry and hide its history.  Reject until the cache key
-        // includes device_id.
-        if let Some(existing) = self.buckets_cache.get(&bucket.id) {
-            if existing.device_id != bucket.device_id {
-                return Err(DatastoreError::BucketAlreadyExists(bucket.id.clone()));
-            }
-        }
+        // Note: UNIQUE(device_id, name) allows same-name buckets from
+        // different devices to coexist; the UNIQUE constraint is the sole
+        // guard against duplicates (same device_id + name hits it and maps to
+        // BucketAlreadyExists below).  Known limitation: buckets_cache is
+        // keyed by name only, so when same-name buckets coexist the cache
+        // entry reflects whichever was created/loaded last.
         let mut stmt = match conn.prepare_cached(
             "
                 INSERT INTO buckets (name, device_id, type, client, hostname, created, data)

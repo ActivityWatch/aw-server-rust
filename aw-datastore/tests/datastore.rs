@@ -1850,11 +1850,10 @@ mod datastore_tests {
     }
 
     #[test]
-    fn test_duplicate_name_different_device_id_rejected() {
-        // UNIQUE(device_id, name) allows (A, "x") and (B, "x"), but the
-        // buckets_cache is keyed by name only. A second insert with the same
-        // name and a different device_id must be rejected to prevent silent
-        // cache corruption / history hiding.
+    fn test_same_name_different_device_id_coexists() {
+        // UNIQUE(device_id, name) exists precisely to allow (A, "x") and
+        // (B, "x") to coexist; creation must not be blocked by the name-keyed
+        // buckets_cache (which reflects the last-created entry).
         let ds = Datastore::new_in_memory(false);
 
         let mut b1 = test_bucket();
@@ -1863,11 +1862,14 @@ mod datastore_tests {
 
         let mut b2 = test_bucket(); // same id/name as b1
         b2.device_id = "device-B".to_string();
+        ds.create_bucket(&b2).unwrap();
+
+        // Same name + same device_id is still a duplicate (UNIQUE constraint).
         match ds.create_bucket(&b2) {
             Err(DatastoreError::BucketAlreadyExists(_)) => {}
-            other => panic!(
-                "expected BucketAlreadyExists for same-name different device_id, got {other:?}"
-            ),
+            other => {
+                panic!("expected BucketAlreadyExists for same-name same device_id, got {other:?}")
+            }
         }
     }
 

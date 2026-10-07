@@ -954,16 +954,25 @@ fn reconcile_updated_events(
     // Bound both fetches to the lookback window ending at `resume`.
     // end=None would load every newer source event when dest is far behind,
     // exhausting Android RAM and bypassing the paginated incremental copy.
-    // get_events clips to the query range; dest-latest ends at `resume`, so
-    // that clip is a no-op on its (timestamp, duration) identity. Title edits
-    // keep duration; duration-only updates stay on the heartbeat path. Do not
-    // also cap by count — a newest-first cap silently skips older in-window
-    // edits.
+    //
+    // Source is fetched UNCLIPPED so a duration-only edit (same timestamp and
+    // data, longer duration) retains its true end_time. If clipped, the
+    // replacement would be truncated to end at `resume`, making its identity
+    // (timestamp, duration) indistinguishable from the old destination copy —
+    // reconcile would mark the source rowid as "on_dest" and the rowid path
+    // would skip it, leaving the stale copy in place. With unclipped source,
+    // the identity mismatch lets the rowid path handle the replacement.
+    //
+    // Dest is fetched with clipping (get_events): dest-latest ends exactly at
+    // `resume`, so that clip is a no-op on its identity.
+    //
+    // Do not also cap by count — a newest-first cap silently skips older
+    // in-window edits.
     //
     // Datastore errors return rather than unwrap: a panic here aborts the
     // whole pass (and on Android, the JNI frame). The per-bucket skip in
     // ActivityWatch/aw-server-rust#697 then drops this bucket, not the daemon.
-    let source_events = ds_from.get_events(
+    let source_events = ds_from.get_events_unclipped(
         bucket_from.id.as_str(),
         Some(lookback_start),
         Some(resume),
@@ -987,6 +996,12 @@ fn reconcile_updated_events(
     }
 
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
+    // (timestamp, data) set across ALL source events in the window.  Used below
+    // to protect dest events that are clipped copies of a longer source event:
+    // if the source still has an event with the same (timestamp, data) (any
+    // duration), the dest copy is not stale — only its end_time differs.
+    let mut source_ts_data: HashSet<(DateTime<Utc>, serde_json::Map<String, serde_json::Value>)> =
+        HashSet::new();
     for src in source_events {
         // Skip events that start at/after the dest cursor; the incremental
         // copy owns those. Do not use end>resume: the dest-latest event starts
@@ -994,6 +1009,7 @@ fn reconcile_updated_events(
         if src.timestamp < lookback_start || src.timestamp >= resume {
             continue;
         }
+        source_ts_data.insert((src.timestamp, src.data.clone()));
         src_by_identity
             .entry(event_identity(&src))
             .or_default()
@@ -1034,7 +1050,15 @@ fn reconcile_updated_events(
                 .collect();
             ds_to.insert_events(bucket_to.id.as_str(), replacements)?;
         }
-        let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
+        // Protect clipped dest copies: if the source still has an event with
+        // the same (timestamp, data) — even with a different (longer) end_time —
+        // the dest copy is valid and must not be deleted.  Only delete dest events
+        // whose (timestamp, data) has no counterpart in source at all.
+        let stale: Vec<i64> = dsts
+            .into_iter()
+            .filter(|dst| !source_ts_data.contains(&(dst.timestamp, dst.data.clone())))
+            .filter_map(|dst| dst.id)
+            .collect();
         if !stale.is_empty() {
             ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
         }
@@ -1050,8 +1074,12 @@ fn reconcile_updated_events(
 /// that was clipped by a previous timestamp-path sync, while the source still
 /// holds the same event with its true (longer) end_time.  Comparing on end_time
 /// would falsely mark the dest row as stale and delete it even though the source
-/// still has an event with the same start and data.  True edits always change
-/// the event data, so (start, data) is sufficient to distinguish stale rows.
+/// still has an event with the same start and data.
+///
+/// Duration-only edits (same timestamp+data, new duration) are detected separately
+/// via the chunk: if the chunk contains an event with the same (timestamp, data) as
+/// a dest row but a different end_time, the dest copy is a replacement target.
+/// See the stale-row loop below.
 type SourceFingerprint = (
     chrono::DateTime<chrono::Utc>,
     serde_json::Map<String, serde_json::Value>,
@@ -1280,9 +1308,25 @@ fn sync_one(
                             Some(max + Duration::seconds(1)),
                             None,
                         )?;
+                        // (timestamp, data) — protects clipped dest copies; see
+                        // SourceFingerprint comment.
                         let source_fps: HashSet<SourceFingerprint> = source_near
                             .into_iter()
                             .map(|e| (e.timestamp, e.data))
+                            .collect();
+                        // Duration-only replacement detection: if the chunk has an
+                        // event at (timestamp, data) but a different end_time than a
+                        // dest row, that dest row is a stale copy of the old duration.
+                        // The original source row was deleted and re-inserted with the
+                        // new duration (new rowid in the chunk), so source_fps still
+                        // contains the (timestamp, data) key and cannot detect this.
+                        let chunk_ts_data: HashSet<(DateTime<Utc>, _)> = chunk
+                            .iter()
+                            .map(|e| (e.timestamp, e.data.clone()))
+                            .collect();
+                        let chunk_fps: HashSet<(DateTime<Utc>, DateTime<Utc>, _)> = chunk
+                            .iter()
+                            .map(|e| (e.timestamp, e.timestamp + e.duration, e.data.clone()))
                             .collect();
                         for d in near {
                             existing.insert((
@@ -1294,7 +1338,18 @@ fn sync_one(
                             if !ts_set.contains(&d.timestamp) {
                                 continue;
                             }
-                            if !source_fps.contains(&(d.timestamp, d.data)) {
+                            let in_source = source_fps.contains(&(d.timestamp, d.data.clone()));
+                            // Chunk has same (timestamp, data) but different end_time →
+                            // this is a duration-only replacement, not just a coexisting
+                            // event.
+                            let chunk_replaces = chunk_ts_data
+                                .contains(&(d.timestamp, d.data.clone()))
+                                && !chunk_fps.contains(&(
+                                    d.timestamp,
+                                    d.timestamp + d.duration,
+                                    d.data.clone(),
+                                ));
+                            if !in_source || chunk_replaces {
                                 stale.push(id);
                             }
                         }
@@ -3018,6 +3073,96 @@ mod rowid_cursor_tests {
             Some(&serde_json::json!(true))
         );
         assert_eq!(seq20[0].duration, Duration::seconds(60));
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// An edit that changes only duration (same timestamp, same data) must
+    /// replace the old destination row rather than accumulating a duplicate.
+    /// Regression for the SourceFingerprint omitting end_time: the old
+    /// (timestamp, data) key matched the source's updated row, so the stale
+    /// check did not mark the old destination copy for deletion, and the rowid
+    /// path then inserted the new row alongside the old one.
+    #[test]
+    fn duration_only_edit_is_not_duplicated() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-duronly-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        // Insert an initial event and sync it.
+        let data = serde_json::json!({"app": "firefox"});
+        let initial = vec![make_event_full(
+            Utc::now() - Duration::seconds(3600),
+            0,
+            5,
+            data.clone(),
+        )];
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Replace the event with a longer one at the same timestamp, same data.
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let ts = original.timestamp;
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src
+            .insert_events(bucket_id, &[make_event_full(ts, 0, 60, data.clone())])
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        assert_eq!(
+            dest.len(),
+            1,
+            "duration-only edit must not duplicate: {dest:?}"
+        );
+        assert_eq!(
+            dest[0].duration,
+            Duration::seconds(60),
+            "destination must hold the updated duration: {dest:?}"
+        );
 
         cursor_ds.close();
         ds_src.close();

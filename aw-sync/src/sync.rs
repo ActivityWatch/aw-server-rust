@@ -1164,6 +1164,50 @@ fn sync_one(
                         e
                     })
                     .collect();
+                // Edits are delete+insert in the source: the replacement row
+                // usually keeps the original timestamp. reconcile_updated_events
+                // only sees the EDIT_RECONCILE_LOOKBACK window and matches on
+                // (timestamp, duration) identity, so a stale dest row survives
+                // its replacement when the edited event is older than the
+                // lookback window, or when the edit changed the duration (the
+                // new row's identity no longer matches the dest row). Probe dest
+                // for rows starting at a chunk timestamp holding different data
+                // and delete them before inserting the replacement. Rows with
+                // equal data are left alone (boundary duplicates are tolerated
+                // elsewhere), and heartbeat fragments never share a timestamp,
+                // so distinct same-timestamp events are not affected in practice.
+                if !chunk.is_empty() {
+                    let ts_set: HashSet<DateTime<Utc>> =
+                        chunk.iter().map(|e| e.timestamp).collect();
+                    let min_ts = ts_set.iter().min().copied();
+                    let max_ts = ts_set.iter().max().copied();
+                    let mut stale: Vec<i64> = Vec::new();
+                    if let (Some(min), Some(max)) = (min_ts, max_ts) {
+                        // get_events end bound is exclusive; one second past
+                        // the newest chunk timestamp covers ns precision.
+                        let near = ds_to.get_events(
+                            bucket_to.id.as_str(),
+                            Some(min),
+                            Some(max + Duration::seconds(1)),
+                            None,
+                        )?;
+                        for d in near {
+                            let Some(id) = d.id else { continue };
+                            if !ts_set.contains(&d.timestamp) {
+                                continue;
+                            }
+                            if chunk
+                                .iter()
+                                .any(|e| e.timestamp == d.timestamp && e.data != d.data)
+                            {
+                                stale.push(id);
+                            }
+                        }
+                    }
+                    if !stale.is_empty() {
+                        ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
+                    }
+                }
                 events_sent += chunk.len();
                 for batch in chunk.chunks(BATCH_SIZE) {
                     ds_to.insert_events(bucket_to.id.as_str(), batch.to_vec())?;
@@ -2548,6 +2592,212 @@ mod rowid_cursor_tests {
         cursor_ds.close();
         ds_a.close();
         ds_b.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// Flexible event builder: explicit base time, duration, and data, for
+    /// tests that need events outside the reconcile lookback window or with
+    /// a changed duration.
+    fn make_event_full(
+        base: DateTime<Utc>,
+        offset_secs: i64,
+        duration_secs: i64,
+        data: serde_json::Value,
+    ) -> Event {
+        serde_json::from_value(serde_json::json!({
+            "timestamp": (base + Duration::seconds(offset_secs)).to_rfc3339(),
+            "duration": duration_secs,
+            "data": data,
+        }))
+        .unwrap()
+    }
+
+    /// An edit of an event OLDER than the EDIT_RECONCILE_LOOKBACK window is
+    /// invisible to reconcile_updated_events, so the rowid path must remove
+    /// the stale dest row itself or the replacement is inserted next to it.
+    #[test]
+    fn edit_older_than_lookback_is_not_duplicated() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-oldedit-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        // Two events 20 days old, plus one fresh event. The dest resume marker
+        // ends up at ~now, so the EDIT_RECONCILE_LOOKBACK window covers only
+        // the last 7 days — the old pair is outside it.
+        let old_base = Utc::now() - Duration::days(20);
+        let initial: Vec<Event> = vec![
+            make_event_full(old_base, 10, 1, serde_json::json!({"seq": 10})),
+            make_event_full(old_base, 20, 1, serde_json::json!({"seq": 20})),
+            make_event_full(Utc::now(), 0, 1, serde_json::json!({"seq": 30})),
+        ];
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Edit the middle event (delete + insert, same timestamp, new data).
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.data["seq"] == 20)
+            .unwrap();
+        let mut edited = original.clone();
+        edited.id = None;
+        edited.data =
+            serde_json::from_value(serde_json::json!({"seq": 20, "edited": true})).unwrap();
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src.insert_events(bucket_id, &[edited]).unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let seq20: Vec<&Event> = dest.iter().filter(|e| e.data["seq"] == 20).collect();
+        assert_eq!(
+            dest.len(),
+            3,
+            "out-of-window edit must not duplicate rows: {dest:?}"
+        );
+        assert_eq!(seq20.len(), 1, "exactly one seq-20 row expected: {dest:?}");
+        assert_eq!(seq20[0].data.get("edited"), Some(&serde_json::json!(true)));
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// An in-window edit that CHANGES THE DURATION breaks the (timestamp,
+    /// duration) identity reconcile_updated_events matches on, so reconcile
+    /// never sees the replacement as an edit. The rowid path must still
+    /// remove the stale dest row.
+    #[test]
+    fn longer_replacement_is_not_duplicated() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-longrepl-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let initial: Vec<Event> = [10i64, 20, 30]
+            .iter()
+            .map(|&s| {
+                make_event_full(
+                    Utc::now() - Duration::seconds(3600),
+                    s,
+                    1,
+                    serde_json::json!({"seq": s}),
+                )
+            })
+            .collect();
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Replace the middle event with a LONGER row: same timestamp, longer
+        // duration, different data. Its identity does not match the dest row.
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.data["seq"] == 20)
+            .unwrap();
+        let ts = original.timestamp;
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src
+            .insert_events(
+                bucket_id,
+                &[make_event_full(
+                    ts,
+                    0,
+                    60,
+                    serde_json::json!({"seq": 20, "extended": true}),
+                )],
+            )
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let seq20: Vec<&Event> = dest.iter().filter(|e| e.data["seq"] == 20).collect();
+        assert_eq!(
+            dest.len(),
+            3,
+            "longer replacement must not duplicate rows: {dest:?}"
+        );
+        assert_eq!(seq20.len(), 1, "exactly one seq-20 row expected: {dest:?}");
+        assert_eq!(
+            seq20[0].data.get("extended"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(seq20[0].duration, Duration::seconds(60));
+
+        cursor_ds.close();
+        ds_src.close();
         ds_dest.close();
         let _ = fs::remove_dir_all(&cursor_root);
     }

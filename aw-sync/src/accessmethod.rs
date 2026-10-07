@@ -25,8 +25,9 @@ pub trait AccessMethod: std::fmt::Debug {
     fn delete_events_by_id(&self, bucket_id: &str, event_ids: Vec<i64>) -> Result<(), String>;
 
     /// Like `get_events` but returns events with their original stored timestamps, without
-    /// clipping them to the query window. Backends that do not clip (e.g. AwClient over HTTP)
-    /// may delegate to `get_events`. Local datastores should override this.
+    /// clipping them to the query window. Backends that cannot avoid clipping should
+    /// override this with an explicit unclipped query path (see the AwClient impl);
+    /// delegating to `get_events` is only correct for backends that never clip.
     fn get_events_unclipped(
         &self,
         bucket_id: &str,
@@ -161,6 +162,20 @@ impl AccessMethod for AwClient {
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
         AwClient::get_events(self, bucket_id, start, end, limit).map_err(|e| e.to_string())
+    }
+    /// The HTTP endpoint clips server-side via the datastore's get_events, so
+    /// the trait default (delegate to get_events) is NOT unclipped. Pass the
+    /// explicit `unclipped=true` parameter; servers older than it return
+    /// clipped events, degrading dedup fidelity but never crashing.
+    fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, String> {
+        AwClient::get_events_unclipped(self, bucket_id, start, end, limit)
+            .map_err(|e| e.to_string())
     }
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
         AwClient::insert_events(self, bucket_id, events).map_err(|e| e.to_string())

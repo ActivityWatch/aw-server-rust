@@ -69,13 +69,13 @@ fn open_or_create_cursor_ds(root: &Path, device_id: &str) -> Result<Datastore, S
 
 /// Key identifying the last-synced source rowid for a given (device, bucket) pair.
 ///
-/// Components are joined with U+001F (ASCII unit separator): device IDs and
-/// bucket IDs are user-controlled strings that may contain dots, so a plain
-/// `.` join could collide (device "a" + bucket "b.c" vs device "a.b" +
-/// bucket "c"). Control characters cannot appear in valid bucket IDs or
-/// device IDs, making the join unambiguous.
+/// Components are joined with U+001F (ASCII unit separator). Any U+001F within
+/// a component is percent-encoded as `%1F` so the separator remains unambiguous
+/// even for user-controlled device and bucket IDs that may contain control chars.
+/// For normal watcher-generated IDs the key format is unchanged (replace is no-op).
 fn cursor_key(src_device_id: &str, bucket_id: &str) -> String {
-    format!("sync.cursor.{src_device_id}\u{1f}{bucket_id}")
+    let enc = |s: &str| s.replace('\u{1f}', "%1F");
+    format!("sync.cursor.{}\u{1f}{}", enc(src_device_id), enc(bucket_id))
 }
 
 /// Discover all sync peers reachable from `sync_root`, excluding `own_device_id`.

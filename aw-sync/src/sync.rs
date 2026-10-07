@@ -1043,10 +1043,16 @@ fn reconcile_updated_events(
     Ok(on_dest)
 }
 
-/// (start, end, data) fingerprint of a source event, used to decide whether a
+/// (start, data) fingerprint of a source event, used to decide whether a
 /// destination row is still represented in the source at its timestamp.
-type SourceFingerprint<'a> = (
-    chrono::DateTime<chrono::Utc>,
+///
+/// end_time is deliberately excluded: a destination copy may carry an end_time
+/// that was clipped by a previous timestamp-path sync, while the source still
+/// holds the same event with its true (longer) end_time.  Comparing on end_time
+/// would falsely mark the dest row as stale and delete it even though the source
+/// still has an event with the same start and data.  True edits always change
+/// the event data, so (start, data) is sufficient to distinguish stale rows.
+type SourceFingerprint = (
     chrono::DateTime<chrono::Utc>,
     serde_json::Map<String, serde_json::Value>,
 );
@@ -1268,7 +1274,7 @@ fn sync_one(
                         )?;
                         let source_fps: HashSet<SourceFingerprint> = source_near
                             .into_iter()
-                            .map(|e| (e.timestamp, e.timestamp + e.duration, e.data))
+                            .map(|e| (e.timestamp, e.data))
                             .collect();
                         for d in near {
                             existing.insert((d.timestamp + d.duration, d.data.clone()));
@@ -1276,11 +1282,7 @@ fn sync_one(
                             if !ts_set.contains(&d.timestamp) {
                                 continue;
                             }
-                            if !source_fps.contains(&(
-                                d.timestamp,
-                                d.timestamp + d.duration,
-                                d.data,
-                            )) {
+                            if !source_fps.contains(&(d.timestamp, d.data)) {
                                 stale.push(id);
                             }
                         }
@@ -3092,6 +3094,105 @@ mod rowid_cursor_tests {
             kinds.contains(&"x".to_string()),
             "new coexisting event missing: {dest:?}"
         );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A dest copy whose end_time was stored shorter than the source (e.g.
+    /// clipped by a previous timestamp-path sync) must NOT be deleted when a
+    /// new chunk event arrives at the same timestamp.  The stale-row key is
+    /// (timestamp, data); end_time is excluded so a clipped copy with the
+    /// same data survives.
+    #[test]
+    fn clipped_dest_row_not_deleted_by_new_same_timestamp_chunk_event() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-clipped-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let base = Utc::now() - Duration::seconds(3600);
+        // E1: a long event at T that will later have a "clipped" dest copy.
+        let ev_e1_long = make_event_full(base, 0, 3600, serde_json::json!({"kind": "long"}));
+        ds_src
+            .insert_events(bucket_id, &[ev_e1_long.clone()])
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        // First pull: dest gets E1 with full 3600s duration; cursor advances to rowid 1.
+        pull();
+
+        // Simulate a previous timestamp-path sync that stored a CLIPPED copy:
+        // delete the synced row and re-insert with a shorter duration (1s) but
+        // the same data.  This mimics what the old cursor path would have left
+        // in dest.
+        let dest_ev = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        assert_eq!(dest_ev.len(), 1);
+        ds_dest
+            .delete_events_by_id(&dest_bucket_id, vec![dest_ev[0].id.unwrap()])
+            .unwrap();
+        let ev_e1_clipped = make_event_full(base, 0, 1, serde_json::json!({"kind": "long"}));
+        ds_dest
+            .insert_events(&dest_bucket_id, &[ev_e1_clipped])
+            .unwrap();
+
+        // E2: a new late-arriving event at the SAME timestamp T with different data.
+        // Its rowid is above the cursor, so it enters the rowid chunk on the next pull.
+        let ev_e2 = make_event_full(base, 0, 1, serde_json::json!({"kind": "backfill"}));
+        ds_src.insert_events(bucket_id, &[ev_e2.clone()]).unwrap();
+        ds_src.force_commit().unwrap();
+
+        // Second pull: chunk = [E2].  The stale-row check must NOT delete dest's
+        // clipped E1 copy — source still has an event with (timestamp, data) =
+        // (T, {"kind": "long"}), only the end_time differs.
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let kinds: Vec<&str> = dest
+            .iter()
+            .filter_map(|e| e.data["kind"].as_str())
+            .collect();
+        assert!(
+            kinds.contains(&"long"),
+            "clipped E1 copy must not be deleted: {dest:?}"
+        );
+        assert!(
+            kinds.contains(&"backfill"),
+            "new E2 must be inserted: {dest:?}"
+        );
+        assert_eq!(dest.len(), 2, "both events must be present: {dest:?}");
 
         cursor_ds.close();
         ds_src.close();

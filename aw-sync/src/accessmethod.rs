@@ -24,6 +24,19 @@ pub trait AccessMethod: std::fmt::Debug {
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
     fn delete_events_by_id(&self, bucket_id: &str, event_ids: Vec<i64>) -> Result<(), String>;
 
+    /// Like `get_events` but returns events with their original stored timestamps, without
+    /// clipping them to the query window. Backends that do not clip (e.g. AwClient over HTTP)
+    /// may delegate to `get_events`. Local datastores should override this.
+    fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, String> {
+        self.get_events(bucket_id, start, end, limit)
+    }
+
     /// Fetch up to `limit` events with source rowid > `since_rowid`, ordered ASC by rowid.
     /// Returns `None` when the backend does not support rowid queries (e.g. AwClient over HTTP).
     /// On success returns `(events, max_scanned_rowid)` — the max rowid includes rows whose
@@ -89,6 +102,17 @@ impl AccessMethod for Datastore {
         Datastore::delete_events_by_id(self, bucket_id, event_ids).map_err(|e| format!("{e:?}"))?;
         self.force_commit().map_err(|e| format!("{e:?}"))?;
         Ok(())
+    }
+
+    fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, String> {
+        Datastore::get_events_unclipped(self, bucket_id, start, end, limit)
+            .map_err(|e| format!("{e:?}"))
     }
 
     fn get_events_since_rowid(

@@ -89,10 +89,12 @@ impl CacheKey {
         }
     }
 
-    /// Rough in-memory footprint of the key itself, so request-supplied query
-    /// text is charged against the cache's byte budget instead of being free.
+    /// Fixed overhead of the key (timestamps only). Query text is not charged:
+    /// the same ~38 KB webui query repeats for every day in long views and would
+    /// exhaust the 128 MB budget before a single All-time load completes. This
+    /// matches `aw_server/query_cache.py`, which counts only `len(json.dumps(result))`.
     fn weight(&self) -> usize {
-        self.query.len() + 2 * std::mem::size_of::<DateTime<Utc>>()
+        2 * std::mem::size_of::<DateTime<Utc>>()
     }
 }
 
@@ -423,17 +425,49 @@ mod tests {
     }
 
     #[test]
-    fn byte_limit_is_enforced_and_counts_key_text() {
-        // Room for entries of a couple of bytes plus the ~40-byte key.
+    fn byte_limit_is_enforced_by_result_size_not_query_text() {
+        // Room for entries of a couple of bytes plus the ~32-byte key timestamp overhead.
         let cache = QueryCache::with_limits(100, 64, Duration::minutes(10), 100);
         let gen = cache.generation();
         cache.put(CacheKey::new("a", period(1)), period(1), result(1.0), gen);
         cache.put(CacheKey::new("b", period(1)), period(1), result(2.0), gen);
         assert!(cache.stats().bytes <= 64);
 
-        // A large request-supplied key is charged even when the result is tiny.
-        let tiny = CacheKey::new(&"x".repeat(4096), period(1));
-        assert!(!cache.put(tiny, period(1), result(1.0), gen));
+        // A large query text does NOT count against the budget; only result size does.
+        // This is the fix for the All-time view getting 0% cache hits: the 38 KB webui
+        // query was charging ~130 MB for 3,417 days, exceeding the 128 MB max_bytes.
+        let large_query = CacheKey::new(&"x".repeat(4096), period(3));
+        assert!(cache.put(large_query, period(3), result(1.0), gen));
+
+        // But a large *result* that exceeds max_bytes on its own is still rejected.
+        let large_result: Arc<str> = Arc::from("x".repeat(65).as_str());
+        let big = CacheKey::new("q", period(4));
+        assert!(!cache.put(big, period(4), large_result, gen));
+    }
+
+    #[test]
+    fn all_time_view_fits_budget_with_large_query_text() {
+        // Regression for #784: 3,417 daily entries × 38 KB query > 128 MB key budget → 0% hits.
+        // After the fix, key weight charges only timestamps (~32 B), so 3,417 small results fit.
+        let cache = QueryCache::new(); // 128 MB budget
+        let base = dt(1, 0, 0);
+        let query = "x".repeat(38 * 1024); // ~38 KB webui fullDesktopQuery
+        let gen = cache.generation();
+        let mut stored = 0usize;
+        for i in 0..3417u64 {
+            let start = base + Duration::days(i as i64);
+            let end = start + Duration::days(1);
+            let key = CacheKey::new(&query, (start, end));
+            // result is tiny: a JSON number, ~5 bytes
+            if cache.put(key, (start, end), result(1.0), gen) {
+                stored += 1;
+            }
+        }
+        assert_eq!(
+            stored, 3417,
+            "All 3,417 daily entries must fit the 128 MB budget"
+        );
+        assert_eq!(cache.stats().entries, 3417);
     }
 
     #[test]

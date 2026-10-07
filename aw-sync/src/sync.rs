@@ -234,21 +234,24 @@ pub(crate) fn sync_run_with_cursor_root(
                 warn!("Could not open cursor datastore: {e}; falling back to timestamp-based sync");
             })
             .ok();
-        if let Err(e) = pull_from_remotes(
+        let pull_result = pull_from_remotes(
             &remotes,
             client,
             sync_spec,
             &mut report,
             true,
             cursor_ds.as_ref(),
-        ) {
+        );
+        // Close the cursor datastore on both paths: a long-lived daemon must
+        // not leak the connection across failed pull passes.
+        if let Some(cds) = cursor_ds {
+            cds.close();
+        }
+        if let Err(e) = pull_result {
             report.finish();
             crate::report::persist_last_report_warn(&report);
             close_opened_datastores(&ds_remotes, &ds_localremote);
             return Err(e.into());
-        }
-        if let Some(cds) = cursor_ds {
-            cds.close();
         }
     }
 
@@ -1176,6 +1179,18 @@ fn sync_one(
                 // equal data are left alone (boundary duplicates are tolerated
                 // elsewhere), and heartbeat fragments never share a timestamp,
                 // so distinct same-timestamp events are not affected in practice.
+                // Replay dedup: a crash between insert_events and the cursor
+                // persist replays this page on the next pull. The rowid path has
+                // no source-id identity at the destination, so skip incoming
+                // events whose (end_time, data) fingerprint already exists here.
+                // Fingerprint on end_time per the timestamp path's rationale: it
+                // is invariant under any clipping, and get_events_unclipped
+                // returns the dest's true stored values. Heartbeat fragments
+                // never share (end, data), so distinct events are not affected.
+                let mut existing: HashSet<(
+                    DateTime<Utc>,
+                    serde_json::Map<String, serde_json::Value>,
+                )> = HashSet::new();
                 if !chunk.is_empty() {
                     let ts_set: HashSet<DateTime<Utc>> =
                         chunk.iter().map(|e| e.timestamp).collect();
@@ -1196,6 +1211,7 @@ fn sync_one(
                             None,
                         )?;
                         for d in near {
+                            existing.insert((d.timestamp + d.duration, d.data.clone()));
                             let Some(id) = d.id else { continue };
                             if !ts_set.contains(&d.timestamp) {
                                 continue;
@@ -1212,12 +1228,19 @@ fn sync_one(
                         ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
                     }
                 }
-                events_sent += chunk.len();
-                for batch in chunk.chunks(BATCH_SIZE) {
+                let to_insert: Vec<Event> = chunk
+                    .iter()
+                    .filter(|e| !existing.contains(&(e.timestamp + e.duration, e.data.clone())))
+                    .cloned()
+                    .collect();
+                events_sent += to_insert.len();
+                for batch in to_insert.chunks(BATCH_SIZE) {
                     ds_to.insert_events(bucket_to.id.as_str(), batch.to_vec())?;
                 }
                 // P1 retry-safety: persist the cursor after every page so that a
-                // failure on a later page does not replay already-inserted pages.
+                // failure on a later page does not replay already-inserted pages;
+                // combined with the (end_time, data) replay dedup above, a crash
+                // between insert and persist is safe to retry.
                 cds.set_key_value(&ck, &max_rowid.to_string())
                     .map_err(|e| {
                         format!(
@@ -2446,6 +2469,101 @@ mod rowid_cursor_tests {
             after_second, 5,
             "second pull must import both the backfill (T5) and the new event (T40); \
              count was {after_second} (expected 5 = 3 initial + 2 new)"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// Crash-replay safety: a pull that dies between inserting a page and
+    /// persisting the cursor leaves the cursor behind what was already
+    /// inserted. The next pull re-fetches those rows; the (end_time, data)
+    /// replay dedup must skip them instead of duplicating the destination.
+    ///
+    /// The replayed row here is a zero-duration event AT the resume boundary:
+    /// its timestamp >= resume_sync_at, so reconcile_updated_events (whose
+    /// window ends exclusively at resume) never matches it, and the stale-row
+    /// delete only fires on differing data. Without the (end_time, data) dedup
+    /// this pull re-inserts the row and the destination grows on every replay.
+    #[test]
+    fn replayed_rows_after_cursor_rollback_are_not_duplicated() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-replay-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        let mut batch: Vec<Event> = [10i64, 20].iter().map(|&s| make_event(s)).collect();
+        // Zero-duration instant event at the newest position: its end-time is
+        // its timestamp, so it defines resume_sync_at exactly.
+        let ts = Utc::now() - Duration::seconds(3600) + Duration::seconds(30);
+        batch.push(
+            serde_json::from_value(serde_json::json!({
+                "timestamp": ts.to_rfc3339(),
+                "duration": 0,
+                "data": {"seq": 30}
+            }))
+            .unwrap(),
+        );
+        ds_src.insert_events(bucket_id, &batch).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect("first pull must succeed");
+        assert_eq!(
+            ds_dest
+                .get_event_count(&dest_bucket_id, None, None)
+                .unwrap(),
+            3
+        );
+
+        // Simulate the crash window: rows were inserted at the destination but
+        // the cursor persist never happened — roll the cursor back to rowid 2
+        // so the next pull re-fetches row 3, which already exists at dest.
+        let ck = cursor_key(src_hostname, bucket_id);
+        cursor_ds.set_key_value(&ck, "2").unwrap();
+
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect("replay pull must succeed");
+
+        assert_eq!(
+            ds_dest
+                .get_event_count(&dest_bucket_id, None, None)
+                .unwrap(),
+            3,
+            "replayed rows must be deduplicated, not re-inserted"
         );
 
         cursor_ds.close();

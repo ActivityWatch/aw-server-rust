@@ -68,8 +68,14 @@ fn open_or_create_cursor_ds(root: &Path, device_id: &str) -> Result<Datastore, S
 }
 
 /// Key identifying the last-synced source rowid for a given (device, bucket) pair.
+///
+/// Components are joined with U+001F (ASCII unit separator): device IDs and
+/// bucket IDs are user-controlled strings that may contain dots, so a plain
+/// `.` join could collide (device "a" + bucket "b.c" vs device "a.b" +
+/// bucket "c"). Control characters cannot appear in valid bucket IDs or
+/// device IDs, making the join unambiguous.
 fn cursor_key(src_device_id: &str, bucket_id: &str) -> String {
-    format!("sync.cursor.{src_device_id}.{bucket_id}")
+    format!("sync.cursor.{src_device_id}\u{1f}{bucket_id}")
 }
 
 /// Discover all sync peers reachable from `sync_root`, excluding `own_device_id`.
@@ -1037,6 +1043,14 @@ fn reconcile_updated_events(
     Ok(on_dest)
 }
 
+/// (start, end, data) fingerprint of a source event, used to decide whether a
+/// destination row is still represented in the source at its timestamp.
+type SourceFingerprint<'a> = (
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+    serde_json::Map<String, serde_json::Value>,
+);
+
 /// Syncs a single bucket from one datastore to another
 fn sync_one(
     ds_from: &dyn AccessMethod,
@@ -1071,6 +1085,11 @@ fn sync_one(
 
     let reconciled =
         reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+
+    // Upgrade bootstrap defers its cursor persist until the timestamp path it
+    // prefaces completes successfully (set inside the cursor block below,
+    // consumed at the end of this function).
+    let mut deferred_bootstrap_cursor: Option<(&Datastore, String, i64)> = None;
 
     // ── Rowid cursor fast path ──────────────────────────────────────────────
     // When the source is a file-based Datastore and a cursor_ds is provided,
@@ -1131,18 +1150,18 @@ fn sync_one(
         let bootstrap_pass = stored_rowid == 0 && eventcount_to_old > 0;
         if bootstrap_pass {
             if let Some(Ok(max_rowid)) = ds_from.get_max_event_rowid(bucket_from.id.as_str()) {
-                if let Err(e) = cds.set_key_value(&ck, &max_rowid.to_string()) {
-                    warn!(
-                        "Failed to bootstrap sync cursor for '{}': {e:?}",
-                        bucket_from.id
-                    );
-                } else {
-                    info!(
-                        "  ⤴  Bootstrapped rowid cursor for '{}' to {} (upgrade from \
-                         timestamp path; falling through to timestamp path this pass)",
-                        bucket_from.id, max_rowid
-                    );
-                }
+                // Do NOT persist the bootstrapped cursor yet: this pass still
+                // runs the timestamp path to copy events that arrived since the
+                // last timestamp-based sync. Persisting first would lose those
+                // events if the timestamp path fails partway (the next pass
+                // would skip everything below the cursor). The cursor is
+                // persisted after the timestamp path succeeds for this bucket.
+                info!(
+                    "  ⤴  Bootstrapping rowid cursor for '{}' to {} after this \
+                     timestamp-path pass (upgrade from timestamp path)",
+                    bucket_from.id, max_rowid
+                );
+                deferred_bootstrap_cursor = Some((cds, ck.clone(), max_rowid));
             }
             // Fall through to the timestamp path for this pass.
         } else if let Some(first_result) = ds_from.get_events_since_rowid(
@@ -1231,16 +1250,37 @@ fn sync_one(
                             Some(max + Duration::seconds(1)),
                             None,
                         )?;
+                        // Reconcile against the SOURCE, not against the chunk:
+                        // "some chunk event at this timestamp differs" cannot
+                        // distinguish an edit (old row deleted from source,
+                        // replacement inserted) from legitimate distinct events
+                        // sharing a timestamp (deleting the dest copy would be
+                        // data loss). A dest row is stale only if the source
+                        // currently has NO event with the same (end_time, data)
+                        // at that timestamp. Source rows below the cursor are
+                        // still returned by this window query, so untouched
+                        // coexisting events are never deleted.
+                        let source_near = ds_from.get_events_unclipped(
+                            bucket_from.id.as_str(),
+                            Some(min),
+                            Some(max + Duration::seconds(1)),
+                            None,
+                        )?;
+                        let source_fps: HashSet<SourceFingerprint> = source_near
+                            .into_iter()
+                            .map(|e| (e.timestamp, e.timestamp + e.duration, e.data))
+                            .collect();
                         for d in near {
                             existing.insert((d.timestamp + d.duration, d.data.clone()));
                             let Some(id) = d.id else { continue };
                             if !ts_set.contains(&d.timestamp) {
                                 continue;
                             }
-                            if chunk
-                                .iter()
-                                .any(|e| e.timestamp == d.timestamp && e.data != d.data)
-                            {
+                            if !source_fps.contains(&(
+                                d.timestamp,
+                                d.timestamp + d.duration,
+                                d.data,
+                            )) {
                                 stale.push(id);
                             }
                         }
@@ -1542,6 +1582,18 @@ fn sync_one(
                     bucket_from.id, bucket_to.id
                 );
             }
+        }
+    }
+
+    // Persist a deferred bootstrap cursor only now that the timestamp path
+    // finished successfully; on any `?` error above it stays unpersisted and
+    // the next pass re-bootstraps (retry-safe).
+    if let Some((cds, ck, max_rowid)) = deferred_bootstrap_cursor {
+        if let Err(e) = cds.set_key_value(&ck, &max_rowid.to_string()) {
+            warn!(
+                "Failed to persist bootstrapped sync cursor for '{}': {e:?}",
+                bucket_to.id
+            );
         }
     }
 
@@ -2941,6 +2993,174 @@ mod rowid_cursor_tests {
             Some(&serde_json::json!(true))
         );
         assert_eq!(seq20[0].duration, Duration::seconds(60));
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// Two distinct events legitimately sharing a timestamp must both survive:
+    /// a new chunk event at the same timestamp must not evict the destination
+    /// copy of the older coexisting event. Regression for the review finding
+    /// that the stale-row deletion keyed on "some chunk event at this
+    /// timestamp differs" deleted legitimate same-timestamp neighbours.
+    #[test]
+    fn distinct_same_timestamp_events_are_not_deleted() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-coexist-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+
+        // Event Y at timestamp T, synced first (cursor advances past its row).
+        let ts_y = Utc::now() - Duration::seconds(1800);
+        let ev_y: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts_y.to_rfc3339(),
+            "duration": 1,
+            "data": {"seq": 40, "kind": "y"}
+        }))
+        .unwrap();
+        ds_src.insert_events(bucket_id, &[ev_y.clone()]).unwrap();
+        ds_src.force_commit().unwrap();
+        pull();
+        assert_eq!(
+            ds_dest
+                .get_events(&dest_bucket_id, None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Event X at the SAME timestamp T with different data and a duration
+        // that ends before `resume` (so reconcile_updated_events' clipped
+        // read does not collapse it onto Y's identity). X then reaches the
+        // rowid chunk and exercises the stale-row deletion against Y.
+        let ev_x: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts_y.to_rfc3339(),
+            "duration": 0.5,
+            "data": {"seq": 40, "kind": "x"}
+        }))
+        .unwrap();
+        ds_src.insert_events(bucket_id, &[ev_x.clone()]).unwrap();
+        ds_src.force_commit().unwrap();
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let kinds: Vec<String> = dest
+            .iter()
+            .filter_map(|e| e.data["kind"].as_str().map(String::from))
+            .collect();
+        assert_eq!(
+            dest.len(),
+            2,
+            "both coexisting events must survive: {dest:?}"
+        );
+        assert!(
+            kinds.contains(&"y".to_string()),
+            "dest copy of Y was deleted: {dest:?}"
+        );
+        assert!(
+            kinds.contains(&"x".to_string()),
+            "new coexisting event missing: {dest:?}"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// Upgrade bootstrap: the cursor must be persisted only AFTER the
+    /// timestamp-path pass it prefaces completes successfully. If it were
+    /// persisted before the pass, a partway failure would permanently skip
+    /// the events the timestamp path had not yet copied.
+    #[test]
+    fn bootstrap_cursor_persists_after_timestamp_pass() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-bootstrap-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        let initial: Vec<Event> = [10i64, 20, 30].iter().map(|&s| make_event(s)).collect();
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        // Simulate the pre-upgrade state: destination has events (copied by
+        // the timestamp path) but no stored rowid cursor.
+        ds_dest
+            .create_bucket(&make_bucket(&dest_bucket_id, "dest-host"))
+            .unwrap();
+        ds_dest
+            .insert_events(&dest_bucket_id, &[make_event(10)])
+            .unwrap();
+        ds_dest.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect("bootstrap pull must succeed");
+
+        // After a successful bootstrap pass the cursor must equal the source
+        // max rowid — and only now, i.e. persisted after the timestamp path
+        // finished rather than before it ran.
+        let src_max = ds_src.get_max_event_rowid(bucket_id).unwrap();
+        let stored: i64 = cursor_ds
+            .get_key_value(&cursor_key(src_hostname, bucket_id))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            stored, src_max,
+            "cursor must equal source max rowid after bootstrap"
+        );
 
         cursor_ds.close();
         ds_src.close();

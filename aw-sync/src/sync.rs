@@ -1185,7 +1185,11 @@ fn sync_one(
                     if let (Some(min), Some(max)) = (min_ts, max_ts) {
                         // get_events end bound is exclusive; one second past
                         // the newest chunk timestamp covers ns precision.
-                        let near = ds_to.get_events(
+                        // Use unclipped to preserve original timestamps: get_events
+                        // clips events to the query window, which can shift a dest
+                        // event's timestamp to match a chunk event at the boundary
+                        // and trigger false deletion.
+                        let near = ds_to.get_events_unclipped(
                             bucket_to.id.as_str(),
                             Some(min),
                             Some(max + Duration::seconds(1)),

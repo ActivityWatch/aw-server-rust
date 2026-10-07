@@ -29,6 +29,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
+use sha2::{Digest, Sha256};
 
 use aw_models::Event;
 
@@ -69,13 +70,17 @@ pub fn coalesce(mut ranges: Vec<TimeRange>, max_ranges: usize) -> Vec<TimeRange>
     merged
 }
 
-/// Exact cache identity: query text plus the requested period.
+/// Cache identity: a fixed-size query identity plus the requested period.
 ///
-/// Whitespace inside the query can be significant (string literals), so the
-/// text is used verbatim.
+/// Whitespace inside the query can be significant (string literals), so
+/// identity uses the full text — hashed to a 32-byte SHA-256. The hash is
+/// collision-resistant, so equality on it stands in for equality on the text
+/// while the key never owns the ~38 KB query the webui sends (3,417 daily
+/// entries of owned text would blow the 128 MB budget before a single
+/// All-time load completes).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct CacheKey {
-    query: String,
+    query_id: [u8; 32],
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 }
@@ -83,18 +88,19 @@ pub struct CacheKey {
 impl CacheKey {
     pub fn new(query: &str, period: TimeRange) -> Self {
         Self {
-            query: query.to_string(),
+            query_id: Sha256::digest(query.as_bytes()).into(),
             start: period.0,
             end: period.1,
         }
     }
 
-    /// Fixed overhead of the key (timestamps only). Query text is not charged:
-    /// the same ~38 KB webui query repeats for every day in long views and would
-    /// exhaust the 128 MB budget before a single All-time load completes. This
-    /// matches `aw_server/query_cache.py`, which counts only `len(json.dumps(result))`.
+    /// Fixed overhead of the key (identity + timestamps). The query text is
+    /// not charged: the same ~38 KB webui query repeats for every day in long
+    /// views and would exhaust the 128 MB budget before a single All-time
+    /// load completes. This matches `aw_server/query_cache.py`, which counts
+    /// only `len(json.dumps(result))`.
     fn weight(&self) -> usize {
-        2 * std::mem::size_of::<DateTime<Utc>>()
+        std::mem::size_of::<[u8; 32]>() + 2 * std::mem::size_of::<DateTime<Utc>>()
     }
 }
 
@@ -468,6 +474,31 @@ mod tests {
             "All 3,417 daily entries must fit the 128 MB budget"
         );
         assert_eq!(cache.stats().entries, 3417);
+    }
+
+    #[test]
+    fn key_footprint_is_fixed_size_and_accounted() {
+        // The key must never own the query text: a 1 MB query's stored
+        // footprint equals a tiny query's (32-byte identity + 2 timestamps),
+        // and put() accounts for exactly the result body plus that footprint.
+        let tiny = CacheKey::new("a", period(1));
+        let huge = CacheKey::new(&"x".repeat(1024 * 1024), period(1));
+        assert_eq!(tiny.weight(), huge.weight());
+
+        let cache = QueryCache::new();
+        let gen = cache.generation();
+        let body = result(1.0);
+        assert!(cache.put(huge, period(1), body.clone(), gen));
+        let stats = cache.stats();
+        assert_eq!(
+            stats.entries, 1,
+            "the 1 MB-query entry must itself be resident"
+        );
+        assert_eq!(
+            stats.bytes,
+            body.len() + tiny.weight(),
+            "accounted bytes must track the stored key footprint"
+        );
     }
 
     #[test]

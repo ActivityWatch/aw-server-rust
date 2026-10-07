@@ -1056,6 +1056,15 @@ type SourceFingerprint = (
     chrono::DateTime<chrono::Utc>,
     serde_json::Map<String, serde_json::Value>,
 );
+/// Replay-dedup key for the rowid cursor path: a replayed source row is
+/// byte-identical to its destination copy, so the full stored interval plus
+/// data identifies it without dropping distinct events that share only the
+/// end time and data.
+type ReplayFingerprint = (
+    DateTime<Utc>,
+    DateTime<Utc>,
+    serde_json::Map<String, serde_json::Value>,
+);
 
 /// Syncs a single bucket from one datastore to another
 fn sync_one(
@@ -1228,15 +1237,14 @@ fn sync_one(
                 // Replay dedup: a crash between insert_events and the cursor
                 // persist replays this page on the next pull. The rowid path has
                 // no source-id identity at the destination, so skip incoming
-                // events whose (end_time, data) fingerprint already exists here.
-                // Fingerprint on end_time per the timestamp path's rationale: it
-                // is invariant under any clipping, and get_events_unclipped
-                // returns the dest's true stored values. Heartbeat fragments
-                // never share (end, data), so distinct events are not affected.
-                let mut existing: HashSet<(
-                    DateTime<Utc>,
-                    serde_json::Map<String, serde_json::Value>,
-                )> = HashSet::new();
+                // events whose full (timestamp, end_time, data) fingerprint
+                // already exists here. A replayed row is byte-identical to the
+                // dest copy (get_events_unclipped returns true stored values),
+                // so the full triple identifies it; a distinct source event that
+                // merely shares end_time and data (e.g. 10:05-10:10 inserted
+                // after 10:00-10:10 was copied) differs in timestamp and must
+                // not be dropped, or the advancing cursor would lose it for good.
+                let mut existing: HashSet<ReplayFingerprint> = HashSet::new();
                 if !chunk.is_empty() {
                     let ts_set: HashSet<DateTime<Utc>> =
                         chunk.iter().map(|e| e.timestamp).collect();
@@ -1277,7 +1285,11 @@ fn sync_one(
                             .map(|e| (e.timestamp, e.data))
                             .collect();
                         for d in near {
-                            existing.insert((d.timestamp + d.duration, d.data.clone()));
+                            existing.insert((
+                                d.timestamp,
+                                d.timestamp + d.duration,
+                                d.data.clone(),
+                            ));
                             let Some(id) = d.id else { continue };
                             if !ts_set.contains(&d.timestamp) {
                                 continue;
@@ -1293,7 +1305,9 @@ fn sync_one(
                 }
                 let to_insert: Vec<Event> = chunk
                     .iter()
-                    .filter(|e| !existing.contains(&(e.timestamp + e.duration, e.data.clone())))
+                    .filter(|e| {
+                        !existing.contains(&(e.timestamp, e.timestamp + e.duration, e.data.clone()))
+                    })
                     .cloned()
                     .collect();
                 events_sent += to_insert.len();
@@ -1302,8 +1316,11 @@ fn sync_one(
                 }
                 // P1 retry-safety: persist the cursor after every page so that a
                 // failure on a later page does not replay already-inserted pages;
-                // combined with the (end_time, data) replay dedup above, a crash
-                // between insert and persist is safe to retry.
+                // combined with the (timestamp, end_time, data) replay dedup
+                // above, a crash between insert and persist is safe to retry.
+                // The cursor datastore commits asynchronously, so force the
+                // commit here: otherwise a crash after set_key_value returns
+                // can still lose the cursor and widen the replay window.
                 cds.set_key_value(&ck, &max_rowid.to_string())
                     .map_err(|e| {
                         format!(
@@ -1311,6 +1328,12 @@ fn sync_one(
                             bucket_from.id
                         )
                     })?;
+                cds.force_commit().map_err(|e| {
+                    format!(
+                        "Failed to commit sync cursor for '{}': {e:?}",
+                        bucket_from.id
+                    )
+                })?;
                 if is_last {
                     break;
                 }

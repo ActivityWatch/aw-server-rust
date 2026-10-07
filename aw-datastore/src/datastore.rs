@@ -747,6 +747,12 @@ impl DatastoreInstance {
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
+                    if new_cache.contains_key(&b.id) {
+                        return Err(DatastoreError::InternalError(format!(
+                            "Cannot load ambiguous bucket name {:?}: device-aware addressing is not implemented",
+                            b.id
+                        )));
+                    }
                     new_cache.insert(b.id.clone(), b);
                 }
                 Err(e) => {
@@ -819,12 +825,12 @@ impl DatastoreInstance {
         if bucket.device_id.is_empty() {
             bucket.device_id = "local".to_string();
         }
-        // Note: UNIQUE(device_id, name) allows same-name buckets from
-        // different devices to coexist; the UNIQUE constraint is the sole
-        // guard against duplicates (same device_id + name hits it and maps to
-        // BucketAlreadyExists below).  Known limitation: buckets_cache is
-        // keyed by name only, so when same-name buckets coexist the cache
-        // entry reflects whichever was created/loaded last.
+        // The v7 schema prepares for device-scoped names, but the public API
+        // and cache still address buckets by name. Until the resolver exists,
+        // reject every duplicate name before it can hide history or redirect writes.
+        if self.buckets_cache.contains_key(&bucket.id) {
+            return Err(DatastoreError::BucketAlreadyExists(bucket.id.clone()));
+        }
         let mut stmt = match conn.prepare_cached(
             "
                 INSERT INTO buckets (name, device_id, type, client, hostname, created, data)

@@ -1850,27 +1850,70 @@ mod datastore_tests {
     }
 
     #[test]
-    fn test_same_name_different_device_id_coexists() {
-        // UNIQUE(device_id, name) exists precisely to allow (A, "x") and
-        // (B, "x") to coexist; creation must not be blocked by the name-keyed
-        // buckets_cache (which reflects the last-created entry).
-        let ds = Datastore::new_in_memory(false);
-
+    fn test_same_name_different_device_id_preserves_original_history() {
+        // The schema supports future device-scoped names, but the public API
+        // cannot address them yet. Reject ambiguity instead of redirecting writes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("device-id.db")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let ds = Datastore::new(path.clone(), false);
         let mut b1 = test_bucket();
         b1.device_id = "device-A".to_string();
         ds.create_bucket(&b1).unwrap();
+        let event = test_event(Utc::now(), Duration::seconds(1));
+        ds.insert_events(&b1.id, &[event.clone()]).unwrap();
+        let original = ds.get_bucket(&b1.id).unwrap();
 
-        let mut b2 = test_bucket(); // same id/name as b1
+        let mut b2 = b1.clone();
         b2.device_id = "device-B".to_string();
-        ds.create_bucket(&b2).unwrap();
-
-        // Same name + same device_id is still a duplicate (UNIQUE constraint).
-        match ds.create_bucket(&b2) {
-            Err(DatastoreError::BucketAlreadyExists(_)) => {}
-            other => {
-                panic!("expected BucketAlreadyExists for same-name same device_id, got {other:?}")
-            }
+        for bucket in [&b1, &b2] {
+            assert!(matches!(
+                ds.create_bucket(bucket),
+                Err(DatastoreError::BucketAlreadyExists(_))
+            ));
         }
+        assert_eq!(ds.get_bucket(&b1.id).unwrap().bid, original.bid);
+        assert_eq!(ds.get_buckets().unwrap().len(), 1);
+        ds.insert_events(&b1.id, &[event]).unwrap();
+        ds.close();
+
+        let ds = Datastore::new(path.clone(), false);
+        assert_eq!(ds.get_bucket(&b1.id).unwrap().device_id, "device-A");
+        assert_eq!(ds.get_events(&b1.id, None, None, None).unwrap().len(), 2);
+        ds.close();
+        let ds = Datastore::open_read_only(path).unwrap();
+        assert_eq!(ds.get_bucket(&b1.id).unwrap().device_id, "device-A");
+        assert_eq!(ds.get_events(&b1.id, None, None, None).unwrap().len(), 2);
+        ds.close();
+    }
+
+    #[test]
+    fn test_loading_same_name_device_rows_fails_without_hiding_history() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
+        ds.create_bucket(&conn, test_bucket()).unwrap();
+        // A future device-aware writer can populate this schema, but this
+        // name-only reader must fail closed rather than pick an arbitrary row.
+        conn.execute(
+            "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+             SELECT name, 'peer', type, client, hostname, created, data FROM buckets",
+            [],
+        )
+        .unwrap();
+        for migrate in [false, true] {
+            assert!(matches!(
+                aw_datastore::DatastoreInstance::new(&conn, migrate),
+                Err(DatastoreError::InternalError(message)) if message.contains("ambiguous bucket name")
+            ));
+        }
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM buckets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "opening must not delete ambiguous rows");
     }
 
     #[test]

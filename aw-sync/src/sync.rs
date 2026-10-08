@@ -74,7 +74,10 @@ fn open_or_create_cursor_ds(root: &Path, device_id: &str) -> Result<Datastore, S
 /// even for user-controlled device and bucket IDs that may contain control chars.
 /// For normal watcher-generated IDs the key format is unchanged (replace is no-op).
 fn cursor_key(src_device_id: &str, bucket_id: &str) -> String {
-    let enc = |s: &str| s.replace('\u{1f}', "%1F");
+    // Escape `%` before `\u{1f}` so that a literal `%1F` in an input string
+    // cannot collide with an escaped unit-separator: "A%1F" → "A%251F" while
+    // "A\u{1f}" → "A%1F", keeping the two distinct.
+    let enc = |s: &str| s.replace('%', "%25").replace('\u{1f}', "%1F");
     format!("sync.cursor.{}\u{1f}{}", enc(src_device_id), enc(bucket_id))
 }
 
@@ -2833,6 +2836,28 @@ mod rowid_cursor_tests {
         ds_src.close();
         ds_dest.close();
         let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A device ID that contains a literal `%1F` must not collide with a device
+    /// ID that contains the unit-separator character `\u{1f}`, even though
+    /// `\u{1f}` is escaped to `%1F`.  The fix encodes `%` → `%25` first so that
+    /// `"A%1F"` → `"A%251F"` while `"A\u{1f}"` → `"A%1F"`, keeping the keys distinct.
+    #[test]
+    fn cursor_key_no_collision_between_percent_escape_and_unit_separator() {
+        // "A\u{1f}" with bucket "B" must differ from "A%1F" with bucket "B".
+        let key_with_sep = cursor_key("A\u{1f}", "B");
+        let key_with_literal = cursor_key("A%1F", "B");
+        assert_ne!(
+            key_with_sep, key_with_literal,
+            "literal %1F and escaped \\u{{1f}} must not collide"
+        );
+        // Symmetrically for bucket_id.
+        let bkey_with_sep = cursor_key("device", "bucket\u{1f}suffix");
+        let bkey_with_literal = cursor_key("device", "bucket%1Fsuffix");
+        assert_ne!(
+            bkey_with_sep, bkey_with_literal,
+            "literal %1F and escaped \\u{{1f}} in bucket_id must not collide"
+        );
     }
 
     /// Cursor is stored per (device_id, bucket_id) so two different source

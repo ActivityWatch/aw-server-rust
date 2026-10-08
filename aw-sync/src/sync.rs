@@ -97,7 +97,7 @@ pub fn sync_run(
     // FIXME: Bad device_id assumption?
     // Only stage a local db when this pass actually pushes. Pull-only
     // `sync_run` is how `sync_wrapper::pull` walks a *peer's* host folder;
-    // creating `{peer_host}/{our_device_id}/test.db` there breaks the
+    // creating `{peer_host}/{our_device_id}/sync.db` there breaks the
     // "each device only writes files it owns" invariant (see
     // ActivityWatch/aw-server-rust#682).
     let ds_localremote = maybe_setup_local_remote(sync_spec.path.as_path(), device_id, mode)?;
@@ -297,7 +297,7 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
     let remotedir = path.join(device_id);
     fs::create_dir_all(&remotedir)?;
 
-    let dbfile = remotedir.join("test.db");
+    let dbfile = local_staging_db_path(&remotedir)?;
 
     // Print a message if dbfile doesn't already exist
     if !dbfile.exists() {
@@ -306,6 +306,45 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
 
     let ds_localremote = create_datastore(&dbfile)?;
     Ok(ds_localremote)
+}
+
+fn local_staging_db_path(remotedir: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let legacy = remotedir.join("test.db");
+    let current = remotedir.join("sync.db");
+
+    if legacy.exists() && current.exists() {
+        warn!(
+            "Both {} and {} exist; using sync.db and leaving test.db untouched",
+            current.display(),
+            legacy.display(),
+        );
+        return Ok(current);
+    }
+
+    if legacy.exists() {
+        fs::rename(&legacy, &current)?;
+        info!(
+            "Renamed legacy staging database {} to {}",
+            legacy.display(),
+            current.display(),
+        );
+    }
+
+    // A crash after renaming the main database but before its SQLite sidecars
+    // must be recoverable on the next run. Move any remaining legacy sidecars
+    // only when the current database exists and their destination is absent;
+    // never adopt orphaned sidecars or overwrite ambiguous state.
+    if current.exists() {
+        for suffix in ["-wal", "-shm"] {
+            let legacy_sidecar = remotedir.join(format!("test.db{suffix}"));
+            let current_sidecar = remotedir.join(format!("sync.db{suffix}"));
+            if legacy_sidecar.exists() && !current_sidecar.exists() {
+                fs::rename(legacy_sidecar, current_sidecar)?;
+            }
+        }
+    }
+
+    Ok(current)
 }
 
 /// Open (or create) the sqlite datastore at `path`.
@@ -1306,13 +1345,77 @@ mod pull_only_staging_tests {
         let dir = temp_dir();
         let staged = maybe_setup_local_remote(&dir, "device-local", SyncMode::Push).unwrap();
         assert!(staged.is_some());
-        // Datastore::new opens sqlite on a worker thread, so test.db may not
+        // Datastore::new opens sqlite on a worker thread, so sync.db may not
         // exist yet; the directory is created synchronously and is the leak
         // pull-only used to leave in a peer folder.
         assert!(dir.join("device-local").is_dir());
         if let Some(ds) = staged {
             ds.close();
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fresh_staging_uses_sync_db() {
+        let dir = temp_dir();
+        let device_dir = dir.join("device-local");
+        fs::create_dir_all(&device_dir).unwrap();
+
+        let selected = local_staging_db_path(&device_dir).unwrap();
+
+        assert_eq!(selected, device_dir.join("sync.db"));
+        assert!(!device_dir.join("test.db").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_staging_db_and_sidecars_are_renamed() {
+        let dir = temp_dir();
+        let device_dir = dir.join("device-local");
+        fs::create_dir_all(&device_dir).unwrap();
+        for (name, contents) in [
+            ("test.db", b"db".as_slice()),
+            ("test.db-wal", b"wal".as_slice()),
+            ("test.db-shm", b"shm".as_slice()),
+        ] {
+            fs::write(device_dir.join(name), contents).unwrap();
+        }
+
+        let selected = local_staging_db_path(&device_dir).unwrap();
+
+        assert_eq!(selected, device_dir.join("sync.db"));
+        for (name, contents) in [
+            ("sync.db", b"db".as_slice()),
+            ("sync.db-wal", b"wal".as_slice()),
+            ("sync.db-shm", b"shm".as_slice()),
+        ] {
+            assert_eq!(fs::read(device_dir.join(name)).unwrap(), contents);
+        }
+        assert!(!device_dir.join("test.db").exists());
+        assert!(!device_dir.join("test.db-wal").exists());
+        assert!(!device_dir.join("test.db-shm").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn both_staging_names_prefers_sync_db_without_touching_legacy() {
+        let dir = temp_dir();
+        let device_dir = dir.join("device-local");
+        fs::create_dir_all(&device_dir).unwrap();
+        fs::write(device_dir.join("test.db"), b"legacy").unwrap();
+        fs::write(device_dir.join("sync.db"), b"current").unwrap();
+        fs::write(device_dir.join("test.db-wal"), b"legacy-wal").unwrap();
+
+        let selected = local_staging_db_path(&device_dir).unwrap();
+
+        assert_eq!(selected, device_dir.join("sync.db"));
+        assert_eq!(fs::read(device_dir.join("test.db")).unwrap(), b"legacy");
+        assert_eq!(fs::read(device_dir.join("sync.db")).unwrap(), b"current");
+        assert_eq!(
+            fs::read(device_dir.join("test.db-wal")).unwrap(),
+            b"legacy-wal"
+        );
+        assert!(!device_dir.join("sync.db-wal").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

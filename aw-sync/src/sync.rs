@@ -944,6 +944,7 @@ fn reconcile_updated_events(
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
+    use_unclipped_source: bool,
 ) -> Result<HashSet<i64>, String> {
     let mut on_dest: HashSet<i64> = HashSet::new();
     let Some(resume) = resume_sync_at else {
@@ -955,13 +956,24 @@ fn reconcile_updated_events(
     // end=None would load every newer source event when dest is far behind,
     // exhausting Android RAM and bypassing the paginated incremental copy.
     //
-    // Source is fetched UNCLIPPED so a duration-only edit (same timestamp and
-    // data, longer duration) retains its true end_time. If clipped, the
-    // replacement would be truncated to end at `resume`, making its identity
-    // (timestamp, duration) indistinguishable from the old destination copy —
-    // reconcile would mark the source rowid as "on_dest" and the rowid path
-    // would skip it, leaving the stale copy in place. With unclipped source,
-    // the identity mismatch lets the rowid path handle the replacement.
+    // Source is fetched UNCLIPPED when the rowid cursor path will be active
+    // (`use_unclipped_source = true`). Unclipped preserves the true end_time of
+    // a duration-only edit (same timestamp, same data, longer duration), giving
+    // it an identity (timestamp, duration) distinct from the dest copy — so
+    // reconcile does NOT mark the source rowid as "on_dest" and the rowid path
+    // can handle the replacement itself (delete clipped copy + insert full).
+    //
+    // When the rowid cursor is NOT active (push path, timestamp-fallback path),
+    // `use_unclipped_source = false`: source is fetched CLIPPED. With clipped
+    // source, a duration-only edit has the same identity as the dest copy, so
+    // the timestamp-based heartbeat path naturally extends the destination
+    // duration. More importantly, an edit that changes BOTH duration AND data
+    // produces a source event whose clipped identity matches the dest copy —
+    // the data mismatch triggers the replacement insert + stale delete here,
+    // and the tail portion (from resume onward) is picked up by the incremental
+    // timestamp path. Without clipping, the identity mismatch would leave the
+    // stale dest row in place and the heartbeat would insert only the tail,
+    // keeping the old data in the head portion (ActivityWatch/aw-server-rust#789).
     //
     // Dest is fetched with clipping (get_events): dest-latest ends exactly at
     // `resume`, so that clip is a no-op on its identity.
@@ -972,12 +984,21 @@ fn reconcile_updated_events(
     // Datastore errors return rather than unwrap: a panic here aborts the
     // whole pass (and on Android, the JNI frame). The per-bucket skip in
     // ActivityWatch/aw-server-rust#697 then drops this bucket, not the daemon.
-    let source_events = ds_from.get_events_unclipped(
-        bucket_from.id.as_str(),
-        Some(lookback_start),
-        Some(resume),
-        None,
-    )?;
+    let source_events = if use_unclipped_source {
+        ds_from.get_events_unclipped(
+            bucket_from.id.as_str(),
+            Some(lookback_start),
+            Some(resume),
+            None,
+        )?
+    } else {
+        ds_from.get_events(
+            bucket_from.id.as_str(),
+            Some(lookback_start),
+            Some(resume),
+            None,
+        )?
+    };
     let dest_events = ds_to.get_events(
         bucket_to.id.as_str(),
         Some(lookback_start),
@@ -1126,8 +1147,19 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    let reconciled =
-        reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    // Use unclipped source in reconcile only when the rowid cursor is available:
+    // the rowid path handles duration-only edits (new source rowid, identity
+    // mismatch keeps it out of `on_dest`). For push/timestamp paths, clipped
+    // source lets the identity match resolve both data-only and combined
+    // duration+data edits without relying on the rowid path.
+    let reconciled = reconcile_updated_events(
+        ds_from,
+        ds_to,
+        &bucket_from,
+        &bucket_to,
+        resume_sync_at,
+        cursor_ds.is_some(),
+    )?;
 
     // Upgrade bootstrap defers its cursor persist until the timestamp path it
     // prefaces completes successfully (set inside the cursor block below,
@@ -3435,5 +3467,94 @@ mod rowid_cursor_tests {
         ds_src.close();
         ds_dest.close();
         let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A timestamp-path sync (no rowid cursor) must replace an event whose
+    /// BOTH duration AND data changed, not leave the old data in the head
+    /// portion. Regression for the `use_unclipped_source=true` behavior where
+    /// the unclipped source identity (timestamp, 60s) differed from the dest
+    /// identity (timestamp, 5s), causing reconcile to skip the replacement and
+    /// leaving the stale data in the head (ActivityWatch/aw-server-rust#789).
+    #[test]
+    fn timestamp_path_replaces_event_with_changed_duration_and_data() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let ts = Utc::now() - Duration::seconds(3600);
+        let initial = vec![make_event_full(
+            ts,
+            0,
+            5,
+            serde_json::json!({"stage": "orig"}),
+        )];
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        // Timestamp path: no cursor_ds
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                None,
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Replace with an event that has a LONGER duration AND different data.
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src
+            .insert_events(
+                bucket_id,
+                &[make_event_full(
+                    ts,
+                    0,
+                    60,
+                    serde_json::json!({"stage": "edited"}),
+                )],
+            )
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        // The stale head (old data) must be gone; new data must be present.
+        // The timestamp path may split the 60s event into a head + tail, so
+        // dest.len() may be 2 — but no event with old data may survive.
+        assert!(
+            !dest.iter().any(|e| e.data["stage"] == "orig"),
+            "stale event with old data must not survive: {dest:?}"
+        );
+        assert!(
+            dest.iter().any(|e| e.data["stage"] == "edited"),
+            "event with new data must be present: {dest:?}"
+        );
+        assert!(dest.len() <= 2, "no extra duplicates expected: {dest:?}");
+
+        ds_src.close();
+        ds_dest.close();
     }
 }

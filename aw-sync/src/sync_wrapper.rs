@@ -111,17 +111,28 @@ pub fn pull(host: &str, client: &AwClient) -> Result<SyncReport, Box<dyn Error>>
         })
         .collect::<Vec<_>>();
 
-    // if more than one db, warn and use the largest one
+    // if more than one db, warn and use the best candidate
     if dbs.len() > 1 {
         warn!(
-            "More than one db found in sync folder for host, choosing largest db {:?}",
+            "More than one db found in sync folder for host, choosing best db {:?}",
             dbs
         );
     }
 
     let db = dbs
         .into_iter()
-        .max_by_key(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
+        .max_by(|a, b| {
+            // Within the same device folder, prefer sync.db over test.db
+            // regardless of file size (compat rename: sync.db is the current name).
+            let a_is_sync = a.file_name() == "sync.db";
+            let b_is_sync = b.file_name() == "sync.db";
+            if a_is_sync != b_is_sync {
+                return a_is_sync.cmp(&b_is_sync);
+            }
+            let a_size = a.metadata().map(|m| m.len()).unwrap_or(0);
+            let b_size = b.metadata().map(|m| m.len()).unwrap_or(0);
+            a_size.cmp(&b_size)
+        })
         .ok_or_else(|| format!("No db found in sync folder {:?}", sync_dir))?;
 
     pull_db(client, host, &db.path())

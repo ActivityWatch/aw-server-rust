@@ -291,6 +291,34 @@ mod tests {
     }
 
     #[test]
+    fn select_remote_dbs_prefers_sync_db_over_test_db_in_same_folder() {
+        // When both sync.db and test.db are present in the same device folder
+        // (e.g. during an in-progress migration), sync.db must win regardless
+        // of file size. test.db is the legacy name; sync.db is authoritative.
+        let sync_db = super::RemoteDb {
+            hostname: "host-a".into(),
+            device_id: "aaa".into(),
+            path: std::path::PathBuf::from("/sync/host-a/aaa/sync.db"),
+            size: 8, // smaller — but it's the current name
+        };
+        let test_db = super::RemoteDb {
+            hostname: "host-a".into(),
+            device_id: "aaa".into(),
+            path: std::path::PathBuf::from("/sync/host-a/aaa/test.db"),
+            size: 64, // larger — but it's the legacy name
+        };
+        let selection = super::select_remote_dbs_detailed(vec![test_db.clone(), sync_db.clone()]);
+
+        assert_eq!(selection.selected.len(), 1, "should collapse to one entry");
+        assert_eq!(
+            selection.selected[0].path, sync_db.path,
+            "sync.db must win over test.db even when test.db is larger"
+        );
+        assert_eq!(selection.skipped.len(), 1);
+        assert_eq!(selection.skipped[0].db.path, test_db.path);
+    }
+
+    #[test]
     fn select_db_paths_keeps_largest_per_device_id() {
         let root = temp_sync_root();
         let large = write_remote_db(&root, "poco_f8_ultra", "device-1", 64);
@@ -535,7 +563,20 @@ pub(crate) fn select_remote_dbs_detailed(dbs: Vec<RemoteDb>) -> RemoteSelection 
     let mut selected = Vec::with_capacity(by_device.len());
     let mut skipped = Vec::new();
     for (device_id, mut group) in by_device {
-        group.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+        group.sort_by(|a, b| {
+            // Within the same device folder, prefer sync.db over test.db.
+            // A migration-in-progress can leave both names present; sync.db
+            // is the authoritative current name and must win regardless of size.
+            let same_dir = a.path.parent() == b.path.parent();
+            if same_dir {
+                let a_is_sync = a.path.file_name().is_some_and(|f| f == "sync.db");
+                let b_is_sync = b.path.file_name().is_some_and(|f| f == "sync.db");
+                if a_is_sync != b_is_sync {
+                    return b_is_sync.cmp(&a_is_sync);
+                }
+            }
+            b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path))
+        });
         let mut group = group.into_iter();
         let winner = group.next().expect("device_id group is non-empty");
         let losers: Vec<RemoteDb> = group.collect();

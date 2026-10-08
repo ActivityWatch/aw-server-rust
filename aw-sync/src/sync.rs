@@ -318,6 +318,38 @@ fn local_staging_db_path(remotedir: &Path) -> Result<PathBuf, Box<dyn Error>> {
             current.display(),
             legacy.display(),
         );
+        // Attempt WAL sidecar migration even when both databases are present.
+        // A concurrent push run may have renamed test.db → sync.db but not yet
+        // moved its sidecars; leaving test.db-wal in place loses those writes.
+        for suffix in ["-wal", "-shm"] {
+            let legacy_sidecar = remotedir.join(format!("test.db{suffix}"));
+            let current_sidecar = remotedir.join(format!("sync.db{suffix}"));
+            if legacy_sidecar.exists() && !current_sidecar.exists() {
+                if let Err(e) = fs::rename(&legacy_sidecar, &current_sidecar) {
+                    warn!(
+                        "Could not move legacy sidecar {} to {}: {}",
+                        legacy_sidecar.display(),
+                        current_sidecar.display(),
+                        e
+                    );
+                }
+            } else if legacy_sidecar.exists() {
+                // Both WAL files exist — this can only happen if a concurrent
+                // push run opened sync.db while we were migrating sidecars.
+                // test.db-wal may contain committed frames that are not yet in
+                // sync.db-wal. Manual recovery: run
+                //   sqlite3 <test.db-path> "PRAGMA wal_checkpoint(TRUNCATE);"
+                // to flush those frames, then remove test.db and test.db-wal.
+                warn!(
+                    "Both {} and {} exist; {} may contain unrecovered writes — \
+                     checkpoint it manually (sqlite3 {} '.quit') and remove the file",
+                    legacy_sidecar.display(),
+                    current_sidecar.display(),
+                    legacy_sidecar.display(),
+                    legacy.display(),
+                );
+            }
+        }
         return Ok(current);
     }
 
@@ -1398,7 +1430,12 @@ mod pull_only_staging_tests {
     }
 
     #[test]
-    fn both_staging_names_prefers_sync_db_without_touching_legacy() {
+    fn both_staging_names_prefers_sync_db_and_migrates_orphan_wal() {
+        // When both database names are present (e.g. a concurrent push renamed
+        // test.db → sync.db but hadn't yet moved its WAL), the function must:
+        // - select sync.db (not touch the databases themselves)
+        // - move the orphaned test.db-wal → sync.db-wal so its committed
+        //   writes are not silently lost when sync.db is next opened.
         let dir = temp_dir();
         let device_dir = dir.join("device-local");
         fs::create_dir_all(&device_dir).unwrap();
@@ -1409,13 +1446,15 @@ mod pull_only_staging_tests {
         let selected = local_staging_db_path(&device_dir).unwrap();
 
         assert_eq!(selected, device_dir.join("sync.db"));
+        // Both database files untouched
         assert_eq!(fs::read(device_dir.join("test.db")).unwrap(), b"legacy");
         assert_eq!(fs::read(device_dir.join("sync.db")).unwrap(), b"current");
+        // WAL migrated so committed frames are not abandoned
+        assert!(!device_dir.join("test.db-wal").exists());
         assert_eq!(
-            fs::read(device_dir.join("test.db-wal")).unwrap(),
+            fs::read(device_dir.join("sync.db-wal")).unwrap(),
             b"legacy-wal"
         );
-        assert!(!device_dir.join("sync.db-wal").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

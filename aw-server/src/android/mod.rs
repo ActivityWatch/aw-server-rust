@@ -45,22 +45,25 @@ pub mod android {
     };
     use aw_datastore::Datastore;
     use aw_models::{Bucket, Event, TimeInterval};
+    use std::sync::OnceLock;
 
-    static mut DATASTORE: Option<Datastore> = None;
+    // Several app threads make their first JNI call at about the same time (the
+    // watchers' init threads, the server thread, migrations). With a plain
+    // `static mut` two of them could both see `None` and each open a datastore,
+    // giving two workers with separate SQLite connections and heartbeat caches.
+    static DATASTORE: OnceLock<Datastore> = OnceLock::new();
 
-    unsafe fn openDatastore() -> Datastore {
-        match DATASTORE {
-            Some(ref ds) => ds.clone(),
-            None => {
+    fn openDatastore() -> Datastore {
+        DATASTORE
+            .get_or_init(|| {
                 let db_dir = dirs::db_path("default")
                     .expect("Failed to get db path")
                     .to_str()
                     .unwrap()
                     .to_string();
-                DATASTORE = Some(Datastore::new(db_dir, false));
-                openDatastore()
-            }
-        }
+                Datastore::new(db_dir, false)
+            })
+            .clone()
     }
 
     #[no_mangle]
@@ -186,24 +189,21 @@ pub mod android {
     async fn start_server_impl(port: u16) {
         info!("Building server state...");
 
-        // FIXME: Why is unsafe needed here? Can we get rid of it?
-        unsafe {
-            let mut server_state: ServerState = endpoints::ServerState::new(
-                openDatastore(),
-                endpoints::AssetResolver::new(None),
-                device_id::get_device_id(),
-            );
-            info!("Using server_state:: device_id: {}", server_state.device_id);
+        let mut server_state: ServerState = endpoints::ServerState::new(
+            openDatastore(),
+            endpoints::AssetResolver::new(None),
+            device_id::get_device_id(),
+        );
+        info!("Using server_state:: device_id: {}", server_state.device_id);
 
-            let mut server_config = crate::config::create_config("default", None);
-            server_config.port = port;
-            // Apply the configurable opt-out, like the desktop entry point does.
-            server_state.query_cache_enabled = server_config.query_cache;
+        let mut server_config = crate::config::create_config("default", None);
+        server_config.port = port;
+        // Apply the configurable opt-out, like the desktop entry point does.
+        server_state.query_cache_enabled = server_config.query_cache;
 
-            let _ = endpoints::build_rocket(server_state, server_config)
-                .launch()
-                .await;
-        }
+        let _ = endpoints::build_rocket(server_state, server_config)
+            .launch()
+            .await;
     }
 
     static mut INITIALIZED: bool = false;

@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::report::{PeerReport, SyncMode, SyncReport};
 use crate::sync::{sync_run, SyncSpec};
@@ -95,7 +95,7 @@ pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
 
 pub fn pull(host: &str, client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
     // Path to the sync folder
-    // Sync folder is structured ./{hostname}/{device_id}/test.db
+    // Sync folder is structured ./{hostname}/{device_id}/sync.db
     let sync_root_dir = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
     let sync_dir = sync_root_dir.join(host);
     let dbs = fs::read_dir(&sync_dir)?
@@ -119,23 +119,21 @@ pub fn pull(host: &str, client: &AwClient) -> Result<SyncReport, Box<dyn Error>>
         );
     }
 
-    let db = dbs
-        .into_iter()
-        .max_by(|a, b| {
-            // Within the same device folder, prefer sync.db over test.db
-            // regardless of file size (compat rename: sync.db is the current name).
-            let a_is_sync = a.file_name() == "sync.db";
-            let b_is_sync = b.file_name() == "sync.db";
-            if a_is_sync != b_is_sync {
-                return a_is_sync.cmp(&b_is_sync);
-            }
-            let a_size = a.metadata().map(|m| m.len()).unwrap_or(0);
-            let b_size = b.metadata().map(|m| m.len()).unwrap_or(0);
-            a_size.cmp(&b_size)
+    // The preference for `sync.db` over a sibling `test.db` applies only within
+    // one device folder; between folders the original largest-file rule stands.
+    // Dropping the shadowed legacy candidate before comparing sizes keeps the
+    // choice a total order (ActivityWatch/aw-server-rust#800).
+    let candidates: Vec<(PathBuf, u64)> = dbs
+        .iter()
+        .map(|entry| {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            (entry.path(), size)
         })
+        .collect();
+    let winner = crate::util::select_best_candidate(&candidates)
         .ok_or_else(|| format!("No db found in sync folder {:?}", sync_dir))?;
 
-    pull_db(client, host, &db.path())
+    pull_db(client, host, &candidates[winner].0)
 }
 
 fn pull_db(client: &AwClient, host: &str, db_path: &Path) -> Result<SyncReport, Box<dyn Error>> {

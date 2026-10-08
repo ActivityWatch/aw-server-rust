@@ -69,7 +69,7 @@ Working paths (bare `aw-sync sync`, Android) write:
 ~/ActivityWatchSync/{hostname}/{device_id}/sync.db
 ```
 
-The default daemon and advanced `sync_run` path write `~/ActivityWatchSync/{device_id}/sync.db` (two levels). Existing `test.db` staging databases and their SQLite sidecars are renamed to `sync.db` before opening — this applies to both the two-level layout (`{device_id}/test.db`) and the three-level layout (`{hostname}/{device_id}/test.db`) used by bare `aw-sync sync` and Android. If both names exist in the same folder, `sync.db` wins and `test.db` is left untouched for manual inspection.
+The default daemon and advanced `sync_run` path write `~/ActivityWatchSync/{device_id}/sync.db` (two levels). Existing `test.db` staging databases and their SQLite sidecars are renamed to `sync.db` before opening — this applies to both the two-level layout (`{device_id}/test.db`) and the three-level layout (`{hostname}/{device_id}/test.db`) used by bare `aw-sync sync` and Android. If both names exist in the same folder, `sync.db` wins and `test.db` and its SQLite sidecars are left untouched for manual inspection.
 
 #### Experimental v2 folder format (`sync-v2` feature)
 

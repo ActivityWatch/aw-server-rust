@@ -48,10 +48,24 @@ fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
-    while buf.len() < MAX_RESPONSE && Instant::now() < deadline {
+    while buf.len() < MAX_RESPONSE {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        stream
+            .set_read_timeout(Some(remaining.min(Duration::from_millis(500))))
+            .ok()?;
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&chunk[..n.min(MAX_RESPONSE - buf.len())]),
+            // A slow response may pause between chunks without exceeding the
+            // overall deadline. Keep waiting, but never reset that deadline.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
             Err(_) => break,
         }
     }
@@ -84,12 +98,17 @@ mod port_probe_tests {
     use std::time::Duration;
 
     fn probe_response(body: &str) -> Option<String> {
+        probe_delayed_response(body, Duration::ZERO)
+    }
+
+    fn probe_delayed_response(body: &str, delay: Duration) -> Option<String> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let response = format!(
             "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
+        let split = response.len() - body.len() / 2;
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -102,11 +121,32 @@ mod port_probe_tests {
                 request.push(byte[0]);
             }
             assert!(request.starts_with(b"GET /api/0/info HTTP/1.0\r\n"));
-            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&response.as_bytes()[..split]).unwrap();
+            thread::sleep(delay);
+            // The deadline test deliberately closes the client before this write.
+            let _ = stream.write_all(&response.as_bytes()[split..]);
         });
         let result = probe_aw_on_port("127.0.0.1", port);
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn identifies_response_delayed_past_per_read_timeout() {
+        assert!(probe_delayed_response(
+            r#"{"version":"v0.13.2","hostname":"test-host","device_id":"test-device"}"#,
+            Duration::from_millis(800),
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn rejects_response_delayed_past_total_deadline() {
+        assert!(probe_delayed_response(
+            r#"{"version":"v0.13.2","hostname":"test-host","device_id":"test-device"}"#,
+            Duration::from_millis(2500),
+        )
+        .is_none());
     }
 
     #[test]

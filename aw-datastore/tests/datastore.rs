@@ -1924,6 +1924,41 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_stale_connection_can_recreate_externally_deleted_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-deleted-cache.db");
+        let conn1 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds1 = aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+        let mut bucket = test_bucket();
+        bucket.device_id = "device-A".to_string();
+        ds1.create_bucket(&conn1, bucket.clone()).unwrap();
+        let original_bid = ds1.get_bucket(&bucket.id).unwrap().bid;
+        let conn2 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds2 = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        ds2.delete_bucket(&conn2, &bucket.id).unwrap();
+        bucket.device_id = "device-B".to_string();
+        ds1.create_bucket(&conn1, bucket.clone()).unwrap();
+        let recreated = ds1.get_bucket(&bucket.id).unwrap();
+        assert_ne!(recreated.bid, original_bid);
+        assert_eq!(recreated.device_id, "device-B");
+        let event = test_event(Utc::now(), Duration::seconds(1));
+        ds1.insert_events(&conn1, &bucket.id, vec![event]).unwrap();
+        let mut reopened = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        assert_eq!(reopened.get_bucket(&bucket.id).unwrap().bid, recreated.bid);
+        assert_eq!(
+            reopened.get_bucket(&bucket.id).unwrap().device_id,
+            "device-B"
+        );
+        assert_eq!(
+            reopened
+                .get_events(&conn2, &bucket.id, None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn test_loading_same_name_device_rows_fails_without_hiding_history() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();

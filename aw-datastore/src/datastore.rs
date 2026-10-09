@@ -310,11 +310,18 @@ fn _migrate_v6_to_v7(conn: &Connection) {
     // defer_foreign_keys=ON the constraint fires during DROP TABLE inside the batch.
     // All IDs are preserved by the copy, so re-enabling FK checks after COMMIT is safe.
     info!("Upgrading database to v7, adding device_id to buckets");
+    let foreign_keys: bool = conn
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .expect("Failed to read foreign_keys before v7 migration");
     conn.pragma_update(None, "foreign_keys", false)
         .expect("Failed to disable foreign_keys for v7 migration");
-    conn.execute_batch(
-        "BEGIN EXCLUSIVE TRANSACTION;
-         CREATE TABLE buckets_v7 (
+    // The transaction guard rolls back on any error before restoring the pragma
+    // (SQLite ignores foreign_keys changes while a transaction is active).
+    let migration = (|| -> rusqlite::Result<()> {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)?;
+        transaction.execute_batch(
+            "CREATE TABLE buckets_v7 (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              name TEXT NOT NULL,
              device_id TEXT NOT NULL DEFAULT 'local',
@@ -330,12 +337,13 @@ fn _migrate_v6_to_v7(conn: &Connection) {
          DROP TABLE buckets;
          ALTER TABLE buckets_v7 RENAME TO buckets;
          CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id);
-         PRAGMA user_version = 7;
-         COMMIT;",
-    )
-    .expect("Failed to run v7 migration transaction");
-    conn.pragma_update(None, "foreign_keys", true)
-        .expect("Failed to re-enable foreign_keys after v7 migration");
+         PRAGMA user_version = 7;",
+        )?;
+        transaction.commit()
+    })();
+    conn.pragma_update(None, "foreign_keys", foreign_keys)
+        .expect("Failed to restore foreign_keys after v7 migration");
+    migration.expect("Failed to run v7 migration transaction");
 }
 
 // Both indexes can bound only one of the two interval predicates. Use the
@@ -828,9 +836,6 @@ impl DatastoreInstance {
         // The v7 schema prepares for device-scoped names, but the public API
         // and cache still address buckets by name. Until the resolver exists,
         // reject every duplicate name before it can hide history or redirect writes.
-        if self.buckets_cache.contains_key(&bucket.id) {
-            return Err(DatastoreError::BucketAlreadyExists(bucket.id.clone()));
-        }
         let mut stmt = match conn.prepare_cached(
             "
                 INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
@@ -1743,6 +1748,53 @@ impl DatastoreInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_v7_migration_restores_foreign_keys_and_rolls_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        _migrate_v0_to_v1(&conn);
+        _migrate_v1_to_v2(&conn);
+        _migrate_v2_to_v3(&conn);
+        _migrate_v3_to_v4(&conn);
+        _migrate_v4_to_v5(&conn);
+        _migrate_v5_to_v6(&conn);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        // Force failure after the replacement table is created, before COMMIT.
+        conn.execute_batch("ALTER TABLE buckets RENAME COLUMN data TO missing_data;")
+            .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            _migrate_v6_to_v7(&conn);
+        }));
+        assert!(result.is_err());
+        assert!(conn.is_autocommit(), "failed migration must roll back");
+        let foreign_keys: bool = conn
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
+        assert!(
+            foreign_keys,
+            "failure must not leave FK enforcement disabled"
+        );
+        assert_eq!(_get_db_version(&conn), 6);
+        let replacements: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'buckets_v7'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(replacements, 0);
+        assert!(conn
+            .execute(
+                "INSERT INTO events (bucketrow, starttime, endtime, data) VALUES (999, 0, 1, '{}')",
+                [],
+            )
+            .is_err());
+        // The same borrowed connection can retry once the cause is repaired.
+        conn.execute_batch("ALTER TABLE buckets RENAME COLUMN missing_data TO data;")
+            .unwrap();
+        _migrate_v6_to_v7(&conn);
+        assert_eq!(_get_db_version(&conn), 7);
+    }
 
     /// Minimal legacy (Python aw-server/peewee) sqlite db fixture: one
     /// bucket, one event. Schema mirrors what `legacy_import` expects.

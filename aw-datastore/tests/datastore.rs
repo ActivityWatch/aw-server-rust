@@ -1960,6 +1960,42 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_stale_connection_rename_rejects_ambiguous_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-rename.db");
+        let conn1 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds1 = aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+        let mut old = test_bucket();
+        old.id = "old".to_string();
+        old.device_id = "device-A".to_string();
+        ds1.create_bucket(&conn1, old).unwrap();
+        // The second instance caches only `old`, then another writer creates `target`.
+        let conn2 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds2 = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        let mut target = test_bucket();
+        target.id = "target".to_string();
+        target.device_id = "device-B".to_string();
+        ds2.create_bucket(&conn2, target).unwrap();
+        assert!(matches!(
+            ds1.rename_bucket(&conn1, "old", "target"),
+            Err(DatastoreError::BucketAlreadyExists(_))
+        ));
+        let names: i64 = conn1
+            .query_row(
+                "SELECT count(*) FROM buckets WHERE name = 'target'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(names, 1, "rename must not create a duplicate name");
+        assert!(
+            ds1.get_bucket("old").is_ok(),
+            "failed rename keeps the cache"
+        );
+        aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+    }
+
+    #[test]
     fn test_loading_same_name_device_rows_fails_without_hiding_history() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();

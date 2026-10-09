@@ -64,16 +64,79 @@ fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     // Verify it looks like an ActivityWatch info payload. Requiring the
     // AW-specific hostname/device_id fields (not just a version substring)
     // avoids misreading an unrelated service that happens to serve JSON.
+    // Python servers and Rust version overrides need not include a language suffix.
     let version = v["version"].as_str()?;
     let hostname = v["hostname"].as_str()?;
     v["device_id"].as_str()?;
-    if !version.contains("rust") && !version.contains("python") {
-        return None;
-    }
+
     Some(format!(
         "ActivityWatch server {version} ({hostname}) is already running on \
          port {port}; open http://localhost:{port} in your browser or stop it first"
     ))
+}
+
+#[cfg(test)]
+mod port_probe_tests {
+    use super::probe_aw_on_port;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    fn probe_response(body: &str) -> Option<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = format!(
+            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(b"GET /api/0/info HTTP/1.0\r\n"));
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let result = probe_aw_on_port("127.0.0.1", port);
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn identifies_python_server_without_language_suffix() {
+        let result = probe_response(
+            r#"{"version":"v0.13.2","hostname":"test-host","device_id":"test-device","testing":false}"#,
+        )
+        .expect("Python's info payload must be recognised");
+        assert!(result.contains("ActivityWatch server v0.13.2 (test-host) is already running"));
+    }
+
+    #[test]
+    fn identifies_rust_server_with_language_suffix() {
+        assert!(probe_response(
+            r#"{"version":"v0.14.0 (rust)","hostname":"test-host","device_id":"test-device","testing":false}"#,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn rejects_unrelated_or_malformed_info_payloads() {
+        for body in [
+            r#"{"version":"python 3.11"}"#,
+            r#"{"version":"v0.13.2","hostname":"test-host"}"#,
+            r#"{"version":13,"hostname":"test-host","device_id":"test-device"}"#,
+            "not JSON",
+        ] {
+            assert!(probe_response(body).is_none(), "unexpected match: {body}");
+        }
+    }
 }
 
 /// Returns a per-OS hint for locating the process that owns a port.

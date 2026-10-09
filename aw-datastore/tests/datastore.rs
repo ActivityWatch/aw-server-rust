@@ -1865,7 +1865,8 @@ mod datastore_tests {
         b1.device_id = "device-A".to_string();
         ds.create_bucket(&b1).unwrap();
         let event = test_event(Utc::now(), Duration::seconds(1));
-        ds.insert_events(&b1.id, &[event.clone()]).unwrap();
+        ds.insert_events(&b1.id, std::slice::from_ref(&event))
+            .unwrap();
         let original = ds.get_bucket(&b1.id).unwrap();
 
         let mut b2 = b1.clone();

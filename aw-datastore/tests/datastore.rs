@@ -1892,6 +1892,38 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_stale_connection_rejects_same_name_different_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-cache.db");
+        let conn1 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds1 = aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+        let conn2 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds2 = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        // Both caches are empty before either connection creates the bucket.
+        let mut bucket = test_bucket();
+        bucket.device_id = "device-A".to_string();
+        ds1.create_bucket(&conn1, bucket.clone()).unwrap();
+        bucket.device_id = "device-B".to_string();
+        assert!(matches!(
+            ds2.create_bucket(&conn2, bucket.clone()),
+            Err(DatastoreError::BucketAlreadyExists(_))
+        ));
+        let count: i64 = conn2
+            .query_row("SELECT count(*) FROM buckets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "stale cache must not allow an ambiguous SQL row");
+        assert!(matches!(
+            ds2.get_bucket(&bucket.id),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        let reopened = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        assert_eq!(
+            reopened.get_bucket(&bucket.id).unwrap().device_id,
+            "device-A"
+        );
+    }
+
+    #[test]
     fn test_loading_same_name_device_rows_fails_without_hiding_history() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();

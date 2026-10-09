@@ -834,7 +834,8 @@ impl DatastoreInstance {
         let mut stmt = match conn.prepare_cached(
             "
                 INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                WHERE NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
         ) {
             Ok(buckets) => buckets,
             Err(err) => {
@@ -855,6 +856,10 @@ impl DatastoreInstance {
         ]);
 
         match res {
+            // The cache may be stale when another connection created this name.
+            // Checking in the INSERT makes rejection atomic across writers;
+            // a skipped insert must not reuse last_insert_rowid or update the cache.
+            Ok(0) => Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string())),
             Ok(_) => {
                 info!("Created bucket {}", bucket.id);
                 // Get and set rowid

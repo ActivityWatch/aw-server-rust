@@ -789,6 +789,132 @@ mod api_tests {
         assert_eq!(events[0]["data"]["title"], "readme.md");
     }
 
+    /// Stored events are redacted, so dedup must compare the filtered form of the
+    /// incoming raw event, or every re-import appends a copy (aw-server-rust#767).
+    #[test]
+    fn test_reimport_with_redact_rule_is_idempotent() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        let rules = json!([{
+            "enabled": true,
+            "field": "title",
+            "pattern": "(?i)secret",
+            "action": "redact",
+            "replacement": "[redacted]"
+        }]);
+        assert_eq!(
+            set_setting_request(&client, "privacy_filters", &rules),
+            rocket::http::Status::Created
+        );
+
+        let import = || {
+            let res = client
+                .post("/api/0/import")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(
+                    r#"{"buckets":{"redact-b":{
+                        "id":"redact-b","type":"currentwindow",
+                        "client":"aw-watcher-window","hostname":"test",
+                        "events":[
+                            {"id":42,"timestamp":"2001-01-01T00:00:00Z","duration":1.0,
+                             "data":{"title":"my secret file","app":"Firefox"}},
+                            {"id":43,"timestamp":"2001-01-01T00:00:01Z","duration":1.0,
+                             "data":{"title":"readme.md","app":"Firefox"}}
+                        ]
+                    }}}"#,
+                )
+                .dispatch();
+            assert_eq!(res.status(), rocket::http::Status::Ok);
+        };
+        let events = || -> Vec<serde_json::Value> {
+            let res = client
+                .get("/api/0/buckets/redact-b/events")
+                .header(host.clone())
+                .dispatch();
+            serde_json::from_str(&res.into_string().unwrap()).unwrap()
+        };
+
+        // New bucket, then two merge-path re-imports of the same raw export
+        import();
+        assert_eq!(events().len(), 2);
+        import();
+        import();
+        let after = events();
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(after.iter().any(|e| e["data"]["title"] == "[redacted]"));
+    }
+
+    /// A rule enabled *after* events were stored leaves those rows unredacted, so
+    /// the incoming raw event's filtered form no longer matches them. Dedup must
+    /// still recognize the raw identity as a duplicate, or a re-import appends a
+    /// copy the pre-rule raw comparison used to skip.
+    #[test]
+    fn test_reimport_after_rule_enabled_is_idempotent() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        let import = |duration: &str, id: &str| {
+            let res = client
+                .post("/api/0/import")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(format!(
+                    r#"{{"buckets":{{"stale-b":{{
+                        "id":"stale-b","type":"currentwindow",
+                        "client":"aw-watcher-window","hostname":"test",
+                        "events":[
+                            {{"id":{id},"timestamp":"2001-01-01T00:00:00Z","duration":{duration},
+                             "data":{{"title":"my secret file","app":"Firefox"}}}}
+                        ]
+                    }}}}}}"#
+                ))
+                .dispatch();
+            assert_eq!(res.status(), rocket::http::Status::Ok);
+        };
+        let events = || -> Vec<serde_json::Value> {
+            let res = client
+                .get("/api/0/buckets/stale-b/events")
+                .header(host.clone())
+                .dispatch();
+            serde_json::from_str(&res.into_string().unwrap()).unwrap()
+        };
+
+        // Store raw (5.0s), then enable the rule: the stored row stays unredacted.
+        import("5.0", "null");
+        let stored = events();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0]["duration"], 5.0);
+
+        let rules = json!([{
+            "enabled": true,
+            "field": "title",
+            "pattern": "(?i)secret",
+            "action": "redact",
+            "replacement": "[redacted]"
+        }]);
+        assert_eq!(
+            set_setting_request(&client, "privacy_filters", &rules),
+            rocket::http::Status::Created
+        );
+
+        // Same raw export re-imported: the raw identity must still match.
+        import("5.0", "null");
+        let after = events();
+        assert_eq!(after.len(), 1, "{after:?}");
+
+        // Older/shorter export of the same id+start with the same raw data must
+        // not shrink the longer unredacted local row (the filtered form differs).
+        import("1.0", "1");
+        let after_stale = events();
+        assert_eq!(after_stale.len(), 1, "{after_stale:?}");
+        assert_eq!(after_stale[0]["duration"], 5.0, "{after_stale:?}");
+        assert_eq!(after_stale[0]["data"]["title"], "my secret file");
+    }
+
     #[test]
     fn test_import_export() {
         let server = setup_testserver();

@@ -112,14 +112,44 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                             .filter_map(|e| e.id.map(|id| (id, e)))
                             .collect();
 
-                        // Filter out events already present (matched by timestamp, duration, data)
+                        // Stored events went through the privacy filter, so compare the
+                        // *filtered* form of each incoming event (a redacted title never
+                        // matches its raw source). The raw event is what gets inserted: the
+                        // datastore filters it once on insert, so rules are never applied twice.
+                        // Events the filter would drop are skipped here.
+                        let filtered =
+                            datastore
+                                .filter_events(&bucket.id, &events_vec)
+                                .map_err(|e| {
+                                    HttpErrorJson::new(
+                                        Status::InternalServerError,
+                                        format!(
+                                            "Failed to preview privacy filter for '{}': {e:?}",
+                                            bucket.id
+                                        ),
+                                    )
+                                })?;
+
+                        // Filter out events already present (matched by timestamp, duration, data).
+                        // Stored rows may predate a privacy rule (raw/unredacted) or postdate it
+                        // (redacted), so match each incoming event against both its raw and its
+                        // filtered form. Comparing only the filtered form would make a rule enabled
+                        // after storage append copies of rows the raw comparison used to skip.
                         let new_events: Vec<_> = events_vec
                             .into_iter()
-                            .map(|event| Ok((event_identity(&event)?, event)))
+                            .zip(filtered)
+                            .filter_map(|(event, filtered)| filtered.map(|f| (event, f)))
+                            .map(|(event, filtered)| {
+                                let raw_identity = event_identity(&event)?;
+                                let filtered_identity = event_identity(&filtered)?;
+                                Ok((raw_identity, filtered_identity, event, filtered))
+                            })
                             .collect::<Result<Vec<_>, HttpErrorJson>>()?
                             .into_iter()
-                            .filter_map(|(identity, mut event)| {
-                                if existing_identities.contains(&identity) {
+                            .filter_map(|(raw_identity, filtered_identity, mut event, filtered)| {
+                                if existing_identities.contains(&raw_identity)
+                                    || existing_identities.contains(&filtered_identity)
+                                {
                                     return None;
                                 }
                                 if let Some(id) = event.id {
@@ -130,9 +160,12 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                                             // Stale backup of the same activity: keep the
                                             // longer local event. A data change at the same
                                             // id+start is a correction and must replace,
-                                            // even if duration shrank.
+                                            // even if duration shrank. Compare both forms:
+                                            // a stored row that predates the rule is raw,
+                                            // so the filtered incoming data would not match.
                                             if event.duration < existing_event.duration
-                                                && event.data == existing_event.data
+                                                && (filtered.data == existing_event.data
+                                                    || event.data == existing_event.data)
                                             {
                                                 return None;
                                             }

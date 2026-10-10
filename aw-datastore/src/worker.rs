@@ -126,6 +126,7 @@ pub enum Response {
     BucketMap(HashMap<String, Bucket>),
     Event(Event),
     EventList(Vec<Event>),
+    FilteredEvents(Vec<Option<Event>>),
     Count(i64),
     KeyValue(String),
     KeyValues(HashMap<String, String>),
@@ -147,6 +148,7 @@ pub enum Command {
     GetBucket(String),
     GetBuckets(),
     InsertEvents(String, Vec<Event>),
+    FilterEvents(String, Vec<Event>),
     Heartbeat(String, Event, f64),
     GetEvent(String, i64),
     GetEvents(
@@ -502,6 +504,12 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
+            Command::FilterEvents(bucketname, events) => Ok(Response::FilteredEvents(
+                events
+                    .into_iter()
+                    .map(|e| self.privacy_engine.filter_event(&bucketname, e))
+                    .collect(),
+            )),
             Command::Heartbeat(bucketname, event, pulsetime) => {
                 // Apply privacy filter to heartbeat
                 let filtered = match self.privacy_engine.filter_event(&bucketname, event.clone()) {
@@ -832,6 +840,21 @@ impl Datastore {
         let cmd = Command::InsertEvents(bucket_id.to_string(), events.to_vec());
         match self.request(cmd)? {
             Response::EventList(events) => Ok(events),
+            _ => panic!("Invalid response"),
+        }
+    }
+
+    /// Preview what the privacy filter would store for each event (`None` = dropped),
+    /// without inserting anything. Lets callers compare an incoming event against stored
+    /// (already filtered) events while the rules still run exactly once, on insert.
+    pub fn filter_events(
+        &self,
+        bucket_id: &str,
+        events: &[Event],
+    ) -> Result<Vec<Option<Event>>, DatastoreError> {
+        let cmd = Command::FilterEvents(bucket_id.to_string(), events.to_vec());
+        match self.request(cmd)? {
+            Response::FilteredEvents(events) => Ok(events),
             _ => panic!("Invalid response"),
         }
     }

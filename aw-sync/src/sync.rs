@@ -9,7 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -54,6 +54,33 @@ impl Default for SyncSpec {
     }
 }
 
+/// Open (or create) the cursors.db for a given source device under `root`.
+///
+/// Cursors are stored under `.cursors/{device_id}/cursors.db`.  The leading dot
+/// means both the 3-level (`list_remote_dbs`) and 2-level (`find_remotes`)
+/// peer-discovery walkers skip the directory, so `cursors.db` is never mistaken
+/// for a peer activity database and chosen over the real data file.
+fn open_or_create_cursor_ds(root: &Path, device_id: &str) -> Result<Datastore, String> {
+    let dir = root.join(".cursors").join(device_id);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create cursor dir {}: {e}", dir.display()))?;
+    create_datastore(&dir.join("cursors.db"))
+}
+
+/// Key identifying the last-synced source rowid for a given (device, bucket) pair.
+///
+/// Components are joined with U+001F (ASCII unit separator). Any U+001F within
+/// a component is percent-encoded as `%1F` so the separator remains unambiguous
+/// even for user-controlled device and bucket IDs that may contain control chars.
+/// For normal watcher-generated IDs the key format is unchanged (replace is no-op).
+fn cursor_key(src_device_id: &str, bucket_id: &str) -> String {
+    // Escape `%` before `\u{1f}` so that a literal `%1F` in an input string
+    // cannot collide with an escaped unit-separator: "A%1F" → "A%251F" while
+    // "A\u{1f}" → "A%1F", keeping the two distinct.
+    let enc = |s: &str| s.replace('%', "%25").replace('\u{1f}', "%1F");
+    format!("sync.cursor.{}\u{1f}{}", enc(src_device_id), enc(bucket_id))
+}
+
 /// Discover all sync peers reachable from `sync_root`, excluding `own_device_id`.
 ///
 /// Unions the 3-level Android/new-desktop walker (`list_remote_dbs`) with the
@@ -81,10 +108,27 @@ pub(crate) fn discover_peers(
 /// A `Ok` report is complete. On error, a partial report (failed peer, any
 /// peers already imported) is persisted so `aw-sync status` can show the
 /// failure without the process having to stay alive.
+///
+/// Pull cursors are stored under `sync_spec.path`, which must be the sync root.
+/// Callers whose `path` is a host subfolder use [`sync_run_with_cursor_root`].
 pub fn sync_run(
     client: &AwClient,
     sync_spec: &SyncSpec,
     mode: SyncMode,
+) -> Result<SyncReport, Box<dyn Error>> {
+    sync_run_with_cursor_root(client, sync_spec, mode, sync_spec.path.as_path())
+}
+
+/// [`sync_run`] with an explicit root for the pull-cursor store.
+///
+/// Every pull of a given peer must resolve the same cursor store, whatever
+/// `sync_spec.path` points at; otherwise one pull mode replays rows another
+/// mode already copied. Pass the sync root.
+pub(crate) fn sync_run_with_cursor_root(
+    client: &AwClient,
+    sync_spec: &SyncSpec,
+    mode: SyncMode,
+    cursor_root: &Path,
 ) -> Result<SyncReport, Box<dyn Error>> {
     let mut report = SyncReport::new(mode);
     let info = client.get_info()?;
@@ -189,7 +233,30 @@ pub fn sync_run(
             .iter()
             .map(|(db, ds)| (db, ds as &dyn AccessMethod))
             .collect();
-        if let Err(e) = pull_from_remotes(&remotes, client, sync_spec, &mut report, true) {
+        // Open a cursor datastore for each peer's device_id so aw-sync can
+        // resume from the last-seen source rowid rather than the destination's
+        // newest timestamp — fixing late-arriving backfill blindness (#696).
+        // Non-fatal: if cursor_ds creation fails we fall back to the
+        // timestamp-based path silently.
+        let cursor_ds = open_or_create_cursor_ds(cursor_root, device_id)
+            .map_err(|e| {
+                warn!("Could not open cursor datastore: {e}; falling back to timestamp-based sync");
+            })
+            .ok();
+        let pull_result = pull_from_remotes(
+            &remotes,
+            client,
+            sync_spec,
+            &mut report,
+            true,
+            cursor_ds.as_ref(),
+        );
+        // Close the cursor datastore on both paths: a long-lived daemon must
+        // not leak the connection across failed pull passes.
+        if let Some(cds) = cursor_ds {
+            cds.close();
+        }
+        if let Err(e) = pull_result {
             report.finish();
             crate::report::persist_last_report_warn(&report);
             close_opened_datastores(&ds_remotes, &ds_localremote);
@@ -406,13 +473,17 @@ fn pull_from_remotes(
     sync_spec: &SyncSpec,
     report: &mut SyncReport,
     record_peers: bool,
+    cursor_ds: Option<&Datastore>,
 ) -> Result<(), String> {
     let mut attempted = 0usize;
     let mut succeeded = 0usize;
     let mut last_err: Option<String> = None;
     for (db, ds_from) in remotes {
         attempted += 1;
-        match sync_datastores(*ds_from, dest, false, None, sync_spec) {
+        let src_did = Some(db.device_id.as_str());
+        match sync_datastores_with_cursor(
+            *ds_from, dest, false, None, sync_spec, cursor_ds, src_did,
+        ) {
             Ok(buckets) => {
                 succeeded += 1;
                 if record_peers {
@@ -724,20 +795,31 @@ pub fn sync_datastores(
     src_did: Option<&str>,
     sync_spec: &SyncSpec,
 ) -> Result<Vec<BucketReport>, String> {
-    // FIXME: "-synced" should only be appended when synced to the local database, not to the
-    // staging area for local buckets.
-    info!("Syncing {:?} to {:?}", ds_from, ds_to);
+    // Delegate to the cursor-aware variant with no cursor state so the external
+    // API is unchanged.  All bucket-selection, hostname-fix, error-reporting and
+    // logging logic lives in one place; changes no longer need to be made twice.
+    sync_datastores_with_cursor(ds_from, ds_to, is_push, src_did, sync_spec, None, None)
+}
 
+/// Core bucket-sync loop used by both `sync_datastores` (no cursor state) and
+/// cursor-aware internal callers.  When `cursor_ds` and `src_device_id` are both
+/// provided and the source supports rowid queries, each bucket's sync resumes
+/// from the persisted per-source rowid cursor instead of the destination's newest
+/// timestamp.
+fn sync_datastores_with_cursor(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    is_push: bool,
+    src_did: Option<&str>,
+    sync_spec: &SyncSpec,
+    cursor_ds: Option<&Datastore>,
+    src_device_id: Option<&str>,
+) -> Result<Vec<BucketReport>, String> {
+    info!("Syncing {:?} to {:?} (cursor path)", ds_from, ds_to);
     let mut buckets_from: Vec<Bucket> = ds_from
         .get_buckets()
         .map_err(|e| format!("Failed to list buckets in {ds_from:?}: {e}"))?
         .iter_mut()
-        // Never sync a bucket that is itself a copy synced from another host.
-        // A host must only ever offer data it collected itself. Without this,
-        // HOSTA's buckets reach HOSTB, are re-exported by HOSTB's next push, and
-        // come back to HOSTA as `<bucket>_HOSTA-synced-from-HOSTA` — a duplicate
-        // of the local bucket, so /timeline renders every event twice.
-        // See https://github.com/orgs/ActivityWatch/discussions/1373
         .filter(|tup| {
             if is_synced_bucket(tup.1) {
                 debug!(" - Skipping already-synced bucket '{}'", tup.1.id);
@@ -746,30 +828,20 @@ pub fn sync_datastores(
                 true
             }
         })
-        // Only filter buckets if specific bucket IDs are provided
         .filter(|tup| {
             let bucket = &tup.1;
             if let Some(buckets) = &sync_spec.buckets {
-                // If "*" is in the buckets list or no buckets specified, sync all buckets
                 if buckets.iter().any(|b_id| b_id == "*") || buckets.is_empty() {
                     true
                 } else {
                     buckets.iter().any(|b_id| b_id == &bucket.id)
                 }
             } else {
-                // By default, sync all buckets
                 true
             }
         })
         .map(|tup| {
-            // TODO: Refuse to sync buckets without hostname/device ID set, or if set to 'unknown'
             if tup.1.hostname == "unknown" {
-                // Only the push path carries a source device ID to substitute.
-                // On pull there is none, and continuing would give the bucket a
-                // `-synced-from-unknown` destination ID shared by every remote
-                // with that bucket ID, mixing events from unrelated devices.
-                // Refuse the sync instead (the previous code unwrapped the None
-                // here, which on Android aborts the whole app).
                 let did = src_did.ok_or_else(|| {
                     format!(
                         "Bucket '{}' has an unknown hostname/device ID and there is no source \
@@ -784,7 +856,6 @@ pub fn sync_datastores(
         })
         .collect::<Result<Vec<Bucket>, String>>()?;
 
-    // Log warning for buckets requested but not found
     if let Some(buckets) = &sync_spec.buckets {
         for b_id in buckets {
             if !buckets_from.iter().any(|b| b.id == *b_id) {
@@ -793,12 +864,8 @@ pub fn sync_datastores(
         }
     }
 
-    // Sync buckets in order of most recently updated
     buckets_from.sort_by_key(|b| b.metadata.end);
 
-    // Partial failure is non-fatal (one bad bucket must not skip the rest).
-    // Total failure must still be Err: otherwise a destination that is down
-    // reports success, which is the #682 silence reintroduced via #688's skip.
     let mut buckets = Vec::with_capacity(buckets_from.len());
     let mut attempted = 0usize;
     let mut succeeded = 0usize;
@@ -814,7 +881,15 @@ pub fn sync_datastores(
                 continue;
             }
         };
-        match sync_one(ds_from, ds_to, bucket_from, bucket_to, sync_spec) {
+        match sync_one(
+            ds_from,
+            ds_to,
+            bucket_from,
+            bucket_to,
+            sync_spec,
+            cursor_ds,
+            src_device_id,
+        ) {
             Ok(synced) => {
                 succeeded += 1;
                 buckets.push(synced);
@@ -861,36 +936,72 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
 /// also re-fetched as a start-clipped fragment, and heartbeat() refuses to
 /// merge different data, which would insert a duplicate unless dest already
 /// holds the new payload.
+///
+/// Returns the source ids of every in-window event that is now present on
+/// dest (already matching, or just inserted as a replacement). The rowid
+/// cursor path skips these: an edit is a new source row with a rowid above the
+/// cursor, so without the skip it would be inserted a second time.
 fn reconcile_updated_events(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
-) -> Result<(), String> {
+    use_unclipped_source: bool,
+) -> Result<HashSet<i64>, String> {
+    let mut on_dest: HashSet<i64> = HashSet::new();
     let Some(resume) = resume_sync_at else {
-        return Ok(());
+        return Ok(on_dest);
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
 
     // Bound both fetches to the lookback window ending at `resume`.
     // end=None would load every newer source event when dest is far behind,
     // exhausting Android RAM and bypassing the paginated incremental copy.
-    // get_events clips to the query range; dest-latest ends at `resume`, so
-    // that clip is a no-op on its (timestamp, duration) identity. Title edits
-    // keep duration; duration-only updates stay on the heartbeat path. Do not
-    // also cap by count — a newest-first cap silently skips older in-window
-    // edits.
+    //
+    // Source is fetched UNCLIPPED when the rowid cursor path will be active
+    // (`use_unclipped_source = true`). Unclipped preserves the true end_time of
+    // a duration-only edit (same timestamp, same data, longer duration), giving
+    // it an identity (timestamp, duration) distinct from the dest copy — so
+    // reconcile does NOT mark the source rowid as "on_dest" and the rowid path
+    // can handle the replacement itself (delete clipped copy + insert full).
+    //
+    // When the rowid cursor is NOT active (push path, timestamp-fallback path),
+    // `use_unclipped_source = false`: source is fetched CLIPPED. With clipped
+    // source, a duration-only edit has the same identity as the dest copy, so
+    // the timestamp-based heartbeat path naturally extends the destination
+    // duration. More importantly, an edit that changes BOTH duration AND data
+    // produces a source event whose clipped identity matches the dest copy —
+    // the data mismatch triggers the replacement insert + stale delete here,
+    // and the tail portion (from resume onward) is picked up by the incremental
+    // timestamp path. Without clipping, the identity mismatch would leave the
+    // stale dest row in place and the heartbeat would insert only the tail,
+    // keeping the old data in the head portion (ActivityWatch/aw-server-rust#789).
+    //
+    // Dest is fetched with clipping (get_events): dest-latest ends exactly at
+    // `resume`, so that clip is a no-op on its identity.
+    //
+    // Do not also cap by count — a newest-first cap silently skips older
+    // in-window edits.
     //
     // Datastore errors return rather than unwrap: a panic here aborts the
     // whole pass (and on Android, the JNI frame). The per-bucket skip in
     // ActivityWatch/aw-server-rust#697 then drops this bucket, not the daemon.
-    let source_events = ds_from.get_events(
-        bucket_from.id.as_str(),
-        Some(lookback_start),
-        Some(resume),
-        None,
-    )?;
+    let source_events = if use_unclipped_source {
+        ds_from.get_events_unclipped(
+            bucket_from.id.as_str(),
+            Some(lookback_start),
+            Some(resume),
+            None,
+        )?
+    } else {
+        ds_from.get_events(
+            bucket_from.id.as_str(),
+            Some(lookback_start),
+            Some(resume),
+            None,
+        )?
+    };
     let dest_events = ds_to.get_events(
         bucket_to.id.as_str(),
         Some(lookback_start),
@@ -909,6 +1020,12 @@ fn reconcile_updated_events(
     }
 
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
+    // (timestamp, data) set across ALL source events in the window.  Used below
+    // to protect dest events that are clipped copies of a longer source event:
+    // if the source still has an event with the same (timestamp, data) (any
+    // duration), the dest copy is not stale — only its end_time differs.
+    let mut source_ts_data: HashSet<(DateTime<Utc>, serde_json::Map<String, serde_json::Value>)> =
+        HashSet::new();
     for src in source_events {
         // Skip events that start at/after the dest cursor; the incremental
         // copy owns those. Do not use end>resume: the dest-latest event starts
@@ -916,6 +1033,7 @@ fn reconcile_updated_events(
         if src.timestamp < lookback_start || src.timestamp >= resume {
             continue;
         }
+        source_ts_data.insert((src.timestamp, src.data.clone()));
         src_by_identity
             .entry(event_identity(&src))
             .or_default()
@@ -927,6 +1045,9 @@ fn reconcile_updated_events(
             Some(dsts) if !dsts.is_empty() => dsts,
             _ => continue,
         };
+        // Every source row in a group that exists on dest ends up on dest:
+        // either it already matches or it is inserted below.
+        on_dest.extend(srcs.iter().filter_map(|src| src.id));
         let mut to_insert = Vec::new();
         for src in srcs {
             if let Some(idx) = dsts.iter().position(|dst| dst.data == src.data) {
@@ -953,14 +1074,49 @@ fn reconcile_updated_events(
                 .collect();
             ds_to.insert_events(bucket_to.id.as_str(), replacements)?;
         }
-        let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
+        // Protect clipped dest copies: if the source still has an event with
+        // the same (timestamp, data) — even with a different (longer) end_time —
+        // the dest copy is valid and must not be deleted.  Only delete dest events
+        // whose (timestamp, data) has no counterpart in source at all.
+        let stale: Vec<i64> = dsts
+            .into_iter()
+            .filter(|dst| !source_ts_data.contains(&(dst.timestamp, dst.data.clone())))
+            .filter_map(|dst| dst.id)
+            .collect();
         if !stale.is_empty() {
             ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
         }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
-    Ok(())
+    Ok(on_dest)
 }
+
+/// (start, data) fingerprint of a source event, used to decide whether a
+/// destination row is still represented in the source at its timestamp.
+///
+/// end_time is deliberately excluded: a destination copy may carry an end_time
+/// that was clipped by a previous timestamp-path sync, while the source still
+/// holds the same event with its true (longer) end_time.  Comparing on end_time
+/// would falsely mark the dest row as stale and delete it even though the source
+/// still has an event with the same start and data.
+///
+/// Duration-only edits (same timestamp+data, new duration) are detected separately
+/// via the chunk: if the chunk contains an event with the same (timestamp, data) as
+/// a dest row but a different end_time, the dest copy is a replacement target.
+/// See the stale-row loop below.
+type SourceFingerprint = (
+    chrono::DateTime<chrono::Utc>,
+    serde_json::Map<String, serde_json::Value>,
+);
+/// Replay-dedup key for the rowid cursor path: a replayed source row is
+/// byte-identical to its destination copy, so the full stored interval plus
+/// data identifies it without dropping distinct events that share only the
+/// end time and data.
+type ReplayFingerprint = (
+    DateTime<Utc>,
+    DateTime<Utc>,
+    serde_json::Map<String, serde_json::Value>,
+);
 
 /// Syncs a single bucket from one datastore to another
 fn sync_one(
@@ -969,6 +1125,8 @@ fn sync_one(
     bucket_from: Bucket,
     bucket_to: Bucket,
     sync_spec: &SyncSpec,
+    cursor_ds: Option<&Datastore>,
+    src_device_id: Option<&str>,
 ) -> Result<BucketReport, String> {
     let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
@@ -992,7 +1150,338 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    // Upgrade bootstrap defers its cursor persist until the timestamp path it
+    // prefaces completes successfully (set inside the cursor block below,
+    // consumed at the end of this function).
+    let mut deferred_bootstrap_cursor: Option<(&Datastore, String, i64)> = None;
+
+    // Decide whether THIS pass will actually take the rowid fast path BEFORE
+    // calling reconcile. `cursor_ds.is_some()` is not enough: upgrade bootstrap
+    // and HTTP peers (`get_events_since_rowid` = None) both fall through to the
+    // timestamp path. Unclipped source on those passes leaves a duration+data
+    // edit's stale dest head in place (ActivityWatch/aw-server-rust#789).
+    let cursor_ctx: Option<(&Datastore, String, i64, bool)> =
+        if let (Some(ck_did), Some(cds)) = (src_device_id, cursor_ds) {
+            let ck = cursor_key(ck_did, &bucket_from.id);
+
+            // P3: Empty destination means the bucket was just created or was deleted
+            // and recreated.  Always reset the cursor to 0 so the full history is
+            // pulled instead of starting from a stale position left over from the
+            // previous incarnation of the bucket.
+            // A source bucket that was deleted and recreated restarts its rowid
+            // sequence at 1. A stored cursor above the current source max rowid
+            // therefore means the cursor refers to a previous incarnation of the
+            // bucket: keep it and every new row below it would be skipped forever.
+            // Reset to 0; the empty-destination and bootstrap logic below then
+            // re-establishes a sane position.
+            let source_max_rowid = ds_from
+                .get_max_event_rowid(bucket_from.id.as_str())
+                .and_then(|r| r.ok())
+                .unwrap_or(i64::MAX);
+            let stored_rowid: i64 = if eventcount_to_old == 0 {
+                0
+            } else {
+                let stored: i64 = cds
+                    .get_key_value(&ck)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                if stored > source_max_rowid {
+                    warn!(
+                        "Stored cursor {} for '{}' is above source max rowid {}; \
+                         source bucket was likely recreated — resetting cursor",
+                        stored, bucket_from.id, source_max_rowid
+                    );
+                    0
+                } else {
+                    stored
+                }
+            };
+
+            // P1 (upgrade bootstrap): saved_rowid == 0 but the destination already
+            // has events means this is the first pass after upgrading from the
+            // timestamp-based cursor path.  Re-inserting all source history would
+            // create duplicates.  Instead, bootstrap the cursor to the current source
+            // max rowid so subsequent passes only fetch genuinely new events — and
+            // fall through to the timestamp path for *this* pass so new events since
+            // the last timestamp-based sync are still caught.
+            let bootstrap_pass = stored_rowid == 0 && eventcount_to_old > 0;
+            Some((cds, ck, stored_rowid, bootstrap_pass))
+        } else {
+            None
+        };
+
+    // Use unclipped source in reconcile only when the rowid fast path will
+    // actually run. The rowid path handles duration-only edits (new source
+    // rowid, identity mismatch keeps it out of `on_dest`). For push/timestamp
+    // paths — including upgrade bootstrap and HTTP peers — clipped source
+    // lets the identity match resolve both data-only and combined
+    // duration+data edits without relying on the rowid path.
+    let source_supports_rowid = ds_from
+        .get_max_event_rowid(bucket_from.id.as_str())
+        .is_some();
+    let use_unclipped_source = match &cursor_ctx {
+        Some((_, _, _, bootstrap_pass)) => source_supports_rowid && !*bootstrap_pass,
+        None => false,
+    };
+    let reconciled = reconcile_updated_events(
+        ds_from,
+        ds_to,
+        &bucket_from,
+        &bucket_to,
+        resume_sync_at,
+        use_unclipped_source,
+    )?;
+
+    // ── Rowid cursor fast path ──────────────────────────────────────────────
+    // When the source is a file-based Datastore and a cursor_ds is provided,
+    // resume from the last persisted source rowid instead of the destination's
+    // newest timestamp.  This catches late-arriving events (backfills, retroactive
+    // edits) that have old timestamps but newer rowids, which the
+    // destination-as-marker path permanently misses (#696).
+    //
+    // Falls through to the timestamp-based path below when:
+    //   - cursor_ds or src_device_id is None (AwClient source, HTTP-only path), or
+    //   - ds_from.get_events_since_rowid returns None (AwClient impl), or
+    //   - saved_rowid == 0 and destination already has events (upgrade bootstrap,
+    //     see below).
+    if let Some((cds, ck, stored_rowid, bootstrap_pass)) = cursor_ctx {
+        if bootstrap_pass {
+            if let Some(Ok(max_rowid)) = ds_from.get_max_event_rowid(bucket_from.id.as_str()) {
+                // Do NOT persist the bootstrapped cursor yet: this pass still
+                // runs the timestamp path to copy events that arrived since the
+                // last timestamp-based sync. Persisting first would lose those
+                // events if the timestamp path fails partway (the next pass
+                // would skip everything below the cursor). The cursor is
+                // persisted after the timestamp path succeeds for this bucket.
+                info!(
+                    "  ⤴  Bootstrapping rowid cursor for '{}' to {} after this \
+                     timestamp-path pass (upgrade from timestamp path)",
+                    bucket_from.id, max_rowid
+                );
+                deferred_bootstrap_cursor = Some((cds, ck.clone(), max_rowid));
+            }
+            // Fall through to the timestamp path for this pass.
+        } else if let Some(first_result) = ds_from.get_events_since_rowid(
+            bucket_from.id.as_str(),
+            stored_rowid,
+            Some(BATCH_SIZE as u64),
+        ) {
+            let (first_batch, first_scanned) = first_result.map_err(|e| {
+                format!(
+                    "get_events_since_rowid failed for '{}': {e}",
+                    bucket_from.id
+                )
+            })?;
+            let mut current_batch = first_batch;
+            // max_rowid tracks the highest rowid scanned (including corrupt rows)
+            // so the cursor always advances past damaged rows and never stalls.
+            let mut max_rowid = first_scanned;
+            let mut events_sent = 0usize;
+            loop {
+                if current_batch.is_empty() {
+                    // Save cursor even on the empty-batch exit so the stored
+                    // position reflects max_scanned_rowid from the previous page.
+                    break;
+                }
+                let is_last = current_batch.len() < BATCH_SIZE;
+                // P4: Honour sync_spec.start: skip events that end before the
+                // requested start date.  Overlap semantics match the timestamp
+                // path, so an event crossing the start boundary is kept.  The
+                // cursor still advances past skipped rows (max_rowid already set
+                // above) so they are not re-fetched on subsequent passes.
+                // Rows reconcile_updated_events already placed on dest (edits
+                // are new source rows above the cursor) are skipped too.
+                let chunk: Vec<Event> = current_batch
+                    .into_iter()
+                    .filter(|e| {
+                        sync_spec
+                            .start
+                            .is_none_or(|start| e.timestamp + e.duration >= start)
+                    })
+                    .filter(|e| e.id.is_none_or(|id| !reconciled.contains(&id)))
+                    .map(|mut e| {
+                        e.id = None;
+                        e
+                    })
+                    .collect();
+                // Edits are delete+insert in the source: the replacement row
+                // usually keeps the original timestamp. reconcile_updated_events
+                // only sees the EDIT_RECONCILE_LOOKBACK window and matches on
+                // (timestamp, duration) identity, so a stale dest row survives
+                // its replacement when the edited event is older than the
+                // lookback window, or when the edit changed the duration (the
+                // new row's identity no longer matches the dest row). Probe dest
+                // for rows starting at a chunk timestamp holding different data
+                // and delete them before inserting the replacement. Rows with
+                // equal data are left alone (boundary duplicates are tolerated
+                // elsewhere), and heartbeat fragments never share a timestamp,
+                // so distinct same-timestamp events are not affected in practice.
+                // Replay dedup: a crash between insert_events and the cursor
+                // persist replays this page on the next pull. The rowid path has
+                // no source-id identity at the destination, so skip incoming
+                // events whose full (timestamp, end_time, data) fingerprint
+                // already exists here. A replayed row is byte-identical to the
+                // dest copy (get_events_unclipped returns true stored values),
+                // so the full triple identifies it; a distinct source event that
+                // merely shares end_time and data (e.g. 10:05-10:10 inserted
+                // after 10:00-10:10 was copied) differs in timestamp and must
+                // not be dropped, or the advancing cursor would lose it for good.
+                let mut existing: HashSet<ReplayFingerprint> = HashSet::new();
+                if !chunk.is_empty() {
+                    let ts_set: HashSet<DateTime<Utc>> =
+                        chunk.iter().map(|e| e.timestamp).collect();
+                    let min_ts = ts_set.iter().min().copied();
+                    let max_ts = ts_set.iter().max().copied();
+                    let mut stale: Vec<i64> = Vec::new();
+                    if let (Some(min), Some(max)) = (min_ts, max_ts) {
+                        // get_events end bound is exclusive; one second past
+                        // the newest chunk timestamp covers ns precision.
+                        // Use unclipped to preserve original timestamps: get_events
+                        // clips events to the query window, which can shift a dest
+                        // event's timestamp to match a chunk event at the boundary
+                        // and trigger false deletion.
+                        let near = ds_to.get_events_unclipped(
+                            bucket_to.id.as_str(),
+                            Some(min),
+                            Some(max + Duration::seconds(1)),
+                            None,
+                        )?;
+                        // Reconcile against the SOURCE, not against the chunk:
+                        // "some chunk event at this timestamp differs" cannot
+                        // distinguish an edit (old row deleted from source,
+                        // replacement inserted) from legitimate distinct events
+                        // sharing a timestamp (deleting the dest copy would be
+                        // data loss). A dest row is stale only if the source
+                        // currently has NO event with the same (end_time, data)
+                        // at that timestamp. Source rows below the cursor are
+                        // still returned by this window query, so untouched
+                        // coexisting events are never deleted.
+                        let source_near = ds_from.get_events_unclipped(
+                            bucket_from.id.as_str(),
+                            Some(min),
+                            Some(max + Duration::seconds(1)),
+                            None,
+                        )?;
+                        // (timestamp, data) — protects clipped dest copies; see
+                        // SourceFingerprint comment.
+                        let source_full: HashSet<ReplayFingerprint> = source_near
+                            .iter()
+                            .map(|e| (e.timestamp, e.timestamp + e.duration, e.data.clone()))
+                            .collect();
+                        let source_fps: HashSet<SourceFingerprint> = source_near
+                            .into_iter()
+                            .map(|e| (e.timestamp, e.data))
+                            .collect();
+                        // Duration-only replacement detection: if the chunk has an
+                        // event at (timestamp, data) but a different end_time than a
+                        // dest row, that dest row is a stale copy of the old duration.
+                        // The original source row was deleted and re-inserted with the
+                        // new duration (new rowid in the chunk), so source_fps still
+                        // contains the (timestamp, data) key and cannot detect this.
+                        let chunk_ts_data: HashSet<(DateTime<Utc>, _)> = chunk
+                            .iter()
+                            .map(|e| (e.timestamp, e.data.clone()))
+                            .collect();
+                        let chunk_fps: HashSet<(DateTime<Utc>, DateTime<Utc>, _)> = chunk
+                            .iter()
+                            .map(|e| (e.timestamp, e.timestamp + e.duration, e.data.clone()))
+                            .collect();
+                        for d in near {
+                            existing.insert((
+                                d.timestamp,
+                                d.timestamp + d.duration,
+                                d.data.clone(),
+                            ));
+                            let Some(id) = d.id else { continue };
+                            if !ts_set.contains(&d.timestamp) {
+                                continue;
+                            }
+                            let in_source = source_fps.contains(&(d.timestamp, d.data.clone()));
+                            // Chunk has same (timestamp, data) but different end_time →
+                            // this is a duration-only replacement, not just a coexisting
+                            // event. Unless the source still holds the dest row's exact
+                            // interval: then the chunk event is a distinct sibling that
+                            // only shares (timestamp, data), and the dest copy is live.
+                            let dest_fp = (d.timestamp, d.timestamp + d.duration, d.data.clone());
+                            let chunk_replaces = chunk_ts_data
+                                .contains(&(d.timestamp, d.data.clone()))
+                                && !chunk_fps.contains(&dest_fp)
+                                && !source_full.contains(&dest_fp);
+                            if !in_source || chunk_replaces {
+                                stale.push(id);
+                            }
+                        }
+                    }
+                    if !stale.is_empty() {
+                        ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
+                    }
+                }
+                let to_insert: Vec<Event> = chunk
+                    .iter()
+                    .filter(|e| {
+                        !existing.contains(&(e.timestamp, e.timestamp + e.duration, e.data.clone()))
+                    })
+                    .cloned()
+                    .collect();
+                events_sent += to_insert.len();
+                for batch in to_insert.chunks(BATCH_SIZE) {
+                    ds_to.insert_events(bucket_to.id.as_str(), batch.to_vec())?;
+                }
+                // P1 retry-safety: persist the cursor after every page so that a
+                // failure on a later page does not replay already-inserted pages;
+                // combined with the (timestamp, end_time, data) replay dedup
+                // above, a crash between insert and persist is safe to retry.
+                // The cursor datastore commits asynchronously, so force the
+                // commit here: otherwise a crash after set_key_value returns
+                // can still lose the cursor and widen the replay window.
+                cds.set_key_value(&ck, &max_rowid.to_string())
+                    .map_err(|e| {
+                        format!(
+                            "Failed to persist sync cursor for '{}': {e:?}",
+                            bucket_from.id
+                        )
+                    })?;
+                cds.force_commit().map_err(|e| {
+                    format!(
+                        "Failed to commit sync cursor for '{}': {e:?}",
+                        bucket_from.id
+                    )
+                })?;
+                if is_last {
+                    break;
+                }
+                let (next_batch, next_scanned) = ds_from
+                    .get_events_since_rowid(
+                        bucket_from.id.as_str(),
+                        max_rowid,
+                        Some(BATCH_SIZE as u64),
+                    )
+                    .unwrap_or_else(|| Ok((vec![], max_rowid)))
+                    .map_err(|e| {
+                        format!(
+                            "get_events_since_rowid (page) failed for '{}': {e}",
+                            bucket_from.id
+                        )
+                    })?;
+                max_rowid = next_scanned;
+                current_batch = next_batch;
+            }
+            let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str())?;
+            let new_events_count = eventcount_to_new - eventcount_to_old;
+            if new_events_count > 0 {
+                info!("  = Synced {} new events (rowid cursor)", events_sent);
+            } else {
+                info!("  ✓ Already up to date (rowid cursor)!");
+            }
+            return Ok(BucketReport {
+                bucket_id: bucket_to.id,
+                events_new: new_events_count,
+                resumed_at: resume_sync_at,
+            });
+        }
+    }
+    // ── End rowid cursor fast path; fall through to timestamp-based path ────
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch
@@ -1232,6 +1721,18 @@ fn sync_one(
                     bucket_from.id, bucket_to.id
                 );
             }
+        }
+    }
+
+    // Persist a deferred bootstrap cursor only now that the timestamp path
+    // finished successfully; on any `?` error above it stays unpersisted and
+    // the next pass re-bootstraps (retry-safe).
+    if let Some((cds, ck, max_rowid)) = deferred_bootstrap_cursor {
+        if let Err(e) = cds.set_key_value(&ck, &max_rowid.to_string()) {
+            warn!(
+                "Failed to persist bootstrapped sync cursor for '{}': {e:?}",
+                bucket_to.id
+            );
         }
     }
 
@@ -1582,8 +2083,15 @@ mod peer_isolation_tests {
         let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> =
             vec![(&db_a, &broken), (&db_b, &healthy)];
         let mut report = dummy_report();
-        pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, false)
-            .expect("partial failure must be Ok");
+        pull_from_remotes(
+            &remotes,
+            &dest,
+            &SyncSpec::default(),
+            &mut report,
+            false,
+            None,
+        )
+        .expect("partial failure must be Ok");
 
         let dest_buckets = dest.get_buckets().unwrap();
         assert!(
@@ -1607,8 +2115,15 @@ mod peer_isolation_tests {
         let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> =
             vec![(&db_a, &broken_a), (&db_b, &broken_b)];
         let mut report = dummy_report();
-        let err = pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, false)
-            .expect_err("total failure must be Err");
+        let err = pull_from_remotes(
+            &remotes,
+            &dest,
+            &SyncSpec::default(),
+            &mut report,
+            false,
+            None,
+        )
+        .expect_err("total failure must be Err");
         assert!(
             err.contains("all 2 peers failed"),
             "error should report total failure, got: {err}"
@@ -1801,8 +2316,15 @@ mod peer_isolation_tests {
             .iter()
             .map(|(db, ds)| (db, ds as &dyn AccessMethod))
             .collect();
-        pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, false)
-            .expect("pull from v4 peer must succeed");
+        pull_from_remotes(
+            &remotes,
+            &dest,
+            &SyncSpec::default(),
+            &mut report,
+            false,
+            None,
+        )
+        .expect("pull from v4 peer must succeed");
         let events = dest
             .get_events(
                 "aw-watcher-window_host-v4-synced-from-host-v4",
@@ -2033,5 +2555,1231 @@ mod daemon_peer_discovery_tests {
         );
 
         let _ = fs::remove_dir_all(&sync_root);
+    }
+}
+
+#[cfg(test)]
+mod rowid_cursor_tests {
+    //! Tests for the per-source rowid cursor introduced in #696.
+    //!
+    //! These tests live here (not in `tests/sync.rs`) to access the private
+    //! `sync_datastores_with_cursor` function.  The integration test file uses
+    //! only the public `sync_datastores` API, which does not thread cursor
+    //! state (cursor support is only available on the `sync_run` pull path).
+
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn make_bucket(id: &str, hostname: &str) -> Bucket {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": "test",
+            "hostname": hostname,
+            "client": "test"
+        }))
+        .unwrap()
+    }
+
+    fn make_event(ts_offset_secs: i64) -> Event {
+        let ts = Utc::now() - Duration::seconds(3600) + Duration::seconds(ts_offset_secs);
+        serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 1,
+            "data": {"seq": ts_offset_secs}
+        }))
+        .unwrap()
+    }
+
+    /// Core invariant: late-arriving events (old timestamps, new insertion order)
+    /// must reach the destination on the second pull.
+    ///
+    /// Timeline:
+    ///   1. Insert events T10, T20, T30 into source.
+    ///   2. Pull with cursor — establishes cursor at rowid 3 (3 events seen).
+    ///   3. Insert BACKFILL event T5 (timestamp OLDER than everything already
+    ///      synced) plus new event T40 into source.
+    ///   4. Pull again with the same cursor — cursor was at rowid 3, so both
+    ///      the backfill (rowid 4) and T40 (rowid 5) must be fetched.
+    ///
+    /// Without the rowid cursor, step 4 would use `resume_sync_at = T30+1s`
+    /// (dest newest end-time), and T5 would be permanently invisible.
+    #[test]
+    fn late_arriving_backfill_syncs_on_second_pull() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        // Cursor database lives in a temporary directory.
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-test-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        // Source bucket hostname must match what sync builds the dest bucket id from.
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        // ── First batch: three events with well-separated timestamps ──────────
+        let batch1: Vec<Event> = [10i64, 20, 30].iter().map(|&s| make_event(s)).collect();
+        ds_src.insert_events(bucket_id, &batch1).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let src_did = src_hostname;
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_did),
+        )
+        .expect("first pull must succeed");
+
+        let after_first = ds_dest
+            .get_event_count(&dest_bucket_id, None, None)
+            .unwrap();
+        assert_eq!(
+            after_first, 3,
+            "first pull must import the 3 initial events"
+        );
+
+        // ── Backfill: insert T5 (OLDER timestamp) AND T40 (newer timestamp) ──
+        // T5 has an insertion-order rowid > 3, so the cursor catches it.
+        // Without cursor, `resume_sync_at = T30+1s` would miss T5 forever.
+        let backfill = make_event(5); // timestamp older than already-synced T10
+        let new_event = make_event(40); // timestamp newer than everything
+        ds_src
+            .insert_events(bucket_id, &[backfill, new_event])
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_did),
+        )
+        .expect("second pull must succeed");
+
+        let after_second = ds_dest
+            .get_event_count(&dest_bucket_id, None, None)
+            .unwrap();
+        assert_eq!(
+            after_second, 5,
+            "second pull must import both the backfill (T5) and the new event (T40); \
+             count was {after_second} (expected 5 = 3 initial + 2 new)"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// Crash-replay safety: a pull that dies between inserting a page and
+    /// persisting the cursor leaves the cursor behind what was already
+    /// inserted. The next pull re-fetches those rows; the (end_time, data)
+    /// replay dedup must skip them instead of duplicating the destination.
+    ///
+    /// The replayed row here is a zero-duration event AT the resume boundary:
+    /// its timestamp >= resume_sync_at, so reconcile_updated_events (whose
+    /// window ends exclusively at resume) never matches it, and the stale-row
+    /// delete only fires on differing data. Without the (end_time, data) dedup
+    /// this pull re-inserts the row and the destination grows on every replay.
+    #[test]
+    fn replayed_rows_after_cursor_rollback_are_not_duplicated() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-replay-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        let mut batch: Vec<Event> = [10i64, 20].iter().map(|&s| make_event(s)).collect();
+        // Zero-duration instant event at the newest position: its end-time is
+        // its timestamp, so it defines resume_sync_at exactly.
+        let ts = Utc::now() - Duration::seconds(3600) + Duration::seconds(30);
+        batch.push(
+            serde_json::from_value(serde_json::json!({
+                "timestamp": ts.to_rfc3339(),
+                "duration": 0,
+                "data": {"seq": 30}
+            }))
+            .unwrap(),
+        );
+        ds_src.insert_events(bucket_id, &batch).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect("first pull must succeed");
+        assert_eq!(
+            ds_dest
+                .get_event_count(&dest_bucket_id, None, None)
+                .unwrap(),
+            3
+        );
+
+        // Simulate the crash window: rows were inserted at the destination but
+        // the cursor persist never happened — roll the cursor back to rowid 2
+        // so the next pull re-fetches row 3, which already exists at dest.
+        let ck = cursor_key(src_hostname, bucket_id);
+        cursor_ds.set_key_value(&ck, "2").unwrap();
+        // The cursor datastore commits asynchronously via its worker thread;
+        // force the rollback durable so the replay actually happens.
+        cursor_ds.force_commit().unwrap();
+
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect("replay pull must succeed");
+
+        assert_eq!(
+            ds_dest
+                .get_event_count(&dest_bucket_id, None, None)
+                .unwrap(),
+            3,
+            "replayed rows must be deduplicated, not re-inserted"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A source-side edit (delete + insert at the same timestamp and duration)
+    /// is a new source row above the cursor. reconcile_updated_events already
+    /// copies the replacement, so the rowid loop must not insert it again.
+    #[test]
+    fn edited_event_is_not_copied_twice() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-edit-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        let initial: Vec<Event> = [10i64, 20, 30].iter().map(|&s| make_event(s)).collect();
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Edit the middle event: delete it and insert a replacement with the
+        // same timestamp and duration but different data.
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.data["seq"] == 20)
+            .unwrap();
+        let mut edited = original.clone();
+        edited.id = None;
+        edited.data =
+            serde_json::from_value(serde_json::json!({"seq": 20, "edited": true})).unwrap();
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src.insert_events(bucket_id, &[edited]).unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let seq20: Vec<&Event> = dest.iter().filter(|e| e.data["seq"] == 20).collect();
+        assert_eq!(dest.len(), 3, "edit must not duplicate rows: {dest:?}");
+        assert_eq!(seq20.len(), 1);
+        assert_eq!(seq20[0].data.get("edited"), Some(&serde_json::json!(true)));
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A device ID that contains a literal `%1F` must not collide with a device
+    /// ID that contains the unit-separator character `\u{1f}`, even though
+    /// `\u{1f}` is escaped to `%1F`.  The fix encodes `%` → `%25` first so that
+    /// `"A%1F"` → `"A%251F"` while `"A\u{1f}"` → `"A%1F"`, keeping the keys distinct.
+    #[test]
+    fn cursor_key_no_collision_between_percent_escape_and_unit_separator() {
+        // "A\u{1f}" with bucket "B" must differ from "A%1F" with bucket "B".
+        let key_with_sep = cursor_key("A\u{1f}", "B");
+        let key_with_literal = cursor_key("A%1F", "B");
+        assert_ne!(
+            key_with_sep, key_with_literal,
+            "literal %1F and escaped \\u{{1f}} must not collide"
+        );
+        // Symmetrically for bucket_id.
+        let bkey_with_sep = cursor_key("device", "bucket\u{1f}suffix");
+        let bkey_with_literal = cursor_key("device", "bucket%1Fsuffix");
+        assert_ne!(
+            bkey_with_sep, bkey_with_literal,
+            "literal %1F and escaped \\u{{1f}} in bucket_id must not collide"
+        );
+    }
+
+    /// Cursor is stored per (device_id, bucket_id) so two different source
+    /// devices do not share a cursor.
+    #[test]
+    fn cursors_are_device_scoped() {
+        let ds_a = Datastore::new_in_memory(false);
+        let ds_b = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-scope-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-host").expect("cursor_ds must open");
+
+        let bucket_id = "aw-watcher-test";
+        ds_a.create_bucket(&make_bucket(bucket_id, "device-a"))
+            .unwrap();
+        ds_b.create_bucket(&make_bucket(bucket_id, "device-b"))
+            .unwrap();
+        ds_a.force_commit().unwrap();
+        ds_b.force_commit().unwrap();
+
+        let ev_a: Vec<Event> = [10i64, 20].iter().map(|&s| make_event(s)).collect();
+        let ev_b: Vec<Event> = [15i64, 25].iter().map(|&s| make_event(s)).collect();
+        ds_a.insert_events(bucket_id, &ev_a).unwrap();
+        ds_b.insert_events(bucket_id, &ev_b).unwrap();
+        ds_a.force_commit().unwrap();
+        ds_b.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+
+        sync_datastores_with_cursor(
+            &ds_a,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some("device-a"),
+        )
+        .expect("pull from device-a must succeed");
+        sync_datastores_with_cursor(
+            &ds_b,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some("device-b"),
+        )
+        .expect("pull from device-b must succeed");
+
+        // Each device's bucket gets its own cursor key; synced event counts are independent.
+        let count_a = ds_dest
+            .get_event_count("aw-watcher-test-synced-from-device-a", None, None)
+            .unwrap();
+        let count_b = ds_dest
+            .get_event_count("aw-watcher-test-synced-from-device-b", None, None)
+            .unwrap();
+        assert_eq!(count_a, 2, "device-a bucket must have 2 events");
+        assert_eq!(count_b, 2, "device-b bucket must have 2 events");
+
+        cursor_ds.close();
+        ds_a.close();
+        ds_b.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// Flexible event builder: explicit base time, duration, and data, for
+    /// tests that need events outside the reconcile lookback window or with
+    /// a changed duration.
+    fn make_event_full(
+        base: DateTime<Utc>,
+        offset_secs: i64,
+        duration_secs: i64,
+        data: serde_json::Value,
+    ) -> Event {
+        serde_json::from_value(serde_json::json!({
+            "timestamp": (base + Duration::seconds(offset_secs)).to_rfc3339(),
+            "duration": duration_secs,
+            "data": data,
+        }))
+        .unwrap()
+    }
+
+    /// An edit of an event OLDER than the EDIT_RECONCILE_LOOKBACK window is
+    /// invisible to reconcile_updated_events, so the rowid path must remove
+    /// the stale dest row itself or the replacement is inserted next to it.
+    #[test]
+    fn edit_older_than_lookback_is_not_duplicated() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-oldedit-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        // Two events 20 days old, plus one fresh event. The dest resume marker
+        // ends up at ~now, so the EDIT_RECONCILE_LOOKBACK window covers only
+        // the last 7 days — the old pair is outside it.
+        let old_base = Utc::now() - Duration::days(20);
+        let initial: Vec<Event> = vec![
+            make_event_full(old_base, 10, 1, serde_json::json!({"seq": 10})),
+            make_event_full(old_base, 20, 1, serde_json::json!({"seq": 20})),
+            make_event_full(Utc::now(), 0, 1, serde_json::json!({"seq": 30})),
+        ];
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Edit the middle event (delete + insert, same timestamp, new data).
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.data["seq"] == 20)
+            .unwrap();
+        let mut edited = original.clone();
+        edited.id = None;
+        edited.data =
+            serde_json::from_value(serde_json::json!({"seq": 20, "edited": true})).unwrap();
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src.insert_events(bucket_id, &[edited]).unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let seq20: Vec<&Event> = dest.iter().filter(|e| e.data["seq"] == 20).collect();
+        assert_eq!(
+            dest.len(),
+            3,
+            "out-of-window edit must not duplicate rows: {dest:?}"
+        );
+        assert_eq!(seq20.len(), 1, "exactly one seq-20 row expected: {dest:?}");
+        assert_eq!(seq20[0].data.get("edited"), Some(&serde_json::json!(true)));
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// An in-window edit that CHANGES THE DURATION breaks the (timestamp,
+    /// duration) identity reconcile_updated_events matches on, so reconcile
+    /// never sees the replacement as an edit. The rowid path must still
+    /// remove the stale dest row.
+    #[test]
+    fn longer_replacement_is_not_duplicated() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-longrepl-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let initial: Vec<Event> = [10i64, 20, 30]
+            .iter()
+            .map(|&s| {
+                make_event_full(
+                    Utc::now() - Duration::seconds(3600),
+                    s,
+                    1,
+                    serde_json::json!({"seq": s}),
+                )
+            })
+            .collect();
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Replace the middle event with a LONGER row: same timestamp, longer
+        // duration, different data. Its identity does not match the dest row.
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.data["seq"] == 20)
+            .unwrap();
+        let ts = original.timestamp;
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src
+            .insert_events(
+                bucket_id,
+                &[make_event_full(
+                    ts,
+                    0,
+                    60,
+                    serde_json::json!({"seq": 20, "extended": true}),
+                )],
+            )
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let seq20: Vec<&Event> = dest.iter().filter(|e| e.data["seq"] == 20).collect();
+        assert_eq!(
+            dest.len(),
+            3,
+            "longer replacement must not duplicate rows: {dest:?}"
+        );
+        assert_eq!(seq20.len(), 1, "exactly one seq-20 row expected: {dest:?}");
+        assert_eq!(
+            seq20[0].data.get("extended"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(seq20[0].duration, Duration::seconds(60));
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// An edit that changes only duration (same timestamp, same data) must
+    /// replace the old destination row rather than accumulating a duplicate.
+    /// Regression for the SourceFingerprint omitting end_time: the old
+    /// (timestamp, data) key matched the source's updated row, so the stale
+    /// check did not mark the old destination copy for deletion, and the rowid
+    /// path then inserted the new row alongside the old one.
+    #[test]
+    fn duration_only_edit_is_not_duplicated() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-duronly-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        // Insert an initial event and sync it.
+        let data = serde_json::json!({"app": "firefox"});
+        let initial = vec![make_event_full(
+            Utc::now() - Duration::seconds(3600),
+            0,
+            5,
+            data.clone(),
+        )];
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Replace the event with a longer one at the same timestamp, same data.
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let ts = original.timestamp;
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src
+            .insert_events(bucket_id, &[make_event_full(ts, 0, 60, data.clone())])
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        assert_eq!(
+            dest.len(),
+            1,
+            "duration-only edit must not duplicate: {dest:?}"
+        );
+        assert_eq!(
+            dest[0].duration,
+            Duration::seconds(60),
+            "destination must hold the updated duration: {dest:?}"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// Two distinct events legitimately sharing a timestamp must both survive:
+    /// a new chunk event at the same timestamp must not evict the destination
+    /// copy of the older coexisting event. Regression for the review finding
+    /// that the stale-row deletion keyed on "some chunk event at this
+    /// timestamp differs" deleted legitimate same-timestamp neighbours.
+    #[test]
+    fn distinct_same_timestamp_events_are_not_deleted() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-coexist-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+
+        // Event Y at timestamp T, synced first (cursor advances past its row).
+        let ts_y = Utc::now() - Duration::seconds(1800);
+        let ev_y: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts_y.to_rfc3339(),
+            "duration": 1,
+            "data": {"seq": 40, "kind": "y"}
+        }))
+        .unwrap();
+        ds_src.insert_events(bucket_id, &[ev_y.clone()]).unwrap();
+        ds_src.force_commit().unwrap();
+        pull();
+        assert_eq!(
+            ds_dest
+                .get_events(&dest_bucket_id, None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Event X at the SAME timestamp T with different data and a duration
+        // that ends before `resume` (so reconcile_updated_events' clipped
+        // read does not collapse it onto Y's identity). X then reaches the
+        // rowid chunk and exercises the stale-row deletion against Y.
+        let ev_x: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts_y.to_rfc3339(),
+            "duration": 0.5,
+            "data": {"seq": 40, "kind": "x"}
+        }))
+        .unwrap();
+        ds_src.insert_events(bucket_id, &[ev_x.clone()]).unwrap();
+        ds_src.force_commit().unwrap();
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let kinds: Vec<String> = dest
+            .iter()
+            .filter_map(|e| e.data["kind"].as_str().map(String::from))
+            .collect();
+        assert_eq!(
+            dest.len(),
+            2,
+            "both coexisting events must survive: {dest:?}"
+        );
+        assert!(
+            kinds.contains(&"y".to_string()),
+            "dest copy of Y was deleted: {dest:?}"
+        );
+        assert!(
+            kinds.contains(&"x".to_string()),
+            "new coexisting event missing: {dest:?}"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A dest copy whose end_time was stored shorter than the source (e.g.
+    /// clipped by a previous timestamp-path sync) must NOT be deleted when a
+    /// new chunk event arrives at the same timestamp.  The stale-row key is
+    /// (timestamp, data); end_time is excluded so a clipped copy with the
+    /// same data survives.
+    #[test]
+    fn clipped_dest_row_not_deleted_by_new_same_timestamp_chunk_event() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-clipped-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let base = Utc::now() - Duration::seconds(3600);
+        // E1: a long event at T that will later have a "clipped" dest copy.
+        let ev_e1_long = make_event_full(base, 0, 3600, serde_json::json!({"kind": "long"}));
+        ds_src
+            .insert_events(bucket_id, &[ev_e1_long.clone()])
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        // First pull: dest gets E1 with full 3600s duration; cursor advances to rowid 1.
+        pull();
+
+        // Simulate a previous timestamp-path sync that stored a CLIPPED copy:
+        // delete the synced row and re-insert with a shorter duration (1s) but
+        // the same data.  This mimics what the old cursor path would have left
+        // in dest.
+        let dest_ev = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        assert_eq!(dest_ev.len(), 1);
+        ds_dest
+            .delete_events_by_id(&dest_bucket_id, vec![dest_ev[0].id.unwrap()])
+            .unwrap();
+        let ev_e1_clipped = make_event_full(base, 0, 1, serde_json::json!({"kind": "long"}));
+        ds_dest
+            .insert_events(&dest_bucket_id, &[ev_e1_clipped])
+            .unwrap();
+
+        // E2: a new late-arriving event at the SAME timestamp T with different data.
+        // Its rowid is above the cursor, so it enters the rowid chunk on the next pull.
+        let ev_e2 = make_event_full(base, 0, 1, serde_json::json!({"kind": "backfill"}));
+        ds_src.insert_events(bucket_id, &[ev_e2.clone()]).unwrap();
+        ds_src.force_commit().unwrap();
+
+        // Second pull: chunk = [E2].  The stale-row check must NOT delete dest's
+        // clipped E1 copy — source still has an event with (timestamp, data) =
+        // (T, {"kind": "long"}), only the end_time differs.
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        let kinds: Vec<&str> = dest
+            .iter()
+            .filter_map(|e| e.data["kind"].as_str())
+            .collect();
+        assert!(
+            kinds.contains(&"long"),
+            "clipped E1 copy must not be deleted: {dest:?}"
+        );
+        assert!(
+            kinds.contains(&"backfill"),
+            "new E2 must be inserted: {dest:?}"
+        );
+        assert_eq!(dest.len(), 2, "both events must be present: {dest:?}");
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A new source event that shares (timestamp, data) with an existing one
+    /// but has a different duration is a sibling, not a duration-only edit,
+    /// as long as the original is still in the source. The dest copy of the
+    /// original must survive (ActivityWatch/aw-server-rust#798).
+    #[test]
+    fn same_timestamp_and_data_sibling_does_not_delete_live_dest_copy() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-sibling-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+
+        let base = Utc::now() - Duration::seconds(3600);
+        let data = serde_json::json!({"kind": "same"});
+        let ev_a = make_event_full(base, 0, 5, data.clone());
+        ds_src.insert_events(bucket_id, &[ev_a]).unwrap();
+        ds_src.force_commit().unwrap();
+        pull();
+
+        // B: distinct row at the same timestamp with the same data and a
+        // longer duration. A stays in the source.
+        let ev_b = make_event_full(base, 0, 10, data);
+        ds_src.insert_events(bucket_id, &[ev_b]).unwrap();
+        ds_src.force_commit().unwrap();
+        pull();
+
+        let mut durations: Vec<i64> = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap()
+            .iter()
+            .map(|e| e.duration.num_seconds())
+            .collect();
+        durations.sort();
+        assert_eq!(
+            durations,
+            vec![5, 10],
+            "dest must hold both siblings, A's copy must not be deleted"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// Upgrade bootstrap: the cursor must be persisted only AFTER the
+    /// timestamp-path pass it prefaces completes successfully. If it were
+    /// persisted before the pass, a partway failure would permanently skip
+    /// the events the timestamp path had not yet copied.
+    #[test]
+    fn bootstrap_cursor_persists_after_timestamp_pass() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-bootstrap-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        let initial: Vec<Event> = [10i64, 20, 30].iter().map(|&s| make_event(s)).collect();
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        // Simulate the pre-upgrade state: destination has events (copied by
+        // the timestamp path) but no stored rowid cursor.
+        ds_dest
+            .create_bucket(&make_bucket(&dest_bucket_id, "dest-host"))
+            .unwrap();
+        ds_dest
+            .insert_events(&dest_bucket_id, &[make_event(10)])
+            .unwrap();
+        ds_dest.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect("bootstrap pull must succeed");
+
+        // After a successful bootstrap pass the cursor must equal the source
+        // max rowid — and only now, i.e. persisted after the timestamp path
+        // finished rather than before it ran.
+        let src_max = ds_src.get_max_event_rowid(bucket_id).unwrap();
+        let stored: i64 = cursor_ds
+            .get_key_value(&cursor_key(src_hostname, bucket_id))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            stored, src_max,
+            "cursor must equal source max rowid after bootstrap"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A timestamp-path sync (no rowid cursor) must replace an event whose
+    /// BOTH duration AND data changed, not leave the old data in the head
+    /// portion. Regression for the `use_unclipped_source=true` behavior where
+    /// the unclipped source identity (timestamp, 60s) differed from the dest
+    /// identity (timestamp, 5s), causing reconcile to skip the replacement and
+    /// leaving the stale data in the head (ActivityWatch/aw-server-rust#789).
+    #[test]
+    fn timestamp_path_replaces_event_with_changed_duration_and_data() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let ts = Utc::now() - Duration::seconds(3600);
+        let initial = vec![make_event_full(
+            ts,
+            0,
+            5,
+            serde_json::json!({"stage": "orig"}),
+        )];
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        // Timestamp path: no cursor_ds
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                None,
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+        pull();
+
+        // Replace with an event that has a LONGER duration AND different data.
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src
+            .insert_events(
+                bucket_id,
+                &[make_event_full(
+                    ts,
+                    0,
+                    60,
+                    serde_json::json!({"stage": "edited"}),
+                )],
+            )
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        pull();
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        // The stale head (old data) must be gone; new data must be present.
+        // The timestamp path may split the 60s event into a head + tail, so
+        // dest.len() may be 2 — but no event with old data may survive.
+        assert!(
+            !dest.iter().any(|e| e.data["stage"] == "orig"),
+            "stale event with old data must not survive: {dest:?}"
+        );
+        assert!(
+            dest.iter().any(|e| e.data["stage"] == "edited"),
+            "event with new data must be present: {dest:?}"
+        );
+        assert!(dest.len() <= 2, "no extra duplicates expected: {dest:?}");
+
+        ds_src.close();
+        ds_dest.close();
+    }
+
+    /// Production upgrade path: dest already has events, cursor_ds is present,
+    /// but no stored rowid yet. That pass falls through to the timestamp path
+    /// even though cursor_ds.is_some(). Reconcile must still use clipped source
+    /// or a duration+data edit leaves the stale dest head in place and the
+    /// deferred max-rowid cursor then hides the replacement forever.
+    #[test]
+    fn bootstrap_timestamp_path_replaces_event_with_changed_duration_and_data() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-bootstrap-edit-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let ts = Utc::now() - Duration::seconds(3600);
+        ds_src
+            .insert_events(
+                bucket_id,
+                &[make_event_full(
+                    ts,
+                    0,
+                    5,
+                    serde_json::json!({"stage": "orig"}),
+                )],
+            )
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        // Pre-upgrade: timestamp path copies the original event.
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            None,
+            Some(src_hostname),
+        )
+        .expect("pre-upgrade pull must succeed");
+
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src
+            .insert_events(
+                bucket_id,
+                &[make_event_full(
+                    ts,
+                    0,
+                    60,
+                    serde_json::json!({"stage": "edited"}),
+                )],
+            )
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        // Upgrade bootstrap: dest has events, cursor_ds is present, no stored
+        // rowid. This is the production first-pull-after-upgrade path.
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect("bootstrap pull must succeed");
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        assert!(
+            !dest.iter().any(|e| e.data["stage"] == "orig"),
+            "stale event with old data must not survive bootstrap timestamp path: {dest:?}"
+        );
+        assert!(
+            dest.iter().any(|e| e.data["stage"] == "edited"),
+            "event with new data must be present after bootstrap: {dest:?}"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
     }
 }

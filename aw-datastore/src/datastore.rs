@@ -1290,6 +1290,97 @@ impl DatastoreInstance {
         )
     }
 
+    /// Fetch up to `limit` events with `id > since_rowid`, ordered ASC by rowid.
+    /// This is the cursor used by aw-sync to detect late-arriving backfill events
+    /// that would be invisible to timestamp-based resume logic.
+    ///
+    /// Returns `(events, max_scanned_rowid)` where `max_scanned_rowid` is the
+    /// highest rowid inspected, including rows whose data could not be parsed.
+    /// Using `max_scanned_rowid` as the next cursor ensures corrupt rows never
+    /// permanently block later valid events.
+    pub fn get_events_since_rowid(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        since_rowid: i64,
+        limit_opt: Option<u64>,
+    ) -> Result<(Vec<Event>, i64), DatastoreError> {
+        let bucket = self.get_bucket(bucket_id)?;
+        let bucket_bid = match bucket.bid {
+            Some(bid) => bid,
+            None => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Bucket '{bucket_id}' has no internal rowid"
+                )))
+            }
+        };
+        let limit: i64 = limit_opt.map(|l| l as i64).unwrap_or(-1);
+        let source = events_source(self.db_version, false);
+        let sql = format!(
+            "SELECT id, starttime, endtime, data FROM {source} \
+             WHERE bucketrow = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3"
+        );
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| {
+            DatastoreError::InternalError(format!("Failed to prepare get_events_since_rowid: {e}"))
+        })?;
+        // Extract the id from every row before attempting full parse so that
+        // corrupt rows still advance the cursor (preventing a permanent stall).
+        let rows = stmt
+            .query_map([&bucket_bid, &since_rowid, &limit], |row| {
+                let id: i64 = row.get(0)?;
+                Ok((id, parse_event_row(row, None)))
+            })
+            .map_err(|e| {
+                DatastoreError::InternalError(format!(
+                    "Failed to query get_events_since_rowid: {e}"
+                ))
+            })?;
+        let mut list = Vec::new();
+        let mut max_scanned_rowid = since_rowid;
+        for row in rows {
+            match row {
+                Ok((id, event_result)) => {
+                    max_scanned_rowid = max_scanned_rowid.max(id);
+                    match event_result {
+                        Ok(event) => list.push(event),
+                        Err(err) => {
+                            warn!("Corrupt event id={id} in bucket {bucket_id} (rowid scan): {err}")
+                        }
+                    }
+                }
+                Err(err) => warn!("Failed to read row in bucket {bucket_id}: {err}"),
+            }
+        }
+        Ok((list, max_scanned_rowid))
+    }
+
+    /// Return the highest rowid currently stored for `bucket_id`, or 0 if the
+    /// bucket is empty.  Used by aw-sync to bootstrap the rowid cursor the first
+    /// time it encounters a bucket that was previously synced via the legacy
+    /// timestamp path.
+    pub fn get_max_event_rowid(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+    ) -> Result<i64, DatastoreError> {
+        let bucket = self.get_bucket(bucket_id)?;
+        let bucket_bid = match bucket.bid {
+            Some(bid) => bid,
+            None => return Ok(0),
+        };
+        let source = events_source(self.db_version, false);
+        let sql = format!("SELECT COALESCE(MAX(id), 0) FROM {source} WHERE bucketrow = ?1");
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| {
+            DatastoreError::InternalError(format!("Failed to prepare get_max_event_rowid: {e}"))
+        })?;
+        let max_rowid: i64 = stmt
+            .query_row([&bucket_bid], |row| row.get(0))
+            .map_err(|e| {
+                DatastoreError::InternalError(format!("Failed to query max event rowid: {e}"))
+            })?;
+        Ok(max_rowid)
+    }
+
     pub fn get_event_count(
         &self,
         conn: &Connection,

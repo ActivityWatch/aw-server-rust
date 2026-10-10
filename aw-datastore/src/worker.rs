@@ -127,6 +127,8 @@ pub enum Response {
     Event(Event),
     EventList(Vec<Event>),
     FilteredEvents(Vec<Option<Event>>),
+    /// Returned by `GetEventsSinceRowid`: (events, max_scanned_rowid).
+    EventPage(Vec<Event>, i64),
     Count(i64),
     KeyValue(String),
     KeyValues(HashMap<String, String>),
@@ -159,6 +161,8 @@ pub enum Command {
         bool,
     ),
     GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
+    GetEventsSinceRowid(String, i64, Option<u64>),
+    GetMaxEventRowid(String),
     DeleteEventsById(String, Vec<i64>),
     ForceCommit(),
     GetKeyValues(String),
@@ -565,6 +569,18 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
+            Command::GetEventsSinceRowid(bucketname, since_rowid, limit) => {
+                match ds.get_events_since_rowid(tx, &bucketname, since_rowid, limit) {
+                    Ok((events, max_scanned)) => Ok(Response::EventPage(events, max_scanned)),
+                    Err(e) => Err(e),
+                }
+            }
+            Command::GetMaxEventRowid(bucketname) => {
+                match ds.get_max_event_rowid(tx, &bucketname) {
+                    Ok(rowid) => Ok(Response::Count(rowid)),
+                    Err(e) => Err(e),
+                }
+            }
             Command::DeleteEventsById(bucketname, event_ids) => {
                 match ds.delete_events_by_id(tx, &bucketname, event_ids) {
                     Ok(()) => {
@@ -930,6 +946,31 @@ impl Datastore {
         match self.request(cmd)? {
             Response::Count(n) => Ok(n),
             _ => panic!("Invalid response"),
+        }
+    }
+
+    pub fn get_events_since_rowid(
+        &self,
+        bucket_id: &str,
+        since_rowid: i64,
+        limit: Option<u64>,
+    ) -> Result<(Vec<Event>, i64), DatastoreError> {
+        let cmd = Command::GetEventsSinceRowid(bucket_id.to_string(), since_rowid, limit);
+        match self.request(cmd)? {
+            Response::EventPage(events, max_scanned) => Ok((events, max_scanned)),
+            e => Err(DatastoreError::InternalError(format!(
+                "Unexpected response to GetEventsSinceRowid: {e:?}"
+            ))),
+        }
+    }
+
+    pub fn get_max_event_rowid(&self, bucket_id: &str) -> Result<i64, DatastoreError> {
+        let cmd = Command::GetMaxEventRowid(bucket_id.to_string());
+        match self.request(cmd)? {
+            Response::Count(rowid) => Ok(rowid),
+            e => Err(DatastoreError::InternalError(format!(
+                "Unexpected response to GetMaxEventRowid: {e:?}"
+            ))),
         }
     }
 

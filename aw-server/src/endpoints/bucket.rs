@@ -131,18 +131,28 @@ fn parse_time_param(
     }
 }
 
-#[get("/<bucket_id>/events?<start>&<end>&<limit>")]
+#[get("/<bucket_id>/events?<start>&<end>&<limit>&<unclipped>")]
 pub fn bucket_events_get(
     bucket_id: &str,
     start: Option<String>,
     end: Option<String>,
     limit: Option<u64>,
+    unclipped: Option<bool>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     let starttime = parse_time_param("starttime", start)?;
     let endtime = parse_time_param("endtime", end)?;
     let datastore = &state.datastore;
-    let res = datastore.get_events(bucket_id, starttime, endtime, limit);
+    // unclipped=true returns events with their original stored timestamps
+    // instead of clipping them to the query window. Used by aw-sync's dedup
+    // and stale-row detection, which must see true timestamps to match
+    // destination rows reliably. Older servers ignore the parameter and
+    // return clipped events (same behavior as before this parameter existed).
+    let res = if unclipped.unwrap_or(false) {
+        datastore.get_events_unclipped(bucket_id, starttime, endtime, limit)
+    } else {
+        datastore.get_events(bucket_id, starttime, endtime, limit)
+    };
     match res {
         Ok(events) => Ok(Json(events)),
         Err(err) => Err(err.into()),

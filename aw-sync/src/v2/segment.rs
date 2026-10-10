@@ -433,6 +433,7 @@ mod tests {
             _type: "currentwindow".to_string(),
             client: "aw-watcher-window".to_string(),
             hostname: "test-host".to_string(),
+            device_id: "local".to_string(),
             created: Some(Utc::now()),
             data: serde_json::Map::new(),
             metadata: Default::default(),

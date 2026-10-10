@@ -46,6 +46,7 @@ mod tests {
             _type: "type".to_string(),
             hostname: expected_hostname,
             client: "testclient".to_string(),
+            device_id: "local".to_string(),
             created: None,
             data: json_map! {},
             metadata: BucketMetadata::default(),

@@ -128,6 +128,7 @@ mod import {
                 _type: row.get(2)?,
                 client: row.get(3)?,
                 hostname: row.get(4)?,
+                device_id: "local".to_string(),
                 created: row.get(5)?,
                 data: json_map! {},
                 events: None,
@@ -279,6 +280,22 @@ mod import {
                     }
                 }
                 Err(DatastoreError::BucketAlreadyExists(_)) => {
+                    // A name collision is only an idempotent re-import if the
+                    // existing bucket belongs to the same device. Read SQLite,
+                    // not the instance cache, which may predate another writer.
+                    let device_id: String = new_conn
+                        .query_row(
+                            "SELECT device_id FROM buckets WHERE name = ?1",
+                            [&bucket.id],
+                            |row| row.get(0),
+                        )
+                        .map_err(|err| LegacyDatastoreImportError::SQLMapError(err.to_string()))?;
+                    if device_id != bucket.device_id {
+                        return Err(LegacyDatastoreImportError::SQLMapError(format!(
+                            "Cannot import legacy bucket '{}': existing device_id '{}' differs from '{}'",
+                            bucket.id, device_id, bucket.device_id
+                        )));
+                    }
                     // Idempotent re-import (e.g. `aw-server --import-legacy` run
                     // again): the bucket already exists from a prior import, so
                     // merge only events not already present instead of panicking.
@@ -462,6 +479,33 @@ mod import {
                 legacy_import(&mut ds, &conn, Some(custom_path.to_str().unwrap())).unwrap();
             assert!(imported);
             assert_eq!(ds.get_buckets().len(), 1);
+        }
+
+        #[test]
+        fn reimport_rejects_a_bucket_owned_by_another_device() {
+            let tmp = tempfile::tempdir().unwrap();
+            let legacy_path = tmp.path().join("legacy.db");
+            write_fixture_legacy_db(
+                &legacy_path,
+                &[("2026-01-01 10:00:00+00:00", 5.0, r#"{"status": "afk"}"#)],
+            );
+            let (conn, mut ds) = new_datastore();
+            let mut bucket = get_legacy_buckets(&Connection::open(&legacy_path).unwrap())
+                .unwrap()
+                .remove(0);
+            bucket.device_id = "peer-abc".to_string();
+            ds.create_bucket(&conn, bucket.clone()).unwrap();
+
+            let result = legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap()));
+            assert!(
+                result.is_err(),
+                "must not merge local legacy events into a peer bucket"
+            );
+            assert_eq!(ds.get_bucket(&bucket.id).unwrap().device_id, "peer-abc");
+            assert!(ds
+                .get_events(&conn, &bucket.id, None, None, None)
+                .unwrap()
+                .is_empty());
         }
 
         #[test]

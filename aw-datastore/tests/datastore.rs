@@ -28,6 +28,7 @@ mod datastore_tests {
             _type: "testtype".to_string(),
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
+            device_id: "local".to_string(),
             created: None,
             data: json_map! {},
             metadata: BucketMetadata::default(),
@@ -1045,7 +1046,7 @@ mod datastore_tests {
             let version: i32 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 6);
+            assert_eq!(version, 7);
             let old_indexes: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN
@@ -1716,9 +1717,8 @@ mod datastore_tests {
                 .unwrap();
                 if version >= 2 {
                     // A distinct payload in the pre-rename `data` column: the
-                    // v2->v3 migration renames it to `data_deprecated`, and no
-                    // later migration touches either column, so both must
-                    // survive to the newest version with this value intact.
+                    // v2->v3 migration renames it to `data_deprecated`, where
+                    // v7 must preserve it without copying it into new `data`.
                     // For a v3 fixture the rename already happened, so the
                     // payload goes straight into `data_deprecated`.
                     let col = if version == 2 {
@@ -1756,9 +1756,8 @@ mod datastore_tests {
             assert_eq!(after, aw_datastore::NEWEST_DB_VERSION, "v{version}");
 
             if version >= 2 {
-                // `data_deprecated` survived the rename and still carries the
-                // pre-migration payload; the new `data` column holds the
-                // migration default and is never NULL.
+                // Preserve the pre-v3 payload for inspection without reviving
+                // the broken field as current bucket metadata.
                 let has_deprecated: bool = conn
                     .query_row(
                         "SELECT 1 FROM pragma_table_info('buckets') WHERE name = 'data_deprecated'",
@@ -1766,15 +1765,15 @@ mod datastore_tests {
                         |_| Ok(true),
                     )
                     .unwrap_or(false);
-                assert!(has_deprecated, "v{version}: data_deprecated missing");
-                let legacy: String = conn
+                assert!(has_deprecated, "v{version}: archival payload column lost");
+                let deprecated: String = conn
                     .query_row(
                         "SELECT data_deprecated FROM buckets WHERE name = 'testid'",
                         [],
                         |row| row.get(0),
                     )
                     .unwrap();
-                assert_eq!(legacy, r#"{"legacy": true}"#, "v{version}");
+                assert_eq!(deprecated, r#"{"legacy": true}"#, "v{version}");
                 let data: String = conn
                     .query_row(
                         "SELECT data FROM buckets WHERE name = 'testid'",
@@ -1813,6 +1812,210 @@ mod datastore_tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(after, aw_datastore::NEWEST_DB_VERSION);
+    }
+
+    #[test]
+    fn test_device_id_local_default() {
+        // Buckets created locally via create_bucket should always end up with
+        // device_id "local", regardless of whether the caller supplies it.
+        let ds = Datastore::new_in_memory(false);
+
+        let mut b = test_bucket();
+        b.device_id = String::new(); // empty → should be stamped "local"
+        ds.create_bucket(&b).unwrap();
+
+        let buckets = ds.get_buckets().unwrap();
+        assert_eq!(
+            buckets[&b.id].device_id, "local",
+            "empty device_id must be stamped 'local' on creation"
+        );
+    }
+
+    #[test]
+    fn test_device_id_explicit_preserved() {
+        // An explicit device_id (non-empty) must survive the round-trip.
+        let ds = Datastore::new_in_memory(false);
+
+        let mut b = test_bucket();
+        b.device_id = "peer-abc".to_string();
+        ds.create_bucket(&b).unwrap();
+
+        let buckets = ds.get_buckets().unwrap();
+        assert_eq!(
+            buckets[&b.id].device_id, "peer-abc",
+            "explicit device_id must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_same_name_different_device_id_preserves_original_history() {
+        // The schema supports future device-scoped names, but the public API
+        // cannot address them yet. Reject ambiguity instead of redirecting writes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("device-id.db")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let ds = Datastore::new(path.clone(), false);
+        let mut b1 = test_bucket();
+        b1.device_id = "device-A".to_string();
+        ds.create_bucket(&b1).unwrap();
+        let event = test_event(Utc::now(), Duration::seconds(1));
+        ds.insert_events(&b1.id, std::slice::from_ref(&event))
+            .unwrap();
+        let original = ds.get_bucket(&b1.id).unwrap();
+
+        let mut b2 = b1.clone();
+        b2.device_id = "device-B".to_string();
+        for bucket in [&b1, &b2] {
+            assert!(matches!(
+                ds.create_bucket(bucket),
+                Err(DatastoreError::BucketAlreadyExists(_))
+            ));
+        }
+        assert_eq!(ds.get_bucket(&b1.id).unwrap().bid, original.bid);
+        assert_eq!(ds.get_buckets().unwrap().len(), 1);
+        ds.insert_events(&b1.id, &[event]).unwrap();
+        ds.close();
+
+        let ds = Datastore::new(path.clone(), false);
+        assert_eq!(ds.get_bucket(&b1.id).unwrap().device_id, "device-A");
+        assert_eq!(ds.get_events(&b1.id, None, None, None).unwrap().len(), 2);
+        ds.close();
+        let ds = Datastore::open_read_only(path).unwrap();
+        assert_eq!(ds.get_bucket(&b1.id).unwrap().device_id, "device-A");
+        assert_eq!(ds.get_events(&b1.id, None, None, None).unwrap().len(), 2);
+        ds.close();
+    }
+
+    #[test]
+    fn test_stale_connection_rejects_same_name_different_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-cache.db");
+        let conn1 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds1 = aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+        let conn2 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds2 = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        // Both caches are empty before either connection creates the bucket.
+        let mut bucket = test_bucket();
+        bucket.device_id = "device-A".to_string();
+        ds1.create_bucket(&conn1, bucket.clone()).unwrap();
+        bucket.device_id = "device-B".to_string();
+        assert!(matches!(
+            ds2.create_bucket(&conn2, bucket.clone()),
+            Err(DatastoreError::BucketAlreadyExists(_))
+        ));
+        let count: i64 = conn2
+            .query_row("SELECT count(*) FROM buckets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "stale cache must not allow an ambiguous SQL row");
+        assert!(matches!(
+            ds2.get_bucket(&bucket.id),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        let reopened = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        assert_eq!(
+            reopened.get_bucket(&bucket.id).unwrap().device_id,
+            "device-A"
+        );
+    }
+
+    #[test]
+    fn test_stale_connection_can_recreate_externally_deleted_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-deleted-cache.db");
+        let conn1 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds1 = aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+        let mut bucket = test_bucket();
+        bucket.device_id = "device-A".to_string();
+        ds1.create_bucket(&conn1, bucket.clone()).unwrap();
+        let original_bid = ds1.get_bucket(&bucket.id).unwrap().bid;
+        let conn2 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds2 = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        ds2.delete_bucket(&conn2, &bucket.id).unwrap();
+        bucket.device_id = "device-B".to_string();
+        ds1.create_bucket(&conn1, bucket.clone()).unwrap();
+        let recreated = ds1.get_bucket(&bucket.id).unwrap();
+        assert_ne!(recreated.bid, original_bid);
+        assert_eq!(recreated.device_id, "device-B");
+        let event = test_event(Utc::now(), Duration::seconds(1));
+        ds1.insert_events(&conn1, &bucket.id, vec![event]).unwrap();
+        let mut reopened = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        assert_eq!(reopened.get_bucket(&bucket.id).unwrap().bid, recreated.bid);
+        assert_eq!(
+            reopened.get_bucket(&bucket.id).unwrap().device_id,
+            "device-B"
+        );
+        assert_eq!(
+            reopened
+                .get_events(&conn2, &bucket.id, None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_stale_connection_rename_rejects_ambiguous_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-rename.db");
+        let conn1 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds1 = aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+        let mut old = test_bucket();
+        old.id = "old".to_string();
+        old.device_id = "device-A".to_string();
+        ds1.create_bucket(&conn1, old).unwrap();
+        // The second instance caches only `old`, then another writer creates `target`.
+        let conn2 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds2 = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        let mut target = test_bucket();
+        target.id = "target".to_string();
+        target.device_id = "device-B".to_string();
+        ds2.create_bucket(&conn2, target).unwrap();
+        assert!(matches!(
+            ds1.rename_bucket(&conn1, "old", "target"),
+            Err(DatastoreError::BucketAlreadyExists(_))
+        ));
+        let names: i64 = conn1
+            .query_row(
+                "SELECT count(*) FROM buckets WHERE name = 'target'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(names, 1, "rename must not create a duplicate name");
+        assert!(
+            ds1.get_bucket("old").is_ok(),
+            "failed rename keeps the cache"
+        );
+        aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+    }
+
+    #[test]
+    fn test_loading_same_name_device_rows_fails_without_hiding_history() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
+        ds.create_bucket(&conn, test_bucket()).unwrap();
+        // A future device-aware writer can populate this schema, but this
+        // name-only reader must fail closed rather than pick an arbitrary row.
+        conn.execute(
+            "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+             SELECT name, 'peer', type, client, hostname, created, data FROM buckets",
+            [],
+        )
+        .unwrap();
+        for migrate in [false, true] {
+            assert!(matches!(
+                aw_datastore::DatastoreInstance::new(&conn, migrate),
+                Err(DatastoreError::InternalError(message)) if message.contains("ambiguous bucket name")
+            ));
+        }
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM buckets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "opening must not delete ambiguous rows");
     }
 
     #[test]

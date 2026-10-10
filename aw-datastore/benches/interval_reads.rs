@@ -15,6 +15,7 @@ fn interval_reads(c: &mut Criterion) {
             _type: "test".into(),
             client: "test".into(),
             hostname: "test".into(),
+            device_id: "local".into(),
             created: Some(Utc::now()),
             data: Default::default(),
             metadata: BucketMetadata::default(),

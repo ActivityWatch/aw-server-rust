@@ -28,16 +28,8 @@ pub fn interpret_prog(
     let mut env = init_env(ti);
     let total = p.stmts.len();
     for (i, expr) in p.stmts.into_iter().enumerate() {
-        if let Some(deadline) = deadline {
-            if Instant::now() >= deadline {
-                return Err(QueryError::TimeBudgetExceeded(format!(
-                    "query stopped before statement {} of {total}: time budget exceeded \
-                     (split the query into shorter timeperiods, or raise query_timeout_secs)",
-                    i + 1
-                )));
-            }
-        }
-        interpret_expr(&mut env, ds, expr)?;
+        check_deadline(deadline, &format!("statement {} of {total}", i + 1))?;
+        interpret_expr(&mut env, ds, expr, deadline)?;
     }
     match env.remove("RETURN") {
         Some(ret) => Ok(ret),
@@ -45,16 +37,32 @@ pub fn interpret_prog(
     }
 }
 
+/// Fail if `deadline` has passed. Called before every statement, at the top
+/// level and inside `if` blocks, so a budget overrun stops at the next
+/// statement boundary wherever it happens.
+fn check_deadline(deadline: Option<Instant>, what: &str) -> Result<(), QueryError> {
+    match deadline {
+        Some(deadline) if Instant::now() >= deadline => {
+            Err(QueryError::TimeBudgetExceeded(format!(
+                "query stopped before {what}: time budget exceeded \
+                 (split the query into shorter timeperiods, or raise query_timeout_secs)"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn interpret_expr(
     env: &mut HashMap<String, DataType>,
     ds: &Datastore,
     expr: Expr,
+    deadline: Option<Instant>,
 ) -> Result<DataType, QueryError> {
     use crate::ast::Expr_::*;
     match expr.node {
         Add(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let res = match a_res {
                 DataType::Number(n1) => match b_res {
                     DataType::Number(n2) => DataType::Number(n1 + n2),
@@ -98,8 +106,8 @@ fn interpret_expr(
             Ok(res)
         }
         Sub(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -119,8 +127,8 @@ fn interpret_expr(
             Ok(DataType::Number(a_num - b_num))
         }
         Mul(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -140,8 +148,8 @@ fn interpret_expr(
             Ok(DataType::Number(a_num * b_num))
         }
         Div(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -166,8 +174,8 @@ fn interpret_expr(
             Ok(DataType::Number(a_num / b_num))
         }
         Mod(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -187,12 +195,12 @@ fn interpret_expr(
             Ok(DataType::Number(a_num % b_num))
         }
         Equal(lhs, rhs) => {
-            let lhs_res = interpret_expr(env, ds, *lhs)?;
-            let rhs_res = interpret_expr(env, ds, *rhs)?;
+            let lhs_res = interpret_expr(env, ds, *lhs, deadline)?;
+            let rhs_res = interpret_expr(env, ds, *rhs, deadline)?;
             Ok(DataType::Bool(lhs_res.query_eq(&rhs_res)?))
         }
         Assign(var, b) => {
-            let val = interpret_expr(env, ds, *b)?;
+            let val = interpret_expr(env, ds, *b, deadline)?;
             env.insert(var, val);
             Ok(DataType::None())
         }
@@ -207,17 +215,18 @@ fn interpret_expr(
         Number(lit) => Ok(DataType::Number(lit)),
         String(litstr) => Ok(DataType::String(litstr)),
         Return(e) => {
-            let val = interpret_expr(env, ds, *e)?;
+            let val = interpret_expr(env, ds, *e, deadline)?;
             // TODO: Once RETURN is deprecated we can fix this
             env.insert("RETURN".to_string(), val);
             Ok(DataType::None())
         }
         If(ifs) => {
             for (cond, block) in ifs {
-                let c = interpret_expr(env, ds, *cond)?;
+                let c = interpret_expr(env, ds, *cond, deadline)?;
                 if c.query_eq(&DataType::Bool(true))? {
                     for expr in block {
-                        interpret_expr(env, ds, expr)?;
+                        check_deadline(deadline, "the next statement of an if block")?;
+                        interpret_expr(env, ds, expr, deadline)?;
                     }
                     break;
                 }
@@ -260,7 +269,7 @@ fn interpret_expr(
                     }
                 }
             }
-            let args = match interpret_expr(env, ds, *e)? {
+            let args = match interpret_expr(env, ds, *e, deadline)? {
                 DataType::List(l) => l,
                 _ => unreachable!(),
             };
@@ -280,7 +289,7 @@ fn interpret_expr(
         List(list) => {
             let mut l = Vec::new();
             for entry in list {
-                let res = interpret_expr(env, ds, entry)?;
+                let res = interpret_expr(env, ds, entry, deadline)?;
                 l.push(res);
             }
             Ok(DataType::List(l))
@@ -288,7 +297,7 @@ fn interpret_expr(
         Dict(d) => {
             let mut dict = HashMap::new();
             for (key, val_uninterpreted) in d {
-                let val = interpret_expr(env, ds, val_uninterpreted)?;
+                let val = interpret_expr(env, ds, val_uninterpreted, deadline)?;
                 dict.insert(key, val);
             }
             Ok(DataType::Dict(dict))
@@ -313,6 +322,14 @@ mod tests {
             }
             other => panic!("expected TimeBudgetExceeded, got {other:?}"),
         }
+        // Statements inside an if block are checked too.
+        let program =
+            crate::parser::parse(crate::lexer::Lexer::new("if True { RETURN = 1; }")).unwrap();
+        match interpret_prog(program, &ti, &ds, Some(expired)) {
+            Err(QueryError::TimeBudgetExceeded(_)) => {}
+            other => panic!("expected TimeBudgetExceeded, got {other:?}"),
+        }
+
         // No deadline, or one in the future, runs the program as before.
         let program = crate::parser::parse(crate::lexer::Lexer::new("RETURN = 1;")).unwrap();
         let far = Instant::now() + std::time::Duration::from_secs(60);
@@ -322,7 +339,7 @@ mod tests {
     fn run(code: &str, env: &mut VarEnv, ds: &Datastore) -> DataType {
         let program = crate::parser::parse(crate::lexer::Lexer::new(code)).unwrap();
         for expr in program.stmts {
-            interpret_expr(env, ds, expr).unwrap();
+            interpret_expr(env, ds, expr, None).unwrap();
         }
         env.remove("RETURN").unwrap_or(DataType::None())
     }
@@ -401,7 +418,7 @@ mod tests {
                 Box::new(expr(Expr_::List(args))),
             ));
             assert_eq!(
-                interpret_expr(&mut env, &ds, call).unwrap(),
+                interpret_expr(&mut env, &ds, call, None).unwrap(),
                 DataType::Bool(true)
             );
         }

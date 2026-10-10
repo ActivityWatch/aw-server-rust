@@ -406,6 +406,14 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
 /// instead of falling back to the old dir while it is being copied.
 struct MigrationLock(#[allow(dead_code)] fs::File);
 
+#[cfg(test)]
+std::thread_local! {
+    // Only the test's waiter thread observes contention; parallel tests cannot
+    // send notifications for an unrelated migration lock.
+    static MIGRATION_LOCK_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl MigrationLock {
     fn path_for(target: &Path) -> PathBuf {
         let name = target
@@ -428,6 +436,12 @@ impl MigrationLock {
         match file.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                MIGRATION_LOCK_CONTENDED.with(|sender| {
+                    if let Some(sender) = sender.borrow_mut().take() {
+                        let _ = sender.send(());
+                    }
+                });
                 info!("Waiting for another process to finish migrating {target:?}");
                 file.lock()?;
             }
@@ -1420,30 +1434,20 @@ fn test_content_selection_occupied_target_waits_for_migration_lock() {
     plant_events_db(&misplaced, 100);
     let held = MigrationLock::acquire(&target).unwrap();
     let (t2, m2) = (target.clone(), misplaced.clone());
-    // Handshake instead of a fixed sleep: the waiter signals immediately
-    // before entering resolve_or_migrate, so once we receive it the thread is
-    // verifiably past spawn and about to contend for the migration lock. The
-    // behavioral assertion below does the real work: with the lock held and
-    // the pre-update state in place (misplaced newer), a thread that did not
-    // wait would select misplaced; only a lock-waiting thread can see the
-    // updated target afterwards.
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    // Observe the actual WouldBlock result, not merely thread startup. The
+    // holder keeps the OS lock until after this notification and the update.
+    let (contended_tx, contended_rx) = std::sync::mpsc::channel();
     let waiter = std::thread::spawn(move || {
-        let _ = started_tx.send(());
+        MIGRATION_LOCK_CONTENDED.with(|sender| *sender.borrow_mut() = Some(contended_tx));
         resolve_or_migrate(&t2, &m2, &real_copy)
     });
-    started_rx
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("waiter thread must start");
-    let waited = !waiter.is_finished();
+    let contention = contended_rx.recv_timeout(std::time::Duration::from_secs(10));
     // Simulate the lock holder changing the authoritative database.
     plant_events_db(&target, 200);
     drop(held);
     let out = waiter.join().unwrap();
-    assert!(
-        waited,
-        "occupied-target selection must also wait for the lock"
-    );
+    // Release the lock and join even on failure, rather than leak a waiter.
+    contention.expect("occupied-target selection must contend for the held lock");
     assert_eq!(out.dir, target);
     let _ = fs::remove_dir_all(root);
 }

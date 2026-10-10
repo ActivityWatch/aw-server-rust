@@ -673,10 +673,9 @@ fn test_categorize_cache_correctness() {
     other.data.insert("title".into(), serde_json::json!("bash"));
 
     // 50 events with same data, then 1 different event, then 50 more same
-    let mut events: Vec<Event> = std::iter::repeat(base.clone())
-        .take(50)
+    let mut events: Vec<Event> = std::iter::repeat_n(base.clone(), 50)
         .chain(std::iter::once(other.clone()))
-        .chain(std::iter::repeat(base.clone()).take(50))
+        .chain(std::iter::repeat_n(base.clone(), 50))
         .collect();
 
     let rules: Vec<CategoryRule> = vec![

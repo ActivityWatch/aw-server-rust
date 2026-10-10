@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rocket::http::Status;
 use rocket::response::content::RawJson;
@@ -11,11 +12,19 @@ use crate::endpoints::query_cache::CacheKey;
 use crate::endpoints::util::ApiJson;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
+/// Queries slower than this are logged at `info` with their timeperiod and
+/// size, so a server that gets bogged down by long-range queries leaves a
+/// trace in the log (ActivityWatch/aw-server-rust#805).
+const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(1);
+
 fn query_error_status(e: &QueryError) -> Status {
     match e {
         // BucketQueryError also wraps datastore failures, which are server
         // errors rather than malformed client queries.
         QueryError::BucketQueryError(_) => Status::InternalServerError,
+        // The server gave up, not the client's fault: 503 tells it to retry
+        // (with a shorter range), like the Python server's busy heartbeat.
+        QueryError::TimeBudgetExceeded(_) => Status::ServiceUnavailable,
         QueryError::ParsingError(_)
         | QueryError::EmptyQuery()
         | QueryError::BucketNotFound(_)
@@ -46,6 +55,10 @@ mod tests {
             query_error_status(&QueryError::BucketQueryError("datastore failure".into())),
             Status::InternalServerError
         );
+        assert_eq!(
+            query_error_status(&QueryError::TimeBudgetExceeded("budget".into())),
+            Status::ServiceUnavailable
+        );
     }
 }
 
@@ -67,11 +80,32 @@ pub fn query(
     let intervals = &query_req.0.timeperiods;
     let use_cache = state.query_cache_enabled && cache.unwrap_or(true);
     let datastore = &state.datastore;
+    let request_start = Instant::now();
+    // One budget for the whole request: a client that sends many timeperiods
+    // in one request is bounded the same as one that sends one long period.
+    let deadline = state.query_timeout.map(|budget| request_start + budget);
 
     let evaluate = |interval: &aw_models::TimeInterval| -> Result<Arc<str>, HttpErrorJson> {
-        match aw_query::query(&query_code, interval, datastore) {
+        let started = Instant::now();
+        let result = aw_query::query_with_deadline(&query_code, interval, datastore, deadline);
+        let elapsed = started.elapsed();
+        match result {
             Ok(data) => match serde_json::to_string(&data) {
-                Ok(serialized) => Ok(Arc::from(serialized.as_str())),
+                Ok(serialized) => {
+                    if elapsed >= SLOW_QUERY_THRESHOLD {
+                        info!(
+                            "Slow query ({:.1}s, {} bytes result) for timeperiod {interval}",
+                            elapsed.as_secs_f64(),
+                            serialized.len()
+                        );
+                    } else {
+                        debug!(
+                            "Query took {:.3}s for timeperiod {interval}",
+                            elapsed.as_secs_f64()
+                        );
+                    }
+                    Ok(Arc::from(serialized.as_str()))
+                }
                 Err(e) => {
                     warn!("Failed to serialize query result: {e}");
                     Err(HttpErrorJson::new(
@@ -81,7 +115,11 @@ pub fn query(
                 }
             },
             Err(e) => {
-                warn!("Query failed: {:?}", e);
+                warn!(
+                    "Query failed after {:.1}s for timeperiod {interval}: {:?}",
+                    elapsed.as_secs_f64(),
+                    e
+                );
                 Err(HttpErrorJson::new(query_error_status(&e), e.to_string()))
             }
         }

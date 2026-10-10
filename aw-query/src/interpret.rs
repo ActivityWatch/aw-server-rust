@@ -1,3 +1,4 @@
+use std::time::Instant;
 use std::{borrow::Cow, collections::HashMap};
 
 use crate::functions;
@@ -22,9 +23,20 @@ pub fn interpret_prog(
     p: Program,
     ti: &TimeInterval,
     ds: &Datastore,
+    deadline: Option<Instant>,
 ) -> Result<DataType, QueryError> {
     let mut env = init_env(ti);
-    for expr in p.stmts {
+    let total = p.stmts.len();
+    for (i, expr) in p.stmts.into_iter().enumerate() {
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                return Err(QueryError::TimeBudgetExceeded(format!(
+                    "query stopped before statement {} of {total}: time budget exceeded \
+                     (split the query into shorter timeperiods, or raise query_timeout_secs)",
+                    i + 1
+                )));
+            }
+        }
         interpret_expr(&mut env, ds, expr)?;
     }
     match env.remove("RETURN") {
@@ -287,6 +299,25 @@ fn interpret_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_deadline_stops_before_the_next_statement() {
+        let ds = Datastore::new_in_memory(false);
+        let ti =
+            TimeInterval::new_from_string("2000-01-01T00:00:00Z/2000-01-02T00:00:00Z").unwrap();
+        let program = crate::parser::parse(crate::lexer::Lexer::new("RETURN = 1;")).unwrap();
+        let expired = Instant::now() - std::time::Duration::from_secs(1);
+        match interpret_prog(program, &ti, &ds, Some(expired)) {
+            Err(QueryError::TimeBudgetExceeded(msg)) => {
+                assert!(msg.contains("statement 1 of 1"), "{msg}")
+            }
+            other => panic!("expected TimeBudgetExceeded, got {other:?}"),
+        }
+        // No deadline, or one in the future, runs the program as before.
+        let program = crate::parser::parse(crate::lexer::Lexer::new("RETURN = 1;")).unwrap();
+        let far = Instant::now() + std::time::Duration::from_secs(60);
+        assert!(interpret_prog(program, &ti, &ds, Some(far)).is_ok());
+    }
 
     fn run(code: &str, env: &mut VarEnv, ds: &Datastore) -> DataType {
         let program = crate::parser::parse(crate::lexer::Lexer::new(code)).unwrap();

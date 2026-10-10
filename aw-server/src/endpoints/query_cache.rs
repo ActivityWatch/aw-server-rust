@@ -132,7 +132,15 @@ struct Inner {
     /// `clear_pending_through` once a flush that started after them
     /// succeeded, never before, so a concurrent query cannot see them
     /// vanish while the commit is still in progress.
+    ///
+    /// Only populated when `has_reader` is true. Bounded by `write_log_size`:
+    /// when at capacity, the entire vec collapses to a single full-range
+    /// sentinel so `pending_overlapping` conservatively flushes for any period.
     pending_flush: Vec<(u64, Vec<TimeRange>)>,
+    /// True once `set_reader_active` has been called; suppresses
+    /// `pending_flush` population on no-reader servers (Android, encrypted,
+    /// in-memory) that never benefit from the tracking (ActivityWatch/aw-server-rust#808).
+    has_reader: bool,
 }
 
 /// Bounded cache of query results for finished past periods.
@@ -171,6 +179,13 @@ impl QueryCache {
             write_log_size: write_log_size.max(1),
             inner: Mutex::new(Inner::default()),
         }
+    }
+
+    /// Inform the cache that a read-only query handle is now active.
+    /// After this call `invalidate` will start tracking pending writes so that
+    /// reader-backed queries can flush before reading (ActivityWatch/aw-server-rust#808).
+    pub fn set_reader_active(&self) {
+        self.inner.lock().unwrap().has_reader = true;
     }
 
     /// Whether a period ended long enough ago to be cached. The current hour
@@ -270,7 +285,20 @@ impl QueryCache {
             inner.writes.pop_front();
         }
         inner.writes.push_back((generation, ranges.clone()));
-        inner.pending_flush.push((generation, ranges.clone()));
+        if inner.has_reader {
+            // Bound pending_flush at write_log_size. When at capacity, collapse
+            // to a single full-range sentinel so any query conservatively flushes
+            // the writer (correct) without unbounded allocation (ActivityWatch/aw-server-rust#808).
+            if inner.pending_flush.len() >= self.write_log_size {
+                inner.pending_flush.clear();
+                inner.pending_flush.push((
+                    generation,
+                    vec![(DateTime::<Utc>::MIN_UTC, DateTime::<Utc>::MAX_UTC)],
+                ));
+            } else {
+                inner.pending_flush.push((generation, ranges.clone()));
+            }
+        }
         let stale: Vec<CacheKey> = inner
             .entries
             .iter()
@@ -556,6 +584,7 @@ mod tests {
     #[test]
     fn pending_writes_are_cleared_only_through_the_flushed_generation() {
         let cache = QueryCache::new();
+        cache.set_reader_active();
         let t = |h: i64| Utc.with_ymd_and_hms(2000, 1, 1, h as u32, 0, 0).unwrap();
         let period = (t(0), t(2));
         assert_eq!(cache.pending_overlapping(&[period]), None);
@@ -574,5 +603,110 @@ mod tests {
         // Non-overlapping periods never trigger a flush.
         cache.invalidate(vec![(t(5), t(6))]);
         assert_eq!(cache.pending_overlapping(&[period]), None);
+    }
+
+    #[test]
+    fn pending_flush_empty_without_reader() {
+        // No-reader servers (Android, encrypted, in-memory) must not accumulate
+        // pending_flush entries even under heavy write traffic (ActivityWatch/aw-server-rust#808).
+        let cache = QueryCache::new();
+        let t = |h: i64| Utc.with_ymd_and_hms(2000, 1, 1, h as u32, 0, 0).unwrap();
+        for _ in 0..20 {
+            cache.invalidate(vec![(t(1), t(2))]);
+        }
+        // Without set_reader_active, pending_overlapping must always be None.
+        assert_eq!(cache.pending_overlapping(&[(t(0), t(3))]), None);
+        assert_eq!(
+            cache.inner.lock().unwrap().pending_flush.len(),
+            0,
+            "pending_flush must stay empty on no-reader servers"
+        );
+    }
+
+    #[test]
+    fn pending_flush_bounded_at_write_log_size() {
+        // When writes saturate write_log_size, pending_flush collapses to a
+        // full-range sentinel and any subsequent query sees a pending write
+        // (ActivityWatch/aw-server-rust#808).
+        let cache = QueryCache::with_limits(100, 1024 * 1024, Duration::minutes(10), 4);
+        cache.set_reader_active();
+        let t = |h: i64| Utc.with_ymd_and_hms(2000, 1, 1, h as u32, 0, 0).unwrap();
+        // Fill up to write_log_size (4 entries).
+        for h in 1..=4 {
+            cache.invalidate(vec![(t(h), t(h + 1))]);
+        }
+        // The 5th write should collapse pending_flush to a sentinel.
+        cache.invalidate(vec![(t(10), t(11))]);
+        let inner = cache.inner.lock().unwrap();
+        assert_eq!(
+            inner.pending_flush.len(),
+            1,
+            "should have collapsed to one sentinel"
+        );
+        let (_, sentinel_ranges) = &inner.pending_flush[0];
+        assert_eq!(sentinel_ranges.len(), 1);
+        assert!(
+            sentinel_ranges[0].0 <= t(0) && sentinel_ranges[0].1 >= t(23),
+            "sentinel must cover the full range"
+        );
+        drop(inner);
+        // Any period should now see a pending overlap (sentinel covers everything).
+        let far_past = (t(0), t(0));
+        assert!(
+            cache.pending_overlapping(&[far_past]).is_some(),
+            "sentinel makes any period return Some"
+        );
+    }
+
+    #[test]
+    fn overflow_sentinel_survives_stale_clear_and_clears_with_latest() {
+        // Exercises clear_pending_through against the overflow sentinel: a flush
+        // that started before overflow must not drop the newer sentinel write,
+        // and a flush through the latest generation empties pending tracking
+        // (ActivityWatch/aw-server-rust#808).
+        let cache = QueryCache::with_limits(100, 1024 * 1024, Duration::minutes(10), 2);
+        cache.set_reader_active();
+        let t = |h: i64| Utc.with_ymd_and_hms(2000, 1, 1, h as u32, 0, 0).unwrap();
+
+        // Two writes fill pending_flush to its limit (2 entries).
+        cache.invalidate(vec![(t(1), t(2))]);
+        cache.invalidate(vec![(t(3), t(4))]);
+        assert_eq!(cache.inner.lock().unwrap().pending_flush.len(), 2);
+
+        // A flush starts now: capture the generation it will clear through.
+        let flush_gen = cache
+            .pending_overlapping(&[(t(0), t(5))])
+            .expect("both writes overlap");
+
+        // A newer write overflows the vec, collapsing it to a full-range
+        // sentinel recorded at a later generation.
+        cache.invalidate(vec![(t(10), t(11))]);
+        {
+            let inner = cache.inner.lock().unwrap();
+            assert_eq!(
+                inner.pending_flush.len(),
+                1,
+                "overflow collapses to sentinel"
+            );
+            let sentinel_gen = inner.pending_flush[0].0;
+            assert!(
+                sentinel_gen > flush_gen,
+                "sentinel must carry the newer generation"
+            );
+        }
+
+        // Clearing through the pre-overflow generation must NOT drop the newer
+        // write: it arrived after the flush started.
+        cache.clear_pending_through(flush_gen);
+        assert!(
+            cache.pending_overlapping(&[(t(0), t(23))]).is_some(),
+            "newer overflow write must remain pending after a stale clear"
+        );
+
+        // Clearing through the latest generation empties pending tracking.
+        let latest = cache.generation();
+        cache.clear_pending_through(latest);
+        assert_eq!(cache.pending_overlapping(&[(t(0), t(23))]), None);
+        assert_eq!(cache.inner.lock().unwrap().pending_flush.len(), 0);
     }
 }

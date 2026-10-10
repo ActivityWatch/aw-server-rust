@@ -39,7 +39,7 @@ aw-sync dedupe --bucket aw-watcher-window-synced-from-host  # delete the extras 
 # data, but note it before running on a live instance.
 ```
 
-`aw-sync` / `aw-sync daemon` currently **does not pull** from the 3-level `{hostname}/{device_id}/` layout that Android and `aw-sync sync` write. The daemon stages `{device_id}/test.db` at the sync-folder root and only walks two directory levels, so those peers are invisible ([#682](https://github.com/ActivityWatch/aw-server-rust/issues/682)). Until that switch lands, use `aw-sync sync` (or a systemd/cron timer around it) — not the daemon.
+`aw-sync` / `aw-sync daemon` currently **does not pull** from the 3-level `{hostname}/{device_id}/` layout that Android and `aw-sync sync` write. The daemon stages `{device_id}/sync.db` at the sync-folder root and only walks two directory levels, so those peers are invisible ([#682](https://github.com/ActivityWatch/aw-server-rust/issues/682)). Until that switch lands, use `aw-sync sync` (or a systemd/cron timer around it) — not the daemon.
 
 ```sh
 # Daemon — currently broken for mixed / Android layouts (see above)
@@ -55,7 +55,7 @@ For more options, see `aw-sync --help`. Some notable options:
 - `--start-date`: Only sync events after this date (YYYY-MM-DD)
 - `--sync-db`: Specify a specific database file in the sync directory
 - `--mode`: Choose sync mode: "push", "pull", or "both" (default: "both")
-  - On `aw-sync sync`, `--mode` / `--buckets` / `--start-date` / `--sync-db` switch to `sync_run`, which uses the two-level `{device_id}/test.db` layout (same as the daemon). Those flags will not see Android or bare-`aw-sync sync` peers. Bare `aw-sync sync` (no extra flags) is the 3-level path and always does both a pull and a push.
+  - On `aw-sync sync`, `--mode` / `--buckets` / `--start-date` / `--sync-db` switch to `sync_run`, which uses the two-level `{device_id}/sync.db` layout (same as the daemon). Those flags will not see Android or bare-`aw-sync sync` peers. Bare `aw-sync sync` (no extra flags) is the 3-level path and always does both a pull and a push.
 
 ### Setting up sync
 
@@ -66,10 +66,10 @@ Default directory: `~/ActivityWatchSync` (`--sync-dir` or `AW_SYNC_DIR`).
 Working paths (bare `aw-sync sync`, Android) write:
 
 ```txt
-~/ActivityWatchSync/{hostname}/{device_id}/test.db
+~/ActivityWatchSync/{hostname}/{device_id}/sync.db
 ```
 
-The default daemon still writes `~/ActivityWatchSync/{device_id}/test.db` (two levels). `aw-sync sync` and the Android app cannot see that file.
+The default daemon and advanced `sync_run` path write `~/ActivityWatchSync/{device_id}/sync.db` (two levels). Existing `test.db` staging databases and their SQLite sidecars are renamed to `sync.db` before opening — this applies to both the two-level layout (`{device_id}/test.db`) and the three-level layout (`{hostname}/{device_id}/test.db`) used by bare `aw-sync sync` and Android. If both names exist in the same folder, `sync.db` wins and `test.db` and its SQLite sidecars are left untouched for manual inspection.
 
 #### Experimental v2 folder format (`sync-v2` feature)
 

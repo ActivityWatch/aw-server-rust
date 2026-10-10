@@ -336,27 +336,30 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
                 migrated_database: false,
             }
         }
-        DirChoice::Misplaced if has_database(target) => {
-            // Selection-only recovery: migrate_dir cannot replace an occupied
-            // target. Keep both originals and avoid copying on every startup.
-            warn!("Using newer data in {misplaced:?}; {target:?} also holds a database and was left untouched. Database merge recovery is still required.");
-            MigrationOutcome {
-                dir: misplaced.to_path_buf(),
-                migrated_database: false,
-            }
-        }
+
         DirChoice::Misplaced => match MigrationLock::acquire(target).and_then(|_lock| {
             // Re-check under the lock: another process may have completed
             // the migration between our first look and taking the lock.
             if choose_module_dir(target, misplaced) == DirChoice::Target {
                 return Err(io_err("already migrated by another process".into()));
             }
-            migrate_dir(target, misplaced, copy)
-        }) {
-            Ok(()) => MigrationOutcome {
+            if has_database(target) {
+                // Selection-only recovery: retain both originals rather than
+                // repeatedly copy into an occupied target. Re-check under the
+                // migration lock before returning the Roaming path.
+                warn!("Using newer data in {misplaced:?}; {target:?} also holds a database and was left untouched. Database merge recovery is still required.");
+                return Ok(MigrationOutcome {
+                    dir: misplaced.to_path_buf(),
+                    migrated_database: false,
+                });
+            }
+            migrate_dir(target, misplaced, copy)?;
+            Ok(MigrationOutcome {
                 dir: target.to_path_buf(),
                 migrated_database: has_database(target),
-            },
+            })
+        }) {
+            Ok(outcome) => outcome,
             Err(e) => {
                 // Re-apply the shared rule rather than assume: normally this
                 // is still `misplaced`, but another process (e.g. a second
@@ -1340,6 +1343,48 @@ fn test_content_selection_unreadable_local_is_not_empty() {
     .unwrap();
     plant_events_db(&misplaced, 100);
     assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_reads_uncheckpointed_wal_events() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 10);
+    let writer = rusqlite::Connection::open(misplaced.join("sqlite.db")).unwrap();
+    writer
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+        .unwrap();
+    writer.execute("INSERT INTO events (bucketrow, starttime, endtime, datastr) VALUES (1, 100, 100, '{}')", []).unwrap();
+    assert!(misplaced.join("sqlite.db-wal").metadata().unwrap().len() > 0);
+    assert_eq!(
+        database_rank(&misplaced, "sqlite.db").unwrap(),
+        (Some(100), 2)
+    );
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    drop(writer);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_occupied_target_waits_for_migration_lock() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let held = MigrationLock::acquire(&target).unwrap();
+    let (t2, m2) = (target.clone(), misplaced.clone());
+    let waiter = std::thread::spawn(move || resolve_or_migrate(&t2, &m2, &real_copy));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let waited = !waiter.is_finished();
+    // Simulate the lock holder changing the authoritative database.
+    plant_events_db(&target, 200);
+    drop(held);
+    let out = waiter.join().unwrap();
+    assert!(
+        waited,
+        "occupied-target selection must also wait for the lock"
+    );
+    assert_eq!(out.dir, target);
     let _ = fs::remove_dir_all(root);
 }
 

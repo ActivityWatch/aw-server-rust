@@ -696,6 +696,107 @@ mod query_tests {
     }
 
     #[test]
+    fn test_logical_rules() {
+        // Query-level coverage for the and/or logical rules: the JSON accepted by
+        // `tag`/`categorize` is exercised end to end, not just the rule constructor.
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let run = |code: &str| -> Vec<Event> {
+            let result: DataType = aw_query::query(code, &interval, &ds).unwrap();
+            Vec::try_from(&result).unwrap()
+        };
+        let count_tagged = |events: &[Event], tag: &str| -> usize {
+            events
+                .iter()
+                .filter(|e| {
+                    e.data
+                        .get("$tags")
+                        .and_then(|t| t.as_array())
+                        .is_some_and(|tags| tags.iter().any(|t| t.as_str() == Some(tag)))
+                })
+                .count()
+        };
+
+        // `or` matches when any nested rule matches; both populated events match one branch.
+        let code = format!(
+            r#"
+            events = query_bucket("{BUCKET_ID}");
+            events = tag(events, [["logical-or", {{ "type": "or", "rules": [
+                {{ "type": "regex", "regex": "^value$" }},
+                {{ "type": "regex", "regex": "^value2$" }}
+            ] }}]]);
+            return  events;"#
+        );
+        let events = run(&code);
+        assert!(!events.is_empty());
+        assert_eq!(count_tagged(&events, "logical-or"), events.len());
+
+        // `and` requires every nested rule; no event satisfies both, so nothing is tagged.
+        let code = format!(
+            r#"
+            events = query_bucket("{BUCKET_ID}");
+            events = tag(events, [["logical-and", {{ "type": "and", "rules": [
+                {{ "type": "regex", "regex": "^value$" }},
+                {{ "type": "regex", "regex": "^value2$" }}
+            ] }}]]);
+            return  events;"#
+        );
+        let events = run(&code);
+        assert_eq!(count_tagged(&events, "logical-and"), 0);
+
+        // Nesting: or(value, and(value2, value2)) matches both events.
+        let code = format!(
+            r#"
+            events = query_bucket("{BUCKET_ID}");
+            events = tag(events, [["logical-nested", {{ "type": "or", "rules": [
+                {{ "type": "regex", "regex": "^value$" }},
+                {{ "type": "and", "rules": [
+                    {{ "type": "regex", "regex": "^value2$" }},
+                    {{ "type": "regex", "regex": "^value2$" }}
+                ] }}
+            ] }}]]);
+            return  events;"#
+        );
+        let events = run(&code);
+        assert_eq!(count_tagged(&events, "logical-nested"), events.len());
+
+        // An empty rule list is rejected: a vacuous `and`/`or` would match every event.
+        for rtype in ["and", "or"] {
+            let code = format!(
+                r#"
+                events = [];
+                events = tag(events, [["t", {{ "type": "{rtype}", "rules": [] }}]]);
+                return  events;"#
+            );
+            assert_err_type!(
+                aw_query::query(&code, &interval, &ds),
+                QueryError::InvalidFunctionParameters(_)
+            );
+        }
+
+        // A missing `rules` field is rejected.
+        let code = r#"
+            events = [];
+            events = tag(events, [["t", { "type": "or" }]]);
+            return  events;"#;
+        assert_err_type!(
+            aw_query::query(code, &interval, &ds),
+            QueryError::InvalidFunctionParameters(_)
+        );
+
+        // A `rules` field that is not a list is rejected.
+        let code = r#"
+            events = [];
+            events = tag(events, [["t", { "type": "or", "rules": "nope" }]]);
+            return  events;"#;
+        assert_err_type!(
+            aw_query::query(code, &interval, &ds),
+            QueryError::InvalidFunctionParameters(_)
+        );
+    }
+
+    #[test]
     fn test_string() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();

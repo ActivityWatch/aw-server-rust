@@ -19,6 +19,7 @@ mod lexer;
 // parser.rs itself (inner `#![allow(...)]`); listing them here too is what
 // triggered clippy::duplicated_attributes (ActivityWatch/aw-server-rust#771).
 #[allow(
+    clippy::block_scrutinee,
     clippy::match_single_binding,
     clippy::redundant_closure_call,
     unused_braces

@@ -47,11 +47,11 @@ aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
 sha2 = "0.10"
+# Same version as aw-datastore; dirs.rs reads databases for content-based selection.
+rusqlite = "0.30"
 
 [dev-dependencies]
 criterion = "0.5.1"
-# Same version as aw-datastore; tests build real WAL databases to migrate.
-rusqlite = "0.30"
 
 [[bench]]
 name = "query_cache"

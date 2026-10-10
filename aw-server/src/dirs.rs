@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rusqlite;
+
 #[cfg(target_os = "android")]
 use std::sync::Mutex;
 
@@ -196,16 +198,104 @@ fn has_entries(dir: &Path) -> bool {
     !dir_entries(dir).is_empty()
 }
 
+/// Newest event `starttime` (nanoseconds) in any database inside `dir`, or
+/// `None` when the directory has no database or the query fails.
+///
+/// Opens with `SQLITE_OPEN_READ_ONLY` so the WAL is visible but never written
+/// or checkpointed.  A missing table (empty / schema-only database) is treated
+/// as None.  On any error the database is simply excluded from ranking.
+fn db_newest_starttime(dir: &Path) -> Option<i64> {
+    let db_path = dir_entries(dir)
+        .into_iter()
+        .find(|e| {
+            e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                && e.file_name().to_string_lossy().ends_with(".db")
+        })?
+        .path();
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    conn.query_row("SELECT MAX(starttime) FROM events", [], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
+    .ok()
+    .flatten()
+}
+
+/// Event count across all buckets in `dir`, or 0 on any error.
+fn db_event_count(dir: &Path) -> u64 {
+    let db_path = dir_entries(dir)
+        .into_iter()
+        .find(|e| {
+            e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                && e.file_name().to_string_lossy().ends_with(".db")
+        })
+        .map(|e| e.path());
+    let Some(path) = db_path else { return 0 };
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return 0;
+    };
+    conn.query_row("SELECT COUNT(*) FROM events", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|n| n as u64)
+    .unwrap_or(0)
+}
+
 /// The rule for which dir is in use, shared by every reader and writer.
 ///
-/// 1. The target holds a database: it is authoritative. The misplaced dir is
-///    left untouched (and logged), never merged into it.
-/// 2. Only the misplaced dir holds a database: it is the one in use (to be
+/// 1. Both dirs hold a database: inspect content and pick the one whose newest
+///    event is most recent (fall back: higher event count, then prefer target).
+///    Log the choice and both candidates' newest timestamps.
+/// 2. Only target holds a database: it is authoritative.
+/// 3. Only the misplaced dir holds a database: it is the one in use (to be
 ///    migrated as a whole, config included).
-/// 3. No database anywhere (e.g. aw-sync's config dir): whichever is
+/// 4. No database anywhere (e.g. aw-sync's config dir): whichever is
 ///    non-empty, preferring the target.
 pub fn choose_module_dir(target: &Path, misplaced: &Path) -> DirChoice {
-    if has_database(target) {
+    if has_database(target) && has_database(misplaced) {
+        // Content-based selection: newest event wins.
+        let target_ts = db_newest_starttime(target);
+        let misplaced_ts = db_newest_starttime(misplaced);
+        log::info!(
+            "choose_module_dir: both dirs have databases — \
+             target newest={:?}, misplaced newest={:?}",
+            target_ts,
+            misplaced_ts
+        );
+        match (target_ts, misplaced_ts) {
+            (Some(t), Some(m)) if m > t => DirChoice::Misplaced,
+            (None, Some(_)) => {
+                // Target database is empty or unreadable; misplaced has data.
+                let mc = db_event_count(misplaced);
+                if mc > 0 {
+                    DirChoice::Misplaced
+                } else {
+                    DirChoice::Target
+                }
+            }
+            _ => {
+                // Target wins on timestamp, or tie → prefer target.
+                if target_ts.is_none() && misplaced_ts.is_none() {
+                    // Both empty: fall back to count, then target.
+                    let tc = db_event_count(target);
+                    let mc = db_event_count(misplaced);
+                    if mc > tc {
+                        DirChoice::Misplaced
+                    } else {
+                        DirChoice::Target
+                    }
+                } else {
+                    DirChoice::Target
+                }
+            }
+        }
+    } else if has_database(target) {
         DirChoice::Target
     } else if has_database(misplaced) {
         DirChoice::Misplaced
@@ -1172,6 +1262,85 @@ fn test_local_database_is_authoritative() {
     assert_eq!(
         fs::read(misplaced.join("config.toml")).unwrap(),
         b"roaming-cfg"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Create a real SQLite database in `dir/sqlite.db` with one event at
+/// `starttime` (nanoseconds since epoch).  Uses the same schema as aw-datastore.
+#[cfg(test)]
+fn plant_events_db(dir: &Path, starttime: i64) {
+    fs::create_dir_all(dir).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("sqlite.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS buckets (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL);
+         CREATE TABLE IF NOT EXISTS events (
+             id INTEGER PRIMARY KEY,
+             bucketrow INTEGER NOT NULL,
+             starttime INTEGER NOT NULL,
+             endtime INTEGER NOT NULL,
+             datastr TEXT NOT NULL
+         );
+         INSERT OR IGNORE INTO buckets (name) VALUES ('test-bucket');",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO events (bucketrow, starttime, endtime, datastr)
+         VALUES ((SELECT id FROM buckets WHERE name='test-bucket'), ?1, ?1, '{}')",
+        rusqlite::params![starttime],
+    )
+    .unwrap();
+}
+
+/// Roaming has newer events than a stale Local database (row 2/3 from the
+/// issue): content-based selection must prefer Roaming even though Local
+/// exists.
+#[test]
+fn test_content_selection_prefers_newer_roaming_over_stale_local() {
+    let (root, target, misplaced) = migration_dirs();
+    // Stale Local: last event months ago.
+    plant_events_db(&target, 1_700_000_000_000_000_000i64);
+    // Recent Roaming: months of v0.14.0 beta data.
+    plant_events_db(&misplaced, 1_728_000_000_000_000_000i64);
+
+    assert_eq!(
+        choose_module_dir(&target, &misplaced),
+        DirChoice::Misplaced,
+        "Roaming has newer events; content-based selection must prefer it"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Local has newer events (normal upgrade path, pre-v0.14.0 install):
+/// content-based selection must keep Local.
+#[test]
+fn test_content_selection_keeps_newer_local() {
+    let (root, target, misplaced) = migration_dirs();
+    // Recent Local: ongoing pre-v0.14.0 Python data.
+    plant_events_db(&target, 1_728_000_000_000_000_000i64);
+    // Older Roaming: only a few days of v0.14.0 beta.
+    plant_events_db(&misplaced, 1_700_000_000_000_000_000i64);
+
+    assert_eq!(
+        choose_module_dir(&target, &misplaced),
+        DirChoice::Target,
+        "Local has newer events; must stay in use"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Equal newest timestamps: prefer Local (target) as the tiebreaker.
+#[test]
+fn test_content_selection_ties_prefer_target() {
+    let (root, target, misplaced) = migration_dirs();
+    let ts = 1_728_000_000_000_000_000i64;
+    plant_events_db(&target, ts);
+    plant_events_db(&misplaced, ts);
+
+    assert_eq!(
+        choose_module_dir(&target, &misplaced),
+        DirChoice::Target,
+        "Equal timestamps: Local (target) wins the tie"
     );
     let _ = fs::remove_dir_all(root);
 }

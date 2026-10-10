@@ -1150,24 +1150,88 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    // Use unclipped source in reconcile only when the rowid cursor is available:
-    // the rowid path handles duration-only edits (new source rowid, identity
-    // mismatch keeps it out of `on_dest`). For push/timestamp paths, clipped
-    // source lets the identity match resolve both data-only and combined
+    // Upgrade bootstrap defers its cursor persist until the timestamp path it
+    // prefaces completes successfully (set inside the cursor block below,
+    // consumed at the end of this function).
+    let mut deferred_bootstrap_cursor: Option<(&Datastore, String, i64)> = None;
+
+    // Decide whether THIS pass will actually take the rowid fast path BEFORE
+    // calling reconcile. `cursor_ds.is_some()` is not enough: upgrade bootstrap
+    // and HTTP peers (`get_events_since_rowid` = None) both fall through to the
+    // timestamp path. Unclipped source on those passes leaves a duration+data
+    // edit's stale dest head in place (ActivityWatch/aw-server-rust#789).
+    let cursor_ctx: Option<(&Datastore, String, i64, bool)> =
+        if let (Some(ck_did), Some(cds)) = (src_device_id, cursor_ds) {
+            let ck = cursor_key(ck_did, &bucket_from.id);
+
+            // P3: Empty destination means the bucket was just created or was deleted
+            // and recreated.  Always reset the cursor to 0 so the full history is
+            // pulled instead of starting from a stale position left over from the
+            // previous incarnation of the bucket.
+            // A source bucket that was deleted and recreated restarts its rowid
+            // sequence at 1. A stored cursor above the current source max rowid
+            // therefore means the cursor refers to a previous incarnation of the
+            // bucket: keep it and every new row below it would be skipped forever.
+            // Reset to 0; the empty-destination and bootstrap logic below then
+            // re-establishes a sane position.
+            let source_max_rowid = ds_from
+                .get_max_event_rowid(bucket_from.id.as_str())
+                .and_then(|r| r.ok())
+                .unwrap_or(i64::MAX);
+            let stored_rowid: i64 = if eventcount_to_old == 0 {
+                0
+            } else {
+                let stored: i64 = cds
+                    .get_key_value(&ck)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                if stored > source_max_rowid {
+                    warn!(
+                        "Stored cursor {} for '{}' is above source max rowid {}; \
+                         source bucket was likely recreated — resetting cursor",
+                        stored, bucket_from.id, source_max_rowid
+                    );
+                    0
+                } else {
+                    stored
+                }
+            };
+
+            // P1 (upgrade bootstrap): saved_rowid == 0 but the destination already
+            // has events means this is the first pass after upgrading from the
+            // timestamp-based cursor path.  Re-inserting all source history would
+            // create duplicates.  Instead, bootstrap the cursor to the current source
+            // max rowid so subsequent passes only fetch genuinely new events — and
+            // fall through to the timestamp path for *this* pass so new events since
+            // the last timestamp-based sync are still caught.
+            let bootstrap_pass = stored_rowid == 0 && eventcount_to_old > 0;
+            Some((cds, ck, stored_rowid, bootstrap_pass))
+        } else {
+            None
+        };
+
+    // Use unclipped source in reconcile only when the rowid fast path will
+    // actually run. The rowid path handles duration-only edits (new source
+    // rowid, identity mismatch keeps it out of `on_dest`). For push/timestamp
+    // paths — including upgrade bootstrap and HTTP peers — clipped source
+    // lets the identity match resolve both data-only and combined
     // duration+data edits without relying on the rowid path.
+    let source_supports_rowid = ds_from
+        .get_max_event_rowid(bucket_from.id.as_str())
+        .is_some();
+    let use_unclipped_source = match &cursor_ctx {
+        Some((_, _, _, bootstrap_pass)) => source_supports_rowid && !*bootstrap_pass,
+        None => false,
+    };
     let reconciled = reconcile_updated_events(
         ds_from,
         ds_to,
         &bucket_from,
         &bucket_to,
         resume_sync_at,
-        cursor_ds.is_some(),
+        use_unclipped_source,
     )?;
-
-    // Upgrade bootstrap defers its cursor persist until the timestamp path it
-    // prefaces completes successfully (set inside the cursor block below,
-    // consumed at the end of this function).
-    let mut deferred_bootstrap_cursor: Option<(&Datastore, String, i64)> = None;
 
     // ── Rowid cursor fast path ──────────────────────────────────────────────
     // When the source is a file-based Datastore and a cursor_ds is provided,
@@ -1181,51 +1245,7 @@ fn sync_one(
     //   - ds_from.get_events_since_rowid returns None (AwClient impl), or
     //   - saved_rowid == 0 and destination already has events (upgrade bootstrap,
     //     see below).
-    if let (Some(ck_did), Some(cds)) = (src_device_id, cursor_ds) {
-        let ck = cursor_key(ck_did, &bucket_from.id);
-
-        // P3: Empty destination means the bucket was just created or was deleted
-        // and recreated.  Always reset the cursor to 0 so the full history is
-        // pulled instead of starting from a stale position left over from the
-        // previous incarnation of the bucket.
-        // A source bucket that was deleted and recreated restarts its rowid
-        // sequence at 1. A stored cursor above the current source max rowid
-        // therefore means the cursor refers to a previous incarnation of the
-        // bucket: keep it and every new row below it would be skipped forever.
-        // Reset to 0; the empty-destination and bootstrap logic below then
-        // re-establishes a sane position.
-        let source_max_rowid = ds_from
-            .get_max_event_rowid(bucket_from.id.as_str())
-            .and_then(|r| r.ok())
-            .unwrap_or(i64::MAX);
-        let stored_rowid: i64 = if eventcount_to_old == 0 {
-            0
-        } else {
-            let stored: i64 = cds
-                .get_key_value(&ck)
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            if stored > source_max_rowid {
-                warn!(
-                    "Stored cursor {} for '{}' is above source max rowid {}; \
-                     source bucket was likely recreated — resetting cursor",
-                    stored, bucket_from.id, source_max_rowid
-                );
-                0
-            } else {
-                stored
-            }
-        };
-
-        // P1 (upgrade bootstrap): saved_rowid == 0 but the destination already
-        // has events means this is the first pass after upgrading from the
-        // timestamp-based cursor path.  Re-inserting all source history would
-        // create duplicates.  Instead, bootstrap the cursor to the current source
-        // max rowid so subsequent passes only fetch genuinely new events — and
-        // fall through to the timestamp path for *this* pass so new events since
-        // the last timestamp-based sync are still caught.
-        let bootstrap_pass = stored_rowid == 0 && eventcount_to_old > 0;
+    if let Some((cds, ck, stored_rowid, bootstrap_pass)) = cursor_ctx {
         if bootstrap_pass {
             if let Some(Ok(max_rowid)) = ds_from.get_max_event_rowid(bucket_from.id.as_str()) {
                 // Do NOT persist the bootstrapped cursor yet: this pass still
@@ -3656,5 +3676,110 @@ mod rowid_cursor_tests {
 
         ds_src.close();
         ds_dest.close();
+    }
+
+    /// Production upgrade path: dest already has events, cursor_ds is present,
+    /// but no stored rowid yet. That pass falls through to the timestamp path
+    /// even though cursor_ds.is_some(). Reconcile must still use clipped source
+    /// or a duration+data edit leaves the stale dest head in place and the
+    /// deferred max-rowid cursor then hides the replacement forever.
+    #[test]
+    fn bootstrap_timestamp_path_replaces_event_with_changed_duration_and_data() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-bootstrap-edit-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let ts = Utc::now() - Duration::seconds(3600);
+        ds_src
+            .insert_events(
+                bucket_id,
+                &[make_event_full(
+                    ts,
+                    0,
+                    5,
+                    serde_json::json!({"stage": "orig"}),
+                )],
+            )
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        let spec = SyncSpec::default();
+        // Pre-upgrade: timestamp path copies the original event.
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            None,
+            Some(src_hostname),
+        )
+        .expect("pre-upgrade pull must succeed");
+
+        let original = ds_src
+            .get_events(bucket_id, None, None, None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        ds_src
+            .delete_events_by_id(bucket_id, vec![original.id.unwrap()])
+            .unwrap();
+        ds_src
+            .insert_events(
+                bucket_id,
+                &[make_event_full(
+                    ts,
+                    0,
+                    60,
+                    serde_json::json!({"stage": "edited"}),
+                )],
+            )
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        // Upgrade bootstrap: dest has events, cursor_ds is present, no stored
+        // rowid. This is the production first-pull-after-upgrade path.
+        sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &spec,
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect("bootstrap pull must succeed");
+
+        let dest = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap();
+        assert!(
+            !dest.iter().any(|e| e.data["stage"] == "orig"),
+            "stale event with old data must not survive bootstrap timestamp path: {dest:?}"
+        );
+        assert!(
+            dest.iter().any(|e| e.data["stage"] == "edited"),
+            "event with new data must be present after bootstrap: {dest:?}"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
     }
 }

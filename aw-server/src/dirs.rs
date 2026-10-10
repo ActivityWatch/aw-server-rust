@@ -196,16 +196,75 @@ fn has_entries(dir: &Path) -> bool {
     !dir_entries(dir).is_empty()
 }
 
+/// Rank the exact database the caller will open, never an arbitrary `.db`.
+/// A successful empty query is distinct from an unreadable (e.g. encrypted)
+/// database. Without a key we must not rank the latter as empty history.
+fn database_rank(dir: &Path, filename: &str) -> rusqlite::Result<(Option<i64>, u64)> {
+    let conn = rusqlite::Connection::open_with_flags(
+        dir.join(filename),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if check != "ok" {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    conn.query_row("SELECT MAX(starttime), COUNT(*) FROM events", [], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })
+}
+
 /// The rule for which dir is in use, shared by every reader and writer.
 ///
-/// 1. The target holds a database: it is authoritative. The misplaced dir is
-///    left untouched (and logged), never merged into it.
-/// 2. Only the misplaced dir holds a database: it is the one in use (to be
+/// 1. Both dirs hold a database: inspect content and pick the one whose newest
+///    event is most recent (fall back: higher event count, then prefer target).
+///    Log the choice and both candidates' newest timestamps.
+/// 2. Only target holds a database: it is authoritative.
+/// 3. Only the misplaced dir holds a database: it is the one in use (to be
 ///    migrated as a whole, config included).
-/// 3. No database anywhere (e.g. aw-sync's config dir): whichever is
+/// 4. No database anywhere (e.g. aw-sync's config dir): whichever is
 ///    non-empty, preferring the target.
 pub fn choose_module_dir(target: &Path, misplaced: &Path) -> DirChoice {
-    if has_database(target) {
+    choose_module_dir_for_database(
+        target,
+        misplaced,
+        &db_filename(crate::config::get_profile()),
+    )
+}
+
+fn choose_module_dir_for_database(target: &Path, misplaced: &Path, filename: &str) -> DirChoice {
+    if has_database(target) && has_database(misplaced) {
+        // Another profile's database does not make this profile unreadable.
+        // Metadata errors remain conservative, like content-inspection errors.
+        match (
+            target.join(filename).try_exists(),
+            misplaced.join(filename).try_exists(),
+        ) {
+            (Ok(false), Ok(true)) => return DirChoice::Misplaced,
+            (Ok(true), Ok(false)) | (Ok(false), Ok(false)) => return DirChoice::Target,
+            (Ok(true), Ok(true)) => {}
+            (t, m) => {
+                warn!("Cannot locate {filename} in {target:?} and {misplaced:?}: target={t:?}, misplaced={m:?}; keeping Local");
+                return DirChoice::Target;
+            }
+        }
+        let target_rank = database_rank(target, filename);
+        let misplaced_rank = database_rank(misplaced, filename);
+        match (target_rank, misplaced_rank) {
+            (Ok(t), Ok(m)) => {
+                let choice = if m > t {
+                    DirChoice::Misplaced
+                } else {
+                    DirChoice::Target
+                };
+                info!("choose_module_dir: {filename}: target rank={t:?}, misplaced rank={m:?}, choice={choice:?}");
+                choice
+            }
+            (t, m) => {
+                warn!("Cannot compare {filename} in {target:?} and {misplaced:?}: target={t:?}, misplaced={m:?}; keeping Local, not treating unreadable history as empty");
+                DirChoice::Target
+            }
+        }
+    } else if has_database(target) {
         DirChoice::Target
     } else if has_database(misplaced) {
         DirChoice::Misplaced
@@ -291,18 +350,30 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
                 migrated_database: false,
             }
         }
+
         DirChoice::Misplaced => match MigrationLock::acquire(target).and_then(|_lock| {
             // Re-check under the lock: another process may have completed
             // the migration between our first look and taking the lock.
             if choose_module_dir(target, misplaced) == DirChoice::Target {
                 return Err(io_err("already migrated by another process".into()));
             }
-            migrate_dir(target, misplaced, copy)
-        }) {
-            Ok(()) => MigrationOutcome {
+            if has_database(target) {
+                // Selection-only recovery: retain both originals rather than
+                // repeatedly copy into an occupied target. Re-check under the
+                // migration lock before returning the Roaming path.
+                warn!("Using newer data in {misplaced:?}; {target:?} also holds a database and was left untouched. Database merge recovery is still required.");
+                return Ok(MigrationOutcome {
+                    dir: misplaced.to_path_buf(),
+                    migrated_database: false,
+                });
+            }
+            migrate_dir(target, misplaced, copy)?;
+            Ok(MigrationOutcome {
                 dir: target.to_path_buf(),
                 migrated_database: has_database(target),
-            },
+            })
+        }) {
+            Ok(outcome) => outcome,
             Err(e) => {
                 // Re-apply the shared rule rather than assume: normally this
                 // is still `misplaced`, but another process (e.g. a second
@@ -1172,6 +1243,246 @@ fn test_local_database_is_authoritative() {
     assert_eq!(
         fs::read(misplaced.join("config.toml")).unwrap(),
         b"roaming-cfg"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Create a real SQLite database in `dir/sqlite.db` with one event at
+/// `starttime` (nanoseconds since epoch).  Uses the same schema as aw-datastore.
+#[cfg(test)]
+fn plant_events_db(dir: &Path, starttime: i64) {
+    fs::create_dir_all(dir).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("sqlite.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS buckets (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL);
+         CREATE TABLE IF NOT EXISTS events (
+             id INTEGER PRIMARY KEY,
+             bucketrow INTEGER NOT NULL,
+             starttime INTEGER NOT NULL,
+             endtime INTEGER NOT NULL,
+             datastr TEXT NOT NULL
+         );
+         INSERT OR IGNORE INTO buckets (name) VALUES ('test-bucket');",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO events (bucketrow, starttime, endtime, datastr)
+         VALUES ((SELECT id FROM buckets WHERE name='test-bucket'), ?1, ?1, '{}')",
+        rusqlite::params![starttime],
+    )
+    .unwrap();
+}
+
+/// Roaming has newer events than a stale Local database (row 2/3 from the
+/// issue): content-based selection must prefer Roaming even though Local
+/// exists.
+#[test]
+fn test_content_selection_prefers_newer_roaming_over_stale_local() {
+    let (root, target, misplaced) = migration_dirs();
+    // Stale Local: last event months ago.
+    plant_events_db(&target, 1_700_000_000_000_000_000i64);
+    // Recent Roaming: months of v0.14.0 beta data.
+    plant_events_db(&misplaced, 1_728_000_000_000_000_000i64);
+
+    assert_eq!(
+        choose_module_dir(&target, &misplaced),
+        DirChoice::Misplaced,
+        "Roaming has newer events; content-based selection must prefer it"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_equal_timestamps_prefers_more_events() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 100);
+    plant_events_db(&misplaced, 100);
+    plant_events_db(&misplaced, 50);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_ranks_the_requested_database() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 200);
+    fs::rename(target.join("sqlite.db"), target.join("sqlite-testing.db")).unwrap();
+    plant_events_db(&misplaced, 50);
+    fs::rename(
+        misplaced.join("sqlite.db"),
+        misplaced.join("sqlite-testing.db"),
+    )
+    .unwrap();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    assert_eq!(
+        choose_module_dir_for_database(&target, &misplaced, "sqlite.db"),
+        DirChoice::Misplaced
+    );
+    assert_eq!(
+        choose_module_dir_for_database(&target, &misplaced, "sqlite-testing.db"),
+        DirChoice::Target
+    );
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_missing_profile_database_is_not_unreadable() {
+    for filename in ["sqlite.db", "sqlite-testing.db"] {
+        let other_filename = if filename == "sqlite.db" {
+            "sqlite-testing.db"
+        } else {
+            "sqlite.db"
+        };
+        let (root, target, misplaced) = migration_dirs();
+        plant_events_db(&target, 200);
+        fs::rename(target.join("sqlite.db"), target.join(other_filename)).unwrap();
+        plant_events_db(&misplaced, 100);
+        if filename != "sqlite.db" {
+            fs::rename(misplaced.join("sqlite.db"), misplaced.join(filename)).unwrap();
+        }
+        assert_eq!(
+            choose_module_dir_for_database(&target, &misplaced, filename),
+            DirChoice::Misplaced,
+            "a different profile's Local database must not hide the requested Roaming database"
+        );
+        assert_eq!(
+            choose_module_dir_for_database(&misplaced, &target, filename),
+            DirChoice::Target,
+            "a different profile's Roaming database must not override the requested Local database"
+        );
+        assert!(
+            !target.join(filename).exists(),
+            "inspection must not create a database"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn test_content_selection_empty_and_corrupt_databases() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    for dir in [&target, &misplaced] {
+        rusqlite::Connection::open(dir.join("sqlite.db"))
+            .unwrap()
+            .execute("DELETE FROM events", [])
+            .unwrap();
+    }
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    plant_events_db(&misplaced, 100);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    fs::write(misplaced.join("sqlite.db"), b"corrupt Roaming").unwrap();
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_unreadable_local_is_not_empty() {
+    let (root, target, misplaced) = migration_dirs();
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("sqlite.db"),
+        b"encrypted or unreadable database",
+    )
+    .unwrap();
+    plant_events_db(&misplaced, 100);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_reads_uncheckpointed_wal_events() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 10);
+    let writer = rusqlite::Connection::open(misplaced.join("sqlite.db")).unwrap();
+    writer
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+        .unwrap();
+    writer.execute("INSERT INTO events (bucketrow, starttime, endtime, datastr) VALUES (1, 100, 100, '{}')", []).unwrap();
+    assert!(misplaced.join("sqlite.db-wal").metadata().unwrap().len() > 0);
+    assert_eq!(
+        database_rank(&misplaced, "sqlite.db").unwrap(),
+        (Some(100), 2)
+    );
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    drop(writer);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_occupied_target_waits_for_migration_lock() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let held = MigrationLock::acquire(&target).unwrap();
+    let (t2, m2) = (target.clone(), misplaced.clone());
+    let waiter = std::thread::spawn(move || resolve_or_migrate(&t2, &m2, &real_copy));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let waited = !waiter.is_finished();
+    // Simulate the lock holder changing the authoritative database.
+    plant_events_db(&target, 200);
+    drop(held);
+    let out = waiter.join().unwrap();
+    assert!(
+        waited,
+        "occupied-target selection must also wait for the lock"
+    );
+    assert_eq!(out.dir, target);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_does_not_copy_into_occupied_target() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let copies = std::cell::Cell::new(0);
+    let out = resolve_or_migrate(&target, &misplaced, &|from, to| {
+        copies.set(copies.get() + 1);
+        fs::copy(from, to)
+    });
+    assert_eq!(out.dir, misplaced);
+    assert!(!out.migrated_database);
+    assert_eq!(copies.get(), 0);
+    assert!(target.join("sqlite.db").exists());
+    assert!(misplaced.join("sqlite.db").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Local has newer events (normal upgrade path, pre-v0.14.0 install):
+/// content-based selection must keep Local.
+#[test]
+fn test_content_selection_keeps_newer_local() {
+    let (root, target, misplaced) = migration_dirs();
+    // Recent Local: ongoing pre-v0.14.0 Python data.
+    plant_events_db(&target, 1_728_000_000_000_000_000i64);
+    // Older Roaming: only a few days of v0.14.0 beta.
+    plant_events_db(&misplaced, 1_700_000_000_000_000_000i64);
+
+    assert_eq!(
+        choose_module_dir(&target, &misplaced),
+        DirChoice::Target,
+        "Local has newer events; must stay in use"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Equal newest timestamps: prefer Local (target) as the tiebreaker.
+#[test]
+fn test_content_selection_ties_prefer_target() {
+    let (root, target, misplaced) = migration_dirs();
+    let ts = 1_728_000_000_000_000_000i64;
+    plant_events_db(&target, ts);
+    plant_events_db(&misplaced, ts);
+
+    assert_eq!(
+        choose_module_dir(&target, &misplaced),
+        DirChoice::Target,
+        "Equal timestamps: Local (target) wins the tie"
     );
     let _ = fs::remove_dir_all(root);
 }

@@ -1133,6 +1133,11 @@ mod api_tests {
                 "test_id".to_string(),
             )
         };
+        // Mirror main.rs: notify the query cache that a reader is active so
+        // pending-write tracking fires on writes (ActivityWatch/aw-server-rust#808).
+        if state.reader.is_some() {
+            state.query_cache.set_reader_active();
+        }
         endpoints::build_rocket(state, config::AWConfig::default())
     }
 

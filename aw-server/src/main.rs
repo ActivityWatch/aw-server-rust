@@ -300,6 +300,11 @@ async fn main() -> Result<(), rocket::Error> {
         // it will not happen there
         ..endpoints::ServerState::new(datastore, asset_resolver, device_id)
     };
+    // Notify the query cache that a reader is active so it starts tracking
+    // pending writes for reader-backed freshness (ActivityWatch/aw-server-rust#808).
+    if server_state.reader.is_some() {
+        server_state.query_cache.set_reader_active();
+    }
 
     let _rocket = endpoints::build_rocket(server_state, config)
         .ignite()

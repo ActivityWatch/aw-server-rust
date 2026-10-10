@@ -57,7 +57,9 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
     if !has("table", "key_value") {
         return 3;
     }
-    if has("index", "events_bucketrow_endtime_starttime_index") {
+    if has("table", "event_category_overrides") {
+        7
+    } else if has("index", "events_bucketrow_endtime_starttime_index") {
         6
     } else if has("index", "events_bucketrow_starttime_endtime_index") {
         5
@@ -1903,6 +1905,19 @@ mod inference_tests {
         let conn = Connection::open_in_memory().unwrap();
         _create_tables(&conn, 0);
         assert_eq!(_infer_db_version(&conn), NEWEST_DB_VERSION);
+    }
+
+    #[test]
+    fn infer_db_version_identifies_v6_without_category_sidecar() {
+        let conn = Connection::open_in_memory().unwrap();
+        _create_tables(&conn, 0);
+        conn.execute_batch(
+            "DROP TRIGGER events_delete_category_override;
+             DROP TABLE event_category_overrides;
+             PRAGMA user_version = 0;",
+        )
+        .unwrap();
+        assert_eq!(_infer_db_version(&conn), 6);
     }
 
     #[test]

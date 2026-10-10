@@ -60,7 +60,30 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
                 None => continue 'event,
             }
         }
-        let summed_key = key_values.join(".");
+        // The category component of the merge key is what keeps events with
+        // the same grouping values but different categories from collapsing
+        // into one row that keeps only the first event's category and
+        // misattributes the summed duration.
+        //
+        // - A `$category` merge already groups by the final category, so no
+        //   extra component is needed: a manual and an automatic event that
+        //   landed in the same category must sum into one row.
+        // - Otherwise the component is the event's effective category: its
+        //   manual override if it has one, else its `$category`. After
+        //   `categorize` this equals `$category` (a valid manual override
+        //   always wins there), so a manual and an automatic event that agree
+        //   on the final category still fold into one row. Before
+        //   classification `query_bucket` events carry no `$category` (stored
+        //   copies are stripped), so manual events stay apart from automatic
+        //   ones and from each other.
+        let split = if keys.iter().any(|key| key == "$category") {
+            None
+        } else {
+            crate::classify::manual_category(&event)
+                .map(|path| serde_json::json!(path))
+                .or_else(|| event.data.get("$category").cloned())
+        };
+        let summed_key = serde_json::to_string(&(key_values, split)).unwrap();
         match index.entry(summed_key) {
             std::collections::hash_map::Entry::Occupied(entry) => {
                 merged[*entry.get()].duration += event.duration;

@@ -41,12 +41,15 @@ pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
             };
             let mut last_event = chunked_events.pop().unwrap();
             let last_val = last_event.data.get(key).unwrap().clone();
-            if &last_val == val {
+            let same_group = &last_val == val
+                && crate::classify::manual_category(&last_event)
+                    == crate::classify::manual_category(&event);
+            if same_group {
                 // TODO: Add sub-chunks
                 last_event.duration += event.duration;
             }
             chunked_events.push(last_event);
-            if &last_val != val {
+            if !same_group {
                 // TODO: Add sub-chunks
                 chunked_events.push(event);
             }

@@ -125,11 +125,14 @@ struct Inner {
     writes: VecDeque<(u64, Vec<TimeRange>)>,
     hits: u64,
     misses: u64,
-    /// Ranges written since the last `take_pending_overlapping`, for the
-    /// read-only query handle: writes are acknowledged before the writer's
-    /// batch commits, so a query over an affected period must flush first
-    /// (ActivityWatch/aw-server-rust#807). Coalesced like `writes`.
-    pending_flush: Vec<TimeRange>,
+    /// `(generation, ranges)` of writes not yet known to be committed, for
+    /// the read-only query handle: writes are acknowledged before the
+    /// writer's batch commits, so a query over an affected period must flush
+    /// first (ActivityWatch/aw-server-rust#807). Entries are removed by
+    /// `clear_pending_through` once a flush that started after them
+    /// succeeded, never before, so a concurrent query cannot see them
+    /// vanish while the commit is still in progress.
+    pending_flush: Vec<(u64, Vec<TimeRange>)>,
 }
 
 /// Bounded cache of query results for finished past periods.
@@ -267,9 +270,7 @@ impl QueryCache {
             inner.writes.pop_front();
         }
         inner.writes.push_back((generation, ranges.clone()));
-        let mut pending = std::mem::take(&mut inner.pending_flush);
-        pending.extend(ranges.iter().cloned());
-        inner.pending_flush = coalesce(pending, 64);
+        inner.pending_flush.push((generation, ranges.clone()));
         let stale: Vec<CacheKey> = inner
             .entries
             .iter()
@@ -284,18 +285,23 @@ impl QueryCache {
     }
 
     /// Drop everything (bucket list changed). Also blocks in-flight stores.
-    /// Whether any write since the last call touched one of `periods`. If so,
-    /// forget all pending writes: the caller is about to commit them.
-    pub fn take_pending_overlapping(&self, periods: &[TimeRange]) -> bool {
+    /// If a write not yet flushed touched one of `periods`, the current write
+    /// generation: commit the writer, then pass it to `clear_pending_through`.
+    pub fn pending_overlapping(&self, periods: &[TimeRange]) -> Option<u64> {
+        let inner = self.inner.lock().unwrap();
+        let hit = inner.pending_flush.iter().any(|(_, ranges)| {
+            ranges
+                .iter()
+                .any(|w| periods.iter().any(|p| overlaps(w, p)))
+        });
+        hit.then_some(inner.generation)
+    }
+
+    /// Forget pending writes recorded at or before `generation`: a flush that
+    /// started after them has succeeded. Later writes stay pending.
+    pub fn clear_pending_through(&self, generation: u64) {
         let mut inner = self.inner.lock().unwrap();
-        let hit = inner
-            .pending_flush
-            .iter()
-            .any(|w| periods.iter().any(|p| overlaps(w, p)));
-        if hit {
-            inner.pending_flush.clear();
-        }
-        hit
+        inner.pending_flush.retain(|(g, _)| *g > generation);
     }
 
     pub fn clear(&self) {
@@ -545,5 +551,28 @@ mod tests {
             2,
         );
         assert_eq!(folded, vec![(dt(1, 0, 0), dt(3, 1, 0))]);
+    }
+
+    #[test]
+    fn pending_writes_are_cleared_only_through_the_flushed_generation() {
+        let cache = QueryCache::new();
+        let t = |h: i64| Utc.with_ymd_and_hms(2000, 1, 1, h as u32, 0, 0).unwrap();
+        let period = (t(0), t(2));
+        assert_eq!(cache.pending_overlapping(&[period]), None);
+
+        cache.invalidate(vec![(t(1), t(1))]);
+        let gen1 = cache
+            .pending_overlapping(&[period])
+            .expect("write overlaps");
+        // A write acknowledged after the flush started must survive the clear.
+        cache.invalidate(vec![(t(1), t(1))]);
+        cache.clear_pending_through(gen1);
+        assert!(cache.pending_overlapping(&[period]).is_some());
+        let gen2 = cache.pending_overlapping(&[period]).unwrap();
+        cache.clear_pending_through(gen2);
+        assert_eq!(cache.pending_overlapping(&[period]), None);
+        // Non-overlapping periods never trigger a flush.
+        cache.invalidate(vec![(t(5), t(6))]);
+        assert_eq!(cache.pending_overlapping(&[period]), None);
     }
 }

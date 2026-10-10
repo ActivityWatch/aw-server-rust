@@ -91,9 +91,13 @@ pub fn query(
             .iter()
             .map(|i| (i.start().to_owned(), i.end().to_owned()))
             .collect();
-        if state.query_cache.take_pending_overlapping(&periods) {
-            if let Err(e) = state.datastore.force_commit() {
-                warn!("Failed to flush writes before query: {e:?}");
+        // Held through the commit: a concurrent query waits here instead of
+        // finding nothing pending while the flush is still in progress.
+        let _flushing = state.flush_lock.lock().unwrap();
+        if let Some(generation) = state.query_cache.pending_overlapping(&periods) {
+            match state.datastore.force_commit() {
+                Ok(()) => state.query_cache.clear_pending_through(generation),
+                Err(e) => warn!("Failed to flush writes before query: {e:?}"),
             }
         }
     }

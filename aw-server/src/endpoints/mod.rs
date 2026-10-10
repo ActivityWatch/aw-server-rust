@@ -111,6 +111,10 @@ pub struct ServerState {
     /// could each invalidate only their own view of the old range and leave an
     /// intermediate period cached (see `bucket_events_create`).
     pub write_lock: std::sync::Mutex<()>,
+    /// Serializes "any pending write overlaps this query? then flush the
+    /// writer" in the query endpoint, so a second query cannot slip between a
+    /// first one's check and its commit and read the old WAL snapshot.
+    pub flush_lock: std::sync::Mutex<()>,
 }
 
 impl ServerState {
@@ -125,6 +129,7 @@ impl ServerState {
             query_cache_enabled: true,
             query_timeout: Some(std::time::Duration::from_secs(300)),
             write_lock: std::sync::Mutex::new(()),
+            flush_lock: std::sync::Mutex::new(()),
         }
     }
 

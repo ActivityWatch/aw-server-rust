@@ -233,6 +233,20 @@ pub fn choose_module_dir(target: &Path, misplaced: &Path) -> DirChoice {
 
 fn choose_module_dir_for_database(target: &Path, misplaced: &Path, filename: &str) -> DirChoice {
     if has_database(target) && has_database(misplaced) {
+        // Another profile's database does not make this profile unreadable.
+        // Metadata errors remain conservative, like content-inspection errors.
+        match (
+            target.join(filename).try_exists(),
+            misplaced.join(filename).try_exists(),
+        ) {
+            (Ok(false), Ok(true)) => return DirChoice::Misplaced,
+            (Ok(true), Ok(false)) | (Ok(false), Ok(false)) => return DirChoice::Target,
+            (Ok(true), Ok(true)) => {}
+            (t, m) => {
+                warn!("Cannot locate {filename} in {target:?} and {misplaced:?}: target={t:?}, misplaced={m:?}; keeping Local");
+                return DirChoice::Target;
+            }
+        }
         let target_rank = database_rank(target, filename);
         let misplaced_rank = database_rank(misplaced, filename);
         match (target_rank, misplaced_rank) {
@@ -1311,6 +1325,39 @@ fn test_content_selection_ranks_the_requested_database() {
     );
     assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_missing_profile_database_is_not_unreadable() {
+    for filename in ["sqlite.db", "sqlite-testing.db"] {
+        let other_filename = if filename == "sqlite.db" {
+            "sqlite-testing.db"
+        } else {
+            "sqlite.db"
+        };
+        let (root, target, misplaced) = migration_dirs();
+        plant_events_db(&target, 200);
+        fs::rename(target.join("sqlite.db"), target.join(other_filename)).unwrap();
+        plant_events_db(&misplaced, 100);
+        if filename != "sqlite.db" {
+            fs::rename(misplaced.join("sqlite.db"), misplaced.join(filename)).unwrap();
+        }
+        assert_eq!(
+            choose_module_dir_for_database(&target, &misplaced, filename),
+            DirChoice::Misplaced,
+            "a different profile's Local database must not hide the requested Roaming database"
+        );
+        assert_eq!(
+            choose_module_dir_for_database(&misplaced, &target, filename),
+            DirChoice::Target,
+            "a different profile's Roaming database must not override the requested Local database"
+        );
+        assert!(
+            !target.join(filename).exists(),
+            "inspection must not create a database"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[test]

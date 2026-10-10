@@ -657,4 +657,56 @@ mod tests {
             "sentinel makes any period return Some"
         );
     }
+
+    #[test]
+    fn overflow_sentinel_survives_stale_clear_and_clears_with_latest() {
+        // Exercises clear_pending_through against the overflow sentinel: a flush
+        // that started before overflow must not drop the newer sentinel write,
+        // and a flush through the latest generation empties pending tracking
+        // (ActivityWatch/aw-server-rust#808).
+        let cache = QueryCache::with_limits(100, 1024 * 1024, Duration::minutes(10), 2);
+        cache.set_reader_active();
+        let t = |h: i64| Utc.with_ymd_and_hms(2000, 1, 1, h as u32, 0, 0).unwrap();
+
+        // Two writes fill pending_flush to its limit (2 entries).
+        cache.invalidate(vec![(t(1), t(2))]);
+        cache.invalidate(vec![(t(3), t(4))]);
+        assert_eq!(cache.inner.lock().unwrap().pending_flush.len(), 2);
+
+        // A flush starts now: capture the generation it will clear through.
+        let flush_gen = cache
+            .pending_overlapping(&[(t(0), t(5))])
+            .expect("both writes overlap");
+
+        // A newer write overflows the vec, collapsing it to a full-range
+        // sentinel recorded at a later generation.
+        cache.invalidate(vec![(t(10), t(11))]);
+        {
+            let inner = cache.inner.lock().unwrap();
+            assert_eq!(
+                inner.pending_flush.len(),
+                1,
+                "overflow collapses to sentinel"
+            );
+            let sentinel_gen = inner.pending_flush[0].0;
+            assert!(
+                sentinel_gen > flush_gen,
+                "sentinel must carry the newer generation"
+            );
+        }
+
+        // Clearing through the pre-overflow generation must NOT drop the newer
+        // write: it arrived after the flush started.
+        cache.clear_pending_through(flush_gen);
+        assert!(
+            cache.pending_overlapping(&[(t(0), t(23))]).is_some(),
+            "newer overflow write must remain pending after a stale clear"
+        );
+
+        // Clearing through the latest generation empties pending tracking.
+        let latest = cache.generation();
+        cache.clear_pending_through(latest);
+        assert_eq!(cache.pending_overlapping(&[(t(0), t(23))]), None);
+        assert_eq!(cache.inner.lock().unwrap().pending_flush.len(), 0);
+    }
 }

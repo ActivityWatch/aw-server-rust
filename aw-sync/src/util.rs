@@ -1175,6 +1175,7 @@ pub struct DbInspect {
 #[derive(Debug, Clone)]
 pub struct BucketInspect {
     pub id: String,
+    pub event_count: i64,
 }
 
 #[cfg(feature = "cli")]
@@ -1218,7 +1219,10 @@ pub fn inspect_sync_db(path: &Path) -> Result<DbInspect, String> {
         if let Some(ns) = last_ns {
             newest_ns = Some(newest_ns.map_or(ns, |cur| cur.max(ns)));
         }
-        buckets.push(BucketInspect { id });
+        buckets.push(BucketInspect {
+            id,
+            event_count: events,
+        });
     }
 
     Ok(DbInspect {

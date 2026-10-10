@@ -1717,9 +1717,8 @@ mod datastore_tests {
                 .unwrap();
                 if version >= 2 {
                     // A distinct payload in the pre-rename `data` column: the
-                    // v2->v3 migration renames it to `data_deprecated`, and no
-                    // later migration touches either column, so both must
-                    // survive to the newest version with this value intact.
+                    // v2->v3 migration renames it to `data_deprecated` (which
+                    // v7 later drops), so it must never reach the new `data`.
                     // For a v3 fixture the rename already happened, so the
                     // payload goes straight into `data_deprecated`.
                     let col = if version == 2 {
@@ -1757,9 +1756,9 @@ mod datastore_tests {
             assert_eq!(after, aw_datastore::NEWEST_DB_VERSION, "v{version}");
 
             if version >= 2 {
-                // `data_deprecated` survived the rename and still carries the
-                // pre-migration payload; the new `data` column holds the
-                // migration default and is never NULL.
+                // The v2->v3 rename ran exactly once (a second run would have
+                // panicked), then v7 dropped `data_deprecated`; the `data`
+                // column holds the migration default and is never NULL.
                 let has_deprecated: bool = conn
                     .query_row(
                         "SELECT 1 FROM pragma_table_info('buckets') WHERE name = 'data_deprecated'",
@@ -1767,15 +1766,7 @@ mod datastore_tests {
                         |_| Ok(true),
                     )
                     .unwrap_or(false);
-                assert!(has_deprecated, "v{version}: data_deprecated missing");
-                let legacy: String = conn
-                    .query_row(
-                        "SELECT data_deprecated FROM buckets WHERE name = 'testid'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(legacy, r#"{"legacy": true}"#, "v{version}");
+                assert!(!has_deprecated, "v{version}: data_deprecated not dropped");
                 let data: String = conn
                     .query_row(
                         "SELECT data FROM buckets WHERE name = 'testid'",

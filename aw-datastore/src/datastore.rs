@@ -586,6 +586,13 @@ impl DatastoreInstance {
         Ok(ds)
     }
 
+    /// Re-read the bucket list from the database. A reader instance
+    /// ([`crate::DatastoreMethod::FileReader`]) keeps a cache that goes stale
+    /// when the writer creates, deletes, renames or imports buckets.
+    pub fn reload_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
+        self.get_stored_buckets(conn)
+    }
+
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
         let mut stmt = match conn.prepare_cached(
             "

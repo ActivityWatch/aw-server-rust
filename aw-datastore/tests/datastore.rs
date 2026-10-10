@@ -107,6 +107,41 @@ mod datastore_tests {
     }
 
     #[test]
+    fn reader_sees_committed_writes_and_buckets_created_after_it_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("reader.sqlite")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let writer = Datastore::new(path.clone(), false);
+        // Wait for the writer to initialize (migrations) before opening the reader.
+        writer.get_buckets().unwrap();
+        let reader = Datastore::open_reader(path).unwrap();
+
+        // Bucket created after the reader opened: found via the cache-miss reload.
+        let bucket = create_test_bucket(&writer);
+        assert_eq!(reader.get_bucket(&bucket.id).unwrap().id, bucket.id);
+
+        // A heartbeat sits in the writer's uncommitted batch until force_commit.
+        let e = test_event(Utc::now(), Duration::seconds(1));
+        writer.heartbeat(&bucket.id, e.clone(), 5.0).unwrap();
+        writer.force_commit().unwrap();
+        let events = reader.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, e.timestamp);
+
+        // Explicit reload after a bucket delete: the reader stops resolving it.
+        writer.delete_bucket(&bucket.id).unwrap();
+        reader.reload_buckets().unwrap();
+        assert!(matches!(
+            reader.get_bucket(&bucket.id),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+    }
+
+    #[test]
     fn test_migrate_test_bucket_names_renames_bucket_and_preserves_events() {
         let ds = Datastore::new_in_memory(false);
         let old_id = "aw-watcher-android-test_phone";

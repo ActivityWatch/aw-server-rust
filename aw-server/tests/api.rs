@@ -1120,6 +1120,97 @@ mod api_tests {
         assert_eq!(buckets.len(), 0);
     }
 
+    /// File-backed server with the read-only query handle, as `main` builds it.
+    fn setup_file_testserver(path: &str) -> rocket::Rocket<rocket::Build> {
+        let datastore = aw_datastore::Datastore::new(path.to_string(), false);
+        datastore.get_buckets().unwrap();
+        let reader = aw_datastore::Datastore::open_reader(path.to_string()).unwrap();
+        let state = endpoints::ServerState {
+            reader: Some(reader),
+            ..endpoints::ServerState::new(
+                datastore,
+                endpoints::AssetResolver::new(None),
+                "test_id".to_string(),
+            )
+        };
+        endpoints::build_rocket(state, config::AWConfig::default())
+    }
+
+    #[test]
+    fn query_reader_sees_new_buckets_and_fresh_heartbeats() {
+        let path = std::env::temp_dir().join(format!(
+            "aw-server-query-reader-{}.sqlite",
+            std::process::id()
+        ));
+        let path_str = path.to_str().unwrap().to_string();
+        let server = setup_file_testserver(&path_str);
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        // Bucket created through the API after the reader opened.
+        let res = client
+            .post("/api/0/buckets/readerbucket")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"id":"readerbucket","type":"type","client":"client","hostname":"hostname"}"#)
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+
+        // A heartbeat just now is in the writer's uncommitted batch; a query
+        // over a period reaching into the present must still see it.
+        let now = chrono::Utc::now();
+        let res = client
+            .post("/api/0/buckets/readerbucket/heartbeat?pulsetime=5")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(format!(
+                r#"{{"timestamp":"{}","duration":1,"data":{{"k":"v"}}}}"#,
+                now.to_rfc3339()
+            ))
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+
+        let period = format!(
+            "{}/{}",
+            (now - chrono::Duration::minutes(1)).to_rfc3339(),
+            (now + chrono::Duration::minutes(1)).to_rfc3339()
+        );
+        let res = client
+            .post("/api/0/query?cache=false")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(format!(
+                r#"{{"timeperiods":["{period}"],"query":["RETURN = query_bucket(\"readerbucket\");"]}}"#
+            ))
+            .dispatch();
+        let status = res.status();
+        let text = res.into_string().unwrap();
+        assert_eq!(status, Status::Ok, "{text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body[0].as_array().map(|a| a.len()), Some(1), "{body}");
+        assert_eq!(body[0][0]["data"]["k"], "v");
+
+        // Deleted bucket: the reader must not keep resolving it.
+        let res = client
+            .delete("/api/0/buckets/readerbucket")
+            .header(host.clone())
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+        let res = client
+            .post("/api/0/query?cache=false")
+            .header(ContentType::JSON)
+            .header(host)
+            .body(format!(
+                r#"{{"timeperiods":["{period}"],"query":["RETURN = query_bucket(\"readerbucket\");"]}}"#
+            ))
+            .dispatch();
+        assert_eq!(res.status(), Status::BadRequest);
+
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path_str}{suffix}"));
+        }
+    }
+
     #[test]
     fn test_query() {
         let server = setup_testserver();

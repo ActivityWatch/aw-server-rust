@@ -226,6 +226,12 @@ async fn main() -> Result<(), rocket::Error> {
         device_id::get_device_id()
     };
 
+    let reader_db_path = db_path.clone();
+    #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
+    let reader_supported = opts.db_password.is_none();
+    #[cfg(not(any(feature = "encryption", feature = "encryption-vendored")))]
+    let reader_supported = true;
+
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
     let datastore = match opts.db_password {
         Some(key) if key.is_empty() => {
@@ -258,6 +264,24 @@ async fn main() -> Result<(), rocket::Error> {
     let datastore =
         aw_datastore::Datastore::new_with_legacy_import_opts(db_path, legacy_import_opts);
 
+    // A second, read-only handle for queries (#805). Opened only once the
+    // writer has initialized (migrations, legacy import): any request on it
+    // returns after that. Encrypted databases keep using the writer.
+    let reader = if reader_supported {
+        if let Err(e) = datastore.get_buckets() {
+            warn!("Datastore initialization failed: {e:?}");
+        }
+        match aw_datastore::Datastore::open_reader(reader_db_path) {
+            Ok(reader) => Some(reader),
+            Err(e) => {
+                warn!("Could not open a read-only datastore for queries, using the writer: {e:?}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let asset_resolver = endpoints::AssetResolver::new(asset_path.clone());
     if !asset_resolver.has_index() {
         warn!(
@@ -269,6 +293,7 @@ async fn main() -> Result<(), rocket::Error> {
     }
 
     let server_state = endpoints::ServerState {
+        reader,
         query_cache_enabled: config.query_cache,
         query_timeout: config.query_timeout(),
         // Even if legacy_import is set to true it is disabled on Android so

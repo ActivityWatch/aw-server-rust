@@ -211,7 +211,7 @@ pub fn bucket_import_json(
     let result = import(&state.datastore, json_data.into_inner());
     // Clear even on failure: a multi-bucket import can write earlier buckets
     // and then fail on a later one, leaving those writes cached-over.
-    state.query_cache.clear();
+    state.bucket_list_changed();
     result
 }
 
@@ -232,6 +232,6 @@ pub fn bucket_import_form(
 ) -> Result<(), HttpErrorJson> {
     let result = import(&state.datastore, form.into_inner().import.into_inner());
     // Same partial-import failure mode as the JSON handler above.
-    state.query_cache.clear();
+    state.bucket_list_changed();
     result
 }

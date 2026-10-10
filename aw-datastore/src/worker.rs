@@ -477,16 +477,13 @@ impl DatastoreWorker {
         tx: &Transaction,
     ) -> Result<Response, DatastoreError> {
         if self.reader {
-            // The writer may have created or deleted buckets since the cache
-            // was loaded: refresh it before a list read, or when a targeted
-            // read misses. Both checks are cheap compared to the read itself.
-            let stale = match &request {
-                Command::GetBuckets() => ds.buckets_changed(tx).unwrap_or(true),
-                _ => request
-                    .read_bucket_id()
-                    .is_some_and(|bucket_id| ds.get_bucket(bucket_id).is_err()),
-            };
-            if stale {
+            // The writer may have created, deleted or renamed buckets since
+            // the cache was loaded: before any read that depends on the
+            // bucket list, compare a one-row signature of the buckets table
+            // and reload when it differs. Cheap compared to the read itself.
+            let depends_on_buckets =
+                matches!(request, Command::GetBuckets()) || request.read_bucket_id().is_some();
+            if depends_on_buckets && ds.buckets_changed(tx).unwrap_or(true) {
                 if let Err(e) = ds.reload_buckets(tx) {
                     warn!("Reader failed to reload bucket list: {e:?}");
                 }

@@ -132,7 +132,20 @@ mod datastore_tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].timestamp, e.timestamp);
 
-        // The bucket list itself is refreshed on read when buckets changed.
+        // The bucket list itself is refreshed on read when buckets changed,
+        // including renames (same row, same count and max id).
+        assert!(reader.get_buckets().unwrap().contains_key(&bucket.id));
+        let renamed = format!("{}-renamed", bucket.id);
+        writer.rename_bucket(&bucket.id, &renamed).unwrap();
+        assert_eq!(
+            reader.get_events(&renamed, None, None, None).unwrap().len(),
+            1
+        );
+        assert!(matches!(
+            reader.get_bucket(&bucket.id),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        writer.rename_bucket(&renamed, &bucket.id).unwrap();
         assert!(reader.get_buckets().unwrap().contains_key(&bucket.id));
         writer.delete_bucket(&bucket.id).unwrap();
         assert!(!reader.get_buckets().unwrap().contains_key(&bucket.id));

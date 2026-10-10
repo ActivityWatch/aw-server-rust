@@ -46,6 +46,7 @@ aw-datastore = { path = "../aw-datastore", default-features = false }
 aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
+sha2 = "0.10"
 
 [dev-dependencies]
 criterion = "0.5.1"

@@ -200,6 +200,7 @@ pub mod android {
         server_config.port = port;
         // Apply the configurable opt-out, like the desktop entry point does.
         server_state.query_cache_enabled = server_config.query_cache;
+        server_state.query_timeout = server_config.query_timeout();
 
         let _ = endpoints::build_rocket(server_state, server_config)
             .launch()

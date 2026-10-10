@@ -83,7 +83,10 @@ pub fn query(
     let request_start = Instant::now();
     // One budget for the whole request: a client that sends many timeperiods
     // in one request is bounded the same as one that sends one long period.
-    let deadline = state.query_timeout.map(|budget| request_start + budget);
+    // An absurdly large budget that does not fit in an Instant means unlimited.
+    let deadline = state
+        .query_timeout
+        .and_then(|budget| request_start.checked_add(budget));
 
     let evaluate = |interval: &aw_models::TimeInterval| -> Result<Arc<str>, HttpErrorJson> {
         let started = Instant::now();

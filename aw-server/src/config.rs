@@ -108,6 +108,16 @@ fn default_query_timeout_secs() -> u64 {
     300
 }
 
+impl AWConfig {
+    /// `query_timeout_secs` as a duration; `None` when disabled (0).
+    pub fn query_timeout(&self) -> Option<std::time::Duration> {
+        match self.query_timeout_secs {
+            0 => None,
+            secs => Some(std::time::Duration::from_secs(secs)),
+        }
+    }
+}
+
 impl Default for AWConfig {
     fn default() -> AWConfig {
         AWConfig {

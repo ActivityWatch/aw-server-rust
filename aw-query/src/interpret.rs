@@ -322,13 +322,19 @@ mod tests {
             }
             other => panic!("expected TimeBudgetExceeded, got {other:?}"),
         }
-        // Statements inside an if block are checked too.
-        let program =
+        // Statements inside an if block are checked too: run the parsed `if`
+        // expression directly, bypassing the top-level check.
+        let mut program =
             crate::parser::parse(crate::lexer::Lexer::new("if True { RETURN = 1; }")).unwrap();
-        match interpret_prog(program, &ti, &ds, Some(expired)) {
-            Err(QueryError::TimeBudgetExceeded(_)) => {}
+        let if_expr = program.stmts.remove(0);
+        let mut env = init_env(&ti);
+        match interpret_expr(&mut env, &ds, if_expr, Some(expired)) {
+            Err(QueryError::TimeBudgetExceeded(msg)) => {
+                assert!(msg.contains("if block"), "{msg}")
+            }
             other => panic!("expected TimeBudgetExceeded, got {other:?}"),
         }
+        assert!(!env.contains_key("RETURN"), "block body must not have run");
 
         // No deadline, or one in the future, runs the program as before.
         let program = crate::parser::parse(crate::lexer::Lexer::new("RETURN = 1;")).unwrap();

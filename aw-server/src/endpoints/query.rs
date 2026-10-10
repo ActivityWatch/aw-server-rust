@@ -129,8 +129,25 @@ pub fn query(
         }
     };
 
+    // The budget also covers cache hits and response assembly: a request
+    // that repeats a large cached period many times is bounded too.
+    let budget_exceeded = |what: &str| -> HttpErrorJson {
+        HttpErrorJson::new(
+            Status::ServiceUnavailable,
+            format!("query stopped before {what}: time budget exceeded"),
+        )
+    };
+    let past_deadline = || deadline.is_some_and(|d| Instant::now() >= d);
+
     let mut bodies: Vec<Arc<str>> = Vec::with_capacity(intervals.len());
-    for interval in intervals {
+    for (i, interval) in intervals.iter().enumerate() {
+        if past_deadline() {
+            return Err(budget_exceeded(&format!(
+                "timeperiod {} of {}",
+                i + 1,
+                intervals.len()
+            )));
+        }
         let period = (interval.start().to_owned(), interval.end().to_owned());
         if use_cache && state.query_cache.cacheable(period) {
             let key = CacheKey::new(&query_code, period);
@@ -149,6 +166,10 @@ pub fn query(
             continue;
         }
         bodies.push(evaluate(interval)?);
+    }
+
+    if past_deadline() {
+        return Err(budget_exceeded("building the response"));
     }
 
     // Join the already-serialized results into the JSON array response body.

@@ -22,6 +22,50 @@ fn _get_db_version(conn: &Connection) -> i32 {
         .unwrap()
 }
 
+/// Infer the schema version of a populated database whose `user_version` is 0.
+///
+/// `sqlite3 .dump` (the documented corruption-recovery path) does not carry
+/// `PRAGMA user_version`, so a restored database reports 0 even though its
+/// tables exist. Re-running the v0 migrations on it panics (duplicate column,
+/// table already exists). Returns 0 for a genuinely empty database.
+pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
+    let has = |kind: &str, name: &str| -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            params![kind, name],
+            |_| Ok(()),
+        )
+        .is_ok()
+    };
+    if !has("table", "buckets") || !has("table", "events") {
+        return 0;
+    }
+    let has_column = |col: &str| -> bool {
+        conn.query_row(
+            "SELECT 1 FROM pragma_table_info('buckets') WHERE name = ?1",
+            params![col],
+            |_| Ok(()),
+        )
+        .is_ok()
+    };
+    if !has_column("data") && !has_column("data_deprecated") {
+        return 1;
+    }
+    if !has_column("data_deprecated") {
+        return 2;
+    }
+    if !has("table", "key_value") {
+        return 3;
+    }
+    if has("index", "events_bucketrow_endtime_starttime_index") {
+        6
+    } else if has("index", "events_bucketrow_starttime_endtime_index") {
+        5
+    } else {
+        4
+    }
+}
+
 /*
  * ### Database version changelog ###
  * 0: Uninitialized database
@@ -493,6 +537,27 @@ impl DatastoreInstance {
     ) -> Result<DatastoreInstance, DatastoreError> {
         let mut first_init = false;
         let mut db_version = _get_db_version(conn);
+
+        // `sqlite3 .dump` (the documented corruption-recovery path) drops
+        // `PRAGMA user_version`, so a restored file reports 0 while its schema
+        // is at some real version. Infer it and use that: a read-only open
+        // (aw-sync pulling a peer db) must not reject the file as unsupported,
+        // and a writable open must not re-run v0 migrations on it. Only a
+        // writable open persists the inferred version; a read-only one cannot.
+        if db_version == 0 {
+            let inferred = _infer_db_version(conn);
+            if inferred > 0 {
+                if migrate_enabled {
+                    warn!(
+                        "Database has user_version 0 but a populated schema (restored from a \
+                         dump?), treating it as v{inferred}"
+                    );
+                    conn.pragma_update(None, "user_version", inferred)
+                        .expect("Failed to update database version!");
+                }
+                db_version = inferred;
+            }
+        }
 
         if migrate_enabled {
             first_init = _create_tables(conn, db_version);
@@ -1646,5 +1711,26 @@ mod tests {
             1,
             "forced re-import must not duplicate events"
         );
+    }
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+
+    /// `_infer_db_version` must name the exact version, not just a version the
+    /// migrations would happen to repair: a v4 schema inferred as v5 would skip
+    /// the v4->v5 migration. `_create_tables(conn, 0)` builds the newest schema.
+    #[test]
+    fn infer_db_version_identifies_current_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        _create_tables(&conn, 0);
+        assert_eq!(_infer_db_version(&conn), NEWEST_DB_VERSION);
+    }
+
+    #[test]
+    fn infer_db_version_zero_for_empty_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(_infer_db_version(&conn), 0);
     }
 }

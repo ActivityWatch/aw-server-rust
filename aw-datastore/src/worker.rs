@@ -78,14 +78,24 @@ fn open_readonly_connection(path: &str) -> rusqlite::Result<Connection> {
 }
 
 /// Read `user_version` without mutating the file.
+///
+/// A `.dump`-restored database reports 0 because the pragma is not dumped, so
+/// a 0 falls back to schema inference; otherwise [`Datastore::open_read_only`]
+/// would skip a restored peer as unsupported (ActivityWatch/aw-server-rust#776).
 fn probe_user_version(path: &str) -> Result<i32, DatastoreError> {
     let conn = open_readonly_connection(path).map_err(|e| {
         DatastoreError::InternalError(format!("read-only open failed for {path}: {e}"))
     })?;
-    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+    let version: i32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|e| {
             DatastoreError::InternalError(format!("user_version read failed for {path}: {e}"))
-        })
+        })?;
+    if version == 0 {
+        Ok(crate::datastore::_infer_db_version(&conn))
+    } else {
+        Ok(version)
+    }
 }
 
 #[derive(Clone)]

@@ -4,8 +4,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite;
-
 #[cfg(target_os = "android")]
 use std::sync::Mutex;
 
@@ -198,53 +196,21 @@ fn has_entries(dir: &Path) -> bool {
     !dir_entries(dir).is_empty()
 }
 
-/// Newest event `starttime` (nanoseconds) in any database inside `dir`, or
-/// `None` when the directory has no database or the query fails.
-///
-/// Opens with `SQLITE_OPEN_READ_ONLY` so the WAL is visible but never written
-/// or checkpointed.  A missing table (empty / schema-only database) is treated
-/// as None.  On any error the database is simply excluded from ranking.
-fn db_newest_starttime(dir: &Path) -> Option<i64> {
-    let db_path = dir_entries(dir)
-        .into_iter()
-        .find(|e| {
-            e.file_type().map(|t| t.is_file()).unwrap_or(false)
-                && e.file_name().to_string_lossy().ends_with(".db")
-        })?
-        .path();
+/// Rank the exact database the caller will open, never an arbitrary `.db`.
+/// A successful empty query is distinct from an unreadable (e.g. encrypted)
+/// database. Without a key we must not rank the latter as empty history.
+fn database_rank(dir: &Path, filename: &str) -> rusqlite::Result<(Option<i64>, u64)> {
     let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
+        dir.join(filename),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
-    conn.query_row("SELECT MAX(starttime) FROM events", [], |row| {
-        row.get::<_, Option<i64>>(0)
+    )?;
+    let check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if check != "ok" {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    conn.query_row("SELECT MAX(starttime), COUNT(*) FROM events", [], |row| {
+        Ok((row.get(0)?, row.get(1)?))
     })
-    .ok()
-    .flatten()
-}
-
-/// Event count across all buckets in `dir`, or 0 on any error.
-fn db_event_count(dir: &Path) -> u64 {
-    let db_path = dir_entries(dir)
-        .into_iter()
-        .find(|e| {
-            e.file_type().map(|t| t.is_file()).unwrap_or(false)
-                && e.file_name().to_string_lossy().ends_with(".db")
-        })
-        .map(|e| e.path());
-    let Some(path) = db_path else { return 0 };
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
-        &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return 0;
-    };
-    conn.query_row("SELECT COUNT(*) FROM events", [], |row| {
-        row.get::<_, i64>(0)
-    })
-    .map(|n| n as u64)
-    .unwrap_or(0)
 }
 
 /// The rule for which dir is in use, shared by every reader and writer.
@@ -258,41 +224,30 @@ fn db_event_count(dir: &Path) -> u64 {
 /// 4. No database anywhere (e.g. aw-sync's config dir): whichever is
 ///    non-empty, preferring the target.
 pub fn choose_module_dir(target: &Path, misplaced: &Path) -> DirChoice {
+    choose_module_dir_for_database(
+        target,
+        misplaced,
+        &db_filename(crate::config::get_profile()),
+    )
+}
+
+fn choose_module_dir_for_database(target: &Path, misplaced: &Path, filename: &str) -> DirChoice {
     if has_database(target) && has_database(misplaced) {
-        // Content-based selection: newest event wins.
-        let target_ts = db_newest_starttime(target);
-        let misplaced_ts = db_newest_starttime(misplaced);
-        log::info!(
-            "choose_module_dir: both dirs have databases — \
-             target newest={:?}, misplaced newest={:?}",
-            target_ts,
-            misplaced_ts
-        );
-        match (target_ts, misplaced_ts) {
-            (Some(t), Some(m)) if m > t => DirChoice::Misplaced,
-            (None, Some(_)) => {
-                // Target database is empty or unreadable; misplaced has data.
-                let mc = db_event_count(misplaced);
-                if mc > 0 {
+        let target_rank = database_rank(target, filename);
+        let misplaced_rank = database_rank(misplaced, filename);
+        match (target_rank, misplaced_rank) {
+            (Ok(t), Ok(m)) => {
+                let choice = if m > t {
                     DirChoice::Misplaced
                 } else {
                     DirChoice::Target
-                }
+                };
+                info!("choose_module_dir: {filename}: target rank={t:?}, misplaced rank={m:?}, choice={choice:?}");
+                choice
             }
-            _ => {
-                // Target wins on timestamp, or tie → prefer target.
-                if target_ts.is_none() && misplaced_ts.is_none() {
-                    // Both empty: fall back to count, then target.
-                    let tc = db_event_count(target);
-                    let mc = db_event_count(misplaced);
-                    if mc > tc {
-                        DirChoice::Misplaced
-                    } else {
-                        DirChoice::Target
-                    }
-                } else {
-                    DirChoice::Target
-                }
+            (t, m) => {
+                warn!("Cannot compare {filename} in {target:?} and {misplaced:?}: target={t:?}, misplaced={m:?}; keeping Local, not treating unreadable history as empty");
+                DirChoice::Target
             }
         }
     } else if has_database(target) {
@@ -378,6 +333,15 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
             }
             MigrationOutcome {
                 dir: target.to_path_buf(),
+                migrated_database: false,
+            }
+        }
+        DirChoice::Misplaced if has_database(target) => {
+            // Selection-only recovery: migrate_dir cannot replace an occupied
+            // target. Keep both originals and avoid copying on every startup.
+            warn!("Using newer data in {misplaced:?}; {target:?} also holds a database and was left untouched. Database merge recovery is still required.");
+            MigrationOutcome {
+                dir: misplaced.to_path_buf(),
                 migrated_database: false,
             }
         }
@@ -1308,6 +1272,92 @@ fn test_content_selection_prefers_newer_roaming_over_stale_local() {
         DirChoice::Misplaced,
         "Roaming has newer events; content-based selection must prefer it"
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_equal_timestamps_prefers_more_events() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 100);
+    plant_events_db(&misplaced, 100);
+    plant_events_db(&misplaced, 50);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_ranks_the_requested_database() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 200);
+    fs::rename(target.join("sqlite.db"), target.join("sqlite-testing.db")).unwrap();
+    plant_events_db(&misplaced, 50);
+    fs::rename(
+        misplaced.join("sqlite.db"),
+        misplaced.join("sqlite-testing.db"),
+    )
+    .unwrap();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    assert_eq!(
+        choose_module_dir_for_database(&target, &misplaced, "sqlite.db"),
+        DirChoice::Misplaced
+    );
+    assert_eq!(
+        choose_module_dir_for_database(&target, &misplaced, "sqlite-testing.db"),
+        DirChoice::Target
+    );
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_empty_and_corrupt_databases() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    for dir in [&target, &misplaced] {
+        rusqlite::Connection::open(dir.join("sqlite.db"))
+            .unwrap()
+            .execute("DELETE FROM events", [])
+            .unwrap();
+    }
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    plant_events_db(&misplaced, 100);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    fs::write(misplaced.join("sqlite.db"), b"corrupt Roaming").unwrap();
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_unreadable_local_is_not_empty() {
+    let (root, target, misplaced) = migration_dirs();
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("sqlite.db"),
+        b"encrypted or unreadable database",
+    )
+    .unwrap();
+    plant_events_db(&misplaced, 100);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_does_not_copy_into_occupied_target() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let copies = std::cell::Cell::new(0);
+    let out = resolve_or_migrate(&target, &misplaced, &|from, to| {
+        copies.set(copies.get() + 1);
+        fs::copy(from, to)
+    });
+    assert_eq!(out.dir, misplaced);
+    assert!(!out.migrated_database);
+    assert_eq!(copies.get(), 0);
+    assert!(target.join("sqlite.db").exists());
+    assert!(misplaced.join("sqlite.db").exists());
     let _ = fs::remove_dir_all(root);
 }
 

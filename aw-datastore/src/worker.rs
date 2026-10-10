@@ -772,7 +772,19 @@ impl Datastore {
             .map_err(|e| {
                 DatastoreError::InternalError(format!("user_version read failed for {dbpath}: {e}"))
             })?;
+        // In rollback-journal mode a reader's shared lock blocks the writer's
+        // commit; only share the file when it is in WAL mode.
+        let journal_mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .map_err(|e| {
+                DatastoreError::InternalError(format!("journal_mode read failed for {dbpath}: {e}"))
+            })?;
         drop(conn);
+        if journal_mode != "wal" {
+            return Err(DatastoreError::InternalError(format!(
+                "Reader requires WAL mode, database is in journal_mode={journal_mode}"
+            )));
+        }
         if version != crate::NEWEST_DB_VERSION {
             return Err(DatastoreError::OldDbVersion(format!(
                 "Reader expects a fully migrated database (version {}), found version {version}",

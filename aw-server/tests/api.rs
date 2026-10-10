@@ -1190,6 +1190,28 @@ mod api_tests {
         assert_eq!(body[0].as_array().map(|a| a.len()), Some(1), "{body}");
         assert_eq!(body[0][0]["data"]["k"], "v");
 
+        // An insert into the past is acknowledged before the writer commits;
+        // a query over that period must flush first instead of reading (and
+        // caching) the old state through the reader.
+        let res = client
+            .post("/api/0/buckets/readerbucket/events")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"[{"timestamp":"2000-01-01T12:00:00Z","duration":1,"data":{"k":"old"}}]"#)
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+        let res = client
+            .post("/api/0/query")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"timeperiods":["2000-01-01T00:00:00Z/2000-01-02T00:00:00Z"],"query":["RETURN = query_bucket(\"readerbucket\");"]}"#)
+            .dispatch();
+        let status = res.status();
+        let text = res.into_string().unwrap();
+        assert_eq!(status, Status::Ok, "{text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body[0][0]["data"]["k"], "old", "{body}");
+
         // Deleted bucket: the reader must not keep resolving it.
         let res = client
             .delete("/api/0/buckets/readerbucket")

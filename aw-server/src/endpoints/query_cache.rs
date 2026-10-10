@@ -125,6 +125,11 @@ struct Inner {
     writes: VecDeque<(u64, Vec<TimeRange>)>,
     hits: u64,
     misses: u64,
+    /// Ranges written since the last `take_pending_overlapping`, for the
+    /// read-only query handle: writes are acknowledged before the writer's
+    /// batch commits, so a query over an affected period must flush first
+    /// (ActivityWatch/aw-server-rust#807). Coalesced like `writes`.
+    pending_flush: Vec<TimeRange>,
 }
 
 /// Bounded cache of query results for finished past periods.
@@ -262,6 +267,9 @@ impl QueryCache {
             inner.writes.pop_front();
         }
         inner.writes.push_back((generation, ranges.clone()));
+        let mut pending = std::mem::take(&mut inner.pending_flush);
+        pending.extend(ranges.iter().cloned());
+        inner.pending_flush = coalesce(pending, 64);
         let stale: Vec<CacheKey> = inner
             .entries
             .iter()
@@ -276,6 +284,20 @@ impl QueryCache {
     }
 
     /// Drop everything (bucket list changed). Also blocks in-flight stores.
+    /// Whether any write since the last call touched one of `periods`. If so,
+    /// forget all pending writes: the caller is about to commit them.
+    pub fn take_pending_overlapping(&self, periods: &[TimeRange]) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let hit = inner
+            .pending_flush
+            .iter()
+            .any(|w| periods.iter().any(|p| overlaps(w, p)));
+        if hit {
+            inner.pending_flush.clear();
+        }
+        hit
+    }
+
     pub fn clear(&self) {
         self.invalidate(vec![(DateTime::<Utc>::MIN_UTC, DateTime::<Utc>::MAX_UTC)]);
         let mut inner = self.inner.lock().unwrap();

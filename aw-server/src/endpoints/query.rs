@@ -17,10 +17,6 @@ use crate::endpoints::{HttpErrorJson, ServerState};
 /// trace in the log (ActivityWatch/aw-server-rust#805).
 const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(1);
 
-/// Periods ending within this many seconds of now may depend on writes the
-/// writer has not committed yet (its batch window is 15 s, with margin).
-const RECENT_WINDOW_SECS: i64 = 60;
-
 fn query_error_status(e: &QueryError) -> Status {
     match e {
         // BucketQueryError also wraps datastore failures, which are server
@@ -85,12 +81,17 @@ pub fn query(
     let use_cache = state.query_cache_enabled && cache.unwrap_or(true);
     let datastore = state.query_datastore();
     let request_start = Instant::now();
-    // The reader only sees committed data and the writer batches commits for
-    // up to 15 s. Flush first when a period reaches into that window; past
-    // periods (the bulk of a Year / All time view) skip the fsync.
+    // The reader only sees committed data, and writes (heartbeats, but also
+    // edits to old events and imports) are acknowledged before the writer's
+    // batch commits. Flush first when any write since the last flush touched
+    // one of the periods; untouched past periods, the bulk of a Year / All
+    // time view, skip the fsync.
     if state.reader.is_some() {
-        let recent = chrono::Utc::now() - chrono::Duration::seconds(RECENT_WINDOW_SECS);
-        if intervals.iter().any(|i| *i.end() > recent) {
+        let periods: Vec<_> = intervals
+            .iter()
+            .map(|i| (i.start().to_owned(), i.end().to_owned()))
+            .collect();
+        if state.query_cache.take_pending_overlapping(&periods) {
             if let Err(e) = state.datastore.force_commit() {
                 warn!("Failed to flush writes before query: {e:?}");
             }

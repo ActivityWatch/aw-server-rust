@@ -137,12 +137,15 @@ impl ServerState {
     /// drops cached query results (the bucket list changed what queries
     /// resolve to) and refreshes the reader's bucket cache.
     pub fn bucket_list_changed(&self) {
-        self.query_cache.clear();
+        // Reader first: clearing bumps the cache generation, so a query that
+        // read the old bucket list before this point cannot be stored, while
+        // one that starts after it already sees the new list.
         if let Some(reader) = &self.reader {
             if let Err(e) = reader.reload_buckets() {
                 warn!("Failed to reload the query reader's bucket list: {e:?}");
             }
         }
+        self.query_cache.clear();
     }
 }
 

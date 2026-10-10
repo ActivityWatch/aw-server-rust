@@ -240,14 +240,31 @@ fn csv_data_columns(key_order: Vec<String>) -> (Vec<String>, bool) {
     }
 }
 
-fn write_csv_header(writer: &mut impl Write, data_keys: &[String]) -> Result<(), DatastoreError> {
+/// Header names for the columns: `id`, `timestamp`, `duration`, then one per
+/// data key. A data key that would repeat an earlier header name (e.g. a data
+/// key `duration`) is prefixed with `data.` until unique, so every column name
+/// is distinct. Only the header changes; values are still read by the original
+/// key.
+fn csv_header_names(data_keys: &[String]) -> Vec<String> {
     let mut fields = vec![
         "id".to_string(),
         "timestamp".to_string(),
         "duration".to_string(),
     ];
-    fields.extend(data_keys.iter().cloned());
-    write_csv_record(writer, fields)
+    let mut used: HashSet<String> = fields.iter().cloned().collect();
+    for key in data_keys {
+        let mut name = key.clone();
+        while used.contains(&name) {
+            name = format!("data.{name}");
+        }
+        used.insert(name.clone());
+        fields.push(name);
+    }
+    fields
+}
+
+fn write_csv_header(writer: &mut impl Write, data_keys: &[String]) -> Result<(), DatastoreError> {
+    write_csv_record(writer, csv_header_names(data_keys))
 }
 
 fn write_csv_event(
@@ -275,7 +292,9 @@ fn write_csv_event(
 ///
 /// Columns: `id`, `timestamp`, `duration`, then the union of data keys across
 /// all matched events, collected in a pre-pass so heterogeneous event data is
-/// not truncated to the first event's schema. If the union exceeds
+/// not truncated to the first event's schema. A data key that collides with an
+/// earlier column name gets a `data.` prefix (see `csv_header_names`). If the
+/// union exceeds
 /// `MAX_CSV_DATA_COLUMNS`, a single `data` column holds each event's JSON data
 /// object instead (bounded output, no keys dropped).
 /// Query filters, clipping, and corrupt-row skipping match `get_events`.
@@ -553,6 +572,64 @@ mod tests {
         assert_eq!(csv_escape(" =1+1"), "' =1+1");
         assert_eq!(csv_escape("\t+cmd"), "'\t+cmd");
         assert_eq!(csv_escape(" plain"), " plain");
+    }
+
+    #[test]
+    fn csv_header_prefixes_data_keys_that_collide_with_columns() {
+        let keys: Vec<String> = ["app", "duration", "id", "data.id", "timestamp"]
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
+        assert_eq!(
+            csv_header_names(&keys),
+            [
+                "id",
+                "timestamp",
+                "duration",
+                "app",
+                "data.duration",
+                "data.id",
+                "data.data.id",
+                "data.timestamp",
+            ]
+        );
+    }
+
+    #[test]
+    fn streamed_csv_prefixed_columns_carry_original_key_values() {
+        let (conn, mut ds) = setup();
+        let event = Event::new(
+            DateTime::from_timestamp(0, 0).unwrap(),
+            Duration::seconds(1),
+            serde_json::from_value(serde_json::json!({
+                "id": "data-id",
+                "timestamp": "data-timestamp",
+                "duration": "data-duration",
+                "data.id": "data-dot-id",
+            }))
+            .unwrap(),
+        );
+        ds.insert_events(&conn, "empty", vec![event]).unwrap();
+
+        let mut output = Vec::new();
+        ds.write_events_csv(&conn, "empty", None, None, None, &mut output)
+            .unwrap();
+        let csv = String::from_utf8(output).unwrap();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let row: Vec<&str> = lines.next().unwrap().split(',').collect();
+        assert_eq!(header.len(), row.len(), "{csv}");
+        let column: HashMap<&str, &str> = header.into_iter().zip(row).collect();
+
+        assert_eq!(column["timestamp"], "1970-01-01T00:00:00+00:00", "{csv}");
+        assert_eq!(column["duration"], "1.000000000", "{csv}");
+        assert!(column["id"].parse::<i64>().is_ok(), "{csv}");
+        // Keys arrive sorted, so the literal `data.id` key claims `data.id`
+        // first and the `id` key is pushed on to `data.data.id`.
+        assert_eq!(column["data.id"], "data-dot-id", "{csv}");
+        assert_eq!(column["data.data.id"], "data-id", "{csv}");
+        assert_eq!(column["data.timestamp"], "data-timestamp", "{csv}");
+        assert_eq!(column["data.duration"], "data-duration", "{csv}");
     }
 
     #[test]

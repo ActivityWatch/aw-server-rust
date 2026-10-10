@@ -98,6 +98,9 @@ pub struct ServerState {
     pub query_cache: std::sync::Arc<query_cache::QueryCache>,
     /// Set to false via config (`query_cache = false`) to bypass the cache.
     pub query_cache_enabled: bool,
+    /// Time budget for one query request (`query_timeout_secs` in the config);
+    /// `None` means unlimited.
+    pub query_timeout: Option<std::time::Duration>,
     /// Serializes the read-modify-invalidate sequence in the event write
     /// handlers. Without it, two concurrent replacements of the same event
     /// could each invalidate only their own view of the old range and leave an
@@ -114,6 +117,7 @@ impl ServerState {
             device_id,
             query_cache: std::sync::Arc::new(query_cache::QueryCache::new()),
             query_cache_enabled: true,
+            query_timeout: Some(std::time::Duration::from_secs(300)),
             write_lock: std::sync::Mutex::new(()),
         }
     }

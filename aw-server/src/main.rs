@@ -270,6 +270,7 @@ async fn main() -> Result<(), rocket::Error> {
 
     let server_state = endpoints::ServerState {
         query_cache_enabled: config.query_cache,
+        query_timeout: config.query_timeout(),
         // Even if legacy_import is set to true it is disabled on Android so
         // it will not happen there
         ..endpoints::ServerState::new(datastore, asset_resolver, device_id)

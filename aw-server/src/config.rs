@@ -93,6 +93,29 @@ pub struct AWConfig {
     /// See `endpoints::query_cache`. Set to false to disable.
     #[serde(default = "default_true")]
     pub query_cache: bool,
+
+    /// Time budget for one `/api/0/query` request, in seconds; 0 disables it.
+    /// Rocket does not stop a handler when the client disconnects, so without
+    /// a budget a query the client already gave up on (web UI timeout, user
+    /// navigated away) runs to completion and the retry stacks on top of it
+    /// (ActivityWatch/aw-server-rust#805). The budget is checked between
+    /// query statements, so one statement always finishes.
+    #[serde(default = "default_query_timeout_secs")]
+    pub query_timeout_secs: u64,
+}
+
+fn default_query_timeout_secs() -> u64 {
+    300
+}
+
+impl AWConfig {
+    /// `query_timeout_secs` as a duration; `None` when disabled (0).
+    pub fn query_timeout(&self) -> Option<std::time::Duration> {
+        match self.query_timeout_secs {
+            0 => None,
+            secs => Some(std::time::Duration::from_secs(secs)),
+        }
+    }
 }
 
 impl Default for AWConfig {
@@ -106,6 +129,7 @@ impl Default for AWConfig {
             cors_regex: default_cors(),
             custom_static: default_custom_static(),
             query_cache: true,
+            query_timeout_secs: default_query_timeout_secs(),
         }
     }
 }

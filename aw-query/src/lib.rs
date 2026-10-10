@@ -4,6 +4,7 @@ extern crate serde;
 extern crate serde_json;
 
 use std::fmt;
+use std::time::Instant;
 
 use aw_models::TimeInterval;
 
@@ -46,6 +47,10 @@ pub enum QueryError {
     BucketNotFound(String),
     BucketQueryError(String),
     RegexCompileError(String),
+    /// The caller's time budget ran out before the program finished; the
+    /// interpreter checks it between statements, so a single statement is
+    /// never interrupted.
+    TimeBudgetExceeded(String),
 }
 
 impl fmt::Display for QueryError {
@@ -55,6 +60,19 @@ impl fmt::Display for QueryError {
 }
 
 pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
+    query_with_deadline(code, ti, ds, None)
+}
+
+/// Like [`query`], but gives up with [`QueryError::TimeBudgetExceeded`] once
+/// `deadline` has passed. The check runs before every statement, so the
+/// program stops at the next statement boundary rather than mid-transform;
+/// a `query_bucket` read that has already started always completes.
+pub fn query_with_deadline(
+    code: &str,
+    ti: &TimeInterval,
+    ds: &Datastore,
+    deadline: Option<Instant>,
+) -> Result<DataType, QueryError> {
     let lexer = lexer::Lexer::new(code);
     let program = match parser::parse(lexer) {
         Ok(p) => p,
@@ -64,5 +82,5 @@ pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, 
             return Err(QueryError::ParsingError(format!("{e:?}")));
         }
     };
-    interpret::interpret_prog(program, ti, ds)
+    interpret::interpret_prog(program, ti, ds, deadline)
 }

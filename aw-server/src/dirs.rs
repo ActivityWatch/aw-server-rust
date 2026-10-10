@@ -1420,8 +1420,21 @@ fn test_content_selection_occupied_target_waits_for_migration_lock() {
     plant_events_db(&misplaced, 100);
     let held = MigrationLock::acquire(&target).unwrap();
     let (t2, m2) = (target.clone(), misplaced.clone());
-    let waiter = std::thread::spawn(move || resolve_or_migrate(&t2, &m2, &real_copy));
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Handshake instead of a fixed sleep: the waiter signals immediately
+    // before entering resolve_or_migrate, so once we receive it the thread is
+    // verifiably past spawn and about to contend for the migration lock. The
+    // behavioral assertion below does the real work: with the lock held and
+    // the pre-update state in place (misplaced newer), a thread that did not
+    // wait would select misplaced; only a lock-waiting thread can see the
+    // updated target afterwards.
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _ = started_tx.send(());
+        resolve_or_migrate(&t2, &m2, &real_copy)
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("waiter thread must start");
     let waited = !waiter.is_finished();
     // Simulate the lock holder changing the authoritative database.
     plant_events_db(&target, 200);

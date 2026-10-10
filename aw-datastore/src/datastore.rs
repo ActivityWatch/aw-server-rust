@@ -49,8 +49,7 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
         )
         .is_ok()
     };
-    // v7 recreated `buckets` with `device_id` and without `data_deprecated`,
-    // so it must be recognised before the v2/v3 column checks below.
+    // Recognise v7 before the earlier schema's column and index checks.
     if has_column("device_id") {
         return 7;
     }
@@ -81,7 +80,7 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
  * 4: Added 'key_value' table for storing key - value pairs
  * 5: Replaced single-column events indexes with a composite index
  * 6: Added an endtime-first index for recent interval reads
- * 7: Added 'device_id' to 'buckets' (UNIQUE(device_id, name)), dropped 'data_deprecated'
+ * 7: Added 'device_id' to 'buckets' (UNIQUE(device_id, name))
  */
 pub const NEWEST_DB_VERSION: i32 = 7;
 
@@ -310,7 +309,8 @@ fn _migrate_v6_to_v7(conn: &Connection) {
     // Add device_id column and change uniqueness from (name) to (device_id, name).
     // SQLite cannot drop a UNIQUE column constraint in-place, so we recreate the
     // table. Existing buckets are all locally-created, so they get device_id='local'.
-    // The deprecated data_deprecated column (unused since v3) is also dropped here.
+    // Keep data_deprecated as an archive of the broken pre-v3 field. It must
+    // neither be discarded by this rebuild nor promoted to current metadata.
     //
     // PRAGMA foreign_keys must be disabled outside any transaction for the table
     // recreation to succeed: events→buckets(id) is an IMMEDIATE FK, and even with
@@ -341,7 +341,19 @@ fn _migrate_v6_to_v7(conn: &Connection) {
                 |row| row.get(0),
             )
             .optional()?;
-        transaction.execute_batch(
+        // Some historical/restored schemas omit the unused archive column.
+        // Preserve it when present, including SQL NULL and malformed payloads.
+        let has_archive: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('buckets') WHERE name = 'data_deprecated')",
+            [],
+            |row| row.get(0),
+        )?;
+        let archive = if has_archive {
+            "data_deprecated"
+        } else {
+            "NULL"
+        };
+        transaction.execute_batch(&format!(
             "CREATE TABLE buckets_v7 (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              name TEXT NOT NULL,
@@ -350,16 +362,17 @@ fn _migrate_v6_to_v7(conn: &Connection) {
              client TEXT NOT NULL,
              hostname TEXT NOT NULL,
              created TEXT NOT NULL,
-             data TEXT NOT NULL DEFAULT '{}',
+             data TEXT NOT NULL DEFAULT '{{}}',
+             data_deprecated TEXT DEFAULT '{{}}',
              UNIQUE(device_id, name)
          );
-         INSERT INTO buckets_v7 (id, name, device_id, type, client, hostname, created, data)
-             SELECT id, name, 'local', type, client, hostname, created, data FROM buckets;
+         INSERT INTO buckets_v7 (id, name, device_id, type, client, hostname, created, data, data_deprecated)
+             SELECT id, name, 'local', type, client, hostname, created, data, {archive} FROM buckets;
          DROP TABLE buckets;
          ALTER TABLE buckets_v7 RENAME TO buckets;
          CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id);
-         PRAGMA user_version = 7;",
-        )?;
+         PRAGMA user_version = 7;"
+        ))?;
         if let Some(sequence) = sequence {
             let updated = transaction.execute(
                 "UPDATE sqlite_sequence SET seq = max(seq, ?1) WHERE name = 'buckets'",
@@ -1870,6 +1883,31 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn v7_migration_preserves_archival_and_current_data_separately() {
+        let conn = v6_connection();
+        for (name, archived) in [("archived", Some("broken legacy bytes")), ("null", None)] {
+            insert_v6_bucket(&conn, name);
+            conn.execute(
+                "UPDATE buckets SET data = '{\"current\":true}', data_deprecated = ?1 WHERE name = ?2",
+                params![archived, name],
+            )
+            .unwrap();
+        }
+        _migrate_v6_to_v7(&conn);
+        for (name, archived) in [("archived", Some("broken legacy bytes")), ("null", None)] {
+            let (data, deprecated): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT data, data_deprecated FROM buckets WHERE name = ?1",
+                    [name],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(data, r#"{"current":true}"#);
+            assert_eq!(deprecated.as_deref(), archived);
+        }
     }
 
     #[test]

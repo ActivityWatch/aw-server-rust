@@ -331,6 +331,10 @@ pub(crate) fn prefer_endtime_index(
 
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
+    /// `(count, max id, names)` of the buckets table when `buckets_cache` was
+    /// loaded; lets a reader detect creates, deletes and renames by another
+    /// connection with one cheap query.
+    buckets_signature: (i64, i64, String),
     first_init: bool,
     pub db_version: i32,
 }
@@ -579,6 +583,7 @@ impl DatastoreInstance {
 
         let mut ds = DatastoreInstance {
             buckets_cache: HashMap::new(),
+            buckets_signature: (0, 0, String::new()),
             first_init,
             db_version,
         };
@@ -586,7 +591,33 @@ impl DatastoreInstance {
         Ok(ds)
     }
 
+    /// Re-read the bucket list from the database. A reader instance
+    /// ([`crate::DatastoreMethod::FileReader`]) keeps a cache that goes stale
+    /// when the writer creates, deletes, renames or imports buckets.
+    pub fn reload_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
+        self.get_stored_buckets(conn)
+    }
+
+    fn read_buckets_signature(conn: &Connection) -> Result<(i64, i64, String), DatastoreError> {
+        conn.query_row(
+            "SELECT count(*), coalesce(max(id), 0), coalesce(group_concat(name, char(10)), '') \
+             FROM (SELECT id, name FROM buckets ORDER BY id)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| DatastoreError::InternalError(format!("Failed to read bucket signature: {e}")))
+    }
+
+    /// Whether buckets were created, deleted or renamed since the cache was
+    /// loaded (ids are AUTOINCREMENT, so a delete-and-recreate changes
+    /// `max(id)`; the name list catches renames).
+    pub fn buckets_changed(&self, conn: &Connection) -> Result<bool, DatastoreError> {
+        Ok(Self::read_buckets_signature(conn)? != self.buckets_signature)
+    }
+
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
+        // Read before the list so a concurrent change lands in the next check.
+        let signature = Self::read_buckets_signature(conn)?;
         let mut stmt = match conn.prepare_cached(
             "
             SELECT  buckets.id, buckets.name, buckets.type, buckets.client,
@@ -674,6 +705,7 @@ impl DatastoreInstance {
             }
         }
         self.buckets_cache = new_cache;
+        self.buckets_signature = signature;
         Ok(())
     }
 

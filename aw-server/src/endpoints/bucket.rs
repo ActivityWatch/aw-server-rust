@@ -98,7 +98,7 @@ pub fn bucket_new(
         Ok(_) => {
             // A new bucket changes what the bucket list resolves to, and a
             // re-created bucket may have gained events.
-            state.query_cache.clear();
+            state.bucket_list_changed();
             Ok(())
         }
         Err(err) => Err(err.into()),
@@ -338,7 +338,7 @@ pub fn bucket_delete(bucket_id: &str, state: &State<ServerState>) -> Result<(), 
     match datastore.delete_bucket(bucket_id) {
         Ok(_) => {
             // Removing a bucket changes what the bucket list resolves to.
-            state.query_cache.clear();
+            state.bucket_list_changed();
             Ok(())
         }
         Err(err) => Err(err.into()),

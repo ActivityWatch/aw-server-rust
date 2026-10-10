@@ -92,6 +92,11 @@ Build with <code>AW_WEBUI_DIR</code> pointing at a built aw-webui, or pass \
 // a slow query block every heartbeat.
 pub struct ServerState {
     pub datastore: Datastore,
+    /// Read-only handle on the same database for `/api/0/query`, so query
+    /// reads never queue behind heartbeats on the writer's worker (#805).
+    /// `None` for in-memory or encrypted databases; queries then use
+    /// `datastore`. See `query_datastore`.
+    pub reader: Option<Datastore>,
     pub asset_resolver: AssetResolver,
     pub device_id: String,
     /// Cache of query results for finished past periods (see `query_cache`).
@@ -106,6 +111,10 @@ pub struct ServerState {
     /// could each invalidate only their own view of the old range and leave an
     /// intermediate period cached (see `bucket_events_create`).
     pub write_lock: std::sync::Mutex<()>,
+    /// Serializes "any pending write overlaps this query? then flush the
+    /// writer" in the query endpoint, so a second query cannot slip between a
+    /// first one's check and its commit and read the old WAL snapshot.
+    pub flush_lock: std::sync::Mutex<()>,
 }
 
 impl ServerState {
@@ -113,13 +122,35 @@ impl ServerState {
     pub fn new(datastore: Datastore, asset_resolver: AssetResolver, device_id: String) -> Self {
         Self {
             datastore,
+            reader: None,
             asset_resolver,
             device_id,
             query_cache: std::sync::Arc::new(query_cache::QueryCache::new()),
             query_cache_enabled: true,
             query_timeout: Some(std::time::Duration::from_secs(300)),
             write_lock: std::sync::Mutex::new(()),
+            flush_lock: std::sync::Mutex::new(()),
         }
+    }
+
+    /// The datastore queries read from: the reader when there is one.
+    pub fn query_datastore(&self) -> &Datastore {
+        self.reader.as_ref().unwrap_or(&self.datastore)
+    }
+
+    /// Call after anything that creates, deletes, renames or imports buckets:
+    /// drops cached query results (the bucket list changed what queries
+    /// resolve to) and refreshes the reader's bucket cache.
+    pub fn bucket_list_changed(&self) {
+        // Reader first: clearing bumps the cache generation, so a query that
+        // read the old bucket list before this point cannot be stored, while
+        // one that starts after it already sees the new list.
+        if let Some(reader) = &self.reader {
+            if let Err(e) = reader.reload_buckets() {
+                warn!("Failed to reload the query reader's bucket list: {e:?}");
+            }
+        }
+        self.query_cache.clear();
     }
 }
 

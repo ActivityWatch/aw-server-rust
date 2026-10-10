@@ -37,6 +37,11 @@ pub enum DatastoreMethod {
     /// Existing file, opened `mode=ro&immutable=1`. Never migrates, never
     /// creates `-wal`/`-shm`. Used by aw-sync when reading a peer's db.
     FileReadOnly(String),
+    /// Existing file opened read-only on a second connection, sharing the
+    /// `-wal`/`-shm` with a writer in the same process, so it sees every
+    /// committed write. Never migrates. Used by aw-server to serve query
+    /// reads without occupying the writer's worker (#805).
+    FileReader(String),
     /// Encrypted SQLite file using SQLCipher. Only available with the
     /// `encryption` or `encryption-vendored` feature flags.
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
@@ -49,6 +54,7 @@ impl fmt::Debug for DatastoreMethod {
             DatastoreMethod::Memory() => write!(f, "Memory()"),
             DatastoreMethod::File(p) => write!(f, "File({p:?})"),
             DatastoreMethod::FileReadOnly(p) => write!(f, "FileReadOnly({p:?})"),
+            DatastoreMethod::FileReader(p) => write!(f, "FileReader({p:?})"),
             #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
             DatastoreMethod::FileEncrypted(p, _) => write!(f, "FileEncrypted({p:?}, <redacted>)"),
         }

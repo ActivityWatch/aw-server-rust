@@ -70,6 +70,13 @@ fn sqlite_readonly_uri(path: &str) -> String {
     format!("file:{encoded}?mode=ro&immutable=1")
 }
 
+/// Read-only connection that shares the WAL with a writer in this process:
+/// plain path (no `immutable`), so SQLite consults `-wal`/`-shm` and every
+/// committed transaction is visible.
+fn open_reader_connection(path: &str) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+}
+
 fn open_readonly_connection(path: &str) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(
         sqlite_readonly_uri(path),
@@ -166,10 +173,24 @@ pub enum Command {
     SetKeyValue(String, String),
     DeleteKeyValue(String),
     RefreshPrivacyFilter(),
+    ReloadBuckets(),
     RenameBucket(String, String),
     MigrateHostname(String),
     MigrateTestBucketNames(),
     Close(),
+}
+
+impl Command {
+    /// The bucket a read command targets, for a reader's cache-miss retry.
+    fn read_bucket_id(&self) -> Option<&str> {
+        match self {
+            Command::GetBucket(id)
+            | Command::GetEvent(id, _)
+            | Command::GetEvents(id, ..)
+            | Command::GetEventCount(id, ..) => Some(id),
+            _ => None,
+        }
+    }
 }
 
 /// Key the webui writes via POST /0/settings/privacy_filters.
@@ -209,6 +230,9 @@ struct DatastoreWorker {
     commit: bool,
     last_heartbeat: HashMap<String, Option<Event>>,
     privacy_engine: PrivacyFilterEngine,
+    /// `FileReader`: a bucket missing from the cache may have been created by
+    /// the writer since we loaded it, so reload once before failing.
+    reader: bool,
 }
 
 impl DatastoreWorker {
@@ -224,6 +248,7 @@ impl DatastoreWorker {
             commit: false,
             last_heartbeat: HashMap::new(),
             privacy_engine: PrivacyFilterEngine::new(vec![]),
+            reader: false,
         }
     }
 
@@ -246,7 +271,11 @@ impl DatastoreWorker {
     }
 
     fn work_loop(&mut self, method: DatastoreMethod) {
-        let read_only = matches!(&method, DatastoreMethod::FileReadOnly(_));
+        let read_only = matches!(
+            &method,
+            DatastoreMethod::FileReadOnly(_) | DatastoreMethod::FileReader(_)
+        );
+        self.reader = matches!(&method, DatastoreMethod::FileReader(_));
 
         // Open SQLite connection
         let mut conn = match &method {
@@ -258,6 +287,9 @@ impl DatastoreWorker {
             }
             DatastoreMethod::FileReadOnly(path) => {
                 open_readonly_connection(path).expect("Failed to open datastore read-only")
+            }
+            DatastoreMethod::FileReader(path) => {
+                open_reader_connection(path).expect("Failed to open datastore reader")
             }
             #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
             DatastoreMethod::FileEncrypted(path, key) => {
@@ -380,6 +412,14 @@ impl DatastoreWorker {
                 }
                 response_sender.respond(response);
 
+                // A reader's transaction pins a WAL snapshot from its first
+                // read; holding it across requests would hide the writer's
+                // commits for up to the batch window. One transaction per
+                // request keeps every read current.
+                if self.reader {
+                    break;
+                }
+
                 let now: DateTime<Utc> = Utc::now();
                 let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
                 if self.commit
@@ -436,7 +476,24 @@ impl DatastoreWorker {
         ds: &mut DatastoreInstance,
         tx: &Transaction,
     ) -> Result<Response, DatastoreError> {
+        if self.reader {
+            // The writer may have created, deleted or renamed buckets since
+            // the cache was loaded: before any read that depends on the
+            // bucket list, compare a one-row signature of the buckets table
+            // and reload when it differs. Cheap compared to the read itself.
+            let depends_on_buckets =
+                matches!(request, Command::GetBuckets()) || request.read_bucket_id().is_some();
+            if depends_on_buckets && ds.buckets_changed(tx).unwrap_or(true) {
+                if let Err(e) = ds.reload_buckets(tx) {
+                    warn!("Reader failed to reload bucket list: {e:?}");
+                }
+            }
+        }
         match request {
+            Command::ReloadBuckets() => match ds.reload_buckets(tx) {
+                Ok(()) => Ok(Response::Empty()),
+                Err(e) => Err(e),
+            },
             Command::Export(bucket_id, mut file) => {
                 let mut writer = BufWriter::new(&mut file);
                 let name = ds.write_export(tx, bucket_id.as_deref(), &mut writer)?;
@@ -697,6 +754,53 @@ impl Datastore {
         ))
     }
 
+    /// Open a second, read-only handle on a database this process is also
+    /// writing to, for serving reads (queries) without queueing behind the
+    /// writer's worker. Unlike [`Datastore::open_read_only`] it shares the
+    /// WAL, so it sees every committed transaction; the writer batches
+    /// commits (15 s / 100 events), so call [`Datastore::force_commit`] on
+    /// the writer first when the newest events matter. Buckets created after
+    /// opening are picked up on a cache miss or via
+    /// [`Datastore::reload_buckets`].
+    ///
+    /// The writer must have finished initializing (migrations, legacy import)
+    /// before this is called, e.g. by awaiting any request on it.
+    pub fn open_reader(dbpath: String) -> Result<Self, DatastoreError> {
+        // Not `probe_user_version`: that opens `immutable`, which ignores the
+        // WAL, and right after a migration the new version is only in the WAL.
+        let conn = open_reader_connection(&dbpath).map_err(|e| {
+            DatastoreError::InternalError(format!("reader open failed for {dbpath}: {e}"))
+        })?;
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|e| {
+                DatastoreError::InternalError(format!("user_version read failed for {dbpath}: {e}"))
+            })?;
+        // In rollback-journal mode a reader's shared lock blocks the writer's
+        // commit; only share the file when it is in WAL mode.
+        let journal_mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .map_err(|e| {
+                DatastoreError::InternalError(format!("journal_mode read failed for {dbpath}: {e}"))
+            })?;
+        drop(conn);
+        if journal_mode != "wal" {
+            return Err(DatastoreError::InternalError(format!(
+                "Reader requires WAL mode, database is in journal_mode={journal_mode}"
+            )));
+        }
+        if version != crate::NEWEST_DB_VERSION {
+            return Err(DatastoreError::OldDbVersion(format!(
+                "Reader expects a fully migrated database (version {}), found version {version}",
+                crate::NEWEST_DB_VERSION
+            )));
+        }
+        Ok(Datastore::_new_internal(
+            DatastoreMethod::FileReader(dbpath),
+            LegacyImportOptions::default(),
+        ))
+    }
+
     pub fn new_in_memory(legacy_import: bool) -> Self {
         let method = DatastoreMethod::Memory();
         Datastore::_new_internal(
@@ -940,6 +1044,11 @@ impl Datastore {
     ) -> Result<(), DatastoreError> {
         let cmd = Command::DeleteEventsById(bucket_id.to_string(), event_ids);
         _unwrap_empty_response(self.request(cmd)?)
+    }
+
+    /// Re-read the bucket list (see [`Datastore::open_reader`]).
+    pub fn reload_buckets(&self) -> Result<(), DatastoreError> {
+        _unwrap_empty_response(self.request(Command::ReloadBuckets())?)
     }
 
     pub fn force_commit(&self) -> Result<(), DatastoreError> {

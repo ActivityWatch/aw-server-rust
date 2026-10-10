@@ -79,8 +79,28 @@ pub fn query(
     let query_code = query_req.0.query.join("\n");
     let intervals = &query_req.0.timeperiods;
     let use_cache = state.query_cache_enabled && cache.unwrap_or(true);
-    let datastore = &state.datastore;
+    let datastore = state.query_datastore();
     let request_start = Instant::now();
+    // The reader only sees committed data, and writes (heartbeats, but also
+    // edits to old events and imports) are acknowledged before the writer's
+    // batch commits. Flush first when any write since the last flush touched
+    // one of the periods; untouched past periods, the bulk of a Year / All
+    // time view, skip the fsync.
+    if state.reader.is_some() {
+        let periods: Vec<_> = intervals
+            .iter()
+            .map(|i| (i.start().to_owned(), i.end().to_owned()))
+            .collect();
+        // Held through the commit: a concurrent query waits here instead of
+        // finding nothing pending while the flush is still in progress.
+        let _flushing = state.flush_lock.lock().unwrap();
+        if let Some(generation) = state.query_cache.pending_overlapping(&periods) {
+            match state.datastore.force_commit() {
+                Ok(()) => state.query_cache.clear_pending_through(generation),
+                Err(e) => warn!("Failed to flush writes before query: {e:?}"),
+            }
+        }
+    }
     // One budget for the whole request: a client that sends many timeperiods
     // in one request is bounded the same as one that sends one long period.
     // An absurdly large budget that does not fit in an Instant means unlimited.

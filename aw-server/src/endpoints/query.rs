@@ -91,10 +91,11 @@ pub fn query(
     let evaluate = |interval: &aw_models::TimeInterval| -> Result<Arc<str>, HttpErrorJson> {
         let started = Instant::now();
         let result = aw_query::query_with_deadline(&query_code, interval, datastore, deadline);
-        let elapsed = started.elapsed();
         match result {
             Ok(data) => match serde_json::to_string(&data) {
                 Ok(serialized) => {
+                    // Serialization of a large result is part of the cost.
+                    let elapsed = started.elapsed();
                     if elapsed >= SLOW_QUERY_THRESHOLD {
                         info!(
                             "Slow query ({:.1}s, {} bytes result) for timeperiod {interval}",
@@ -120,7 +121,7 @@ pub fn query(
             Err(e) => {
                 warn!(
                     "Query failed after {:.1}s for timeperiod {interval}: {:?}",
-                    elapsed.as_secs_f64(),
+                    started.elapsed().as_secs_f64(),
                     e
                 );
                 Err(HttpErrorJson::new(query_error_status(&e), e.to_string()))

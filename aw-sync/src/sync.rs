@@ -1345,6 +1345,10 @@ fn sync_one(
                         )?;
                         // (timestamp, data) — protects clipped dest copies; see
                         // SourceFingerprint comment.
+                        let source_full: HashSet<ReplayFingerprint> = source_near
+                            .iter()
+                            .map(|e| (e.timestamp, e.timestamp + e.duration, e.data.clone()))
+                            .collect();
                         let source_fps: HashSet<SourceFingerprint> = source_near
                             .into_iter()
                             .map(|e| (e.timestamp, e.data))
@@ -1376,14 +1380,14 @@ fn sync_one(
                             let in_source = source_fps.contains(&(d.timestamp, d.data.clone()));
                             // Chunk has same (timestamp, data) but different end_time →
                             // this is a duration-only replacement, not just a coexisting
-                            // event.
+                            // event. Unless the source still holds the dest row's exact
+                            // interval: then the chunk event is a distinct sibling that
+                            // only shares (timestamp, data), and the dest copy is live.
+                            let dest_fp = (d.timestamp, d.timestamp + d.duration, d.data.clone());
                             let chunk_replaces = chunk_ts_data
                                 .contains(&(d.timestamp, d.data.clone()))
-                                && !chunk_fps.contains(&(
-                                    d.timestamp,
-                                    d.timestamp + d.duration,
-                                    d.data.clone(),
-                                ));
+                                && !chunk_fps.contains(&dest_fp)
+                                && !source_full.contains(&dest_fp);
                             if !in_source || chunk_replaces {
                                 stale.push(id);
                             }
@@ -3418,6 +3422,77 @@ mod rowid_cursor_tests {
             "new E2 must be inserted: {dest:?}"
         );
         assert_eq!(dest.len(), 2, "both events must be present: {dest:?}");
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// A new source event that shares (timestamp, data) with an existing one
+    /// but has a different duration is a sibling, not a duration-only edit,
+    /// as long as the original is still in the source. The dest copy of the
+    /// original must survive (ActivityWatch/aw-server-rust#798).
+    #[test]
+    fn same_timestamp_and_data_sibling_does_not_delete_live_dest_copy() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-sibling-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &ds_src,
+                &ds_dest,
+                false,
+                None,
+                &spec,
+                Some(&cursor_ds),
+                Some(src_hostname),
+            )
+            .expect("pull must succeed")
+        };
+
+        let base = Utc::now() - Duration::seconds(3600);
+        let data = serde_json::json!({"kind": "same"});
+        let ev_a = make_event_full(base, 0, 5, data.clone());
+        ds_src.insert_events(bucket_id, &[ev_a]).unwrap();
+        ds_src.force_commit().unwrap();
+        pull();
+
+        // B: distinct row at the same timestamp with the same data and a
+        // longer duration. A stays in the source.
+        let ev_b = make_event_full(base, 0, 10, data);
+        ds_src.insert_events(bucket_id, &[ev_b]).unwrap();
+        ds_src.force_commit().unwrap();
+        pull();
+
+        let mut durations: Vec<i64> = ds_dest
+            .get_events(&dest_bucket_id, None, None, None)
+            .unwrap()
+            .iter()
+            .map(|e| e.duration.num_seconds())
+            .collect();
+        durations.sort();
+        assert_eq!(
+            durations,
+            vec![5, 10],
+            "dest must hold both siblings, A's copy must not be deleted"
+        );
 
         cursor_ds.close();
         ds_src.close();

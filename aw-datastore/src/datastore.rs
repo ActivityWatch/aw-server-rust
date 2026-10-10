@@ -49,6 +49,11 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
         )
         .is_ok()
     };
+    // v7 recreated `buckets` with `device_id` and without `data_deprecated`,
+    // so it must be recognised before the v2/v3 column checks below.
+    if has_column("device_id") {
+        return 7;
+    }
     if !has_column("data") && !has_column("data_deprecated") {
         return 1;
     }
@@ -76,6 +81,7 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
  * 4: Added 'key_value' table for storing key - value pairs
  * 5: Replaced single-column events indexes with a composite index
  * 6: Added an endtime-first index for recent interval reads
+ * 7: Added 'device_id' to 'buckets' (UNIQUE(device_id, name)), dropped 'data_deprecated'
  */
 pub const NEWEST_DB_VERSION: i32 = 7;
 

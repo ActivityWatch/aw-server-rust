@@ -132,13 +132,16 @@ mod datastore_tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].timestamp, e.timestamp);
 
-        // Explicit reload after a bucket delete: the reader stops resolving it.
+        // The bucket list itself is refreshed on read when buckets changed.
+        assert!(reader.get_buckets().unwrap().contains_key(&bucket.id));
         writer.delete_bucket(&bucket.id).unwrap();
-        reader.reload_buckets().unwrap();
+        assert!(!reader.get_buckets().unwrap().contains_key(&bucket.id));
         assert!(matches!(
             reader.get_bucket(&bucket.id),
             Err(DatastoreError::NoSuchBucket(_))
         ));
+        // Explicit reload is still available for callers that know better.
+        reader.reload_buckets().unwrap();
     }
 
     #[test]

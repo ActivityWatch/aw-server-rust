@@ -1138,11 +1138,13 @@ mod api_tests {
 
     #[test]
     fn query_reader_sees_new_buckets_and_fresh_heartbeats() {
-        let path = std::env::temp_dir().join(format!(
-            "aw-server-query-reader-{}.sqlite",
-            std::process::id()
-        ));
-        let path_str = path.to_str().unwrap().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let path_str = dir
+            .path()
+            .join("reader.sqlite")
+            .to_str()
+            .unwrap()
+            .to_string();
         let server = setup_file_testserver(&path_str);
         let client = Client::untracked(server).expect("valid instance");
         let host = Header::new("Host", "127.0.0.1:5600");
@@ -1227,10 +1229,6 @@ mod api_tests {
             ))
             .dispatch();
         assert_eq!(res.status(), Status::BadRequest);
-
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{path_str}{suffix}"));
-        }
     }
 
     #[test]

@@ -1281,7 +1281,22 @@ fn sync_one(
             loop {
                 if current_batch.is_empty() {
                     // Save cursor even on the empty-batch exit so the stored
-                    // position reflects max_scanned_rowid from the previous page.
+                    // position reflects max_scanned_rowid from the previous page
+                    // (covers the case where an entire page consists of corrupt
+                    // rows that parse to an empty vec but still advance max_rowid).
+                    cds.set_key_value(&ck, &max_rowid.to_string())
+                        .map_err(|e| {
+                            format!(
+                                "Failed to persist sync cursor for '{}': {e:?}",
+                                bucket_from.id
+                            )
+                        })?;
+                    cds.force_commit().map_err(|e| {
+                        format!(
+                            "Failed to commit sync cursor for '{}': {e:?}",
+                            bucket_from.id
+                        )
+                    })?;
                     break;
                 }
                 let is_last = current_batch.len() < BATCH_SIZE;

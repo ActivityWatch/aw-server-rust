@@ -21,6 +21,7 @@ mod datastore;
 mod export;
 mod legacy_import;
 mod privacy_filter;
+pub mod recovery;
 mod worker;
 
 pub use self::datastore::DatastoreInstance;

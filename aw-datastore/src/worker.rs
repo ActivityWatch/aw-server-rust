@@ -334,6 +334,15 @@ impl DatastoreWorker {
         // unused until something happens to send RefreshPrivacyFilter.
         self.reload_privacy_engine(&ds, &conn);
 
+        // A durable migration request survives a process dying between path
+        // resolution and actual Python import (including embedded/Tauri startup).
+        let python_recovery_pending = !read_only
+            && ds
+                .get_key_value(&conn, "windows_python_recovery")
+                .ok()
+                .as_deref()
+                == Some("pending");
+
         // Ensure legacy import
         if self.legacy_import_opts.enabled {
             let transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
@@ -345,19 +354,25 @@ impl DatastoreWorker {
             match ds.ensure_legacy_import(
                 &transaction,
                 self.legacy_import_opts.db_path_override.as_deref(),
-                self.legacy_import_opts.force,
+                self.legacy_import_opts.force || python_recovery_pending,
             ) {
-                Ok(_) => (),
-                Err(err) => error!("Failed to do legacy import: {:?}", err),
-            }
-            match transaction.commit() {
-                Ok(_) => (),
+                Ok(imported) => {
+                    if imported && python_recovery_pending {
+                        ds.insert_key_value(&transaction, "windows_python_recovery", "done")
+                            .unwrap();
+                    }
+                    if let Err(err) = transaction.commit() {
+                        error!("Failed to commit legacy import transaction: {err}");
+                    }
+                }
                 Err(err) => {
-                    error!("Failed to commit legacy import transaction: {err}");
-                    // Continue without panicking — legacy import will be retried on
-                    // next startup if the commit didn't persist.
+                    error!("Failed to do legacy import (rolling back): {:?}", err);
+                    drop(transaction);
                 }
             }
+            // Both create_bucket and ensure_legacy_import mutate caches before
+            // commit. Rebuild them after rollback/commit, never serve phantom rows.
+            ds = DatastoreInstance::new(&conn, false).unwrap();
         }
 
         // BEGIN IMMEDIATE takes a reserved (write) lock. On a read-only

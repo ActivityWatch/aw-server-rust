@@ -295,7 +295,26 @@ static MIGRATED_DEFAULT_DATABASE: std::sync::atomic::AtomicBool =
 /// looked in the wrong directory and so never ran against the real Python
 /// aw-server database. aw-server uses this to run that import once.
 pub fn migrated_v0140_default_database() -> bool {
-    MIGRATED_DEFAULT_DATABASE.load(std::sync::atomic::Ordering::SeqCst)
+    if MIGRATED_DEFAULT_DATABASE.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    // Tauri's pre-worker import guard calls this too. The process flag alone
+    // loses the obligation on a restart after migration but before import.
+    get_data_dir_for("default").ok().is_some_and(|dir| {
+        let path = dir.join(db_filename("default"));
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT value FROM key_value WHERE key='windows_python_recovery'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+            })
+            .as_deref()
+            == Some("pending")
+    })
 }
 
 #[cfg(not(target_os = "android"))]
@@ -327,6 +346,8 @@ struct RecoverySources {
     chosen_database: PathBuf,
     local_backup: PathBuf,
     roaming_backup: PathBuf,
+    #[serde(default)]
+    roaming_original: Option<PathBuf>,
 }
 
 type CopyFn<'a> = dyn Fn(&Path, &Path) -> std::io::Result<u64> + 'a;
@@ -340,8 +361,49 @@ type RenameFn<'a> = dyn Fn(&Path, &Path) -> std::io::Result<()> + 'a;
 /// keeps being used (and migration is retried next start) rather than
 /// starting from an empty target. Nothing is ever deleted or overwritten.
 pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) -> MigrationOutcome {
+    // Once Local won and recovery was requested, the original Roaming file
+    // is archival input, not a fresh selection candidate. User deletions must
+    // not cause the next startup to promote that older archive over Local.
+    let local_manifest = target.with_file_name(format!(
+        "{}{}local-wins",
+        target.file_name().unwrap().to_string_lossy(),
+        RECOVERY_PENDING_TAG
+    ));
+    if local_manifest.is_file() && has_database(target) {
+        return MigrationOutcome {
+            dir: target.to_path_buf(),
+            migrated_database: false,
+        };
+    }
     match choose_module_dir(target, misplaced) {
         DirChoice::Target => {
+            if has_database(target) && has_database(misplaced) {
+                // Local won selection, but Roaming can still contain unique
+                // history. Record the exact still-live source for union as well.
+                let recovery = MigrationLock::acquire(target).and_then(|_lock| {
+                    let pending = target.with_file_name(format!(
+                        "{}{}local-wins",
+                        target.file_name().unwrap().to_string_lossy(),
+                        RECOVERY_PENDING_TAG
+                    ));
+                    if !pending.exists() {
+                        let sources = RecoverySources {
+                            chosen_database: target.to_path_buf(),
+                            local_backup: target.to_path_buf(),
+                            roaming_backup: misplaced.to_path_buf(),
+                            roaming_original: Some(misplaced.to_path_buf()),
+                        };
+                        // The ordinary writer allocates a unique stamp; keep its
+                        // returned path rather than searching preserved siblings.
+                        let written = write_recovery_sources(target, &sources)?;
+                        fs::rename(written, pending)?;
+                    }
+                    Ok(())
+                });
+                if let Err(e) = recovery {
+                    warn!("Could not record history recovery sources: {e}");
+                }
+            }
             if has_entries(misplaced) {
                 let what = if has_database(misplaced) {
                     "a database (data recorded while running v0.14.0)"
@@ -452,7 +514,11 @@ impl MigrationLock {
 }
 
 fn migration_stamp() -> String {
-    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+    format!(
+        "{}-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        uuid::Uuid::new_v4()
+    )
 }
 
 /// `dir` with `tag` and a unique suffix appended to its name, in the same parent.
@@ -554,7 +620,10 @@ fn write_recovery_sources(target: &Path, sources: &RecoverySources) -> std::io::
     file.write_all(&bytes)?;
     file.sync_all()?;
     fs::rename(&temporary, &path)?;
-    fs::File::open(&path)?.sync_all()?;
+    fs::OpenOptions::new().write(true).open(&path)?.sync_all()?;
+    // Persist the directory entry too on platforms that support opening dirs.
+    #[cfg(unix)]
+    fs::File::open(path.parent().unwrap())?.sync_all()?;
     Ok(path)
 }
 
@@ -595,16 +664,15 @@ fn migrate_dir_with_rename(
     }
     let local_backup = tagged_sibling(target, PRE_MIGRATION_TAG, &stamp);
     let roaming_backup = tagged_sibling(misplaced, MIGRATED_TAG, &stamp);
-    if local_had_database {
-        let sources = RecoverySources {
-            chosen_database: target.to_path_buf(),
-            local_backup: local_backup.clone(),
-            roaming_backup: roaming_backup.clone(),
-        };
-        if let Err(e) = write_recovery_sources(target, &sources) {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(e);
-        }
+    let sources = RecoverySources {
+        chosen_database: target.to_path_buf(),
+        local_backup: local_backup.clone(),
+        roaming_backup: roaming_backup.clone(),
+        roaming_original: Some(misplaced.to_path_buf()),
+    };
+    if let Err(e) = write_recovery_sources(target, &sources) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
     }
     let aside = if target.exists() {
         if fs::remove_dir(target).is_ok() {
@@ -916,7 +984,89 @@ fn get_data_dir_for(_profile: &str) -> Result<PathBuf, ()> {
 pub fn db_path(profile: &str) -> Result<PathBuf, ()> {
     let mut db_path = get_data_dir_for(profile)?;
     db_path.push(db_filename(profile));
+    recover_preserved_histories(&db_path, profile == "default")
+        .unwrap_or_else(|e| panic!("History recovery failed; originals are preserved: {e}"));
     Ok(db_path)
+}
+
+/// Shared by standalone and embedded servers, before opening datastore workers.
+/// Manifests remain on disk; the database transaction owns the completion marker.
+fn recover_preserved_histories(database: &Path, default_profile: bool) -> Result<(), String> {
+    let Some(target) = database.parent() else {
+        return Ok(());
+    };
+    let Some(parent) = target.parent() else {
+        return Ok(());
+    };
+    if !database.is_file() {
+        return Ok(());
+    }
+    // Avoid taking a migration lock or running quick_check on every ordinary
+    // startup (including Android). Only recorded recovery requests need it.
+    let prefix = format!(
+        "{}{}",
+        target.file_name().unwrap().to_string_lossy(),
+        RECOVERY_PENDING_TAG
+    );
+    let manifests: Vec<_> = fs::read_dir(parent)
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with(&prefix) && !name.contains(".tmp-") && entry.path().is_file()
+        })
+        .collect();
+    if manifests.is_empty() {
+        return Ok(());
+    }
+    let _lock = MigrationLock::acquire(target).map_err(|e| e.to_string())?;
+    if let Err(e) = database_rank(target, &database.file_name().unwrap().to_string_lossy()) {
+        warn!("Selected history {database:?} is corrupt, encrypted or unsupported ({e}); automatic recovery deferred, originals are untouched");
+        return Ok(());
+    }
+    for entry in manifests {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let sources: RecoverySources =
+            serde_json::from_slice(&fs::read(entry.path()).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        if sources.chosen_database != target {
+            continue;
+        }
+        let roaming = if sources.roaming_backup.exists() {
+            sources.roaming_backup
+        } else {
+            sources.roaming_original.unwrap_or(sources.roaming_backup)
+        };
+        for (kind, dir) in [("local", sources.local_backup), ("roaming", roaming)] {
+            let source = dir.join(database.file_name().unwrap());
+            if source == database || !source.is_file() {
+                continue;
+            }
+            if let Err(e) = database_rank(&dir, &database.file_name().unwrap().to_string_lossy()) {
+                warn!("History recovery source {source:?} is corrupt, encrypted or unsupported ({e}); leaving it untouched for manual recovery");
+                continue;
+            }
+            let backup = tagged_sibling(database, ".recovery-backup-", &migration_stamp());
+            let counts = aw_datastore::recovery::recover_database(
+                database,
+                &source,
+                &backup,
+                &format!("{id}:{kind}"),
+            )?;
+            info!("History recovery from {source:?}: {} buckets created, {} events inserted, {} duplicates skipped",
+                counts.buckets_created, counts.events_inserted, counts.duplicates_skipped);
+        }
+        // Persist before returning the path: a crash before the worker imports
+        // Python must not erase the recovery request (the old atomic flag did).
+        if default_profile {
+            let conn = rusqlite::Connection::open(database).map_err(|e| e.to_string())?;
+            conn.execute("INSERT OR IGNORE INTO key_value(key, value, last_modified) VALUES ('windows_python_recovery', 'pending', 0)", [])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "android")]
@@ -1301,6 +1451,114 @@ fn test_local_database_is_authoritative() {
         b"roaming-cfg"
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_shared_recovery_unions_both_selection_directions_and_restart() {
+    use aw_models::{Bucket, Event};
+    use chrono::{Duration, TimeZone, Utc};
+    for roaming_newer in [false, true] {
+        let (root, target, misplaced) = migration_dirs();
+        for (dir, seconds) in [
+            (&target, if roaming_newer { 10 } else { 20 }),
+            (&misplaced, if roaming_newer { 20 } else { 10 }),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+            let conn = rusqlite::Connection::open(dir.join("sqlite.db")).unwrap();
+            let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
+            ds.create_bucket(
+                &conn,
+                Bucket {
+                    bid: None,
+                    id: "shared".into(),
+                    _type: "test".into(),
+                    client: "test".into(),
+                    hostname: "test".into(),
+                    created: None,
+                    data: Default::default(),
+                    metadata: Default::default(),
+                    events: None,
+                    last_updated: None,
+                },
+            )
+            .unwrap();
+            ds.insert_events(
+                &conn,
+                "shared",
+                vec![Event {
+                    id: None,
+                    timestamp: Utc.timestamp_opt(1700000000 + seconds, 0).unwrap(),
+                    duration: Duration::seconds(1),
+                    data: Default::default(),
+                }],
+            )
+            .unwrap();
+        }
+        let outcome = resolve_or_migrate(&target, &misplaced, &real_copy);
+        assert_eq!(outcome.dir, target);
+        assert_eq!(outcome.migrated_database, roaming_newer);
+        let path = target.join("sqlite.db");
+        recover_preserved_histories(&path, true).unwrap();
+        let manifests = || {
+            fs::read_dir(target.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .contains(RECOVERY_PENDING_TAG)
+                })
+                .count()
+        };
+        let before = manifests();
+        resolve_or_migrate(&target, &misplaced, &real_copy);
+        assert_eq!(
+            manifests(),
+            before,
+            "restart must not create another recovery request"
+        );
+        recover_preserved_histories(&path, true).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        let state: String = conn
+            .query_row(
+                "SELECT value FROM key_value WHERE key='windows_python_recovery'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "pending");
+        conn.execute("DELETE FROM events", []).unwrap();
+        conn.execute(
+            "UPDATE key_value SET value='done' WHERE key='windows_python_recovery'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        resolve_or_migrate(&target, &misplaced, &real_copy);
+        recover_preserved_histories(&path, true).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "completed recovery must not resurrect deliberately deleted history"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM key_value WHERE key='windows_python_recovery'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "done"
+        );
+        drop(conn);
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 /// Create a real SQLite database in `dir/sqlite.db` with one event at

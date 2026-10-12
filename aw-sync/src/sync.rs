@@ -961,10 +961,9 @@ fn reconcile_updated_events(
     //
     // Source is fetched UNCLIPPED when the rowid cursor path will be active
     // (`use_unclipped_source = true`). Unclipped preserves the true end_time of
-    // a duration-only edit (same timestamp, same data, longer duration), giving
-    // it an identity (timestamp, duration) distinct from the dest copy — so
-    // reconcile does NOT mark the source rowid as "on_dest" and the rowid path
-    // can handle the replacement itself (delete clipped copy + insert full).
+    // a duration-only edit. Refresh uniquely identified in-place heartbeat
+    // updates here: their rowids do not advance, so the rowid path cannot see
+    // them. Newly inserted replacements are also reconciled before pagination.
     //
     // When the rowid cursor is NOT active (push path, timestamp-fallback path),
     // `use_unclipped_source = false`: source is fetched CLIPPED. With clipped
@@ -1002,12 +1001,60 @@ fn reconcile_updated_events(
             None,
         )?
     };
-    let dest_events = ds_to.get_events(
+    let mut dest_events = ds_to.get_events(
         bucket_to.id.as_str(),
         Some(lookback_start),
         Some(resume),
         None,
     )?;
+
+    if use_unclipped_source {
+        let mut existing: HashSet<_> = dest_events
+            .iter()
+            .map(|e| (e.timestamp, e.duration, e.data.clone()))
+            .collect();
+        // Heartbeats update in place, so their rowids are already below the
+        // cursor. Refresh a uniquely identified duration edit here rather
+        // than expecting the incremental rowid query to return it again.
+        for src in &source_events {
+            if src.timestamp < lookback_start || src.timestamp >= resume {
+                continue;
+            }
+            if source_events
+                .iter()
+                .filter(|e| e.timestamp == src.timestamp && e.data == src.data)
+                .count()
+                != 1
+            {
+                continue;
+            }
+            for dst in &mut dest_events {
+                if dst.timestamp == src.timestamp
+                    && dst.data == src.data
+                    && dst.duration != src.duration
+                {
+                    let Some(id) = dst.id else { continue };
+                    let stored = ds_to.get_stored_event(bucket_to.id.as_str(), id)?;
+                    if !stored.is_some_and(|e| {
+                        e.timestamp == dst.timestamp
+                            && e.duration == dst.duration
+                            && e.data == dst.data
+                    }) {
+                        continue;
+                    }
+                    let fingerprint = (src.timestamp, src.duration, src.data.clone());
+                    if !existing.contains(&fingerprint) {
+                        let mut replacement = src.clone();
+                        replacement.id = None;
+                        ds_to.insert_events(bucket_to.id.as_str(), vec![replacement])?;
+                        existing.insert(fingerprint);
+                    }
+                    ds_to.delete_events_by_id(bucket_to.id.as_str(), vec![id])?;
+                    dst.duration = src.duration;
+                }
+            }
+        }
+    }
 
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for event in dest_events {
@@ -1278,12 +1325,11 @@ fn sync_one(
             // so the cursor always advances past damaged rows and never stalls.
             let mut max_rowid = first_scanned;
             let mut events_sent = 0usize;
+            let mut previous_scanned = stored_rowid;
             loop {
-                if current_batch.is_empty() {
-                    // Save cursor even on the empty-batch exit so the stored
-                    // position reflects max_scanned_rowid from the previous page
-                    // (covers the case where an entire page consists of corrupt
-                    // rows that parse to an empty vec but still advance max_rowid).
+                if max_rowid <= previous_scanned {
+                    // No rows were scanned. Persist even for an empty initial
+                    // query, so a fresh empty source establishes its cursor.
                     cds.set_key_value(&ck, &max_rowid.to_string())
                         .map_err(|e| {
                             format!(
@@ -1299,7 +1345,10 @@ fn sync_one(
                     })?;
                     break;
                 }
-                let is_last = current_batch.len() < BATCH_SIZE;
+                // A short parsed page can still be a full scanned page containing
+                // corrupt rows. Keep fetching while the scanned cursor advances;
+                // one empty query is cheaper than silently delaying valid rows.
+                previous_scanned = max_rowid;
                 // P4: Honour sync_spec.start: skip events that end before the
                 // requested start date.  Overlap semantics match the timestamp
                 // path, so an event crossing the start boundary is kept.  The
@@ -1424,7 +1473,17 @@ fn sync_one(
                                 && !chunk_fps.contains(&dest_fp)
                                 && !source_full.contains(&dest_fp);
                             if !in_source || chunk_replaces {
-                                stale.push(id);
+                                // Older HTTP servers ignore unclipped=true. A
+                                // range-clipped row must never authorize deletion
+                                // of the full stored event behind the same id.
+                                let stored = ds_to.get_stored_event(bucket_to.id.as_str(), id)?;
+                                if stored.is_some_and(|e| {
+                                    (e.timestamp, e.timestamp + e.duration, e.data) == dest_fp
+                                }) {
+                                    stale.push(id);
+                                } else {
+                                    warn!("Skipping stale deletion of event {id}: unclipped identity not verified");
+                                }
                             }
                         }
                     }
@@ -1463,9 +1522,6 @@ fn sync_one(
                         bucket_from.id
                     )
                 })?;
-                if is_last {
-                    break;
-                }
                 let (next_batch, next_scanned) = ds_from
                     .get_events_since_rowid(
                         bucket_from.id.as_str(),
@@ -2603,6 +2659,213 @@ mod rowid_cursor_tests {
             "data": {"seq": ts_offset_secs}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn in_place_heartbeat_extension_reaches_destination() {
+        let source = Datastore::new_in_memory(false);
+        let dest = Datastore::new_in_memory(false);
+        let cursors = Datastore::new_in_memory(false);
+        let bucket_id = "heartbeat";
+        let device = "heartbeat-device";
+        let dest_id = format!("{bucket_id}-synced-from-{device}");
+        source
+            .create_bucket(&make_bucket(bucket_id, device))
+            .unwrap();
+        let base = Utc::now() - Duration::seconds(3600);
+        let event = make_event_full(base, 0, 5, serde_json::json!({"app": "firefox"}));
+        source.insert_events(bucket_id, &[event.clone()]).unwrap();
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &source,
+                &dest,
+                false,
+                None,
+                &spec,
+                Some(&cursors),
+                Some(device),
+            )
+            .unwrap()
+        };
+        pull();
+        let before = source.get_events(bucket_id, None, None, None).unwrap()[0].id;
+        let heartbeat = make_event_full(base, 5, 55, serde_json::json!({"app": "firefox"}));
+        source.heartbeat(bucket_id, heartbeat, 60.0).unwrap();
+        source.force_commit().unwrap();
+        let updated = source.get_events(bucket_id, None, None, None).unwrap();
+        assert_eq!(updated[0].id, before, "heartbeat must update in place");
+        assert_eq!(updated[0].duration, Duration::seconds(60));
+        pull();
+        let copied = dest.get_events(&dest_id, None, None, None).unwrap();
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].duration, Duration::seconds(60));
+        pull();
+        assert_eq!(dest.get_event_count(&dest_id, None, None).unwrap(), 1);
+        source.close();
+        dest.close();
+        cursors.close();
+    }
+
+    #[derive(Debug)]
+    struct ClippingDestination(Datastore);
+
+    impl AccessMethod for ClippingDestination {
+        fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
+            AccessMethod::get_buckets(&self.0)
+        }
+        fn get_bucket(&self, id: &str) -> Result<Bucket, aw_datastore::DatastoreError> {
+            self.0.get_bucket(id)
+        }
+        fn create_bucket(&self, bucket: &Bucket) -> Result<(), aw_datastore::DatastoreError> {
+            AccessMethod::create_bucket(&self.0, bucket)
+        }
+        fn get_events(
+            &self,
+            id: &str,
+            start: Option<DateTime<Utc>>,
+            end: Option<DateTime<Utc>>,
+            limit: Option<u64>,
+        ) -> Result<Vec<Event>, String> {
+            AccessMethod::get_events(&self.0, id, start, end, limit)
+        }
+        fn insert_events(&self, id: &str, events: Vec<Event>) -> Result<(), String> {
+            AccessMethod::insert_events(&self.0, id, events)
+        }
+        fn get_event_count(&self, id: &str) -> Result<i64, String> {
+            AccessMethod::get_event_count(&self.0, id)
+        }
+        fn heartbeat(&self, id: &str, event: Event, duration: f64) -> Result<(), String> {
+            AccessMethod::heartbeat(&self.0, id, event, duration)
+        }
+        fn delete_events_by_id(&self, id: &str, ids: Vec<i64>) -> Result<(), String> {
+            AccessMethod::delete_events_by_id(&self.0, id, ids)
+        }
+        fn get_stored_event(&self, id: &str, event_id: i64) -> Result<Option<Event>, String> {
+            AccessMethod::get_stored_event(&self.0, id, event_id)
+        }
+        // Deliberately inherit get_events_unclipped: old HTTP servers ignore it.
+    }
+
+    #[test]
+    fn clipping_destination_does_not_delete_overlapping_source_event() {
+        let source = Datastore::new_in_memory(false);
+        let dest = ClippingDestination(Datastore::new_in_memory(false));
+        let cursors = Datastore::new_in_memory(false);
+        let bucket_id = "clipping";
+        let device = "clip-device";
+        let dest_id = format!("{bucket_id}-synced-from-{device}");
+        source
+            .create_bucket(&make_bucket(bucket_id, device))
+            .unwrap();
+        let base = Utc::now() - Duration::seconds(3600);
+        source
+            .insert_events(
+                bucket_id,
+                &[
+                    make_event_full(base, 0, 100, serde_json::json!({"kind": "long"})),
+                    make_event_full(base, 200, 1, serde_json::json!({"kind": "tail"})),
+                ],
+            )
+            .unwrap();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &source,
+                &dest,
+                false,
+                None,
+                &SyncSpec::default(),
+                Some(&cursors),
+                Some(device),
+            )
+            .unwrap()
+        };
+        pull();
+        source
+            .insert_events(
+                bucket_id,
+                &[make_event_full(
+                    base,
+                    50,
+                    1,
+                    serde_json::json!({"kind": "backfill"}),
+                )],
+            )
+            .unwrap();
+        pull();
+        let copied = dest.0.get_events(&dest_id, None, None, None).unwrap();
+        assert!(
+            copied.iter().any(|e| e.data["kind"] == "long"
+                && e.timestamp == base
+                && e.duration == Duration::seconds(100)),
+            "clipped query results must not authorize deletion of a live row: {copied:?}"
+        );
+        assert_eq!(copied.len(), 3);
+        source.close();
+        dest.0.close();
+        cursors.close();
+    }
+
+    fn pull_past_corrupt_page(corrupt_count: usize) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.db");
+        let bucket_id = "corrupt-page";
+        let device = "corrupt-device";
+        let source = Datastore::new(path.to_string_lossy().into_owned(), false);
+        source
+            .create_bucket(&make_bucket(bucket_id, device))
+            .unwrap();
+        let events: Vec<_> = (0..=BATCH_SIZE)
+            .map(|i| make_event(i as i64 * 10))
+            .collect();
+        source.insert_events(bucket_id, &events).unwrap();
+        source.force_commit().unwrap();
+        source.close();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE events SET data = 'invalid json' WHERE id <= ?1",
+            [corrupt_count as i64],
+        )
+        .unwrap();
+        drop(conn);
+        let source = Datastore::new(path.to_string_lossy().into_owned(), false);
+        let dest = Datastore::new_in_memory(false);
+        let cursors = Datastore::new_in_memory(false);
+        sync_datastores_with_cursor(
+            &source,
+            &dest,
+            false,
+            None,
+            &SyncSpec::default(),
+            Some(&cursors),
+            Some(device),
+        )
+        .unwrap();
+        let dest_id = format!("{bucket_id}-synced-from-{device}");
+        assert_eq!(
+            dest.get_event_count(&dest_id, None, None).unwrap(),
+            (BATCH_SIZE + 1 - corrupt_count) as i64,
+            "a corrupt page must not prevent later valid rows syncing in this pass"
+        );
+        assert_eq!(
+            cursors
+                .get_key_value(&cursor_key(device, bucket_id))
+                .unwrap(),
+            (BATCH_SIZE + 1).to_string()
+        );
+        source.close();
+        dest.close();
+        cursors.close();
+    }
+
+    #[test]
+    fn partially_corrupt_page_does_not_end_pull() {
+        pull_past_corrupt_page(1);
+    }
+
+    #[test]
+    fn fully_corrupt_page_does_not_end_pull() {
+        pull_past_corrupt_page(BATCH_SIZE);
     }
 
     /// Core invariant: late-arriving events (old timestamps, new insertion order)

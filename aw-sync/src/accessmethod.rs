@@ -24,6 +24,12 @@ pub trait AccessMethod: std::fmt::Debug {
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
     fn delete_events_by_id(&self, bucket_id: &str, event_ids: Vec<i64>) -> Result<(), String>;
 
+    /// Fetch a stored event by id to verify that a range-query result was not
+    /// clipped. Unknown backends fail closed before destructive reconciliation.
+    fn get_stored_event(&self, _bucket_id: &str, _event_id: i64) -> Result<Option<Event>, String> {
+        Ok(None)
+    }
+
     /// Like `get_events` but returns events with their original stored timestamps, without
     /// clipping them to the query window. Backends that cannot avoid clipping should
     /// override this with an explicit unclipped query path (see the AwClient impl);
@@ -66,6 +72,11 @@ pub trait AccessMethod: std::fmt::Debug {
 /// into a panic that unwinds out of the JNI `extern "C"` frame and aborts the
 /// whole app — see ActivityWatch/aw-android#220.
 impl AccessMethod for Datastore {
+    fn get_stored_event(&self, bucket_id: &str, event_id: i64) -> Result<Option<Event>, String> {
+        Datastore::get_event(self, bucket_id, event_id)
+            .map(Some)
+            .map_err(|e| format!("{e:?}"))
+    }
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
         Datastore::get_buckets(self).map_err(|e| format!("{e:?}"))
     }
@@ -134,6 +145,9 @@ impl AccessMethod for Datastore {
 }
 
 impl AccessMethod for AwClient {
+    fn get_stored_event(&self, bucket_id: &str, event_id: i64) -> Result<Option<Event>, String> {
+        AwClient::get_event(self, bucket_id, event_id).map_err(|e| e.to_string())
+    }
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
         AwClient::get_buckets(self).map_err(|e| e.to_string())
     }

@@ -583,10 +583,10 @@ mod tests {
 
     /// How long the mock waits for a live request before giving up.
     ///
-    /// Above every client deadline the tests pass to `wait_for_server`, so a client
-    /// that gave up first fails the test instead of leaving the mock (and therefore
-    /// `tokio::join!`) waiting forever.
-    const REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+    /// Strictly above every client deadline the tests pass to `wait_for_server`,
+    /// so a client that gave up first fails the test instead of leaving the mock
+    /// (and therefore `tokio::join!`) waiting forever.
+    const REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
     /// Answer the first connection that sends a request with `status_line` and `body`.
     ///

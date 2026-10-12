@@ -78,10 +78,21 @@ pub fn recover_database(
         Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(error)?;
     conn.busy_timeout(std::time::Duration::from_secs(30))
         .map_err(error)?;
-    // Inspect without schema writes before making the rollback snapshot.
-    DatastoreInstance::new(&conn, false).map_err(error)?;
     let key = format!("windows_recovery:{recovery_id}");
     let completed = |c: &Connection| -> Result<bool, String> {
+        // Versions before v4 have no key_value table (and hence cannot
+        // contain a completion marker). Do not migrate just to probe it:
+        // the rollback snapshot must preserve the pre-upgrade schema.
+        let has_key_value: bool = c
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='key_value')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if !has_key_value {
+            return Ok(false);
+        }
         c.query_row("SELECT value FROM key_value WHERE key=?1", [&key], |r| {
             r.get::<_, String>(0)
         })
@@ -99,8 +110,21 @@ pub fn recover_database(
     source_conn
         .busy_timeout(std::time::Duration::from_secs(30))
         .map_err(error)?;
-    let source_tx = source_conn.unchecked_transaction().map_err(error)?;
-    let mut source_ds = DatastoreInstance::new(&source_tx, false).map_err(error)?;
+    // A private temporary SQLite database is deleted when this connection
+    // closes. Upgrade this online snapshot, never the preserved original.
+    // An empty filename uses SQLite's temporary-file storage, so a large
+    // history need not fit in RAM. Online backup includes committed WAL.
+    let mut source_snapshot = Connection::open("").map_err(error)?;
+    rusqlite::backup::Backup::new(&source_conn, &mut source_snapshot)
+        .map_err(error)?
+        .run_to_completion(128, std::time::Duration::from_millis(10), None)
+        .map_err(error)?;
+    drop(source_conn);
+    let mut source_ds = DatastoreInstance::new(&source_snapshot, true).map_err(error)?;
+    let source_tx = source_snapshot.unchecked_transaction().map_err(error)?;
+    // Index migrations use their own BEGIN/COMMIT. Run them only after the
+    // rollback backup, and before starting our atomic union transaction.
+    DatastoreInstance::new(&conn, true).map_err(error)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(error)?;
@@ -110,7 +134,7 @@ pub fn recover_database(
     // An old server can still be writing this file. Build the bucket cache
     // only under the write lock so a concurrent delete/recreate cannot leave
     // stale bucket row IDs and orphan recovered events.
-    let mut ds = DatastoreInstance::new(&tx, true).map_err(error)?;
+    let mut ds = DatastoreInstance::new(&tx, false).map_err(error)?;
     let mut counts = RecoveryCounts::default();
     for (name, mut bucket) in source_ds.get_buckets() {
         if ds.get_bucket(&name).is_err() {
@@ -305,6 +329,87 @@ mod tests {
             .unwrap();
         assert_eq!(data, r#"{"a":2}"#);
         assert_eq!(count(&source), 1);
+    }
+
+    // v3 has the current bucket/event columns, but no key_value table and
+    // only the three original single-column event indexes.
+    fn downgrade_to_v3(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TABLE key_value;
+             DROP INDEX events_bucketrow_starttime_endtime_index;
+             DROP INDEX events_bucketrow_endtime_starttime_index;
+             CREATE INDEX events_bucketrow_index ON events(bucketrow);
+             CREATE INDEX events_starttime_index ON events(starttime);
+             CREATE INDEX events_endtime_index ON events(endtime);
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    }
+
+    fn version(conn: &Connection) -> i32 {
+        conn.pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn v3_histories_recover_without_upgrading_source_or_rollback_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let source = root.path().join("source.db");
+        let backup = root.path().join("backup.db");
+        populate(&target, &[("shared", vec![event(r#"{"target":true}"#)])]);
+        populate(&source, &[("shared", vec![event(r#"{"source":true}"#)])]);
+        let target_writer = Connection::open(&target).unwrap();
+        let source_writer = Connection::open(&source).unwrap();
+        downgrade_to_v3(&target_writer);
+        downgrade_to_v3(&source_writer);
+        // Data updates are committed only in WAL. Keeping these writers
+        // open prevents a close-time checkpoint from hiding
+        // accidental main-file-only copies.
+        for conn in [&target_writer, &source_writer] {
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+                .unwrap();
+        }
+        target_writer
+            .execute("UPDATE events SET data=?1", [r#"{"target_wal":true}"#])
+            .unwrap();
+        source_writer
+            .execute("UPDATE events SET data=?1", [r#"{"source_wal":true}"#])
+            .unwrap();
+        let source_bytes = std::fs::read(&source).unwrap();
+        let source_wal = source.with_extension("db-wal");
+        let source_wal_bytes = std::fs::read(&source_wal).unwrap();
+
+        let counts = recover_database(&target, &source, &backup, "v3").unwrap();
+        assert_eq!(counts.events_inserted, 1);
+        assert_eq!(count(&target), 2);
+        assert_eq!(version(&target_writer), crate::datastore::NEWEST_DB_VERSION);
+        let values: Vec<String> = target_writer
+            .prepare("SELECT data FROM events ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            values,
+            vec![r#"{"target_wal":true}"#, r#"{"source_wal":true}"#]
+        );
+        assert_eq!(version(&source_writer), 3);
+        assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+        assert_eq!(std::fs::read(&source_wal).unwrap(), source_wal_bytes);
+        let rollback = Connection::open(&backup).unwrap();
+        assert_eq!(version(&rollback), 3);
+        assert_eq!(count(&backup), 1);
+        let data: String = rollback
+            .query_row("SELECT data FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(data, r#"{"target_wal":true}"#);
+        assert!(rollback.prepare("SELECT * FROM key_value").is_err());
+        assert_eq!(
+            recover_database(&target, &source, &backup, "v3").unwrap(),
+            RecoveryCounts::default()
+        );
     }
 
     #[test]

@@ -278,6 +278,7 @@ fn choose_module_dir_for_database(target: &Path, misplaced: &Path, filename: &st
 const MIGRATING_TAG: &str = ".migrating-";
 const MIGRATED_TAG: &str = ".migrated-";
 const PRE_MIGRATION_TAG: &str = ".pre-migration-";
+const RECOVERY_PENDING_TAG: &str = ".recovery-pending-";
 
 /// Per-process memo of [`resolve_or_migrate`] (target → dir in use), so the
 /// several `get_*_dir` calls during startup decide (and log) once.
@@ -320,7 +321,16 @@ pub struct MigrationOutcome {
     pub migrated_database: bool,
 }
 
+/// Exact post-migration paths whose databases still need to be unioned.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct RecoverySources {
+    chosen_database: PathBuf,
+    local_backup: PathBuf,
+    roaming_backup: PathBuf,
+}
+
 type CopyFn<'a> = dyn Fn(&Path, &Path) -> std::io::Result<u64> + 'a;
+type RenameFn<'a> = dyn Fn(&Path, &Path) -> std::io::Result<()> + 'a;
 
 /// Recover a module dir that v0.14.0 wrote to the wrong place (Windows:
 /// Roaming `%APPDATA%` instead of `%LOCALAPPDATA%`, see #562).
@@ -356,16 +366,6 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
             // the migration between our first look and taking the lock.
             if choose_module_dir(target, misplaced) == DirChoice::Target {
                 return Err(io_err("already migrated by another process".into()));
-            }
-            if has_database(target) {
-                // Selection-only recovery: retain both originals rather than
-                // repeatedly copy into an occupied target. Re-check under the
-                // migration lock before returning the Roaming path.
-                warn!("Using newer data in {misplaced:?}; {target:?} also holds a database and was left untouched. Database merge recovery is still required.");
-                return Ok(MigrationOutcome {
-                    dir: misplaced.to_path_buf(),
-                    migrated_database: false,
-                });
             }
             migrate_dir(target, misplaced, copy)?;
             Ok(MigrationOutcome {
@@ -525,24 +525,52 @@ fn copy_tree_verified(from: &Path, to: &Path, copy: &CopyFn<'_>) -> std::io::Res
 ///    another drive or a network share). Every file is compared byte for
 ///    byte with its source, and each plain SQLite database is opened with
 ///    its `-wal`/`-shm` in place and must pass `PRAGMA quick_check`.
-/// 2. If `target` exists and is not empty (it holds no database, or the
-///    caller would not be migrating), rename it aside to
-///    `<name>.pre-migration-<date>`.
+/// 2. If `target` holds a losing database, write an fsynced recovery manifest
+///    naming both future backup paths. If `target` is non-empty, rename it
+///    aside to `<name>.pre-migration-<date>`.
 /// 3. Rename the staging dir to `target`.
 /// 4. Rename `misplaced` to `<name>.migrated-<date>`: kept as a backup, and
 ///    no longer seen by [`choose_module_dir`].
 ///
-/// Any failure before step 4 undoes the earlier steps (removing only the
-/// staging copy this call made) and returns the error, leaving both dirs
-/// as they were. A failure in step 4 is only logged: the copy is complete
-/// and verified, and the leftover original is reported on later starts.
+/// Any failure before step 4 restores the two source dirs and removes the
+/// staging copy. A recovery manifest may remain, but it names the exact paths
+/// chosen before any original moved. A failure in step 4 is only logged: the
+/// copy is complete and verified, and the manifest still names the unrenamed
+/// Roaming original for restart-safe recovery.
 pub fn migrate_dir(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) -> std::io::Result<()> {
+    migrate_dir_with_rename(target, misplaced, copy, &|from, to| fs::rename(from, to))
+}
+
+fn write_recovery_sources(target: &Path, sources: &RecoverySources) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+
+    let path = tagged_sibling(target, RECOVERY_PENDING_TAG, &migration_stamp());
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec_pretty(sources).map_err(|e| io_err(e.to_string()))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    fs::rename(&temporary, &path)?;
+    fs::File::open(&path)?.sync_all()?;
+    Ok(path)
+}
+
+fn migrate_dir_with_rename(
+    target: &Path,
+    misplaced: &Path,
+    copy: &CopyFn<'_>,
+    rename: &RenameFn<'_>,
+) -> std::io::Result<()> {
     let parent = target
         .parent()
         .ok_or_else(|| io_err(format!("{target:?} has no parent")))?;
     fs::create_dir_all(parent)?;
     let stamp = migration_stamp();
     let staging = tagged_sibling(target, MIGRATING_TAG, &uuid::Uuid::new_v4().to_string());
+    let local_had_database = has_database(target);
 
     let verified = copy_tree_verified(misplaced, &staging, copy).and_then(|()| {
         for entry in dir_entries(&staging) {
@@ -558,38 +586,52 @@ pub fn migrate_dir(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) -> std::i
         return Err(e);
     }
 
-    if has_database(target) {
-        // Someone else migrated (or created a database) meanwhile: never
-        // move a database aside.
+    if !local_had_database && has_database(target) {
+        // A concurrent process created a database while the copy was in
+        // progress. It was not part of our selection decision, so retry from
+        // scratch rather than moving a live database aside.
         let _ = fs::remove_dir_all(&staging);
         return Err(io_err(format!("{target:?} got a database meanwhile")));
+    }
+    let local_backup = tagged_sibling(target, PRE_MIGRATION_TAG, &stamp);
+    let roaming_backup = tagged_sibling(misplaced, MIGRATED_TAG, &stamp);
+    if local_had_database {
+        let sources = RecoverySources {
+            chosen_database: target.to_path_buf(),
+            local_backup: local_backup.clone(),
+            roaming_backup: roaming_backup.clone(),
+        };
+        if let Err(e) = write_recovery_sources(target, &sources) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e);
+        }
     }
     let aside = if target.exists() {
         if fs::remove_dir(target).is_ok() {
             None // was empty
         } else {
-            let aside = tagged_sibling(target, PRE_MIGRATION_TAG, &stamp);
-            if let Err(e) = fs::rename(target, &aside) {
+            let aside = local_backup;
+            if let Err(e) = rename(target, &aside) {
                 let _ = fs::remove_dir_all(&staging);
                 return Err(e);
             }
-            warn!("Moved existing {target:?} (no database) aside to {aside:?}");
+            warn!("Moved existing {target:?} aside to {aside:?}");
             Some(aside)
         }
     } else {
         None
     };
 
-    if let Err(e) = fs::rename(&staging, target) {
+    if let Err(e) = rename(&staging, target) {
         if let Some(aside) = &aside {
-            let _ = fs::rename(aside, target);
+            let _ = rename(aside, target);
         }
         let _ = fs::remove_dir_all(&staging);
         return Err(e);
     }
 
-    let backup = tagged_sibling(misplaced, MIGRATED_TAG, &stamp);
-    match fs::rename(misplaced, &backup) {
+    let backup = roaming_backup;
+    match rename(misplaced, &backup) {
         Ok(()) => info!(
             "Migrated {misplaced:?} (written by ActivityWatch v0.14.0) to {target:?}; \
              the original is kept at {backup:?}"
@@ -1453,7 +1495,7 @@ fn test_content_selection_occupied_target_waits_for_migration_lock() {
 }
 
 #[test]
-fn test_content_selection_does_not_copy_into_occupied_target() {
+fn test_content_selection_migrates_into_occupied_target_without_data_loss() {
     let (root, target, misplaced) = migration_dirs();
     plant_events_db(&target, 50);
     plant_events_db(&misplaced, 100);
@@ -1462,11 +1504,106 @@ fn test_content_selection_does_not_copy_into_occupied_target() {
         copies.set(copies.get() + 1);
         fs::copy(from, to)
     });
-    assert_eq!(out.dir, misplaced);
-    assert!(!out.migrated_database);
-    assert_eq!(copies.get(), 0);
+    assert_eq!(out.dir, target);
+    assert!(out.migrated_database);
+    assert!(copies.get() > 0);
+    assert!(target.join("sqlite.db").exists());
+    assert!(sibling_with(&target, PRE_MIGRATION_TAG).is_some());
+    assert!(sibling_with(&misplaced, MIGRATED_TAG).is_some());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_newer_roaming_preserves_local_and_records_recovery_sources() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+
+    let out = resolve_or_migrate(&target, &misplaced, &real_copy);
+
+    assert_eq!(out.dir, target);
+    assert!(out.migrated_database);
+    assert_eq!(database_rank(&target, "sqlite.db").unwrap(), (Some(100), 1));
+    let local_backup = sibling_with(&target, PRE_MIGRATION_TAG).expect("Local preserved");
+    let roaming_backup =
+        sibling_with(&misplaced, MIGRATED_TAG).expect("Roaming original preserved");
+    let manifest_path =
+        sibling_with(&target, RECOVERY_PENDING_TAG).expect("recovery sources recorded");
+    let manifest: RecoverySources =
+        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest.chosen_database, target);
+    assert_eq!(manifest.local_backup, local_backup);
+    assert_eq!(manifest.roaming_backup, roaming_backup);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_occupied_migration_records_sources_before_target_rename() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let rename = |from: &Path, to: &Path| {
+        if from == target {
+            Err(std::io::Error::other("simulated target rename failure"))
+        } else {
+            fs::rename(from, to)
+        }
+    };
+
+    assert!(migrate_dir_with_rename(&target, &misplaced, &real_copy, &rename).is_err());
+
     assert!(target.join("sqlite.db").exists());
     assert!(misplaced.join("sqlite.db").exists());
+    assert!(sibling_with(&target, RECOVERY_PENDING_TAG).is_some());
+    assert!(sibling_with(&target, PRE_MIGRATION_TAG).is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_occupied_migration_restores_local_when_staging_rename_fails() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let rename = |from: &Path, to: &Path| {
+        if from
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().contains(MIGRATING_TAG))
+            && to == target
+        {
+            Err(std::io::Error::other("simulated staging rename failure"))
+        } else {
+            fs::rename(from, to)
+        }
+    };
+
+    assert!(migrate_dir_with_rename(&target, &misplaced, &real_copy, &rename).is_err());
+
+    assert_eq!(database_rank(&target, "sqlite.db").unwrap(), (Some(50), 1));
+    assert!(misplaced.join("sqlite.db").exists());
+    assert!(sibling_with(&target, RECOVERY_PENDING_TAG).is_some());
+    assert!(sibling_with(&target, PRE_MIGRATION_TAG).is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_occupied_migration_keeps_sources_when_roaming_backup_rename_fails() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let rename = |from: &Path, to: &Path| {
+        if from == misplaced {
+            Err(std::io::Error::other("simulated Roaming backup failure"))
+        } else {
+            fs::rename(from, to)
+        }
+    };
+
+    migrate_dir_with_rename(&target, &misplaced, &real_copy, &rename).unwrap();
+
+    assert_eq!(database_rank(&target, "sqlite.db").unwrap(), (Some(100), 1));
+    assert!(sibling_with(&target, PRE_MIGRATION_TAG).is_some());
+    assert!(misplaced.join("sqlite.db").exists());
+    assert!(sibling_with(&target, RECOVERY_PENDING_TAG).is_some());
     let _ = fs::remove_dir_all(root);
 }
 

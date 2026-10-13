@@ -59,8 +59,13 @@ pub(crate) fn reset_own_staging(
     single_component(device_id, "device id")?;
 
     let device_dir = sync_root.join(hostname).join(device_id);
-    if !device_dir.exists() {
-        return Ok(Vec::new());
+    // Only a missing dir means "nothing to reset". `Path::exists` also returns
+    // false on permission errors, which would let the caller record a reset
+    // that never happened.
+    match fs::metadata(&device_dir) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("failed to inspect {}: {e}", device_dir.display())),
     }
 
     let root = sync_root
@@ -96,11 +101,12 @@ pub(crate) fn read_device_id(data_dir: &Path) -> Result<String, String> {
     let path = data_dir.join("device_id");
     let id = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read device id from {}: {e}", path.display()))?;
-    let id = id.trim();
-    if id.is_empty() {
+    // Not trimmed: push names the staging dir after the id exactly as
+    // `get_device_id` returns it, so the reset must use the same bytes.
+    if id.trim().is_empty() {
         return Err(format!("device id file {} is empty", path.display()));
     }
-    Ok(id.to_string())
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -206,6 +212,25 @@ mod tests {
         assert!(elsewhere.join("test.db").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn uninspectable_device_dir_is_an_error_not_a_noop() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let host = root.join("phone");
+        touch(&host.join("dev-a").join("test.db"));
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root bypasses permission bits, so the check is meaningless there.
+        let denied = fs::metadata(host.join("dev-a")).is_err();
+        let result = reset_own_staging(root, "phone", "dev-a");
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+        if denied {
+            assert!(result.is_err(), "{result:?}");
+            assert!(host.join("dev-a").join("test.db").exists());
+        }
+    }
+
     #[test]
     fn device_id_is_read_not_created() {
         let tmp = tempfile::tempdir().unwrap();
@@ -215,7 +240,11 @@ mod tests {
         fs::write(tmp.path().join("device_id"), "  ").unwrap();
         assert!(read_device_id(tmp.path()).is_err());
 
-        fs::write(tmp.path().join("device_id"), "dev-a\n").unwrap();
+        fs::write(tmp.path().join("device_id"), "dev-a").unwrap();
         assert_eq!(read_device_id(tmp.path()).unwrap(), "dev-a");
+
+        // Returned verbatim, matching `get_device_id` and therefore the push dir.
+        fs::write(tmp.path().join("device_id"), "dev-a\n").unwrap();
+        assert_eq!(read_device_id(tmp.path()).unwrap(), "dev-a\n");
     }
 }

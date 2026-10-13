@@ -376,7 +376,13 @@ type RenameFn<'a> = dyn Fn(&Path, &Path) -> std::io::Result<()> + 'a;
 pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) -> MigrationOutcome {
     match choose_module_dir(target, misplaced) {
         DirChoice::Target => {
-            if has_database(target) && has_database(misplaced) {
+            // A promoted target already carries the recovery request that
+            // covered its Roaming source; a restart after a failed archive
+            // rename must not union that still-live source a second time.
+            if has_database(target)
+                && has_database(misplaced)
+                && !target.join(RECOVERY_SELECTED_FILE).is_file()
+            {
                 // Local won selection, but Roaming can still contain unique
                 // history. Record the exact still-live source for union as well.
                 let recovery = MigrationLock::acquire(target).and_then(|_lock| {
@@ -1572,6 +1578,41 @@ fn test_review_recovery_retains_choice_after_failed_archive_rename() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Promotion whose Roaming archive rename failed leaves Roaming live. Once
+/// recovery completed and the user deleted history, a restart must not record
+/// a fresh `local-wins` request that unions the still-live Roaming copy back.
+#[test]
+fn test_review_recovery_failed_archive_rename_does_not_resurrect_deleted_history() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_datastore_with_event(&target, 5);
+    plant_datastore_with_event(&misplaced, 10);
+    migrate_dir_with_rename(&target, &misplaced, &real_copy, &|from, to| {
+        if from == misplaced {
+            Err(io_err("archive locked".into()))
+        } else {
+            fs::rename(from, to)
+        }
+    })
+    .unwrap();
+    let path = target.join("sqlite.db");
+    recover_preserved_histories(&path, true).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DELETE FROM events", []).unwrap();
+    drop(conn);
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    recover_preserved_histories(&path, true).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "deleted history must not return from live Roaming"
+    );
+    drop(conn);
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn test_review_recovery_readers_honor_local_wins() {
     let (root, target, misplaced) = migration_dirs();
@@ -1585,46 +1626,53 @@ fn test_review_recovery_readers_honor_local_wins() {
     let _ = fs::remove_dir_all(root);
 }
 
-#[test]
-fn test_shared_recovery_unions_both_selection_directions_and_restart() {
+/// A real aw-datastore database in `dir/sqlite.db` holding one event in the
+/// "shared" bucket, `seconds` after a fixed epoch.
+#[cfg(test)]
+fn plant_datastore_with_event(dir: &Path, seconds: i64) {
     use aw_models::{Bucket, Event};
     use chrono::{Duration, TimeZone, Utc};
+    fs::create_dir_all(dir).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("sqlite.db")).unwrap();
+    let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
+    ds.create_bucket(
+        &conn,
+        Bucket {
+            bid: None,
+            id: "shared".into(),
+            _type: "test".into(),
+            client: "test".into(),
+            hostname: "test".into(),
+            created: None,
+            data: Default::default(),
+            metadata: Default::default(),
+            events: None,
+            last_updated: None,
+        },
+    )
+    .unwrap();
+    ds.insert_events(
+        &conn,
+        "shared",
+        vec![Event {
+            id: None,
+            timestamp: Utc.timestamp_opt(1700000000 + seconds, 0).unwrap(),
+            duration: Duration::seconds(1),
+            data: Default::default(),
+        }],
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_shared_recovery_unions_both_selection_directions_and_restart() {
     for roaming_newer in [false, true] {
         let (root, target, misplaced) = migration_dirs();
         for (dir, seconds) in [
             (&target, if roaming_newer { 10 } else { 20 }),
             (&misplaced, if roaming_newer { 20 } else { 10 }),
         ] {
-            fs::create_dir_all(dir).unwrap();
-            let conn = rusqlite::Connection::open(dir.join("sqlite.db")).unwrap();
-            let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
-            ds.create_bucket(
-                &conn,
-                Bucket {
-                    bid: None,
-                    id: "shared".into(),
-                    _type: "test".into(),
-                    client: "test".into(),
-                    hostname: "test".into(),
-                    created: None,
-                    data: Default::default(),
-                    metadata: Default::default(),
-                    events: None,
-                    last_updated: None,
-                },
-            )
-            .unwrap();
-            ds.insert_events(
-                &conn,
-                "shared",
-                vec![Event {
-                    id: None,
-                    timestamp: Utc.timestamp_opt(1700000000 + seconds, 0).unwrap(),
-                    duration: Duration::seconds(1),
-                    data: Default::default(),
-                }],
-            )
-            .unwrap();
+            plant_datastore_with_event(dir, seconds);
         }
         let outcome = resolve_or_migrate(&target, &misplaced, &real_copy);
         assert_eq!(outcome.dir, target);

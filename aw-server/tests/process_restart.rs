@@ -178,31 +178,53 @@ fn acknowledged_stopwatch_start_and_stop_survive_normal_shutdown() {
     stopwatch_restart(true);
 }
 
+fn ordinary_watcher_restart(first_attempt_delay: Duration) -> usize {
+    for attempt in 0..3 {
+        let dir = TempDir::new().unwrap();
+        // Start before spawn, not after bucket creation: the writer's batch
+        // clock can already be running during startup. Include process death
+        // so a pause after the SQLite read cannot invalidate the restart check.
+        let window = Instant::now();
+        let mut server = Server::start(dir.path());
+        server.bucket("watcher", "currentwindow");
+        if attempt == 0 {
+            sleep(first_attempt_delay);
+        }
+        let acknowledged = server.post(
+            "/buckets/watcher/heartbeat?pulsetime=1",
+            &json!({"timestamp": "2026-01-01T12:00:00Z", "duration": 1.0,
+                "data": {"title": "synthetic batched control"}}),
+        );
+        let conn = rusqlite::Connection::open(dir.path().join("events.db")).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE id = ?1",
+                [acknowledged["id"].as_i64().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        server.stop(false);
+        if window.elapsed() >= Duration::from_secs(15) {
+            // Normal interval commits are allowed. Retry with a fresh process
+            // and database; never retry a failure inside the valid window.
+            continue;
+        }
+        assert_eq!(count, 0, "ordinary watcher unexpectedly forced a commit");
+        server = Server::start(dir.path());
+        assert_eq!(server.events("watcher"), json!([]));
+        server.stop(false);
+        return attempt;
+    }
+    panic!("ordinary watcher control exhausted three attempts within the 15-second batch window");
+}
+
 #[test]
 fn ordinary_watcher_acknowledgement_remains_batched() {
-    let dir = TempDir::new().unwrap();
-    let mut server = Server::start(dir.path());
-    server.bucket("watcher", "currentwindow");
-    let acknowledged = server.post(
-        "/buckets/watcher/heartbeat?pulsetime=1",
-        &json!({"timestamp": "2026-01-01T12:00:00Z", "duration": 1.0,
-            "data": {"title": "synthetic batched control"}}),
-    );
-    // Inspect committed visibility immediately, without sleeping through the
-    // 15-second batch interval. Success here is deliberately not the manual
-    // stopwatch's commit-before-ack contract.
-    let conn = rusqlite::Connection::open(dir.path().join("events.db")).unwrap();
-    let count: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM events WHERE id = ?1",
-            [acknowledged["id"].as_i64().unwrap()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 0, "ordinary watcher unexpectedly forced a commit");
-    drop(conn);
-    server.stop(false);
-    server = Server::start(dir.path());
-    assert_eq!(server.events("watcher"), json!([]));
-    server.stop(false);
+    ordinary_watcher_restart(Duration::ZERO);
+}
+
+#[test]
+fn ordinary_watcher_control_retries_expired_batch_window() {
+    assert!(ordinary_watcher_restart(Duration::from_secs(16)) >= 1);
 }

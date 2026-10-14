@@ -483,9 +483,15 @@ pub mod android {
             };
             // The datastore worker reloads privacy filters on a SetKeyValue of
             // that key, so no extra refresh is needed here.
-            match openDatastore().set_key_value(&setting_key, &value_str) {
+            let ds = openDatastore();
+            if let Err(e) = ds.set_key_value(&setting_key, &value_str) {
+                return create_error_object(&env, format!("Failed to set setting: {:?}", e));
+            }
+            // SetKeyValue is batched for up to ~15s. Callers record one-shot
+            // migrations as done on "ok", so only report it once the write is durable.
+            match ds.force_commit() {
                 Ok(()) => string_to_jstring(&env, "ok".to_string()),
-                Err(e) => create_error_object(&env, format!("Failed to set setting: {:?}", e)),
+                Err(e) => create_error_object(&env, format!("Failed to commit setting: {:?}", e)),
             }
         })
     }

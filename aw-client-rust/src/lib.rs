@@ -635,13 +635,21 @@ mod tests {
     #[test]
     fn test_wait_for_start_retries_without_blocking_executor() {
         runtime().block_on(async {
-            // Reserve a port without listening, then start the server on this same runtime.
-            let socket = tokio::net::TcpSocket::new_v4().unwrap();
-            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-            let url = info_url(socket.local_addr().unwrap());
+            // Listener is already accepting connections, but the server task waits
+            // 30 ms before answering. On the single-threaded executor the server
+            // task must get a turn for the test to pass — verifies that
+            // wait_for_server yields instead of spinning.
+            //
+            // Previously this used a pre-bound TcpSocket that only called
+            // socket.listen() after the sleep. On Windows, connecting to a port
+            // with a bound-but-not-listening socket triggers the TCP
+            // SYN-retransmission timeout (several seconds per attempt) rather
+            // than an immediate ECONNREFUSED, causing intermittent 10 s timeouts
+            // on slower CI runners (#812).
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = info_url(listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                let listener = socket.listen(8).unwrap();
                 answer_once(&listener, "200 OK", INFO_BODY).await;
             });
             let client = reqwest::Client::new();

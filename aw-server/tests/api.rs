@@ -1209,6 +1209,9 @@ mod api_tests {
                 "test_id".to_string(),
             )
         };
+        // Mirror main.rs: without this, the query cache does not track pending
+        // writes and the reader serves stale data.
+        state.query_cache.register_reader();
         endpoints::build_rocket(state, config::AWConfig::default())
     }
 

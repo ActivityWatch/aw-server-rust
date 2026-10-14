@@ -300,6 +300,11 @@ async fn main() -> Result<(), rocket::Error> {
         // it will not happen there
         ..endpoints::ServerState::new(datastore, asset_resolver, device_id)
     };
+    // Inform the query cache that a reader handle was opened, so pending_flush
+    // is populated for write–read race detection (#808).
+    if server_state.reader.is_some() {
+        server_state.query_cache.register_reader();
+    }
 
     let _rocket = endpoints::build_rocket(server_state, config)
         .ignite()

@@ -941,6 +941,29 @@ mod datastore_tests {
     }
 
     #[test]
+    fn setting_is_committed_before_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.db");
+        let ds = Datastore::new(path.to_str().unwrap().to_string(), false);
+        // Finish startup before opening an independent connection.
+        ds.force_commit().unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+
+        for value in ["false", "true"] {
+            ds.set_key_value_and_commit("settings.aw_notify_enabled", value)
+                .unwrap();
+            let stored: String = conn
+                .query_row(
+                    "SELECT value FROM key_value WHERE key = 'settings.aw_notify_enabled'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, value);
+        }
+    }
+
+    #[test]
     fn stopwatch_changes_are_committed_before_ack() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stopwatch.db");

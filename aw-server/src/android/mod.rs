@@ -416,6 +416,18 @@ pub mod android {
         )
     }
 
+    /// Map a JNI settings key to its datastore key, or `None` if invalid.
+    ///
+    /// Match /api/0/settings/<key>: dots are valid (nested-looking keys like
+    /// "foo.bar" store as settings.foo.bar). Reject empty keys and path/NUL bytes
+    /// so JNI cannot reach a key the HTTP router would never pass through.
+    fn jni_setting_key(key: &str) -> Option<String> {
+        if key.is_empty() || key.contains('/') || key.contains('\\') || key.contains('\0') {
+            return None;
+        }
+        crate::endpoints::settings_datastore_key(key).ok()
+    }
+
     /// Return a raw settings JSON value (the datastore body, matching GET /api/0/settings/<key>).
     /// Missing or invalid keys return the JSON literal `null`.
     ///
@@ -430,20 +442,50 @@ pub mod android {
     ) -> jstring {
         jni_guard(env, "getSetting", || {
             let key = jstring_to_string(&env, java_key);
-            // Match GET /api/0/settings/<key>: dots are valid (nested-looking
-            // keys like "foo.bar" store as settings.foo.bar). Reject empty keys
-            // and path/NUL bytes so JNI cannot smuggle a lookup the HTTP router
-            // would never pass through.
-            if key.is_empty() || key.contains('/') || key.contains('\\') || key.contains('\0') {
-                return string_to_jstring(&env, "null".to_string());
-            }
-            let setting_key = match crate::endpoints::settings_datastore_key(&key) {
-                Ok(k) => k,
-                Err(_) => return string_to_jstring(&env, "null".to_string()),
+            let setting_key = match jni_setting_key(&key) {
+                Some(k) => k,
+                None => return string_to_jstring(&env, "null".to_string()),
             };
             match openDatastore().get_key_value(&setting_key) {
                 Ok(value) => string_to_jstring(&env, value),
                 Err(_) => string_to_jstring(&env, "null".to_string()),
+            }
+        })
+    }
+
+    /// Store a settings JSON value (matching POST /api/0/settings/<key>).
+    /// Returns `"ok"` on success and `{"error": "..."}` for an invalid key, a
+    /// body that is not JSON, or a datastore failure.
+    ///
+    /// Android services cannot POST to the API without the API key, so app-side
+    /// writers (such as a settings migration on upgrade) use this instead.
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_setSetting(
+        env: JNIEnv,
+        _: JClass,
+        java_key: JString,
+        java_value: JString,
+    ) -> jstring {
+        jni_guard(env, "setSetting", || {
+            let key = jstring_to_string(&env, java_key);
+            let setting_key = match jni_setting_key(&key) {
+                Some(k) => k,
+                None => return create_error_object(&env, format!("Invalid key: {:?}", key)),
+            };
+            // Re-serialize like the HTTP handler so the stored body is canonical
+            // JSON and getSetting/GET return something parseable.
+            let raw_value = jstring_to_string(&env, java_value);
+            let value_str = match serde_json::from_str::<serde_json::Value>(&raw_value)
+                .and_then(|v| serde_json::to_string(&v))
+            {
+                Ok(v) => v,
+                Err(err) => return create_error_object(&env, format!("Invalid JSON: {}", err)),
+            };
+            // The datastore worker reloads privacy filters on a SetKeyValue of
+            // that key, so no extra refresh is needed here.
+            match openDatastore().set_key_value(&setting_key, &value_str) {
+                Ok(()) => string_to_jstring(&env, "ok".to_string()),
+                Err(e) => create_error_object(&env, format!("Failed to set setting: {:?}", e)),
             }
         })
     }

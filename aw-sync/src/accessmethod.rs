@@ -73,9 +73,14 @@ pub trait AccessMethod: std::fmt::Debug {
 /// whole app — see ActivityWatch/aw-android#220.
 impl AccessMethod for Datastore {
     fn get_stored_event(&self, bucket_id: &str, event_id: i64) -> Result<Option<Event>, String> {
-        Datastore::get_event(self, bucket_id, event_id)
-            .map(Some)
-            .map_err(|e| format!("{e:?}"))
+        match Datastore::get_event(self, bucket_id, event_id) {
+            Ok(event) => Ok(Some(event)),
+            // A missing event is `None` per the trait contract, not an error:
+            // callers reconcile against possibly-deleted rows and must skip
+            // instead of aborting the whole bucket pull.
+            Err(DatastoreError::NoSuchEvent(..)) => Ok(None),
+            Err(e) => Err(format!("{e:?}")),
+        }
     }
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
         Datastore::get_buckets(self).map_err(|e| format!("{e:?}"))

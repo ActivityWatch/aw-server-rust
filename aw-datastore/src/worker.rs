@@ -356,8 +356,11 @@ impl DatastoreWorker {
                 self.legacy_import_opts.db_path_override.as_deref(),
                 self.legacy_import_opts.force || python_recovery_pending,
             ) {
-                Ok(imported) => {
-                    if imported && python_recovery_pending {
+                Ok(_imported) => {
+                    // Mark the obligation satisfied whenever the attempt completed
+                    // without error — a missing legacy database (_imported=false)
+                    // still means there is nothing left to import.
+                    if python_recovery_pending {
                         ds.insert_key_value(&transaction, "windows_python_recovery", "done")
                             .unwrap();
                     }

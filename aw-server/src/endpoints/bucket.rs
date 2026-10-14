@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use gethostname::gethostname;
 use rocket::serde::json::Json;
@@ -244,6 +245,18 @@ pub fn bucket_events_heartbeat(
     }
 }
 
+/// Upper bound on the number of ids accepted by the bulk-delete endpoint.
+///
+/// Each id costs one datastore round-trip while the write lock is held, so an
+/// unbounded list would let a single request stall all event writes. Clients
+/// deleting more than this should issue several requests.
+const MAX_BULK_DELETE_IDS: usize = 10_000;
+
+#[derive(serde::Deserialize)]
+pub struct BulkDeleteRequest {
+    pub ids: Vec<i64>,
+}
+
 #[get("/<bucket_id>/events/count?<start>&<end>")]
 pub fn bucket_event_count(
     bucket_id: &str,
@@ -278,6 +291,81 @@ pub fn bucket_events_delete_by_id(
             Ok(())
         }
         Err(err) => Err(err.into()),
+    }
+}
+
+/// Delete many events from one bucket in a single request.
+///
+/// Body: `{"ids": [1, 2, 3]}`. Unknown ids are ignored; the response is the
+/// number of events that actually existed and were deleted.
+#[post(
+    "/<bucket_id>/events/delete",
+    data = "<body>",
+    format = "application/json"
+)]
+pub fn bucket_events_delete_many(
+    bucket_id: &str,
+    body: Json<BulkDeleteRequest>,
+    state: &State<ServerState>,
+) -> Result<Json<u64>, HttpErrorJson> {
+    // Reject oversized requests before taking the lock: the cap bounds the
+    // lock-held work, so it must be checked outside the critical section.
+    if body.ids.len() > MAX_BULK_DELETE_IDS {
+        return Err(HttpErrorJson::new(
+            Status::PayloadTooLarge,
+            format!(
+                "Too many ids in bulk delete request: {} (max {MAX_BULK_DELETE_IDS})",
+                body.ids.len()
+            ),
+        ));
+    }
+
+    // Hold the write lock across (read old ranges + delete + invalidate), as
+    // bucket_events_create and bucket_events_delete_by_id do. If the read ran
+    // outside the lock, a concurrent insert/heartbeat could replace an event
+    // with one of the same id at a different range; the delete would remove
+    // that new event while only the stale range was invalidated, and the
+    // returned count could include ids another request had already deleted.
+    let _guard = state.write_lock.lock().unwrap();
+    let datastore = &state.datastore;
+
+    // Validate bucket exists before iterating (handles empty-ids case too).
+    datastore
+        .get_bucket(bucket_id)
+        .map_err(HttpErrorJson::from)?;
+
+    // Collect the events that exist. Duplicate ids collapse to one entry.
+    let mut existing: Vec<Event> = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    for id in body.ids.iter() {
+        if !seen.insert(*id) {
+            continue;
+        }
+        match datastore.get_event(bucket_id, *id) {
+            Ok(event) => existing.push(event),
+            Err(DatastoreError::NoSuchEvent(_, _)) => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let ids: Vec<i64> = existing.iter().filter_map(|e| e.id).collect();
+    if ids.is_empty() {
+        return Ok(Json(0));
+    }
+
+    // Ranges are collected under the same lock that deletes, so they describe
+    // exactly the events that the delete removes.
+    let ranges: Vec<_> = existing.iter().map(event_range).collect();
+    match datastore.delete_events_by_id(bucket_id, ids.clone()) {
+        Ok(_) => {
+            state.query_cache.invalidate(ranges);
+            Ok(Json(ids.len() as u64))
+        }
+        Err(err) => {
+            // Invalidate cache even on failure: some events may have been
+            // deleted by the datastore worker before the error was returned.
+            state.query_cache.invalidate(ranges);
+            Err(err.into())
+        }
     }
 }
 

@@ -380,6 +380,18 @@ impl AwClient {
         Ok(())
     }
 
+    /// Delete many events in one request; returns how many existed and were deleted.
+    pub async fn delete_events(
+        &self,
+        bucketname: &str,
+        event_ids: &[i64],
+    ) -> Result<u64, reqwest::Error> {
+        let url = self.api_url(&["buckets", bucketname, "events", "delete"]);
+        let body = serde_json::json!({ "ids": event_ids });
+        let resp = Self::send_success(self.client.post(url).json(&body)).await?;
+        resp.json::<u64>().await
+    }
+
     /// Count events in a bucket, optionally only those between `start` and `stop`.
     pub async fn get_event_count(
         &self,

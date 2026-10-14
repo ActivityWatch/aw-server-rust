@@ -635,10 +635,10 @@ mod tests {
     #[test]
     fn test_wait_for_start_retries_without_blocking_executor() {
         runtime().block_on(async {
-            // Listener is already accepting connections, but the server task waits
-            // 30 ms before answering. On the single-threaded executor the server
-            // task must get a turn for the test to pass — verifies that
-            // wait_for_server yields instead of spinning.
+            // Keep the socket listening, but close the first complete request without
+            // responding. Only a retry can receive the successful response below.
+            // On this single-threaded executor the server task must get a turn on
+            // both attempts, so this also verifies that wait_for_server yields.
             //
             // Previously this used a pre-bound TcpSocket that only called
             // socket.listen() after the sleep. On Windows, connecting to a port
@@ -649,7 +649,12 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = info_url(listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                let (stream, _) = listener.accept().await.unwrap();
+                let (stream, request) = read_request(stream).await.unwrap();
+                assert!(request.starts_with(b"GET /api/0/info "));
+                drop(stream);
+                // This must read a second complete request before answering; finishing
+                // the server task proves that the client actually retried.
                 answer_once(&listener, "200 OK", INFO_BODY).await;
             });
             let client = reqwest::Client::new();

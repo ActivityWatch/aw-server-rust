@@ -132,7 +132,23 @@ struct Inner {
     /// `clear_pending_through` once a flush that started after them
     /// succeeded, never before, so a concurrent query cannot see them
     /// vanish while the commit is still in progress.
+    ///
+    /// Bounded to `write_log_size` entries. When it would grow beyond that,
+    /// `pending_flush_overflow` is set and the vec is cleared so memory stays
+    /// O(write_log_size) (ActivityWatch/aw-server-rust#808).
     pending_flush: Vec<(u64, Vec<TimeRange>)>,
+    /// Set when `pending_flush` was truncated due to overflow. Causes
+    /// `pending_overlapping` to conservatively return `Some(generation)` for
+    /// any period until `clear_pending_through` is called with a generation
+    /// that covers `pending_flush_overflow_gen`.
+    pending_flush_overflow: bool,
+    /// Generation at which the first overflow was detected; used by
+    /// `clear_pending_through` to know when the overflow has been resolved.
+    pending_flush_overflow_gen: u64,
+    /// True once `register_reader` has been called. When false, `invalidate`
+    /// skips `pending_flush` entirely since nothing reads it, so servers
+    /// without a reader (Android, encrypted, in-memory) never allocate it.
+    has_reader: bool,
 }
 
 /// Bounded cache of query results for finished past periods.
@@ -185,6 +201,14 @@ impl QueryCache {
 
     pub fn generation(&self) -> u64 {
         self.inner.lock().unwrap().generation
+    }
+
+    /// Mark that a read-only query reader has been registered. After this
+    /// call `invalidate` will populate `pending_flush` so that
+    /// `pending_overlapping` can detect write–read races. Idempotent.
+    /// Call once, after opening the reader handle in `main.rs`.
+    pub fn register_reader(&self) {
+        self.inner.lock().unwrap().has_reader = true;
     }
 
     /// Return the cached result, serialized. It is shared, not copied.
@@ -270,7 +294,20 @@ impl QueryCache {
             inner.writes.pop_front();
         }
         inner.writes.push_back((generation, ranges.clone()));
-        inner.pending_flush.push((generation, ranges.clone()));
+        if inner.has_reader {
+            inner.pending_flush.push((generation, ranges.clone()));
+            // Bound pending_flush to write_log_size entries. On overflow,
+            // clear it and set the overflow flag so pending_overlapping()
+            // conservatively requires a flush for every period until the
+            // overflow generation is cleared.
+            if inner.pending_flush.len() > self.write_log_size {
+                inner.pending_flush.clear();
+                if !inner.pending_flush_overflow {
+                    inner.pending_flush_overflow = true;
+                    inner.pending_flush_overflow_gen = generation;
+                }
+            }
+        }
         let stale: Vec<CacheKey> = inner
             .entries
             .iter()
@@ -289,6 +326,11 @@ impl QueryCache {
     /// generation: commit the writer, then pass it to `clear_pending_through`.
     pub fn pending_overlapping(&self, periods: &[TimeRange]) -> Option<u64> {
         let inner = self.inner.lock().unwrap();
+        // Overflow means we lost track of some affected ranges; conservatively
+        // report a flush is needed for every period.
+        if inner.pending_flush_overflow {
+            return Some(inner.generation);
+        }
         let hit = inner.pending_flush.iter().any(|(_, ranges)| {
             ranges
                 .iter()
@@ -302,6 +344,10 @@ impl QueryCache {
     pub fn clear_pending_through(&self, generation: u64) {
         let mut inner = self.inner.lock().unwrap();
         inner.pending_flush.retain(|(g, _)| *g > generation);
+        if inner.pending_flush_overflow && generation >= inner.pending_flush_overflow_gen {
+            inner.pending_flush_overflow = false;
+            inner.pending_flush_overflow_gen = 0;
+        }
     }
 
     pub fn clear(&self) {
@@ -556,6 +602,7 @@ mod tests {
     #[test]
     fn pending_writes_are_cleared_only_through_the_flushed_generation() {
         let cache = QueryCache::new();
+        cache.register_reader();
         let t = |h: i64| Utc.with_ymd_and_hms(2000, 1, 1, h as u32, 0, 0).unwrap();
         let period = (t(0), t(2));
         assert_eq!(cache.pending_overlapping(&[period]), None);
@@ -574,5 +621,75 @@ mod tests {
         // Non-overlapping periods never trigger a flush.
         cache.invalidate(vec![(t(5), t(6))]);
         assert_eq!(cache.pending_overlapping(&[period]), None);
+    }
+
+    #[test]
+    fn pending_flush_does_not_grow_without_reader() {
+        // Without register_reader(), invalidate() must never push to pending_flush.
+        let cache = QueryCache::with_limits(100, 128 * 1024 * 1024, Duration::minutes(10), 2);
+        // Use day() helper (period() covers one whole day each).
+        let far_future = (dt(20, 0, 0), dt(21, 0, 0));
+
+        // Many invalidations — no reader registered.
+        for d in 1u32..=28 {
+            cache.invalidate(vec![period(d)]);
+        }
+        // pending_flush never populated → no flush required.
+        assert_eq!(cache.pending_overlapping(&[far_future]), None);
+    }
+
+    #[test]
+    fn pending_flush_is_bounded_and_overflow_conservatively_triggers_flush() {
+        // write_log_size=2: pushing a 3rd entry triggers overflow.
+        let cache = QueryCache::with_limits(100, 128 * 1024 * 1024, Duration::minutes(10), 2);
+        cache.register_reader();
+
+        cache.invalidate(vec![period(1)]);
+        cache.invalidate(vec![period(2)]);
+        // Two entries: no overflow yet.
+        assert!(cache.pending_overlapping(&[period(1)]).is_some());
+
+        // Third invalidation triggers overflow.
+        cache.invalidate(vec![period(3)]);
+        // Overflow → conservatively flush even for a non-overlapping period (day 28).
+        let far = period(28);
+        assert!(
+            cache.pending_overlapping(&[far]).is_some(),
+            "overflow must trigger a conservative flush"
+        );
+
+        // Clearing through the overflow generation resolves it.
+        let gen = cache.pending_overlapping(&[far]).unwrap();
+        cache.clear_pending_through(gen);
+        assert_eq!(cache.pending_overlapping(&[far]), None);
+    }
+
+    #[test]
+    fn overflow_cleared_only_when_generation_covers_it() {
+        // write_log_size=1: 2nd entry immediately overflows.
+        let cache = QueryCache::with_limits(100, 128 * 1024 * 1024, Duration::minutes(10), 1);
+        cache.register_reader();
+
+        cache.invalidate(vec![period(1)]); // gen=1, pending=[gen1]
+        cache.invalidate(vec![period(2)]); // gen=2, overflow at gen=2, pending=[]
+
+        // Add another write after overflow.
+        cache.invalidate(vec![period(3)]); // gen=3, pending=[gen3]
+
+        let far = period(28);
+
+        // Clear through gen=1 (before overflow_gen=2): overflow must survive.
+        cache.clear_pending_through(1);
+        assert!(
+            cache.pending_overlapping(&[far]).is_some(),
+            "overflow should persist after clear_pending_through(1)"
+        );
+
+        // Clear through gen=2 (== overflow_gen): overflow is resolved.
+        cache.clear_pending_through(2);
+        // gen=3 write is still pending but non-overlapping with day 28.
+        assert_eq!(cache.pending_overlapping(&[far]), None);
+        // gen=3 write still overlaps day 3.
+        assert!(cache.pending_overlapping(&[period(3)]).is_some());
     }
 }

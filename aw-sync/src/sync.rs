@@ -2915,6 +2915,18 @@ mod rowid_cursor_tests {
     use super::*;
     use chrono::{Duration, Utc};
 
+    #[test]
+    fn get_stored_event_missing_event_is_none_not_error() {
+        // Regression: a missing event must come back as Ok(None) per the
+        // AccessMethod contract, not Err(NoSuchEvent) — reconcile callers use
+        // `?` and an error would abort the whole bucket pull.
+        let ds = Datastore::new_in_memory(false);
+        ds.create_bucket(&make_bucket("missing-event", "dev"))
+            .unwrap();
+        let stored = AccessMethod::get_stored_event(&ds, "missing-event", 12345).unwrap();
+        assert!(stored.is_none());
+    }
+
     fn make_bucket(id: &str, hostname: &str) -> Bucket {
         serde_json::from_value(serde_json::json!({
             "id": id,

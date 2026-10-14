@@ -142,7 +142,7 @@ struct Inner {
     /// any period until `clear_pending_through` is called with a generation
     /// that covers `pending_flush_overflow_gen`.
     pending_flush_overflow: bool,
-    /// Generation at which the first overflow was detected; used by
+    /// Generation at which the latest overflow was detected; used by
     /// `clear_pending_through` to know when the overflow has been resolved.
     pending_flush_overflow_gen: u64,
     /// True once `register_reader` has been called. When false, `invalidate`
@@ -302,10 +302,10 @@ impl QueryCache {
             // overflow generation is cleared.
             if inner.pending_flush.len() > self.write_log_size {
                 inner.pending_flush.clear();
-                if !inner.pending_flush_overflow {
-                    inner.pending_flush_overflow = true;
-                    inner.pending_flush_overflow_gen = generation;
-                }
+                inner.pending_flush_overflow = true;
+                // Every overflow discards ranges, including writes newer than
+                // an in-flight flush. Advance the watermark each time.
+                inner.pending_flush_overflow_gen = generation;
             }
         }
         let stale: Vec<CacheKey> = inner
@@ -662,6 +662,31 @@ mod tests {
         let gen = cache.pending_overlapping(&[far]).unwrap();
         cache.clear_pending_through(gen);
         assert_eq!(cache.pending_overlapping(&[far]), None);
+    }
+
+    #[test]
+    fn repeated_overflow_survives_an_older_flush() {
+        let cache = QueryCache::with_limits(100, 128 * 1024 * 1024, Duration::minutes(10), 1);
+        cache.register_reader();
+
+        cache.invalidate(vec![period(1)]);
+        cache.invalidate(vec![period(2)]);
+        let first_flush = cache.pending_overlapping(&[period(28)]).unwrap();
+
+        // Another overflow occurs after the first flush captured its generation.
+        cache.invalidate(vec![period(3)]);
+        cache.invalidate(vec![period(4)]);
+        cache.clear_pending_through(first_flush);
+        assert_eq!(
+            cache.pending_overlapping(&[period(4)]),
+            Some(4),
+            "an older flush must not forget writes discarded by a newer overflow"
+        );
+        assert_eq!(cache.pending_overlapping(&[period(28)]), Some(4));
+
+        cache.clear_pending_through(4);
+        assert_eq!(cache.pending_overlapping(&[period(4)]), None);
+        assert_eq!(cache.pending_overlapping(&[period(28)]), None);
     }
 
     #[test]

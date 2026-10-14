@@ -483,7 +483,9 @@ pub mod android {
             };
             // The datastore worker reloads privacy filters on a SetKeyValue of
             // that key, so no extra refresh is needed here.
-            match openDatastore().set_key_value(&setting_key, &value_str) {
+            // Write and commit in one worker command so a failed batch commit
+            // cannot lose the setting before a separate ForceCommit reports success.
+            match openDatastore().set_key_value_and_commit(&setting_key, &value_str) {
                 Ok(()) => string_to_jstring(&env, "ok".to_string()),
                 Err(e) => create_error_object(&env, format!("Failed to set setting: {:?}", e)),
             }

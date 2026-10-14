@@ -171,6 +171,7 @@ pub enum Command {
     GetKeyValues(String),
     GetKeyValue(String),
     SetKeyValue(String, String),
+    SetKeyValueAndCommit(String, String),
     DeleteKeyValue(String),
     RefreshPrivacyFilter(),
     ReloadBuckets(),
@@ -470,6 +471,20 @@ impl DatastoreWorker {
         info!("DB Worker thread finished");
     }
 
+    fn set_key_value(
+        &mut self,
+        ds: &mut DatastoreInstance,
+        tx: &Transaction,
+        key: &str,
+        data: &str,
+    ) -> Result<Response, DatastoreError> {
+        ds.insert_key_value(tx, key, data)?;
+        if key == PRIVACY_FILTERS_KEY {
+            self.reload_privacy_engine(ds, tx);
+        }
+        Ok(Response::Empty())
+    }
+
     fn handle_request(
         &mut self,
         request: Command,
@@ -639,15 +654,12 @@ impl DatastoreWorker {
                 Ok(result) => Ok(Response::KeyValues(result)),
                 Err(e) => Err(e),
             },
-            Command::SetKeyValue(key, data) => match ds.insert_key_value(tx, &key, &data) {
-                Ok(()) => {
-                    if key == PRIVACY_FILTERS_KEY {
-                        self.reload_privacy_engine(ds, tx);
-                    }
-                    Ok(Response::Empty())
-                }
-                Err(e) => Err(e),
-            },
+            Command::SetKeyValue(key, data) => self.set_key_value(ds, tx, &key, &data),
+            Command::SetKeyValueAndCommit(key, data) => {
+                self.set_key_value(ds, tx, &key, &data)?;
+                self.commit = true;
+                Ok(Response::Empty())
+            }
             Command::GetKeyValue(key) => match ds.get_key_value(tx, &key) {
                 Ok(result) => Ok(Response::KeyValue(result)),
                 Err(e) => Err(e),
@@ -1074,6 +1086,13 @@ impl Datastore {
 
     pub fn set_key_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
         let cmd = Command::SetKeyValue(key.to_string(), data.to_string());
+        _unwrap_empty_response(self.request(cmd)?)
+    }
+
+    /// Writes a setting and acknowledges only after its transaction commits.
+    /// Unlike a separate set/force_commit pair, no batch commit can intervene.
+    pub fn set_key_value_and_commit(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
+        let cmd = Command::SetKeyValueAndCommit(key.to_string(), data.to_string());
         _unwrap_empty_response(self.request(cmd)?)
     }
 

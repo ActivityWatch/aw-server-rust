@@ -290,6 +290,7 @@ dependencies = [
  "log-panics",
  "openssl-sys",
  "regex",
+ "reqwest",
  "rocket",
  "rocket_cors",
  "rusqlite",

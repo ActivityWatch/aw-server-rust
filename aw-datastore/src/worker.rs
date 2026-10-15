@@ -360,12 +360,27 @@ impl DatastoreWorker {
                     // Mark the obligation satisfied whenever the attempt completed
                     // without error — a missing legacy database (_imported=false)
                     // still means there is nothing left to import.
-                    if python_recovery_pending {
+                    let marked = if python_recovery_pending {
                         ds.insert_key_value(&transaction, "windows_python_recovery", "done")
-                            .unwrap();
-                    }
-                    if let Err(err) = transaction.commit() {
-                        error!("Failed to commit legacy import transaction: {err}");
+                    } else {
+                        Ok(())
+                    };
+                    match marked {
+                        Ok(()) => {
+                            if let Err(err) = transaction.commit() {
+                                error!("Failed to commit legacy import transaction: {err}");
+                            }
+                        }
+                        Err(err) => {
+                            // A panic here would kill the worker and leave the
+                            // datastore unusable. Roll the import back with the
+                            // marker so the still-pending request retries on the
+                            // next start.
+                            error!(
+                                "Failed to mark windows_python_recovery done (rolling back legacy import): {err:?}"
+                            );
+                            drop(transaction);
+                        }
                     }
                 }
                 Err(err) => {

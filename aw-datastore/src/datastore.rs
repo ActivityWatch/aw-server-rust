@@ -1398,9 +1398,11 @@ impl DatastoreInstance {
             }
         };
         let timestamp = Utc::now().timestamp();
-        #[allow(clippy::expect_fun_call)]
-        stmt.execute(params![key, data, &timestamp])
-            .expect(&format!("Failed to insert key-value pair: {key}"));
+        if let Err(err) = stmt.execute(params![key, data, &timestamp]) {
+            return Err(DatastoreError::InternalError(format!(
+                "Failed to insert key-value pair: {key}: {err}"
+            )));
+        }
         Ok(())
     }
 

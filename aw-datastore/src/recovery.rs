@@ -267,6 +267,55 @@ mod tests {
     }
 
     #[test]
+    fn failed_recovery_marker_write_keeps_request_pending_and_restart_retries() {
+        use crate::{Datastore, LegacyImportOptions};
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let legacy = root.path().join("legacy.db");
+        populate(&target, &[]);
+        {
+            let conn = Connection::open(&target).unwrap();
+            conn.execute("INSERT INTO key_value(key, value, last_modified) VALUES ('windows_python_recovery', 'pending', 0)", []).unwrap();
+            // The import succeeds but writing the completion marker fails
+            // (I/O error, busy database, ...). The worker must survive it.
+            conn.execute_batch("CREATE TRIGGER fail_marker BEFORE INSERT ON key_value WHEN NEW.key = 'windows_python_recovery' AND NEW.value = 'done' BEGIN SELECT RAISE(ABORT, 'simulated marker write failure'); END;").unwrap();
+        }
+        let python = Connection::open(&legacy).unwrap();
+        python.execute_batch("CREATE TABLE bucketmodel (key INTEGER PRIMARY KEY, id TEXT, type TEXT, client TEXT, hostname TEXT, created TEXT);
+            CREATE TABLE eventmodel (id INTEGER PRIMARY KEY, bucket_id INTEGER, timestamp TEXT, duration REAL, datastr TEXT);
+            INSERT INTO bucketmodel VALUES (1, 'python', 'test', 'test', 'test', '2026-01-01T00:00:00+00:00');
+            INSERT INTO eventmodel VALUES (1, 1, '2026-01-01 10:00:00+00:00', 5.0, '{}');").unwrap();
+        let opts = LegacyImportOptions {
+            enabled: true,
+            force: false,
+            db_path_override: Some(legacy.to_str().unwrap().into()),
+        };
+        {
+            let ds = Datastore::new_with_legacy_import_opts(
+                target.to_str().unwrap().into(),
+                opts.clone(),
+            );
+            // The datastore stays usable, the import was rolled back with the
+            // marker, and the durable request is still pending for a retry.
+            assert_eq!(
+                ds.get_key_value("windows_python_recovery").unwrap(),
+                "pending"
+            );
+            assert!(
+                ds.get_event_count("python", None, None).is_err(),
+                "rolled-back import must not leave a phantom bucket"
+            );
+        }
+        Connection::open(&target)
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_marker")
+            .unwrap();
+        let ds = Datastore::new_with_legacy_import_opts(target.to_str().unwrap().into(), opts);
+        assert_eq!(ds.get_event_count("python", None, None).unwrap(), 1);
+        assert_eq!(ds.get_key_value("windows_python_recovery").unwrap(), "done");
+    }
+
+    #[test]
     fn failed_insert_rolls_back_and_restart_retries() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("target.db");

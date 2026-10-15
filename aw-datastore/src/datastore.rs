@@ -1232,7 +1232,9 @@ impl DatastoreInstance {
         if filter_excludes_everything(starttime_opt, endtime_opt) {
             return Ok(list);
         }
-        let starttime_filter_ns: i64 = starttime_opt.map_or(0, filter_nanos);
+        // i64::MIN so None starttime means "all events including pre-epoch timestamps".
+        // Using 0 (Unix epoch) silently drops events with negative nanosecond timestamps.
+        let starttime_filter_ns: i64 = starttime_opt.map_or(i64::MIN, filter_nanos);
         let endtime_filter_ns: i64 = endtime_opt.map_or(i64::MAX, filter_nanos);
         if starttime_filter_ns > endtime_filter_ns {
             warn!("Starttime in event query was lower than endtime!");

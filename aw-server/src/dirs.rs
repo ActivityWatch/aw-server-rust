@@ -401,7 +401,13 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
                         // The ordinary writer allocates a unique stamp; keep its
                         // returned path rather than searching preserved siblings.
                         let written = write_recovery_sources(target, &sources)?;
-                        fs::rename(written, pending)?;
+                        if let Err(rename_err) = fs::rename(&written, &pending) {
+                            // Remove the orphaned unique-stamp manifest so it is not
+                            // re-processed on next startup with a mismatched recovery
+                            // ID, which would resurrect deleted Roaming history.
+                            let _ = fs::remove_file(&written);
+                            return Err(rename_err);
+                        }
                     }
                     Ok(())
                 });

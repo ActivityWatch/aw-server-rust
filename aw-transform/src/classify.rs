@@ -240,7 +240,9 @@ pub fn categorize(mut events: Vec<Event>, rules: &[CategoryRule]) -> Vec<Event> 
         let cache_key = serde_json::to_string(&event.data).unwrap_or_default();
         let category = category_cache
             .entry(cache_key)
-            .or_insert_with(|| _pick_category(&event, &ranked_rules))
+            .or_insert_with(|| {
+                manual_category(&event).unwrap_or_else(|| _pick_category(&event, &ranked_rules))
+            })
             .clone();
         event
             .data
@@ -248,6 +250,22 @@ pub fn categorize(mut events: Vec<Event>, rules: &[CategoryRule]) -> Vec<Event> 
         classified_events.push(event);
     }
     classified_events
+}
+
+/// Query-only sidecar marker, never a watcher-data annotation. query_bucket
+/// strips stored copies before overlaying the datastore's authoritative value.
+pub fn manual_category(event: &Event) -> Option<Vec<String>> {
+    let path = event.data.get("$manual_category")?.as_array()?;
+    if path.is_empty() {
+        return None;
+    }
+    path.iter()
+        .map(|part| {
+            part.as_str()
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 /// A [`CategoryRule`] with its rank precomputed, for ordered evaluation.

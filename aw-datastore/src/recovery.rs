@@ -227,6 +227,7 @@ mod tests {
         for (name, events) in rows {
             let bucket = Bucket {
                 id: (*name).to_owned(),
+                device_id: "local".to_owned(),
                 _type: "test".to_owned(),
                 client: "test".to_owned(),
                 hostname: "test".to_owned(),

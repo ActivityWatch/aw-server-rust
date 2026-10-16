@@ -123,10 +123,25 @@ fn identify_aw(
     let hostname = v["hostname"].as_str()?;
     v["device_id"].as_str()?;
 
+    let display_host = display_host(addr.ip());
     Some(format!(
         "ActivityWatch server {version} ({hostname}) is already running on \
-         port {port}; open http://localhost:{port} in your browser or stop it first"
+         port {port}; open http://{display_host}:{port} in your browser or stop it first"
     ))
+}
+
+/// The address to tell the user to open in a browser.
+///
+/// A server bound to a specific LAN address does not answer on `localhost`,
+/// so only loopback and wildcard bindings map to the friendly name.
+fn display_host(ip: std::net::IpAddr) -> String {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(ip) if ip.is_loopback() || ip.is_unspecified() => "localhost".to_string(),
+        IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() => "localhost".to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+        ip => ip.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +248,21 @@ mod port_probe_tests {
         )
         .expect("Python's info payload must be recognised");
         assert!(result.contains("ActivityWatch server v0.13.2 (test-host) is already running"));
+    }
+
+    #[test]
+    fn display_host_prefers_localhost_for_loopback_and_wildcard() {
+        use super::display_host;
+        use std::net::IpAddr;
+        assert_eq!(display_host("127.0.0.1".parse().unwrap()), "localhost");
+        assert_eq!(display_host("0.0.0.0".parse().unwrap()), "localhost");
+        assert_eq!(display_host("::1".parse().unwrap()), "localhost");
+        assert_eq!(display_host("::".parse().unwrap()), "localhost");
+        assert_eq!(
+            display_host("192.168.1.10".parse::<IpAddr>().unwrap()),
+            "192.168.1.10"
+        );
+        assert_eq!(display_host("fd00::5".parse().unwrap()), "[fd00::5]");
     }
 
     #[test]

@@ -320,6 +320,34 @@ impl AwClient {
         Self::send_success(self.client.get(url)).await?.json().await
     }
 
+    /// Like `get_events` but asks the server to return events with their
+    /// original stored timestamps instead of clipping them to the query
+    /// window. Servers older than the `unclipped` parameter ignore it and
+    /// return clipped events (same behavior as `get_events`).
+    pub async fn get_events_unclipped(
+        &self,
+        bucketname: &str,
+        start: Option<DateTime<Utc>>,
+        stop: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, reqwest::Error> {
+        let mut url = self.api_url(&["buckets", bucketname, "events"]);
+        if let Some(s) = start {
+            url.query_pairs_mut()
+                .append_pair("start", s.to_rfc3339().as_str());
+        };
+        if let Some(s) = stop {
+            url.query_pairs_mut()
+                .append_pair("end", s.to_rfc3339().as_str());
+        };
+        if let Some(s) = limit {
+            url.query_pairs_mut()
+                .append_pair("limit", s.to_string().as_str());
+        };
+        url.query_pairs_mut().append_pair("unclipped", "true");
+        Self::send_success(self.client.get(url)).await?.json().await
+    }
+
     /// Fetch a single event by id. Returns `Ok(None)` when the server responds 404.
     pub async fn get_event(
         &self,
@@ -555,10 +583,10 @@ mod tests {
 
     /// How long the mock waits for a live request before giving up.
     ///
-    /// Above every client deadline the tests pass to `wait_for_server`, so a client
-    /// that gave up first fails the test instead of leaving the mock (and therefore
-    /// `tokio::join!`) waiting forever.
-    const REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+    /// Strictly above every client deadline the tests pass to `wait_for_server`,
+    /// so a client that gave up first fails the test instead of leaving the mock
+    /// (and therefore `tokio::join!`) waiting forever.
+    const REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
     /// Answer the first connection that sends a request with `status_line` and `body`.
     ///
@@ -635,13 +663,20 @@ mod tests {
     #[test]
     fn test_wait_for_start_retries_without_blocking_executor() {
         runtime().block_on(async {
-            // Reserve a port without listening, then start the server on this same runtime.
-            let socket = tokio::net::TcpSocket::new_v4().unwrap();
-            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-            let url = info_url(socket.local_addr().unwrap());
+            // Bind and listen immediately. The previous setup reserved a port
+            // with bind() and delayed listen() so the first connects would fail.
+            // On Windows a SYN to a bound-but-not-listening port hangs instead of
+            // being refused, so wait_for_server never saw a live request (#812).
+            //
+            // Drop the first accepted connection unanswered so the client must
+            // retry. Answering from a task on this current-thread runtime still
+            // proves wait_for_server yields between attempts: if it blocked the
+            // executor, the spawned task would never accept or reply.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = info_url(listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                let listener = socket.listen(8).unwrap();
+                let (rejected, _) = listener.accept().await.unwrap();
+                drop(rejected);
                 answer_once(&listener, "200 OK", INFO_BODY).await;
             });
             let client = reqwest::Client::new();

@@ -23,6 +23,45 @@ pub trait AccessMethod: std::fmt::Debug {
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
     fn delete_events_by_id(&self, bucket_id: &str, event_ids: Vec<i64>) -> Result<(), String>;
+
+    /// Fetch a stored event by id to verify that a range-query result was not
+    /// clipped. Unknown backends fail closed before destructive reconciliation.
+    fn get_stored_event(&self, _bucket_id: &str, _event_id: i64) -> Result<Option<Event>, String> {
+        Ok(None)
+    }
+
+    /// Like `get_events` but returns events with their original stored timestamps, without
+    /// clipping them to the query window. Backends that cannot avoid clipping should
+    /// override this with an explicit unclipped query path (see the AwClient impl);
+    /// delegating to `get_events` is only correct for backends that never clip.
+    fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, String> {
+        self.get_events(bucket_id, start, end, limit)
+    }
+
+    /// Fetch up to `limit` events with source rowid > `since_rowid`, ordered ASC by rowid.
+    /// Returns `None` when the backend does not support rowid queries (e.g. AwClient over HTTP).
+    /// On success returns `(events, max_scanned_rowid)` — the max rowid includes rows whose
+    /// data was corrupt, so callers should use it as the next cursor even when `events` is short.
+    fn get_events_since_rowid(
+        &self,
+        _bucket_id: &str,
+        _since_rowid: i64,
+        _limit: Option<u64>,
+    ) -> Option<Result<(Vec<Event>, i64), String>> {
+        None
+    }
+
+    /// Return the highest rowid currently stored for `bucket_id`, or 0 for an empty bucket.
+    /// Returns `None` when the backend does not support rowid queries.
+    fn get_max_event_rowid(&self, _bucket_id: &str) -> Option<Result<i64, String>> {
+        None
+    }
 }
 
 /// Every method here returns a `Result`, so a datastore failure must be reported
@@ -33,6 +72,16 @@ pub trait AccessMethod: std::fmt::Debug {
 /// into a panic that unwinds out of the JNI `extern "C"` frame and aborts the
 /// whole app — see ActivityWatch/aw-android#220.
 impl AccessMethod for Datastore {
+    fn get_stored_event(&self, bucket_id: &str, event_id: i64) -> Result<Option<Event>, String> {
+        match Datastore::get_event(self, bucket_id, event_id) {
+            Ok(event) => Ok(Some(event)),
+            // A missing event is `None` per the trait contract, not an error:
+            // callers reconcile against possibly-deleted rows and must skip
+            // instead of aborting the whole bucket pull.
+            Err(DatastoreError::NoSuchEvent(..)) => Ok(None),
+            Err(e) => Err(format!("{e:?}")),
+        }
+    }
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
         Datastore::get_buckets(self).map_err(|e| format!("{e:?}"))
     }
@@ -71,9 +120,39 @@ impl AccessMethod for Datastore {
         self.force_commit().map_err(|e| format!("{e:?}"))?;
         Ok(())
     }
+
+    fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, String> {
+        Datastore::get_events_unclipped(self, bucket_id, start, end, limit)
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    fn get_events_since_rowid(
+        &self,
+        bucket_id: &str,
+        since_rowid: i64,
+        limit: Option<u64>,
+    ) -> Option<Result<(Vec<Event>, i64), String>> {
+        Some(
+            Datastore::get_events_since_rowid(self, bucket_id, since_rowid, limit)
+                .map_err(|e| format!("{e:?}")),
+        )
+    }
+
+    fn get_max_event_rowid(&self, bucket_id: &str) -> Option<Result<i64, String>> {
+        Some(Datastore::get_max_event_rowid(self, bucket_id).map_err(|e| format!("{e:?}")))
+    }
 }
 
 impl AccessMethod for AwClient {
+    fn get_stored_event(&self, bucket_id: &str, event_id: i64) -> Result<Option<Event>, String> {
+        AwClient::get_event(self, bucket_id, event_id).map_err(|e| e.to_string())
+    }
     fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
         AwClient::get_buckets(self).map_err(|e| e.to_string())
     }
@@ -102,6 +181,20 @@ impl AccessMethod for AwClient {
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
         AwClient::get_events(self, bucket_id, start, end, limit).map_err(|e| e.to_string())
+    }
+    /// The HTTP endpoint clips server-side via the datastore's get_events, so
+    /// the trait default (delegate to get_events) is NOT unclipped. Pass the
+    /// explicit `unclipped=true` parameter; servers older than it return
+    /// clipped events, degrading dedup fidelity but never crashing.
+    fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, String> {
+        AwClient::get_events_unclipped(self, bucket_id, start, end, limit)
+            .map_err(|e| e.to_string())
     }
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
         AwClient::insert_events(self, bucket_id, events).map_err(|e| e.to_string())

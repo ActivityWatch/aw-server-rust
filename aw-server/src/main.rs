@@ -4,22 +4,54 @@ extern crate log;
 use std::env;
 use std::path::PathBuf;
 
+/// What a pre-bind probe of the configured address found.
+#[derive(Debug)]
+enum PortProbe {
+    /// Nothing accepted a connection (or the address is not an IP literal):
+    /// let Rocket bind and report any error itself.
+    NotListening,
+    /// An ActivityWatch server answered; the message says how to reach it.
+    ActivityWatch(String),
+    /// Something else owns the port.
+    Other,
+}
+
 /// Probe `host:port` to see whether ActivityWatch is already listening there.
 ///
-/// Sends a plain HTTP/1.0 GET to `/api/0/info` using only std networking (no
-/// extra dependency). Returns a human-readable message if the endpoint responds
-/// as an ActivityWatch server; `None` when the port is free or is owned by
-/// something unrecognised.
-fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
-    use std::io::{Read, Write};
+/// Uses a single connection, so a listener that vanishes between a separate
+/// "is anything there?" connect and the identifying request cannot turn a
+/// now-free port into a spurious "in use" exit. Sends a plain HTTP/1.0 GET to
+/// `/api/0/info` using only std networking (no extra dependency).
+fn probe_port(host: &str, port: u16) -> PortProbe {
     use std::net::{IpAddr, SocketAddr, TcpStream};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     // Rocket binds `address` as an IpAddr, so parse it the same way. This also
     // handles IPv6 literals, which the previous `format!("{host}:{port}")` form
     // could not parse and therefore silently skipped.
-    let addr = SocketAddr::new(host.parse::<IpAddr>().ok()?, port);
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return PortProbe::NotListening;
+    };
+    let addr = SocketAddr::new(ip, port);
+    match TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
+        Ok(stream) => {
+            identify_aw(stream, addr, port).map_or(PortProbe::Other, PortProbe::ActivityWatch)
+        }
+        Err(_) => PortProbe::NotListening,
+    }
+}
+
+/// Returns a human-readable message if the connected listener responds as an
+/// ActivityWatch server; `None` when it is something unrecognised.
+fn identify_aw(
+    mut stream: std::net::TcpStream,
+    addr: std::net::SocketAddr,
+    port: u16,
+) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::net::IpAddr;
+    use std::time::{Duration, Instant};
+
     // A per-read/write timeout bounds each operation, not the whole exchange; the
     // response read below is additionally size- and deadline-bounded so a chatty
     // listener cannot stall startup, and the write timeout stops a listener that accepts but never reads
@@ -71,8 +103,16 @@ fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
     }
     let buf = String::from_utf8_lossy(&buf);
 
-    // Body starts after the first blank line.
-    let body = buf.split("\r\n\r\n").nth(1)?;
+    // Only a successful info response identifies a server: an error page from
+    // another service may carry similar JSON fields.
+    let mut status = buf.lines().next()?.split_whitespace();
+    if !status.next()?.starts_with("HTTP/") || status.next()? != "200" {
+        return None;
+    }
+    // Body starts after the first blank line; tolerate bare-LF servers.
+    let (_, body) = buf
+        .split_once("\r\n\r\n")
+        .or_else(|| buf.split_once("\n\n"))?;
     let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
 
     // Verify it looks like an ActivityWatch info payload. Requiring the
@@ -91,7 +131,7 @@ fn probe_aw_on_port(host: &str, port: u16) -> Option<String> {
 
 #[cfg(test)]
 mod port_probe_tests {
-    use super::probe_aw_on_port;
+    use super::{probe_port, PortProbe};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -102,13 +142,17 @@ mod port_probe_tests {
     }
 
     fn probe_delayed_response(body: &str, delay: Duration) -> Option<String> {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
         let response = format!(
             "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let split = response.len() - body.len() / 2;
+        probe_raw_response(response, body.len(), delay)
+    }
+
+    fn probe_raw_response(response: String, body_len: usize, delay: Duration) -> Option<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let split = response.len() - body_len / 2;
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -126,9 +170,42 @@ mod port_probe_tests {
             // The deadline test deliberately closes the client before this write.
             let _ = stream.write_all(&response.as_bytes()[split..]);
         });
-        let result = probe_aw_on_port("127.0.0.1", port);
+        let result = probe_port("127.0.0.1", port);
         server.join().unwrap();
-        result
+        match result {
+            PortProbe::ActivityWatch(msg) => Some(msg),
+            PortProbe::Other => None,
+            PortProbe::NotListening => panic!("the listener was there"),
+        }
+    }
+
+    const INFO: &str = r#"{"version":"v0.13.2","hostname":"test-host","device_id":"test-device"}"#;
+
+    #[test]
+    fn rejects_info_payload_with_error_status() {
+        let response =
+            format!("HTTP/1.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n{INFO}");
+        assert!(probe_raw_response(response, INFO.len(), Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn identifies_bare_lf_response() {
+        let response = format!("HTTP/1.0 200 OK\nContent-Type: application/json\n\n{INFO}");
+        assert!(probe_raw_response(response, INFO.len(), Duration::ZERO).is_some());
+    }
+
+    /// A port nobody accepts on must let Rocket bind, not exit as "in use".
+    #[test]
+    fn released_port_is_not_reported_in_use() {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(matches!(
+            probe_port("127.0.0.1", port),
+            PortProbe::NotListening
+        ));
     }
 
     #[test]
@@ -366,28 +443,20 @@ async fn main() -> Result<(), rocket::Error> {
     // produces a generic "Address already in use" IO error. This runs before the
     // datastore is opened so a port conflict never interrupts a legacy import or
     // leaves a half-initialised database behind, and so exit() has nothing to clean up.
-    {
-        use std::net::{IpAddr, SocketAddr, TcpStream};
-        use std::time::Duration;
-        if let Ok(ip) = config.address.parse::<IpAddr>() {
-            let addr = SocketAddr::new(ip, config.port);
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
-                match probe_aw_on_port(&config.address, config.port) {
-                    Some(msg) => {
-                        error!("{}", msg);
-                        std::process::exit(1);
-                    }
-                    None => {
-                        error!(
-                            "Port {} is already in use by another program. \
-                             To identify it, run: {}",
-                            config.port,
-                            port_owner_hint(config.port)
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
+    match probe_port(&config.address, config.port) {
+        PortProbe::NotListening => {}
+        PortProbe::ActivityWatch(msg) => {
+            error!("{}", msg);
+            std::process::exit(1);
+        }
+        PortProbe::Other => {
+            error!(
+                "Port {} is already in use by another program. \
+                 To identify it, run: {}",
+                config.port,
+                port_owner_hint(config.port)
+            );
+            std::process::exit(1);
         }
     }
 

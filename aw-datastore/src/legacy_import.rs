@@ -7,6 +7,8 @@ pub enum LegacyDatastoreImportError {
     SQLPrepareError(String),
     #[allow(dead_code)]
     SQLMapError(String),
+    #[allow(dead_code)]
+    Import(String),
 }
 
 /// Imports a legacy (Python aw-server) database into `new_ds`, if one is
@@ -272,10 +274,10 @@ mod import {
                         bucket.id, num_events
                     );
                     if let Err(err) = new_ds.insert_events(new_conn, &bucket.id, events) {
-                        panic!(
+                        return Err(LegacyDatastoreImportError::Import(format!(
                             "Failed to insert events to bucket '{}': {:?}",
                             bucket.id, err
-                        );
+                        )));
                     }
                 }
                 Err(DatastoreError::BucketAlreadyExists(_)) => {
@@ -286,10 +288,10 @@ mod import {
                     let merged = new_events.len();
                     if !new_events.is_empty() {
                         if let Err(err) = new_ds.insert_events(new_conn, &bucket.id, new_events) {
-                            panic!(
+                            return Err(LegacyDatastoreImportError::Import(format!(
                                 "Failed to merge legacy events into bucket '{}': {:?}",
                                 bucket.id, err
-                            );
+                            )));
                         }
                     }
                     info!(
@@ -297,7 +299,12 @@ mod import {
                         bucket.id, merged, num_events - merged
                     );
                 }
-                Err(err) => panic!("Failed to create bucket '{}': {:?}", bucket.id, err),
+                Err(err) => {
+                    return Err(LegacyDatastoreImportError::Import(format!(
+                        "Failed to create bucket '{}': {:?}",
+                        bucket.id, err
+                    )));
+                }
             };
         }
         Ok(true)

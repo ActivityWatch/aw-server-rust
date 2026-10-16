@@ -279,30 +279,54 @@ fn _migrate_v4_to_v5(conn: &Connection) {
     // The drops run before the create so the pages they free are reused to
     // build the new index within the same transaction; creating first would
     // permanently grow the database file by the new index's size.
-    conn.execute_batch(
-        "
-        BEGIN EXCLUSIVE TRANSACTION;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to start v5 migration transaction");
+    // The caller read user_version before this lock: a concurrent opener may
+    // have run later migrations already. Writing user_version = 5 here would
+    // regress it and re-trigger the v7 rebuild, which overwrites stored
+    // device IDs with 'local'.
+    if _get_db_version(&transaction) >= 5 {
+        return; // Dropped uncommitted: releases the lock without changes
+    }
+    transaction
+        .execute_batch(
+            "
         DROP INDEX IF EXISTS events_bucketrow_index;
         DROP INDEX IF EXISTS events_starttime_index;
         DROP INDEX IF EXISTS events_endtime_index;
         CREATE INDEX IF NOT EXISTS events_bucketrow_starttime_endtime_index
             ON events(bucketrow, starttime DESC, endtime);
         PRAGMA user_version = 5;
-        COMMIT;
     ",
-    )
-    .expect("Failed to run v5 migration transaction");
+        )
+        .expect("Failed to run v5 migration transaction");
+    transaction
+        .commit()
+        .expect("Failed to commit v5 migration transaction");
 }
 
 fn _migrate_v5_to_v6(conn: &Connection) {
-    conn.execute_batch(
-        "BEGIN EXCLUSIVE TRANSACTION;
-         CREATE INDEX IF NOT EXISTS events_bucketrow_endtime_starttime_index
-             ON events(bucketrow, endtime, starttime DESC);
-         PRAGMA user_version = 6;
-         COMMIT;",
-    )
-    .expect("Failed to run v6 migration transaction");
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to start v6 migration transaction");
+    // The caller read user_version before this lock: a concurrent opener may
+    // have finished the v7 migration (and written device IDs) while we waited.
+    // Writing user_version = 6 here would regress it and cause the v7 rebuild
+    // to re-run, overwriting stored device IDs with 'local'.
+    if _get_db_version(&transaction) >= 6 {
+        return; // Dropped uncommitted: releases the lock without changes
+    }
+    transaction
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS events_bucketrow_endtime_starttime_index
+                 ON events(bucketrow, endtime, starttime DESC);
+             PRAGMA user_version = 6;",
+        )
+        .expect("Failed to run v6 migration transaction");
+    transaction
+        .commit()
+        .expect("Failed to commit v6 migration transaction");
 }
 
 fn _migrate_v6_to_v7(conn: &Connection) {
@@ -1953,7 +1977,6 @@ mod tests {
             .unwrap();
         _migrate_v6_to_v7(&conn);
         assert_eq!(_get_db_version(&conn), 7);
-
     }
 
     fn v6_connection() -> Connection {
@@ -2046,6 +2069,27 @@ mod tests {
         // A second opener read v6 before the first finished; once it holds the
         // lock the migration must be a no-op, not rebuild with 'local'.
         _migrate_v6_to_v7(&conn);
+        let device: String = conn
+            .query_row("SELECT device_id FROM buckets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(device, "peer-abc");
+        assert_eq!(_get_db_version(&conn), 7);
+    }
+
+    /// A concurrent opener that read v5 (or earlier) may reach its pre-v7
+    /// migration step after the first opener finished v7. Each step takes the
+    /// exclusive lock before writing, so it must recheck the version under the
+    /// lock and never regress it — a regression to 6 would re-run the v7
+    /// rebuild and overwrite stored device IDs with 'local'.
+    #[test]
+    fn pre_v7_migrations_recheck_version_after_taking_the_lock() {
+        let conn = v6_connection();
+        insert_v6_bucket(&conn, "a");
+        _migrate_v6_to_v7(&conn);
+        conn.execute("UPDATE buckets SET device_id = 'peer-abc'", [])
+            .unwrap();
+        _migrate_v4_to_v5(&conn);
+        _migrate_v5_to_v6(&conn);
         let device: String = conn
             .query_row("SELECT device_id FROM buckets", [], |r| r.get(0))
             .unwrap();

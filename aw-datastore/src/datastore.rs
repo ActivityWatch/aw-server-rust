@@ -394,8 +394,6 @@ pub(crate) fn parse_event_row(
     }
     let duration_ns = endtime_ns - starttime_ns;
 
-    let time_seconds: i64 = starttime_ns / 1_000_000_000;
-    let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
     let data: serde_json::map::Map<String, Value> =
         serde_json::from_str(&data_str).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
@@ -403,7 +401,7 @@ pub(crate) fn parse_event_row(
 
     Ok(Event {
         id: Some(id),
-        timestamp: DateTime::from_timestamp(time_seconds, time_subnanos).unwrap(),
+        timestamp: _datetime_from_nanos(starttime_ns),
         duration: Duration::nanoseconds(duration_ns),
         data,
     })
@@ -638,24 +636,11 @@ impl DatastoreInstance {
         };
         let buckets = match stmt.query_map(&[] as &[&dyn ToSql], |row| {
             let opt_start_ns: Option<i64> = row.get(6)?;
-            let opt_start = match opt_start_ns {
-                Some(starttime_ns) => {
-                    let seconds: i64 = starttime_ns / 1_000_000_000;
-                    let subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
-                    Some(DateTime::from_timestamp(seconds, subnanos).unwrap())
-                }
-                None => None,
-            };
+            // Pre-epoch timestamps are valid; see `_datetime_from_nanos`.
+            let opt_start = opt_start_ns.map(_datetime_from_nanos);
 
             let opt_end_ns: Option<i64> = row.get(7)?;
-            let opt_end = match opt_end_ns {
-                Some(endtime_ns) => {
-                    let seconds: i64 = endtime_ns / 1_000_000_000;
-                    let subnanos: u32 = (endtime_ns % 1_000_000_000) as u32;
-                    Some(DateTime::from_timestamp(seconds, subnanos).unwrap())
-                }
-                None => None,
-            };
+            let opt_end = opt_end_ns.map(_datetime_from_nanos);
 
             // If data column is not set (possible on old installations), use an empty map as default
             let data_str: String = row.get(8)?;
@@ -1336,7 +1321,8 @@ impl DatastoreInstance {
         if filter_excludes_everything(starttime_opt, endtime_opt) {
             return Ok(0);
         }
-        let starttime_filter_ns: i64 = starttime_opt.map_or(0, filter_nanos);
+        // Same default range as get_events_inner: None includes pre-epoch events.
+        let starttime_filter_ns: i64 = starttime_opt.map_or(i64::MIN, filter_nanos);
         let endtime_filter_ns: i64 = endtime_opt.map_or(i64::MAX, filter_nanos);
         // Same bound check as get_events_inner, so a zero-length range counts the
         // events that get_events returns for it.

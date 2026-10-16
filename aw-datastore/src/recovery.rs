@@ -461,6 +461,61 @@ mod tests {
         );
     }
 
+    /// Recovery must copy every stored row, including events stamped before
+    /// 1970 (whole and fractional seconds), not just the API's default range.
+    #[test]
+    fn union_includes_pre_epoch_events() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let source = root.path().join("source.db");
+        let at = |ns: i64, data: &str| Event {
+            id: None,
+            timestamp: Utc.timestamp_nanos(ns),
+            duration: Duration::seconds(1),
+            data: serde_json::from_str(data).unwrap(),
+        };
+        populate(&target, &[("shared", vec![event(r#"{"a":1}"#)])]);
+        populate(
+            &source,
+            &[(
+                "shared",
+                vec![
+                    at(-2_000_000_000, r#"{"pre":"whole"}"#),
+                    at(-1_500_000_000, r#"{"pre":"fraction"}"#),
+                    at(-10_000_000_000, r#"{"pre":"ended"}"#),
+                ],
+            )],
+        );
+        let result = recover_database(
+            &target,
+            &source,
+            &root.path().join("backup.db"),
+            "migration-pre-epoch",
+        )
+        .unwrap();
+        assert_eq!(result.events_inserted, 3);
+        assert_eq!(count(&target), 4);
+        let conn = Connection::open(&target).unwrap();
+        let mut ds = DatastoreInstance::new(&conn, false).unwrap();
+        let mut starts: Vec<_> = ds
+            .get_events_unclipped(&conn, "shared", None, None, None)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.timestamp.timestamp_nanos_opt().unwrap())
+            .collect();
+        starts.sort();
+        assert_eq!(
+            starts,
+            vec![
+                -10_000_000_000,
+                -2_000_000_000,
+                -1_500_000_000,
+                1_700_000_000_000_000_123
+            ]
+        );
+        assert_eq!(ds.get_event_count(&conn, "shared", None, None).unwrap(), 4);
+    }
+
     #[test]
     fn union_preserves_id_collisions_dedups_per_bucket_and_replays() {
         let root = tempfile::tempdir().unwrap();

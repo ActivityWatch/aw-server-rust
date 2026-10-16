@@ -385,32 +385,8 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
             {
                 // Local won selection, but Roaming can still contain unique
                 // history. Record the exact still-live source for union as well.
-                let recovery = MigrationLock::acquire(target).and_then(|_lock| {
-                    let pending = target.with_file_name(format!(
-                        "{}{}local-wins",
-                        target.file_name().unwrap().to_string_lossy(),
-                        RECOVERY_PENDING_TAG
-                    ));
-                    if !pending.exists() {
-                        let sources = RecoverySources {
-                            chosen_database: target.to_path_buf(),
-                            local_backup: target.to_path_buf(),
-                            roaming_backup: misplaced.to_path_buf(),
-                            roaming_original: Some(misplaced.to_path_buf()),
-                        };
-                        // The ordinary writer allocates a unique stamp; keep its
-                        // returned path rather than searching preserved siblings.
-                        let written = write_recovery_sources(target, &sources)?;
-                        if let Err(rename_err) = fs::rename(&written, &pending) {
-                            // Remove the orphaned unique-stamp manifest so it is not
-                            // re-processed on next startup with a mismatched recovery
-                            // ID, which would resurrect deleted Roaming history.
-                            let _ = fs::remove_file(&written);
-                            return Err(rename_err);
-                        }
-                    }
-                    Ok(())
-                });
+                let recovery =
+                    record_local_wins_sources(target, misplaced, &|from, to| fs::rename(from, to));
                 if let Err(e) = recovery {
                     warn!("Could not record history recovery sources: {e}");
                 }
@@ -619,9 +595,21 @@ pub fn migrate_dir(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) -> std::i
 }
 
 fn write_recovery_sources(target: &Path, sources: &RecoverySources) -> std::io::Result<PathBuf> {
+    let path = tagged_sibling(target, RECOVERY_PENDING_TAG, &migration_stamp());
+    write_recovery_sources_at(&path, sources, &|from, to| fs::rename(from, to))?;
+    Ok(path)
+}
+
+/// Write `sources` to a `.tmp-` file and atomically rename it to `path`.
+/// Recovery ignores `.tmp-` files, so a failed or interrupted publish leaves
+/// no request that could be processed under another identity.
+fn write_recovery_sources_at(
+    path: &Path,
+    sources: &RecoverySources,
+    rename: &RenameFn<'_>,
+) -> std::io::Result<()> {
     use std::io::Write;
 
-    let path = tagged_sibling(target, RECOVERY_PENDING_TAG, &migration_stamp());
     let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let bytes = serde_json::to_vec_pretty(sources).map_err(|e| io_err(e.to_string()))?;
     let mut file = fs::OpenOptions::new()
@@ -630,12 +618,44 @@ fn write_recovery_sources(target: &Path, sources: &RecoverySources) -> std::io::
         .open(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
-    fs::rename(&temporary, &path)?;
-    fs::OpenOptions::new().write(true).open(&path)?.sync_all()?;
+    drop(file);
+    if let Err(e) = rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(e);
+    }
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
     // Persist the directory entry too on platforms that support opening dirs.
     #[cfg(unix)]
     fs::File::open(path.parent().unwrap())?.sync_all()?;
-    Ok(path)
+    Ok(())
+}
+
+/// Record a still-live Roaming history for union into a Local database that
+/// won selection. The request is published directly under its stable
+/// `local-wins` name: a uniquely stamped manifest left by a failed final
+/// rename would complete under a one-off ID, and the next start would union
+/// Roaming again under `local-wins`, resurrecting history deleted meanwhile.
+fn record_local_wins_sources(
+    target: &Path,
+    misplaced: &Path,
+    rename: &RenameFn<'_>,
+) -> std::io::Result<()> {
+    let _lock = MigrationLock::acquire(target)?;
+    let pending = target.with_file_name(format!(
+        "{}{}local-wins",
+        target.file_name().unwrap().to_string_lossy(),
+        RECOVERY_PENDING_TAG
+    ));
+    if pending.exists() {
+        return Ok(());
+    }
+    let sources = RecoverySources {
+        chosen_database: target.to_path_buf(),
+        local_backup: target.to_path_buf(),
+        roaming_backup: misplaced.to_path_buf(),
+        roaming_original: Some(misplaced.to_path_buf()),
+    };
+    write_recovery_sources_at(&pending, &sources, rename)
 }
 
 fn migrate_dir_with_rename(
@@ -1616,6 +1636,61 @@ fn test_review_recovery_failed_archive_rename_does_not_resurrect_deleted_history
         "deleted history must not return from live Roaming"
     );
     drop(conn);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A failed final rename while recording a Local-wins request must leave no
+/// manifest recovery could process under a one-off ID. Otherwise the next
+/// start records `local-wins` afresh and unions Roaming a second time, after
+/// the user may have deleted the recovered history.
+#[test]
+fn test_review_recovery_failed_local_wins_publish_does_not_resurrect_deleted_history() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_datastore_with_event(&target, 20);
+    plant_datastore_with_event(&misplaced, 10);
+    let pending_tag = format!("{RECOVERY_PENDING_TAG}local-wins");
+    let failed = record_local_wins_sources(&target, &misplaced, &|from, to| {
+        if to.to_string_lossy().ends_with(&pending_tag) {
+            Err(io_err("manifest locked".into()))
+        } else {
+            fs::rename(from, to)
+        }
+    });
+    assert!(failed.is_err());
+    let processable: Vec<_> = fs::read_dir(target.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(RECOVERY_PENDING_TAG))
+        .collect();
+    assert!(
+        processable.is_empty(),
+        "a failed publish must leave no recovery request: {processable:?}"
+    );
+    let path = target.join("sqlite.db");
+    let count = || {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    recover_preserved_histories(&path, true).unwrap();
+    assert_eq!(count(), 1, "nothing is unioned without a published request");
+
+    // The retry publishes the stable request and unions Roaming exactly once.
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    recover_preserved_histories(&path, true).unwrap();
+    assert_eq!(count(), 2);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DELETE FROM events", []).unwrap();
+    drop(conn);
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    recover_preserved_histories(&path, true).unwrap();
+    assert_eq!(
+        count(),
+        0,
+        "deleted history must not return from live Roaming"
+    );
     let _ = fs::remove_dir_all(root);
 }
 

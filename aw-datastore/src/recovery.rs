@@ -5,7 +5,7 @@ use std::path::Path;
 use aw_models::Event;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
-use crate::DatastoreInstance;
+use crate::{DatastoreError, DatastoreInstance};
 
 fn error(e: impl std::fmt::Debug) -> String {
     format!("Database recovery failed: {e:?}")
@@ -161,9 +161,28 @@ pub fn recover_database(
             .get_events_unclipped(&tx, &name, None, None, None)
             .map_err(error)?;
         let mut seen: HashSet<_> = existing.iter().map(identity).collect::<Result<_, _>>()?;
-        let events = source_ds
+        // Unreadable event content in the preserved original is a content
+        // problem, not an operational failure: defer the whole source for
+        // manual recovery instead of crashing startup, even when the selected
+        // database is healthy. Returning before the transaction commits leaves
+        // no completion marker, so a truncated union is never claimed as done
+        // and the source stays available for manual recovery. `database_rank`
+        // inspects only SQLite structure and timestamps, and the constructor
+        // guard above only catches bucket-read failures, so this is the one
+        // place corrupt event rows are detected. Operational failures (backup,
+        // target writes, commit) still propagate.
+        let events = match source_ds
             .get_events_unclipped_strict(&source_tx, &name, None, None, None)
-            .map_err(error)?;
+        {
+            Ok(events) => events,
+            Err(DatastoreError::CorruptEvent(e)) => {
+                warn!(
+                    "History recovery source {source:?} has unreadable event content ({e}); leaving it untouched for manual recovery"
+                );
+                return Ok(RecoveryCounts::default());
+            }
+            Err(e) => return Err(error(e)),
+        };
         let mut insert = Vec::new();
         for mut event in events {
             if seen.insert(identity(&event)?) {
@@ -566,24 +585,27 @@ mod tests {
     }
 
     #[test]
-    fn partial_source_read_rolls_back_and_does_not_mark_done() {
+    fn corrupt_source_events_are_deferred_not_fatal() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("target.db");
         let source = root.path().join("source.db");
         let backup = root.path().join("backup.db");
-        populate(&target, &[]);
+        populate(&target, &[("healthy", vec![event(r#"{"a":1}"#)])]);
         populate(&source, &[("shared", vec![event(r#"{"a":1}"#)])]);
         // One event row is unreadable. A tolerant reader would return the
         // readable subset and commit `done`, silently truncating history; the
-        // strict recovery reader must instead fail so the union rolls back.
+        // strict recovery reader must not claim success. But corrupt content
+        // in the preserved archive must not crash startup either, even though
+        // the selected database is healthy: defer the source for manual
+        // recovery and leave no completion marker so it is retried.
         Connection::open(&source)
             .unwrap()
             .execute("UPDATE events SET data='not-json'", [])
             .unwrap();
-        assert!(recover_database(&target, &source, &backup, "migration-corrupt").is_err());
-        // Rolled back: nothing inserted and no completion marker, so a later
-        // run retries the source instead of skipping it forever.
-        assert_eq!(count(&target), 0);
+        let result = recover_database(&target, &source, &backup, "migration-corrupt").unwrap();
+        assert_eq!(result, RecoveryCounts::default());
+        // Rolled back: nothing inserted and no completion marker.
+        assert_eq!(count(&target), 1);
         let conn = Connection::open(&target).unwrap();
         let done: i64 = conn
             .query_row(

@@ -1293,9 +1293,11 @@ impl DatastoreInstance {
                         // Recovery must never treat a partially read source as
                         // complete: a swallowed row error would let the union
                         // commit `done` on truncated history and skip the
-                        // source forever. Propagate so the transaction rolls
-                        // back and the next launch retries.
-                        return Err(DatastoreError::InternalError(format!(
+                        // source forever. Report it as content corruption so
+                        // the caller can defer the source for manual recovery
+                        // without claiming the union succeeded, while
+                        // operational failures still propagate.
+                        return Err(DatastoreError::CorruptEvent(format!(
                             "Corrupt event in bucket {bucket_id}: {err}"
                         )));
                     }

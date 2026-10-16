@@ -71,6 +71,9 @@ pub enum DatastoreError {
     NoSuchEvent(String, i64),
     MpscError,
     InternalError(String),
+    /// A stored event row could not be parsed. Content corruption in a file
+    /// we are reading, not an operational failure of the datastore itself.
+    CorruptEvent(String),
     // Errors specific to when migrate is disabled
     Uninitialized(String),
     OldDbVersion(String),

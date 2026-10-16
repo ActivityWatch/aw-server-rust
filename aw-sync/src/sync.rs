@@ -1857,7 +1857,7 @@ mod daemon_peer_discovery_tests {
 
     // Thin wrapper so tests exercise the actual production discovery path,
     // not a copy that can silently diverge.
-    fn discover(sync_root: &PathBuf, own_device_id: &str) -> crate::util::RemoteSelection {
+    fn discover(sync_root: &Path, own_device_id: &str) -> crate::util::RemoteSelection {
         super::discover_peers(sync_root, own_device_id).unwrap()
     }
 

@@ -1123,6 +1123,7 @@ mod sync_tests {
     }
 
     // TODO: Find a way to reuse this (previously used in an integration test)
+    #[allow(dead_code)]
     fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         let mut datastores: Vec<Datastore> = Vec::new();
         for n in 0..2 {

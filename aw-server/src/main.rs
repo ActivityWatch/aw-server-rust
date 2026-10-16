@@ -4,6 +4,299 @@ extern crate log;
 use std::env;
 use std::path::PathBuf;
 
+/// What a pre-bind probe of the configured address found.
+#[derive(Debug)]
+enum PortProbe {
+    /// Nothing accepted a connection (or the address is not an IP literal):
+    /// let Rocket bind and report any error itself.
+    NotListening,
+    /// An ActivityWatch server answered; the message says how to reach it.
+    ActivityWatch(String),
+    /// Something else owns the port.
+    Other,
+}
+
+/// Probe `host:port` to see whether ActivityWatch is already listening there.
+///
+/// Uses a single connection, so a listener that vanishes between a separate
+/// "is anything there?" connect and the identifying request cannot turn a
+/// now-free port into a spurious "in use" exit. Sends a plain HTTP/1.0 GET to
+/// `/api/0/info` using only std networking (no extra dependency).
+fn probe_port(host: &str, port: u16) -> PortProbe {
+    use std::net::{IpAddr, SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    // Rocket binds `address` as an IpAddr, so parse it the same way. This also
+    // handles IPv6 literals, which the previous `format!("{host}:{port}")` form
+    // could not parse and therefore silently skipped.
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return PortProbe::NotListening;
+    };
+    let addr = SocketAddr::new(ip, port);
+    match TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
+        Ok(stream) => {
+            identify_aw(stream, addr, port).map_or(PortProbe::Other, PortProbe::ActivityWatch)
+        }
+        Err(_) => PortProbe::NotListening,
+    }
+}
+
+/// Returns a human-readable message if the connected listener responds as an
+/// ActivityWatch server; `None` when it is something unrecognised.
+fn identify_aw(
+    mut stream: std::net::TcpStream,
+    addr: std::net::SocketAddr,
+    port: u16,
+) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::net::IpAddr;
+    use std::time::{Duration, Instant};
+
+    // A per-read/write timeout bounds each operation, not the whole exchange; the
+    // response read below is additionally size- and deadline-bounded so a chatty
+    // listener cannot stall startup, and the write timeout stops a listener that accepts but never reads
+    // from blocking us in write_all.
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+
+    // IPv6 literals must be bracketed in the Host header (RFC 7230).
+    let host_header = match addr.ip() {
+        IpAddr::V6(_) => format!("[{}]", addr.ip()),
+        ip => ip.to_string(),
+    };
+    let req = format!(
+        "GET /api/0/info HTTP/1.0\r\nHost: {host_header}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+
+    // `set_read_timeout` applies to each read, not the whole response, so a listener
+    // trickling one byte per read would otherwise keep us here for hours. Bound both
+    // the bytes buffered and the total time spent reading.
+    const MAX_RESPONSE: usize = 16 * 1024;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    while buf.len() < MAX_RESPONSE {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        stream
+            .set_read_timeout(Some(remaining.min(Duration::from_millis(500))))
+            .ok()?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n.min(MAX_RESPONSE - buf.len())]),
+            // A slow response may pause between chunks without exceeding the
+            // overall deadline. Keep waiting, but never reset that deadline.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => break,
+        }
+    }
+    let buf = String::from_utf8_lossy(&buf);
+
+    // Only a successful info response identifies a server: an error page from
+    // another service may carry similar JSON fields.
+    let mut status = buf.lines().next()?.split_whitespace();
+    if !status.next()?.starts_with("HTTP/") || status.next()? != "200" {
+        return None;
+    }
+    // Body starts after the first blank line; tolerate bare-LF servers.
+    let (_, body) = buf
+        .split_once("\r\n\r\n")
+        .or_else(|| buf.split_once("\n\n"))?;
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+
+    // Verify it looks like an ActivityWatch info payload. Requiring the
+    // AW-specific hostname/device_id fields (not just a version substring)
+    // avoids misreading an unrelated service that happens to serve JSON.
+    // Python servers and Rust version overrides need not include a language suffix.
+    let version = v["version"].as_str()?;
+    let hostname = v["hostname"].as_str()?;
+    v["device_id"].as_str()?;
+
+    let display_host = display_host(addr.ip());
+    Some(format!(
+        "ActivityWatch server {version} ({hostname}) is already running on \
+         port {port}; open http://{display_host}:{port} in your browser or stop it first"
+    ))
+}
+
+/// The address to tell the user to open in a browser.
+///
+/// A server bound to a specific LAN address does not answer on `localhost`,
+/// so only loopback and wildcard bindings map to the friendly name.
+fn display_host(ip: std::net::IpAddr) -> String {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(ip) if ip.is_loopback() || ip.is_unspecified() => "localhost".to_string(),
+        IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() => "localhost".to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+        ip => ip.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod port_probe_tests {
+    use super::{probe_port, PortProbe};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    fn probe_response(body: &str) -> Option<String> {
+        probe_delayed_response(body, Duration::ZERO)
+    }
+
+    fn probe_delayed_response(body: &str, delay: Duration) -> Option<String> {
+        let response = format!(
+            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        probe_raw_response(response, body.len(), delay)
+    }
+
+    fn probe_raw_response(response: String, body_len: usize, delay: Duration) -> Option<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let split = response.len() - body_len / 2;
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(b"GET /api/0/info HTTP/1.0\r\n"));
+            stream.write_all(&response.as_bytes()[..split]).unwrap();
+            thread::sleep(delay);
+            // The deadline test deliberately closes the client before this write.
+            let _ = stream.write_all(&response.as_bytes()[split..]);
+        });
+        let result = probe_port("127.0.0.1", port);
+        server.join().unwrap();
+        match result {
+            PortProbe::ActivityWatch(msg) => Some(msg),
+            PortProbe::Other => None,
+            PortProbe::NotListening => panic!("the listener was there"),
+        }
+    }
+
+    const INFO: &str = r#"{"version":"v0.13.2","hostname":"test-host","device_id":"test-device"}"#;
+
+    #[test]
+    fn rejects_info_payload_with_error_status() {
+        let response =
+            format!("HTTP/1.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n{INFO}");
+        assert!(probe_raw_response(response, INFO.len(), Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn identifies_bare_lf_response() {
+        let response = format!("HTTP/1.0 200 OK\nContent-Type: application/json\n\n{INFO}");
+        assert!(probe_raw_response(response, INFO.len(), Duration::ZERO).is_some());
+    }
+
+    /// A port nobody accepts on must let Rocket bind, not exit as "in use".
+    #[test]
+    fn released_port_is_not_reported_in_use() {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(matches!(
+            probe_port("127.0.0.1", port),
+            PortProbe::NotListening
+        ));
+    }
+
+    #[test]
+    fn identifies_response_delayed_past_per_read_timeout() {
+        assert!(probe_delayed_response(
+            r#"{"version":"v0.13.2","hostname":"test-host","device_id":"test-device"}"#,
+            Duration::from_millis(800),
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn rejects_response_delayed_past_total_deadline() {
+        assert!(probe_delayed_response(
+            r#"{"version":"v0.13.2","hostname":"test-host","device_id":"test-device"}"#,
+            Duration::from_millis(2500),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn identifies_python_server_without_language_suffix() {
+        let result = probe_response(
+            r#"{"version":"v0.13.2","hostname":"test-host","device_id":"test-device","testing":false}"#,
+        )
+        .expect("Python's info payload must be recognised");
+        assert!(result.contains("ActivityWatch server v0.13.2 (test-host) is already running"));
+    }
+
+    #[test]
+    fn display_host_prefers_localhost_for_loopback_and_wildcard() {
+        use super::display_host;
+        use std::net::IpAddr;
+        assert_eq!(display_host("127.0.0.1".parse().unwrap()), "localhost");
+        assert_eq!(display_host("0.0.0.0".parse().unwrap()), "localhost");
+        assert_eq!(display_host("::1".parse().unwrap()), "localhost");
+        assert_eq!(display_host("::".parse().unwrap()), "localhost");
+        assert_eq!(
+            display_host("192.168.1.10".parse::<IpAddr>().unwrap()),
+            "192.168.1.10"
+        );
+        assert_eq!(display_host("fd00::5".parse().unwrap()), "[fd00::5]");
+    }
+
+    #[test]
+    fn identifies_rust_server_with_language_suffix() {
+        assert!(probe_response(
+            r#"{"version":"v0.14.0 (rust)","hostname":"test-host","device_id":"test-device","testing":false}"#,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn rejects_unrelated_or_malformed_info_payloads() {
+        for body in [
+            r#"{"version":"python 3.11"}"#,
+            r#"{"version":"v0.13.2","hostname":"test-host"}"#,
+            r#"{"version":13,"hostname":"test-host","device_id":"test-device"}"#,
+            "not JSON",
+        ] {
+            assert!(probe_response(body).is_none(), "unexpected match: {body}");
+        }
+    }
+}
+
+/// Returns a per-OS hint for locating the process that owns a port.
+fn port_owner_hint(port: u16) -> String {
+    if cfg!(target_os = "windows") {
+        format!("netstat -ano | findstr :{port}")
+    } else if cfg!(target_os = "macos") {
+        format!("lsof -i :{port}")
+    } else {
+        format!("ss -ltnp | grep :{port}  (or: lsof -i :{port})")
+    }
+}
+
 use clap::crate_version;
 use clap::Parser;
 
@@ -173,6 +466,27 @@ async fn main() -> Result<(), rocket::Error> {
                 error!("custom_static path for {} does not exist ({})", name, path);
                 config.custom_static.remove(name);
             }
+        }
+    }
+
+    // If the port is already occupied, emit a helpful message before Rocket
+    // produces a generic "Address already in use" IO error. This runs before the
+    // datastore is opened so a port conflict never interrupts a legacy import or
+    // leaves a half-initialised database behind, and so exit() has nothing to clean up.
+    match probe_port(&config.address, config.port) {
+        PortProbe::NotListening => {}
+        PortProbe::ActivityWatch(msg) => {
+            error!("{}", msg);
+            std::process::exit(1);
+        }
+        PortProbe::Other => {
+            error!(
+                "Port {} is already in use by another program. \
+                 To identify it, run: {}",
+                config.port,
+                port_owner_hint(config.port)
+            );
+            std::process::exit(1);
         }
     }
 

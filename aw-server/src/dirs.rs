@@ -1152,7 +1152,14 @@ fn recover_preserved_histories(database: &Path, default_profile: bool) -> Result
         }
         // Persist before returning the path: a crash before the worker imports
         // Python must not erase the recovery request (the old atomic flag did).
-        if default_profile && id != format!("{prefix}local-wins") && database.is_file() {
+        // A stamped manifest is published before promotion and may survive a
+        // failed rename. Only the marker published with staging proves that
+        // Roaming replaced Local; an abandoned request must not force import.
+        if default_profile
+            && id != format!("{prefix}local-wins")
+            && target.join(RECOVERY_SELECTED_FILE).is_file()
+            && database.is_file()
+        {
             let conn = rusqlite::Connection::open(database).map_err(|e| e.to_string())?;
             conn.execute("INSERT OR IGNORE INTO key_value(key, value, last_modified) VALUES ('windows_python_recovery', 'pending', 0)", [])
                 .map_err(|e| e.to_string())?;
@@ -1743,6 +1750,50 @@ fn plant_datastore_with_event(dir: &Path, seconds: i64) {
         }],
     )
     .unwrap();
+}
+
+#[test]
+fn test_failed_promotion_does_not_request_python_import() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_datastore_with_event(&target, 10);
+    plant_datastore_with_event(&misplaced, 20);
+    assert!(
+        migrate_dir_with_rename(&target, &misplaced, &real_copy, &|from, to| {
+            if from == target {
+                Err(io_err("Local is still in use".into()))
+            } else {
+                fs::rename(from, to)
+            }
+        })
+        .is_err()
+    );
+    assert!(!target.join(RECOVERY_SELECTED_FILE).exists());
+    // The still-running Local server records newer history before restart.
+    let path = target.join("sqlite.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE events SET starttime=starttime+30000000000, endtime=endtime+30000000000",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    recover_preserved_histories(&path, true).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let requests: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM key_value WHERE key='windows_python_recovery'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        requests, 0,
+        "an abandoned manifest must not force Python import into Local"
+    );
+    drop(conn);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

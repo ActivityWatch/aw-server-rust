@@ -368,6 +368,51 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
     })
 }
 
+/// Delete this device's own push staging db so the next push re-stages it from
+/// the local datastore (ActivityWatch/aw-android#296).
+///
+/// Resolves `{sync_dir}/{hostname}/{device_id}` the same way a push does, with
+/// the device id read from the server's data dir, and refuses any path outside
+/// the sync dir. The caller must not run this concurrently with a push.
+#[no_mangle]
+pub extern "C" fn Java_net_activitywatch_android_SyncInterface_resetStaging(
+    mut env: JNIEnv,
+    _class: JClass,
+    hostname: JString,
+) -> jstring {
+    jni_guard(&mut env, "resetStaging", |env| {
+        let result: Result<String, String> = (|| {
+            let hostname_str: String = env
+                .get_string(&hostname)
+                .map_err(|e| format!("Failed to get hostname: {}", e))?
+                .into();
+            apply_android_data_dir_from_env();
+            let data_dir = aw_server::dirs::get_data_dir()
+                .map_err(|_| "Failed to get data dir".to_string())?;
+            let device_id = crate::staging::read_device_id(&data_dir)?;
+            let sync_root = crate::dirs::get_sync_dir()
+                .map_err(|e| format!("Failed to get sync dir: {}", e))?;
+            let removed = crate::staging::reset_own_staging(&sync_root, &hostname_str, &device_id)?;
+            info!(
+                "resetStaging removed {} file(s): {:?}",
+                removed.len(),
+                removed
+            );
+            let removed: Vec<String> = removed
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            Ok(json!({
+                "success": true,
+                "message": format!("Removed {} staging file(s)", removed.len()),
+                "removed": removed,
+            })
+            .to_string())
+        })();
+        sync_result_to_jstring(env, "resetStaging", result)
+    })
+}
+
 /// Get the sync directory path
 #[no_mangle]
 pub extern "C" fn Java_net_activitywatch_android_SyncInterface_getSyncDir(

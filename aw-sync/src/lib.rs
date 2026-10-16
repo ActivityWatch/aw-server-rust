@@ -31,6 +31,10 @@ mod status;
 pub use status::run_status;
 mod util;
 
+// Only the Android JNI layer calls the staging reset today.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod staging;
+
 #[cfg(feature = "sync-v2")]
 pub mod v2;
 

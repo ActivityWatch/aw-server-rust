@@ -700,7 +700,13 @@ const EDIT_RECONCILE_LOOKBACK: Duration = Duration::days(7);
 /// therefore adds no new failure mode. Issue #649 tracks moving provenance to
 /// bucket metadata, which removes the dependency on the ID string entirely.
 pub(crate) fn is_synced_bucket(bucket: &Bucket) -> bool {
-    bucket.id.contains("-synced-from-")
+    is_synced_bucket_id(&bucket.id)
+}
+
+/// [`is_synced_bucket`] for callers that only have the id (e.g. a raw sqlite peek).
+#[cfg_attr(not(feature = "cli"), allow(dead_code))]
+pub(crate) fn is_synced_bucket_id(id: &str) -> bool {
+    id.contains("-synced-from-")
 }
 
 /// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.

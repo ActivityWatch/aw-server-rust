@@ -1264,20 +1264,12 @@ impl DatastoreInstance {
             }
         };
 
-        let rows = match stmt.query_map(
-            [
-                &bucket.bid.unwrap(),
-                &starttime_filter_ns,
-                &endtime_filter_ns,
-                &limit,
-            ],
-            |row| {
-                parse_event_row(
-                    row,
-                    clip_to_query_range.then_some((starttime_filter_ns, endtime_filter_ns)),
-                )
-            },
-        ) {
+        let mut rows = match stmt.query([
+            &bucket.bid.unwrap(),
+            &starttime_filter_ns,
+            &endtime_filter_ns,
+            &limit,
+        ]) {
             Ok(rows) => rows,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -1285,18 +1277,32 @@ impl DatastoreInstance {
                 )))
             }
         };
-        for row in rows {
-            match row {
+        loop {
+            let row = match rows.next() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(err) => {
+                    if strict_rows {
+                        return Err(DatastoreError::InternalError(format!(
+                            "Failed to read events in bucket {bucket_id}: {err}"
+                        )));
+                    }
+                    warn!("Failed to read events in bucket {}: {}", bucket_id, err);
+                    break;
+                }
+            };
+            match parse_event_row(
+                row,
+                clip_to_query_range.then_some((starttime_filter_ns, endtime_filter_ns)),
+            ) {
                 Ok(event) => list.push(event),
                 Err(err) => {
                     if strict_rows {
                         // Recovery must never treat a partially read source as
                         // complete: a swallowed row error would let the union
                         // commit `done` on truncated history and skip the
-                        // source forever. Report it as content corruption so
-                        // the caller can defer the source for manual recovery
-                        // without claiming the union succeeded, while
-                        // operational failures still propagate.
+                        // source forever. Parsing failures are content errors;
+                        // SQLite stepping failures above remain operational.
                         return Err(DatastoreError::CorruptEvent(format!(
                             "Corrupt event in bucket {bucket_id}: {err}"
                         )));
@@ -1716,6 +1722,42 @@ impl DatastoreInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_event_read_propagates_sqlite_step_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        let bucket = Bucket {
+            id: "test".to_owned(),
+            _type: "test".to_owned(),
+            client: "test".to_owned(),
+            hostname: "test".to_owned(),
+            bid: None,
+            created: None,
+            data: Default::default(),
+            metadata: Default::default(),
+            events: None,
+            last_updated: None,
+        };
+        ds.create_bucket(&conn, bucket).unwrap();
+        // A view deterministically raises an SQLite execution error while
+        // stepping the query, rather than an event-content conversion error.
+        // Use the v4 read path, which does not require named table indexes.
+        ds.db_version = 4;
+        conn.execute_batch(
+            "ALTER TABLE events RENAME TO saved_events;
+             CREATE VIEW events AS SELECT abs(-9223372036854775808) AS id,
+                 1 AS bucketrow, 0 AS starttime, 1 AS endtime, '{}' AS data;",
+        )
+        .unwrap();
+        let err = ds
+            .get_events_unclipped_strict(&conn, "test", None, None, None)
+            .unwrap_err();
+        assert!(
+            matches!(&err, DatastoreError::InternalError(message) if message.contains("integer overflow")),
+            "SQLite execution errors must not be deferred as corrupt content: {err:?}"
+        );
+    }
 
     /// Minimal legacy (Python aw-server/peewee) sqlite db fixture: one
     /// bucket, one event. Schema mirrors what `legacy_import` expects.

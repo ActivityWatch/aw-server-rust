@@ -329,6 +329,19 @@ pub(crate) fn prefer_endtime_index(
     }
 }
 
+/// How [`DatastoreInstance::get_events_inner`] clips events and treats a
+/// corrupt event row. Recovery unions must use `UnclippedStrict` so a partially
+/// read source rolls back instead of committing truncated history.
+#[derive(Clone, Copy)]
+enum EventRead {
+    /// Clip events to the query range; tolerate corrupt rows (`get_events`).
+    Clipped,
+    /// No clipping; tolerate corrupt rows (`get_events_unclipped`).
+    Unclipped,
+    /// No clipping; propagate corrupt rows (`get_events_unclipped_strict`).
+    UnclippedStrict,
+}
+
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
     /// `(count, max id, names)` of the buckets table when `buckets_cache` was
@@ -1208,8 +1221,10 @@ impl DatastoreInstance {
         starttime_opt: Option<DateTime<Utc>>,
         endtime_opt: Option<DateTime<Utc>>,
         limit_opt: Option<u64>,
-        clip_to_query_range: bool,
+        mode: EventRead,
     ) -> Result<Vec<Event>, DatastoreError> {
+        let clip_to_query_range = matches!(mode, EventRead::Clipped);
+        let strict_rows = matches!(mode, EventRead::UnclippedStrict);
         let bucket = self.get_bucket(bucket_id)?;
 
         let mut list = Vec::new();
@@ -1273,7 +1288,19 @@ impl DatastoreInstance {
         for row in rows {
             match row {
                 Ok(event) => list.push(event),
-                Err(err) => warn!("Corrupt event in bucket {}: {}", bucket_id, err),
+                Err(err) => {
+                    if strict_rows {
+                        // Recovery must never treat a partially read source as
+                        // complete: a swallowed row error would let the union
+                        // commit `done` on truncated history and skip the
+                        // source forever. Propagate so the transaction rolls
+                        // back and the next launch retries.
+                        return Err(DatastoreError::InternalError(format!(
+                            "Corrupt event in bucket {bucket_id}: {err}"
+                        )));
+                    }
+                    warn!("Corrupt event in bucket {}: {}", bucket_id, err);
+                }
             };
         }
 
@@ -1288,7 +1315,14 @@ impl DatastoreInstance {
         endtime_opt: Option<DateTime<Utc>>,
         limit_opt: Option<u64>,
     ) -> Result<Vec<Event>, DatastoreError> {
-        self.get_events_inner(conn, bucket_id, starttime_opt, endtime_opt, limit_opt, true)
+        self.get_events_inner(
+            conn,
+            bucket_id,
+            starttime_opt,
+            endtime_opt,
+            limit_opt,
+            EventRead::Clipped,
+        )
     }
 
     pub fn get_events_unclipped(
@@ -1305,7 +1339,29 @@ impl DatastoreInstance {
             starttime_opt,
             endtime_opt,
             limit_opt,
-            false,
+            EventRead::Unclipped,
+        )
+    }
+
+    /// Like [`Self::get_events_unclipped`], but propagates a corrupt event row
+    /// instead of logging and skipping it. Recovery unions use this so a source
+    /// that reads only partially rolls back rather than committing truncated
+    /// history as `done`.
+    pub fn get_events_unclipped_strict(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        starttime_opt: Option<DateTime<Utc>>,
+        endtime_opt: Option<DateTime<Utc>>,
+        limit_opt: Option<u64>,
+    ) -> Result<Vec<Event>, DatastoreError> {
+        self.get_events_inner(
+            conn,
+            bucket_id,
+            starttime_opt,
+            endtime_opt,
+            limit_opt,
+            EventRead::UnclippedStrict,
         )
     }
 

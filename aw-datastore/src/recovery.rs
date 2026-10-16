@@ -120,7 +120,21 @@ pub fn recover_database(
         .run_to_completion(128, std::time::Duration::from_millis(10), None)
         .map_err(error)?;
     drop(source_conn);
-    let mut source_ds = DatastoreInstance::new(&source_snapshot, true).map_err(error)?;
+    // An uninspectable source (invalid bucket JSON, unsupported schema) is a
+    // content problem in the preserved original, not an operational failure:
+    // defer it for manual recovery instead of failing startup, even when the
+    // selected database is healthy. Operational write failures below still
+    // propagate. `database_rank` cannot catch this because it only inspects
+    // SQLite structure and event timestamps, not bucket JSON.
+    let mut source_ds = match DatastoreInstance::new(&source_snapshot, true) {
+        Ok(ds) => ds,
+        Err(e) => {
+            warn!(
+                "History recovery source {source:?} is uninspectable ({e:?}); leaving it untouched for manual recovery"
+            );
+            return Ok(RecoveryCounts::default());
+        }
+    };
     let source_tx = source_snapshot.unchecked_transaction().map_err(error)?;
     // Index migrations use their own BEGIN/COMMIT. Run them only after the
     // rollback backup, and before starting our atomic union transaction.
@@ -148,7 +162,7 @@ pub fn recover_database(
             .map_err(error)?;
         let mut seen: HashSet<_> = existing.iter().map(identity).collect::<Result<_, _>>()?;
         let events = source_ds
-            .get_events_unclipped(&source_tx, &name, None, None, None)
+            .get_events_unclipped_strict(&source_tx, &name, None, None, None)
             .map_err(error)?;
         let mut insert = Vec::new();
         for mut event in events {
@@ -549,5 +563,56 @@ mod tests {
             RecoveryCounts::default()
         );
         assert_eq!(count(&target), 3);
+    }
+
+    #[test]
+    fn partial_source_read_rolls_back_and_does_not_mark_done() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let source = root.path().join("source.db");
+        let backup = root.path().join("backup.db");
+        populate(&target, &[]);
+        populate(&source, &[("shared", vec![event(r#"{"a":1}"#)])]);
+        // One event row is unreadable. A tolerant reader would return the
+        // readable subset and commit `done`, silently truncating history; the
+        // strict recovery reader must instead fail so the union rolls back.
+        Connection::open(&source)
+            .unwrap()
+            .execute("UPDATE events SET data='not-json'", [])
+            .unwrap();
+        assert!(recover_database(&target, &source, &backup, "migration-corrupt").is_err());
+        // Rolled back: nothing inserted and no completion marker, so a later
+        // run retries the source instead of skipping it forever.
+        assert_eq!(count(&target), 0);
+        let conn = Connection::open(&target).unwrap();
+        let done: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM key_value WHERE key=?1",
+                ["windows_recovery:migration-corrupt"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(done, 0);
+    }
+
+    #[test]
+    fn uninspectable_source_is_deferred_not_fatal() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let source = root.path().join("source.db");
+        let backup = root.path().join("backup.db");
+        populate(&target, &[]);
+        populate(&source, &[("shared", vec![event(r#"{"a":1}"#)])]);
+        // Invalid bucket JSON passes database_rank (structure/timestamps only)
+        // but makes the preserved source uninspectable.
+        Connection::open(&source)
+            .unwrap()
+            .execute("UPDATE buckets SET data='not-json'", [])
+            .unwrap();
+        let result =
+            recover_database(&target, &source, &backup, "migration-uninspectable").unwrap();
+        assert_eq!(result, RecoveryCounts::default());
+        // The healthy target is untouched and startup is not blocked.
+        assert_eq!(count(&target), 0);
     }
 }

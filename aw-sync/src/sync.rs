@@ -1817,6 +1817,57 @@ mod peer_isolation_tests {
         }
         dest.close();
     }
+
+    #[test]
+    fn broken_peer_records_as_failed_when_record_peers() {
+        let dir = std::env::temp_dir().join(format!(
+            "aw-sync-failed-rec-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        let db = peer_db("dev-failed", "host-failed", dir.join("nope.db"));
+        let mut report = dummy_report();
+        let _err =
+            open_peer_datastores(&[db], &mut report, true).expect_err("missing file must be Err");
+        assert_eq!(report.peers.len(), 1, "one peer entry expected");
+        let peer = &report.peers[0];
+        assert_eq!(peer.device_id, "dev-failed");
+        assert!(
+            matches!(peer.outcome, crate::report::PeerOutcome::Failed { .. }),
+            "broken peer must record as Failed, got: {:?}",
+            peer.outcome
+        );
+    }
+
+    #[test]
+    fn version_incompatible_peer_records_as_skipped_when_record_peers() {
+        let dir = std::env::temp_dir().join(format!(
+            "aw-sync-version-skip-rec-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.db");
+        {
+            let conn = rusqlite::Connection::open(&old).unwrap();
+            conn.pragma_update(None, "user_version", aw_datastore::NEWEST_DB_VERSION + 1000)
+                .unwrap();
+        }
+        let db = peer_db("dev-old", "host-old", old.clone());
+        let mut report = dummy_report();
+        open_peer_datastores(&[db], &mut report, true)
+            .expect("version-skip only must be Ok (no hard failures)");
+        assert_eq!(report.peers.len(), 1, "one peer entry expected");
+        let peer = &report.peers[0];
+        assert_eq!(peer.device_id, "dev-old");
+        assert!(
+            matches!(peer.outcome, crate::report::PeerOutcome::Skipped { .. }),
+            "version-incompatible peer must record as Skipped, got: {:?}",
+            peer.outcome
+        );
+        if let crate::report::PeerOutcome::Skipped { reason } = &peer.outcome {
+            assert!(!reason.is_empty(), "skipped reason must not be empty");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 /// Regression guard for ActivityWatch/aw-server-rust#709.

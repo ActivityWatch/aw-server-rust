@@ -380,6 +380,9 @@ impl From<DatastoreError> for HttpErrorJson {
             DatastoreError::InternalError(msg) => {
                 HttpErrorJson::new(Status::InternalServerError, msg)
             }
+            DatastoreError::CorruptEvent(msg) => {
+                HttpErrorJson::new(Status::InternalServerError, msg)
+            }
             // When upgrade is disabled
             DatastoreError::Uninitialized(msg) => {
                 HttpErrorJson::new(Status::InternalServerError, msg)

@@ -23,18 +23,23 @@ impl Serialize for EventRows<'_> {
         let sql = format!(
             "SELECT id, starttime, endtime, data
              FROM {}
-             WHERE bucketrow = ?1 AND endtime >= 0 AND starttime <= ?2
+             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3
              ORDER BY starttime DESC, endtime ASC, id ASC",
             events_source(self.db_version, false)
         );
         let mut stmt = self.conn.prepare_cached(&sql).map_err(S::Error::custom)?;
         let mut rows = stmt
-            .query(rusqlite::params![self.bucket.bid.unwrap(), i64::MAX])
+            .query(rusqlite::params![
+                self.bucket.bid.unwrap(),
+                i64::MIN,
+                i64::MAX
+            ])
             .map_err(S::Error::custom)?;
         let mut seq = serializer.serialize_seq(None)?;
         while let Some(row) = rows.next().map_err(S::Error::custom)? {
             // Match get_events' default range, clipping and corrupt-row policy.
-            match crate::datastore::parse_event_row(row, Some((0, i64::MAX))) {
+            // i64::MIN so None starttime includes pre-epoch events, like get_events.
+            match crate::datastore::parse_event_row(row, Some((i64::MIN, i64::MAX))) {
                 Ok(event) => seq.serialize_element(&event)?,
                 Err(err) => warn!("Corrupt event in bucket {}: {}", self.bucket.id, err),
             }
@@ -316,7 +321,8 @@ pub(crate) fn write_events_csv(
 
     let starttime_filter_ns: i64 = match starttime_opt {
         Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-        None => 0,
+        // Match get_events: None means all events, including pre-epoch ones.
+        None => i64::MIN,
     };
     let endtime_filter_ns: i64 = match endtime_opt {
         Some(dt) => dt.timestamp_nanos_opt().unwrap(),

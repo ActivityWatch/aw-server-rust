@@ -21,6 +21,7 @@ mod datastore;
 mod export;
 mod legacy_import;
 mod privacy_filter;
+pub mod recovery;
 mod worker;
 
 pub use self::datastore::DatastoreInstance;
@@ -70,6 +71,9 @@ pub enum DatastoreError {
     NoSuchEvent(String, i64),
     MpscError,
     InternalError(String),
+    /// A stored event row could not be parsed. Content corruption in a file
+    /// we are reading, not an operational failure of the datastore itself.
+    CorruptEvent(String),
     // Errors specific to when migrate is disabled
     Uninitialized(String),
     OldDbVersion(String),

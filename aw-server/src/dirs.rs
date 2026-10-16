@@ -196,16 +196,87 @@ fn has_entries(dir: &Path) -> bool {
     !dir_entries(dir).is_empty()
 }
 
+/// Rank the exact database the caller will open, never an arbitrary `.db`.
+/// A successful empty query is distinct from an unreadable (e.g. encrypted)
+/// database. Without a key we must not rank the latter as empty history.
+fn database_rank(dir: &Path, filename: &str) -> rusqlite::Result<(Option<i64>, u64)> {
+    let conn = rusqlite::Connection::open_with_flags(
+        dir.join(filename),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if check != "ok" {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    conn.query_row("SELECT MAX(starttime), COUNT(*) FROM events", [], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })
+}
+
 /// The rule for which dir is in use, shared by every reader and writer.
 ///
-/// 1. The target holds a database: it is authoritative. The misplaced dir is
-///    left untouched (and logged), never merged into it.
-/// 2. Only the misplaced dir holds a database: it is the one in use (to be
+/// 1. Both dirs hold a database: inspect content and pick the one whose newest
+///    event is most recent (fall back: higher event count, then prefer target).
+///    Log the choice and both candidates' newest timestamps.
+/// 2. Only target holds a database: it is authoritative.
+/// 3. Only the misplaced dir holds a database: it is the one in use (to be
 ///    migrated as a whole, config included).
-/// 3. No database anywhere (e.g. aw-sync's config dir): whichever is
+/// 4. No database anywhere (e.g. aw-sync's config dir): whichever is
 ///    non-empty, preferring the target.
 pub fn choose_module_dir(target: &Path, misplaced: &Path) -> DirChoice {
-    if has_database(target) {
+    choose_module_dir_for_database(
+        target,
+        misplaced,
+        &db_filename(crate::config::get_profile()),
+    )
+}
+
+fn choose_module_dir_for_database(target: &Path, misplaced: &Path, filename: &str) -> DirChoice {
+    // A recorded selection stays authoritative even after user deletions make
+    // the archival Roaming history rank higher. All readers use this rule too.
+    let local_manifest = target.with_file_name(format!(
+        "{}{}local-wins",
+        target.file_name().unwrap().to_string_lossy(),
+        RECOVERY_PENDING_TAG
+    ));
+    if has_database(target)
+        && (local_manifest.is_file() || target.join(RECOVERY_SELECTED_FILE).is_file())
+    {
+        return DirChoice::Target;
+    }
+    if has_database(target) && has_database(misplaced) {
+        // Another profile's database does not make this profile unreadable.
+        // Metadata errors remain conservative, like content-inspection errors.
+        match (
+            target.join(filename).try_exists(),
+            misplaced.join(filename).try_exists(),
+        ) {
+            (Ok(false), Ok(true)) => return DirChoice::Misplaced,
+            (Ok(true), Ok(false)) | (Ok(false), Ok(false)) => return DirChoice::Target,
+            (Ok(true), Ok(true)) => {}
+            (t, m) => {
+                warn!("Cannot locate {filename} in {target:?} and {misplaced:?}: target={t:?}, misplaced={m:?}; keeping Local");
+                return DirChoice::Target;
+            }
+        }
+        let target_rank = database_rank(target, filename);
+        let misplaced_rank = database_rank(misplaced, filename);
+        match (target_rank, misplaced_rank) {
+            (Ok(t), Ok(m)) => {
+                let choice = if m > t {
+                    DirChoice::Misplaced
+                } else {
+                    DirChoice::Target
+                };
+                info!("choose_module_dir: {filename}: target rank={t:?}, misplaced rank={m:?}, choice={choice:?}");
+                choice
+            }
+            (t, m) => {
+                warn!("Cannot compare {filename} in {target:?} and {misplaced:?}: target={t:?}, misplaced={m:?}; keeping Local, not treating unreadable history as empty");
+                DirChoice::Target
+            }
+        }
+    } else if has_database(target) {
         DirChoice::Target
     } else if has_database(misplaced) {
         DirChoice::Misplaced
@@ -219,6 +290,8 @@ pub fn choose_module_dir(target: &Path, misplaced: &Path) -> DirChoice {
 const MIGRATING_TAG: &str = ".migrating-";
 const MIGRATED_TAG: &str = ".migrated-";
 const PRE_MIGRATION_TAG: &str = ".pre-migration-";
+const RECOVERY_PENDING_TAG: &str = ".recovery-pending-";
+const RECOVERY_SELECTED_FILE: &str = ".windows-recovery-selected";
 
 /// Per-process memo of [`resolve_or_migrate`] (target → dir in use), so the
 /// several `get_*_dir` calls during startup decide (and log) once.
@@ -235,7 +308,26 @@ static MIGRATED_DEFAULT_DATABASE: std::sync::atomic::AtomicBool =
 /// looked in the wrong directory and so never ran against the real Python
 /// aw-server database. aw-server uses this to run that import once.
 pub fn migrated_v0140_default_database() -> bool {
-    MIGRATED_DEFAULT_DATABASE.load(std::sync::atomic::Ordering::SeqCst)
+    if MIGRATED_DEFAULT_DATABASE.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    // Tauri's pre-worker import guard calls this too. The process flag alone
+    // loses the obligation on a restart after migration but before import.
+    get_data_dir_for("default").ok().is_some_and(|dir| {
+        let path = dir.join(db_filename("default"));
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT value FROM key_value WHERE key='windows_python_recovery'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+            })
+            .as_deref()
+            == Some("pending")
+    })
 }
 
 #[cfg(not(target_os = "android"))]
@@ -261,7 +353,18 @@ pub struct MigrationOutcome {
     pub migrated_database: bool,
 }
 
+/// Exact post-migration paths whose databases still need to be unioned.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct RecoverySources {
+    chosen_database: PathBuf,
+    local_backup: PathBuf,
+    roaming_backup: PathBuf,
+    #[serde(default)]
+    roaming_original: Option<PathBuf>,
+}
+
 type CopyFn<'a> = dyn Fn(&Path, &Path) -> std::io::Result<u64> + 'a;
+type RenameFn<'a> = dyn Fn(&Path, &Path) -> std::io::Result<()> + 'a;
 
 /// Recover a module dir that v0.14.0 wrote to the wrong place (Windows:
 /// Roaming `%APPDATA%` instead of `%LOCALAPPDATA%`, see #562).
@@ -273,6 +376,21 @@ type CopyFn<'a> = dyn Fn(&Path, &Path) -> std::io::Result<u64> + 'a;
 pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) -> MigrationOutcome {
     match choose_module_dir(target, misplaced) {
         DirChoice::Target => {
+            // A promoted target already carries the recovery request that
+            // covered its Roaming source; a restart after a failed archive
+            // rename must not union that still-live source a second time.
+            if has_database(target)
+                && has_database(misplaced)
+                && !target.join(RECOVERY_SELECTED_FILE).is_file()
+            {
+                // Local won selection, but Roaming can still contain unique
+                // history. Record the exact still-live source for union as well.
+                let recovery =
+                    record_local_wins_sources(target, misplaced, &|from, to| fs::rename(from, to));
+                if let Err(e) = recovery {
+                    warn!("Could not record history recovery sources: {e}");
+                }
+            }
             if has_entries(misplaced) {
                 let what = if has_database(misplaced) {
                     "a database (data recorded while running v0.14.0)"
@@ -291,18 +409,20 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
                 migrated_database: false,
             }
         }
+
         DirChoice::Misplaced => match MigrationLock::acquire(target).and_then(|_lock| {
             // Re-check under the lock: another process may have completed
             // the migration between our first look and taking the lock.
             if choose_module_dir(target, misplaced) == DirChoice::Target {
                 return Err(io_err("already migrated by another process".into()));
             }
-            migrate_dir(target, misplaced, copy)
-        }) {
-            Ok(()) => MigrationOutcome {
+            migrate_dir(target, misplaced, copy)?;
+            Ok(MigrationOutcome {
                 dir: target.to_path_buf(),
                 migrated_database: has_database(target),
-            },
+            })
+        }) {
+            Ok(outcome) => outcome,
             Err(e) => {
                 // Re-apply the shared rule rather than assume: normally this
                 // is still `misplaced`, but another process (e.g. a second
@@ -335,6 +455,14 @@ pub fn resolve_or_migrate(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) ->
 /// instead of falling back to the old dir while it is being copied.
 struct MigrationLock(#[allow(dead_code)] fs::File);
 
+#[cfg(test)]
+std::thread_local! {
+    // Only the test's waiter thread observes contention; parallel tests cannot
+    // send notifications for an unrelated migration lock.
+    static MIGRATION_LOCK_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl MigrationLock {
     fn path_for(target: &Path) -> PathBuf {
         let name = target
@@ -357,6 +485,12 @@ impl MigrationLock {
         match file.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                MIGRATION_LOCK_CONTENDED.with(|sender| {
+                    if let Some(sender) = sender.borrow_mut().take() {
+                        let _ = sender.send(());
+                    }
+                });
                 info!("Waiting for another process to finish migrating {target:?}");
                 file.lock()?;
             }
@@ -367,7 +501,11 @@ impl MigrationLock {
 }
 
 fn migration_stamp() -> String {
-    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+    format!(
+        "{}-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        uuid::Uuid::new_v4()
+    )
 }
 
 /// `dir` with `tag` and a unique suffix appended to its name, in the same parent.
@@ -440,24 +578,99 @@ fn copy_tree_verified(from: &Path, to: &Path, copy: &CopyFn<'_>) -> std::io::Res
 ///    another drive or a network share). Every file is compared byte for
 ///    byte with its source, and each plain SQLite database is opened with
 ///    its `-wal`/`-shm` in place and must pass `PRAGMA quick_check`.
-/// 2. If `target` exists and is not empty (it holds no database, or the
-///    caller would not be migrating), rename it aside to
-///    `<name>.pre-migration-<date>`.
+/// 2. If `target` holds a losing database, write an fsynced recovery manifest
+///    naming both future backup paths. If `target` is non-empty, rename it
+///    aside to `<name>.pre-migration-<date>`.
 /// 3. Rename the staging dir to `target`.
 /// 4. Rename `misplaced` to `<name>.migrated-<date>`: kept as a backup, and
 ///    no longer seen by [`choose_module_dir`].
 ///
-/// Any failure before step 4 undoes the earlier steps (removing only the
-/// staging copy this call made) and returns the error, leaving both dirs
-/// as they were. A failure in step 4 is only logged: the copy is complete
-/// and verified, and the leftover original is reported on later starts.
+/// Any failure before step 4 restores the two source dirs and removes the
+/// staging copy. A recovery manifest may remain, but it names the exact paths
+/// chosen before any original moved. A failure in step 4 is only logged: the
+/// copy is complete and verified, and the manifest still names the unrenamed
+/// Roaming original for restart-safe recovery.
 pub fn migrate_dir(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) -> std::io::Result<()> {
+    migrate_dir_with_rename(target, misplaced, copy, &|from, to| fs::rename(from, to))
+}
+
+fn write_recovery_sources(target: &Path, sources: &RecoverySources) -> std::io::Result<PathBuf> {
+    let path = tagged_sibling(target, RECOVERY_PENDING_TAG, &migration_stamp());
+    write_recovery_sources_at(&path, sources, &|from, to| fs::rename(from, to))?;
+    Ok(path)
+}
+
+/// Write `sources` to a `.tmp-` file and atomically rename it to `path`.
+/// Recovery ignores `.tmp-` files, so a failed or interrupted publish leaves
+/// no request that could be processed under another identity.
+fn write_recovery_sources_at(
+    path: &Path,
+    sources: &RecoverySources,
+    rename: &RenameFn<'_>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec_pretty(sources).map_err(|e| io_err(e.to_string()))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(e) = rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(e);
+    }
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
+    // Persist the directory entry too on platforms that support opening dirs.
+    #[cfg(unix)]
+    fs::File::open(path.parent().unwrap())?.sync_all()?;
+    Ok(())
+}
+
+/// Record a still-live Roaming history for union into a Local database that
+/// won selection. The request is published directly under its stable
+/// `local-wins` name: a uniquely stamped manifest left by a failed final
+/// rename would complete under a one-off ID, and the next start would union
+/// Roaming again under `local-wins`, resurrecting history deleted meanwhile.
+fn record_local_wins_sources(
+    target: &Path,
+    misplaced: &Path,
+    rename: &RenameFn<'_>,
+) -> std::io::Result<()> {
+    let _lock = MigrationLock::acquire(target)?;
+    let pending = target.with_file_name(format!(
+        "{}{}local-wins",
+        target.file_name().unwrap().to_string_lossy(),
+        RECOVERY_PENDING_TAG
+    ));
+    if pending.exists() {
+        return Ok(());
+    }
+    let sources = RecoverySources {
+        chosen_database: target.to_path_buf(),
+        local_backup: target.to_path_buf(),
+        roaming_backup: misplaced.to_path_buf(),
+        roaming_original: Some(misplaced.to_path_buf()),
+    };
+    write_recovery_sources_at(&pending, &sources, rename)
+}
+
+fn migrate_dir_with_rename(
+    target: &Path,
+    misplaced: &Path,
+    copy: &CopyFn<'_>,
+    rename: &RenameFn<'_>,
+) -> std::io::Result<()> {
     let parent = target
         .parent()
         .ok_or_else(|| io_err(format!("{target:?} has no parent")))?;
     fs::create_dir_all(parent)?;
     let stamp = migration_stamp();
     let staging = tagged_sibling(target, MIGRATING_TAG, &uuid::Uuid::new_v4().to_string());
+    let local_had_database = has_database(target);
 
     let verified = copy_tree_verified(misplaced, &staging, copy).and_then(|()| {
         for entry in dir_entries(&staging) {
@@ -473,38 +686,68 @@ pub fn migrate_dir(target: &Path, misplaced: &Path, copy: &CopyFn<'_>) -> std::i
         return Err(e);
     }
 
-    if has_database(target) {
-        // Someone else migrated (or created a database) meanwhile: never
-        // move a database aside.
+    if !local_had_database && has_database(target) {
+        // A concurrent process created a database while the copy was in
+        // progress. It was not part of our selection decision, so retry from
+        // scratch rather than moving a live database aside.
         let _ = fs::remove_dir_all(&staging);
         return Err(io_err(format!("{target:?} got a database meanwhile")));
+    }
+    let local_backup = tagged_sibling(target, PRE_MIGRATION_TAG, &stamp);
+    let roaming_backup = tagged_sibling(misplaced, MIGRATED_TAG, &stamp);
+    let sources = RecoverySources {
+        chosen_database: target.to_path_buf(),
+        local_backup: local_backup.clone(),
+        roaming_backup: roaming_backup.clone(),
+        roaming_original: Some(misplaced.to_path_buf()),
+    };
+    if let Err(e) = write_recovery_sources(target, &sources) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    // Publish the durable choice with staging. Do every fallible marker write
+    // before moving Local aside, so write failures leave both originals live.
+    let selected = (|| -> std::io::Result<()> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(staging.join(RECOVERY_SELECTED_FILE))?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        fs::File::open(&staging)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = selected {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
     }
     let aside = if target.exists() {
         if fs::remove_dir(target).is_ok() {
             None // was empty
         } else {
-            let aside = tagged_sibling(target, PRE_MIGRATION_TAG, &stamp);
-            if let Err(e) = fs::rename(target, &aside) {
+            let aside = local_backup;
+            if let Err(e) = rename(target, &aside) {
                 let _ = fs::remove_dir_all(&staging);
                 return Err(e);
             }
-            warn!("Moved existing {target:?} (no database) aside to {aside:?}");
+            warn!("Moved existing {target:?} aside to {aside:?}");
             Some(aside)
         }
     } else {
         None
     };
 
-    if let Err(e) = fs::rename(&staging, target) {
+    if let Err(e) = rename(&staging, target) {
         if let Some(aside) = &aside {
-            let _ = fs::rename(aside, target);
+            let _ = rename(aside, target);
         }
         let _ = fs::remove_dir_all(&staging);
         return Err(e);
     }
 
-    let backup = tagged_sibling(misplaced, MIGRATED_TAG, &stamp);
-    match fs::rename(misplaced, &backup) {
+    let backup = roaming_backup;
+    match rename(misplaced, &backup) {
         Ok(()) => info!(
             "Migrated {misplaced:?} (written by ActivityWatch v0.14.0) to {target:?}; \
              the original is kept at {backup:?}"
@@ -547,7 +790,35 @@ fn legacy_testing_artifacts_in_app_root(app_root: &Path) -> bool {
     };
     entries.flatten().any(|entry| {
         let path = entry.path();
-        path.is_dir() && dir_has_legacy_testing_file(&path)
+        path.is_dir() && (dir_has_legacy_testing_file(&path) || preserved_testing_history(&path))
+    })
+}
+
+/// A directory promotion can leave the legacy testing database only in the
+/// recorded Local backup. Keep selecting its legacy filename until recovery.
+fn preserved_testing_history(target: &Path) -> bool {
+    let Some(parent) = target.parent() else {
+        return false;
+    };
+    let prefix = format!(
+        "{}{}",
+        target.file_name().unwrap().to_string_lossy(),
+        RECOVERY_PENDING_TAG
+    );
+    fs::read_dir(parent).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&prefix) || name.contains(".tmp-") {
+                return false;
+            }
+            fs::read(entry.path())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<RecoverySources>(&bytes).ok())
+                .is_some_and(|sources| {
+                    sources.chosen_database == target
+                        && dir_has_legacy_testing_file(&sources.local_backup)
+                })
+        })
     })
 }
 
@@ -789,7 +1060,112 @@ fn get_data_dir_for(_profile: &str) -> Result<PathBuf, ()> {
 pub fn db_path(profile: &str) -> Result<PathBuf, ()> {
     let mut db_path = get_data_dir_for(profile)?;
     db_path.push(db_filename(profile));
+    recover_preserved_histories(&db_path, profile == "default")
+        .unwrap_or_else(|e| panic!("History recovery failed; originals are preserved: {e}"));
     Ok(db_path)
+}
+
+/// Shared by standalone and embedded servers, before opening datastore workers.
+/// Manifests remain on disk; the database transaction owns the completion marker.
+fn recover_preserved_histories(database: &Path, default_profile: bool) -> Result<(), String> {
+    let Some(target) = database.parent() else {
+        return Ok(());
+    };
+    let Some(parent) = target.parent() else {
+        return Ok(());
+    };
+    // Avoid taking a migration lock or running quick_check on every ordinary
+    // startup (including Android). Only recorded recovery requests need it.
+    let prefix = format!(
+        "{}{}",
+        target.file_name().unwrap().to_string_lossy(),
+        RECOVERY_PENDING_TAG
+    );
+    let manifests: Vec<_> = fs::read_dir(parent)
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with(&prefix) && !name.contains(".tmp-") && entry.path().is_file()
+        })
+        .collect();
+    if manifests.is_empty() {
+        return Ok(());
+    }
+    let _lock = MigrationLock::acquire(target).map_err(|e| e.to_string())?;
+    if database.is_file() {
+        if let Err(e) = database_rank(target, &database.file_name().unwrap().to_string_lossy()) {
+            warn!("Selected history {database:?} is corrupt, encrypted or unsupported ({e}); automatic recovery deferred, originals are untouched");
+            return Ok(());
+        }
+    }
+    for entry in manifests {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let sources: RecoverySources =
+            serde_json::from_slice(&fs::read(entry.path()).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        if sources.chosen_database != target {
+            continue;
+        }
+        let roaming = if sources.roaming_backup.exists() {
+            sources.roaming_backup
+        } else {
+            sources.roaming_original.unwrap_or(sources.roaming_backup)
+        };
+        for (kind, dir) in [("local", sources.local_backup), ("roaming", roaming)] {
+            let source = dir.join(database.file_name().unwrap());
+            if source == database || !source.is_file() {
+                continue;
+            }
+            if let Err(e) = database_rank(&dir, &database.file_name().unwrap().to_string_lossy()) {
+                warn!("History recovery source {source:?} is corrupt, encrypted or unsupported ({e}); leaving it untouched for manual recovery");
+                continue;
+            }
+            if !database.is_file() {
+                // A sibling profile may exist only in the displaced Local
+                // directory. Publish a complete WAL-aware snapshot, never an
+                // empty placeholder that would hide that saved history.
+                let snapshot = tagged_sibling(database, ".recovering-", &migration_stamp());
+                let conn = rusqlite::Connection::open_with_flags(
+                    &source,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map_err(|e| e.to_string())?;
+                aw_datastore::recovery::consistent_backup(&conn, &snapshot)?;
+                fs::rename(&snapshot, database).map_err(|e| e.to_string())?;
+                #[cfg(unix)]
+                fs::File::open(target)
+                    .and_then(|dir| dir.sync_all())
+                    .map_err(|e| e.to_string())?;
+            }
+            let backup = tagged_sibling(database, ".recovery-backup-", &migration_stamp());
+            let counts = aw_datastore::recovery::recover_database(
+                database,
+                &source,
+                &backup,
+                &format!("{id}:{kind}"),
+            )?;
+            info!("History recovery from {source:?}: {} buckets created, {} events inserted, {} duplicates skipped",
+                counts.buckets_created, counts.events_inserted, counts.duplicates_skipped);
+        }
+        // Persist before returning the path: a crash before the worker imports
+        // Python must not erase the recovery request (the old atomic flag did).
+        // A stamped manifest is published before promotion and may survive a
+        // failed rename. Only the marker published with staging proves that
+        // Roaming replaced Local; an abandoned request must not force import.
+        if default_profile
+            && id != format!("{prefix}local-wins")
+            && target.join(RECOVERY_SELECTED_FILE).is_file()
+            && database.is_file()
+        {
+            let conn = rusqlite::Connection::open(database).map_err(|e| e.to_string())?;
+            conn.execute("INSERT OR IGNORE INTO key_value(key, value, last_modified) VALUES ('windows_python_recovery', 'pending', 0)", [])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "android")]
@@ -1172,6 +1548,670 @@ fn test_local_database_is_authoritative() {
     assert_eq!(
         fs::read(misplaced.join("config.toml")).unwrap(),
         b"roaming-cfg"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_review_recovery_missing_testing_database() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let conn = rusqlite::Connection::open(target.join("sqlite-testing.db")).unwrap();
+    aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
+    conn.execute("INSERT INTO key_value(key, value, last_modified) VALUES ('saved-test-history', 'retained', 0)", []).unwrap();
+    drop(conn);
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    let path = target.join("sqlite-testing.db");
+    assert!(!path.exists());
+    assert!(
+        using_legacy_testing_root_in(
+            "testing",
+            &root.join("local"),
+            &root.join("config"),
+            &root.join("cache")
+        ),
+        "profile resolution must find the preserved legacy testing history"
+    );
+    recover_preserved_histories(&path, false).unwrap();
+    assert!(path.is_file(), "saved testing database must be recovered");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    aw_datastore::DatastoreInstance::new(&conn, false).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT value FROM key_value WHERE key='saved-test-history'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "retained"
+    );
+    drop(conn);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_review_recovery_retains_choice_after_failed_archive_rename() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    migrate_dir_with_rename(&target, &misplaced, &real_copy, &|from, to| {
+        if from == misplaced {
+            Err(io_err("archive locked".into()))
+        } else {
+            fs::rename(from, to)
+        }
+    })
+    .unwrap();
+    let conn = rusqlite::Connection::open(target.join("sqlite.db")).unwrap();
+    conn.execute("DELETE FROM events", []).unwrap();
+    drop(conn);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    assert!(!resolve_or_migrate(&target, &misplaced, &real_copy).migrated_database);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Promotion whose Roaming archive rename failed leaves Roaming live. Once
+/// recovery completed and the user deleted history, a restart must not record
+/// a fresh `local-wins` request that unions the still-live Roaming copy back.
+#[test]
+fn test_review_recovery_failed_archive_rename_does_not_resurrect_deleted_history() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_datastore_with_event(&target, 5);
+    plant_datastore_with_event(&misplaced, 10);
+    migrate_dir_with_rename(&target, &misplaced, &real_copy, &|from, to| {
+        if from == misplaced {
+            Err(io_err("archive locked".into()))
+        } else {
+            fs::rename(from, to)
+        }
+    })
+    .unwrap();
+    let path = target.join("sqlite.db");
+    recover_preserved_histories(&path, true).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DELETE FROM events", []).unwrap();
+    drop(conn);
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    recover_preserved_histories(&path, true).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "deleted history must not return from live Roaming"
+    );
+    drop(conn);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A failed final rename while recording a Local-wins request must leave no
+/// manifest recovery could process under a one-off ID. Otherwise the next
+/// start records `local-wins` afresh and unions Roaming a second time, after
+/// the user may have deleted the recovered history.
+#[test]
+fn test_review_recovery_failed_local_wins_publish_does_not_resurrect_deleted_history() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_datastore_with_event(&target, 20);
+    plant_datastore_with_event(&misplaced, 10);
+    let pending_tag = format!("{RECOVERY_PENDING_TAG}local-wins");
+    let failed = record_local_wins_sources(&target, &misplaced, &|from, to| {
+        if to.to_string_lossy().ends_with(&pending_tag) {
+            Err(io_err("manifest locked".into()))
+        } else {
+            fs::rename(from, to)
+        }
+    });
+    assert!(failed.is_err());
+    let processable: Vec<_> = fs::read_dir(target.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(RECOVERY_PENDING_TAG))
+        .collect();
+    assert!(
+        processable.is_empty(),
+        "a failed publish must leave no recovery request: {processable:?}"
+    );
+    let path = target.join("sqlite.db");
+    let count = || {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    recover_preserved_histories(&path, true).unwrap();
+    assert_eq!(count(), 1, "nothing is unioned without a published request");
+
+    // The retry publishes the stable request and unions Roaming exactly once.
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    recover_preserved_histories(&path, true).unwrap();
+    assert_eq!(count(), 2);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DELETE FROM events", []).unwrap();
+    drop(conn);
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    recover_preserved_histories(&path, true).unwrap();
+    assert_eq!(
+        count(),
+        0,
+        "deleted history must not return from live Roaming"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_review_recovery_readers_honor_local_wins() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 100);
+    plant_events_db(&misplaced, 50);
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    let conn = rusqlite::Connection::open(target.join("sqlite.db")).unwrap();
+    conn.execute("DELETE FROM events", []).unwrap();
+    drop(conn);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A real aw-datastore database in `dir/sqlite.db` holding one event in the
+/// "shared" bucket, `seconds` after a fixed epoch.
+#[cfg(test)]
+fn plant_datastore_with_event(dir: &Path, seconds: i64) {
+    use aw_models::{Bucket, Event};
+    use chrono::{Duration, TimeZone, Utc};
+    fs::create_dir_all(dir).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("sqlite.db")).unwrap();
+    let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
+    ds.create_bucket(
+        &conn,
+        Bucket {
+            bid: None,
+            id: "shared".into(),
+            _type: "test".into(),
+            client: "test".into(),
+            hostname: "test".into(),
+            created: None,
+            data: Default::default(),
+            metadata: Default::default(),
+            events: None,
+            last_updated: None,
+        },
+    )
+    .unwrap();
+    ds.insert_events(
+        &conn,
+        "shared",
+        vec![Event {
+            id: None,
+            timestamp: Utc.timestamp_opt(1700000000 + seconds, 0).unwrap(),
+            duration: Duration::seconds(1),
+            data: Default::default(),
+        }],
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_failed_promotion_does_not_request_python_import() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_datastore_with_event(&target, 10);
+    plant_datastore_with_event(&misplaced, 20);
+    assert!(
+        migrate_dir_with_rename(&target, &misplaced, &real_copy, &|from, to| {
+            if from == target {
+                Err(io_err("Local is still in use".into()))
+            } else {
+                fs::rename(from, to)
+            }
+        })
+        .is_err()
+    );
+    assert!(!target.join(RECOVERY_SELECTED_FILE).exists());
+    // The still-running Local server records newer history before restart.
+    let path = target.join("sqlite.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE events SET starttime=starttime+30000000000, endtime=endtime+30000000000",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    resolve_or_migrate(&target, &misplaced, &real_copy);
+    recover_preserved_histories(&path, true).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let requests: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM key_value WHERE key='windows_python_recovery'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        requests, 0,
+        "an abandoned manifest must not force Python import into Local"
+    );
+    drop(conn);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_shared_recovery_unions_both_selection_directions_and_restart() {
+    for roaming_newer in [false, true] {
+        let (root, target, misplaced) = migration_dirs();
+        for (dir, seconds) in [
+            (&target, if roaming_newer { 10 } else { 20 }),
+            (&misplaced, if roaming_newer { 20 } else { 10 }),
+        ] {
+            plant_datastore_with_event(dir, seconds);
+        }
+        let outcome = resolve_or_migrate(&target, &misplaced, &real_copy);
+        assert_eq!(outcome.dir, target);
+        assert_eq!(outcome.migrated_database, roaming_newer);
+        let path = target.join("sqlite.db");
+        recover_preserved_histories(&path, true).unwrap();
+        let manifests = || {
+            fs::read_dir(target.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .contains(RECOVERY_PENDING_TAG)
+                })
+                .count()
+        };
+        let before = manifests();
+        resolve_or_migrate(&target, &misplaced, &real_copy);
+        assert_eq!(
+            manifests(),
+            before,
+            "restart must not create another recovery request"
+        );
+        recover_preserved_histories(&path, true).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+        let state: Option<String> = conn
+            .query_row(
+                "SELECT value FROM key_value WHERE key='windows_python_recovery'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(
+            state.as_deref(),
+            if roaming_newer { Some("pending") } else { None },
+            "Local-wins union must not force Python history to be imported again"
+        );
+        conn.execute("INSERT OR IGNORE INTO key_value(key, value, last_modified) VALUES ('windows_python_recovery', 'done', 0)", []).unwrap();
+        conn.execute("DELETE FROM events", []).unwrap();
+        conn.execute(
+            "UPDATE key_value SET value='done' WHERE key='windows_python_recovery'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        resolve_or_migrate(&target, &misplaced, &real_copy);
+        recover_preserved_histories(&path, true).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "completed recovery must not resurrect deliberately deleted history"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM key_value WHERE key='windows_python_recovery'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "done"
+        );
+        drop(conn);
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Create a real SQLite database in `dir/sqlite.db` with one event at
+/// `starttime` (nanoseconds since epoch).  Uses the same schema as aw-datastore.
+#[cfg(test)]
+fn plant_events_db(dir: &Path, starttime: i64) {
+    fs::create_dir_all(dir).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("sqlite.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS buckets (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL);
+         CREATE TABLE IF NOT EXISTS events (
+             id INTEGER PRIMARY KEY,
+             bucketrow INTEGER NOT NULL,
+             starttime INTEGER NOT NULL,
+             endtime INTEGER NOT NULL,
+             datastr TEXT NOT NULL
+         );
+         INSERT OR IGNORE INTO buckets (name) VALUES ('test-bucket');",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO events (bucketrow, starttime, endtime, datastr)
+         VALUES ((SELECT id FROM buckets WHERE name='test-bucket'), ?1, ?1, '{}')",
+        rusqlite::params![starttime],
+    )
+    .unwrap();
+}
+
+/// Roaming has newer events than a stale Local database (row 2/3 from the
+/// issue): content-based selection must prefer Roaming even though Local
+/// exists.
+#[test]
+fn test_content_selection_prefers_newer_roaming_over_stale_local() {
+    let (root, target, misplaced) = migration_dirs();
+    // Stale Local: last event months ago.
+    plant_events_db(&target, 1_700_000_000_000_000_000i64);
+    // Recent Roaming: months of v0.14.0 beta data.
+    plant_events_db(&misplaced, 1_728_000_000_000_000_000i64);
+
+    assert_eq!(
+        choose_module_dir(&target, &misplaced),
+        DirChoice::Misplaced,
+        "Roaming has newer events; content-based selection must prefer it"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_equal_timestamps_prefers_more_events() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 100);
+    plant_events_db(&misplaced, 100);
+    plant_events_db(&misplaced, 50);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_ranks_the_requested_database() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 200);
+    fs::rename(target.join("sqlite.db"), target.join("sqlite-testing.db")).unwrap();
+    plant_events_db(&misplaced, 50);
+    fs::rename(
+        misplaced.join("sqlite.db"),
+        misplaced.join("sqlite-testing.db"),
+    )
+    .unwrap();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    assert_eq!(
+        choose_module_dir_for_database(&target, &misplaced, "sqlite.db"),
+        DirChoice::Misplaced
+    );
+    assert_eq!(
+        choose_module_dir_for_database(&target, &misplaced, "sqlite-testing.db"),
+        DirChoice::Target
+    );
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_missing_profile_database_is_not_unreadable() {
+    for filename in ["sqlite.db", "sqlite-testing.db"] {
+        let other_filename = if filename == "sqlite.db" {
+            "sqlite-testing.db"
+        } else {
+            "sqlite.db"
+        };
+        let (root, target, misplaced) = migration_dirs();
+        plant_events_db(&target, 200);
+        fs::rename(target.join("sqlite.db"), target.join(other_filename)).unwrap();
+        plant_events_db(&misplaced, 100);
+        if filename != "sqlite.db" {
+            fs::rename(misplaced.join("sqlite.db"), misplaced.join(filename)).unwrap();
+        }
+        assert_eq!(
+            choose_module_dir_for_database(&target, &misplaced, filename),
+            DirChoice::Misplaced,
+            "a different profile's Local database must not hide the requested Roaming database"
+        );
+        assert_eq!(
+            choose_module_dir_for_database(&misplaced, &target, filename),
+            DirChoice::Target,
+            "a different profile's Roaming database must not override the requested Local database"
+        );
+        assert!(
+            !target.join(filename).exists(),
+            "inspection must not create a database"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn test_content_selection_empty_and_corrupt_databases() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    for dir in [&target, &misplaced] {
+        rusqlite::Connection::open(dir.join("sqlite.db"))
+            .unwrap()
+            .execute("DELETE FROM events", [])
+            .unwrap();
+    }
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    plant_events_db(&misplaced, 100);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    fs::write(misplaced.join("sqlite.db"), b"corrupt Roaming").unwrap();
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_unreadable_local_is_not_empty() {
+    let (root, target, misplaced) = migration_dirs();
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("sqlite.db"),
+        b"encrypted or unreadable database",
+    )
+    .unwrap();
+    plant_events_db(&misplaced, 100);
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Target);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_reads_uncheckpointed_wal_events() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 10);
+    let writer = rusqlite::Connection::open(misplaced.join("sqlite.db")).unwrap();
+    writer
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+        .unwrap();
+    writer.execute("INSERT INTO events (bucketrow, starttime, endtime, datastr) VALUES (1, 100, 100, '{}')", []).unwrap();
+    assert!(misplaced.join("sqlite.db-wal").metadata().unwrap().len() > 0);
+    assert_eq!(
+        database_rank(&misplaced, "sqlite.db").unwrap(),
+        (Some(100), 2)
+    );
+    assert_eq!(choose_module_dir(&target, &misplaced), DirChoice::Misplaced);
+    drop(writer);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_occupied_target_waits_for_migration_lock() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let held = MigrationLock::acquire(&target).unwrap();
+    let (t2, m2) = (target.clone(), misplaced.clone());
+    // Observe the actual WouldBlock result, not merely thread startup. The
+    // holder keeps the OS lock until after this notification and the update.
+    let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        MIGRATION_LOCK_CONTENDED.with(|sender| *sender.borrow_mut() = Some(contended_tx));
+        resolve_or_migrate(&t2, &m2, &real_copy)
+    });
+    let contention = contended_rx.recv_timeout(std::time::Duration::from_secs(10));
+    // Simulate the lock holder changing the authoritative database.
+    plant_events_db(&target, 200);
+    drop(held);
+    let out = waiter.join().unwrap();
+    // Release the lock and join even on failure, rather than leak a waiter.
+    contention.expect("occupied-target selection must contend for the held lock");
+    assert_eq!(out.dir, target);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_content_selection_migrates_into_occupied_target_without_data_loss() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let copies = std::cell::Cell::new(0);
+    let out = resolve_or_migrate(&target, &misplaced, &|from, to| {
+        copies.set(copies.get() + 1);
+        fs::copy(from, to)
+    });
+    assert_eq!(out.dir, target);
+    assert!(out.migrated_database);
+    assert!(copies.get() > 0);
+    assert!(target.join("sqlite.db").exists());
+    assert!(sibling_with(&target, PRE_MIGRATION_TAG).is_some());
+    assert!(sibling_with(&misplaced, MIGRATED_TAG).is_some());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_newer_roaming_preserves_local_and_records_recovery_sources() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+
+    let out = resolve_or_migrate(&target, &misplaced, &real_copy);
+
+    assert_eq!(out.dir, target);
+    assert!(out.migrated_database);
+    assert_eq!(database_rank(&target, "sqlite.db").unwrap(), (Some(100), 1));
+    let local_backup = sibling_with(&target, PRE_MIGRATION_TAG).expect("Local preserved");
+    let roaming_backup =
+        sibling_with(&misplaced, MIGRATED_TAG).expect("Roaming original preserved");
+    let manifest_path =
+        sibling_with(&target, RECOVERY_PENDING_TAG).expect("recovery sources recorded");
+    let manifest: RecoverySources =
+        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest.chosen_database, target);
+    assert_eq!(manifest.local_backup, local_backup);
+    assert_eq!(manifest.roaming_backup, roaming_backup);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_occupied_migration_records_sources_before_target_rename() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let rename = |from: &Path, to: &Path| {
+        if from == target {
+            Err(std::io::Error::other("simulated target rename failure"))
+        } else {
+            fs::rename(from, to)
+        }
+    };
+
+    assert!(migrate_dir_with_rename(&target, &misplaced, &real_copy, &rename).is_err());
+
+    assert!(target.join("sqlite.db").exists());
+    assert!(misplaced.join("sqlite.db").exists());
+    assert!(sibling_with(&target, RECOVERY_PENDING_TAG).is_some());
+    assert!(sibling_with(&target, PRE_MIGRATION_TAG).is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_occupied_migration_restores_local_when_staging_rename_fails() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let rename = |from: &Path, to: &Path| {
+        if from
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().contains(MIGRATING_TAG))
+            && to == target
+        {
+            Err(std::io::Error::other("simulated staging rename failure"))
+        } else {
+            fs::rename(from, to)
+        }
+    };
+
+    assert!(migrate_dir_with_rename(&target, &misplaced, &real_copy, &rename).is_err());
+
+    assert_eq!(database_rank(&target, "sqlite.db").unwrap(), (Some(50), 1));
+    assert!(misplaced.join("sqlite.db").exists());
+    assert!(sibling_with(&target, RECOVERY_PENDING_TAG).is_some());
+    assert!(sibling_with(&target, PRE_MIGRATION_TAG).is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn test_occupied_migration_keeps_sources_when_roaming_backup_rename_fails() {
+    let (root, target, misplaced) = migration_dirs();
+    plant_events_db(&target, 50);
+    plant_events_db(&misplaced, 100);
+    let rename = |from: &Path, to: &Path| {
+        if from == misplaced {
+            Err(std::io::Error::other("simulated Roaming backup failure"))
+        } else {
+            fs::rename(from, to)
+        }
+    };
+
+    migrate_dir_with_rename(&target, &misplaced, &real_copy, &rename).unwrap();
+
+    assert_eq!(database_rank(&target, "sqlite.db").unwrap(), (Some(100), 1));
+    assert!(sibling_with(&target, PRE_MIGRATION_TAG).is_some());
+    assert!(misplaced.join("sqlite.db").exists());
+    assert!(sibling_with(&target, RECOVERY_PENDING_TAG).is_some());
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Local has newer events (normal upgrade path, pre-v0.14.0 install):
+/// content-based selection must keep Local.
+#[test]
+fn test_content_selection_keeps_newer_local() {
+    let (root, target, misplaced) = migration_dirs();
+    // Recent Local: ongoing pre-v0.14.0 Python data.
+    plant_events_db(&target, 1_728_000_000_000_000_000i64);
+    // Older Roaming: only a few days of v0.14.0 beta.
+    plant_events_db(&misplaced, 1_700_000_000_000_000_000i64);
+
+    assert_eq!(
+        choose_module_dir(&target, &misplaced),
+        DirChoice::Target,
+        "Local has newer events; must stay in use"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Equal newest timestamps: prefer Local (target) as the tiebreaker.
+#[test]
+fn test_content_selection_ties_prefer_target() {
+    let (root, target, misplaced) = migration_dirs();
+    let ts = 1_728_000_000_000_000_000i64;
+    plant_events_db(&target, ts);
+    plant_events_db(&misplaced, ts);
+
+    assert_eq!(
+        choose_module_dir(&target, &misplaced),
+        DirChoice::Target,
+        "Equal timestamps: Local (target) wins the tie"
     );
     let _ = fs::remove_dir_all(root);
 }

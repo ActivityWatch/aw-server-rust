@@ -525,6 +525,37 @@ mod import {
         }
 
         #[test]
+        fn datastore_remains_importable_after_failed_event_insertion() {
+            // Pins the recovery contract: a failed import returns Err without
+            // leaving the datastore in a state where a later import cannot
+            // succeed. Retry takes the bucket-already-exists merge path.
+            let tmp = tempfile::tempdir().unwrap();
+            let legacy_path = tmp.path().join("legacy.db");
+            write_fixture_legacy_db(&legacy_path, &[("2026-01-01 10:00:00+00:00", 5.0, "{}")]);
+            let (conn, mut ds) = new_datastore();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_event_insert BEFORE INSERT ON events
+                 BEGIN SELECT RAISE(ABORT, 'injected event write failure'); END;",
+            )
+            .unwrap();
+
+            let result = legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap()));
+            assert!(
+                matches!(result, Err(LegacyDatastoreImportError::Import(_))),
+                "expected a returned import error, got {result:?}"
+            );
+
+            conn.execute_batch("DROP TRIGGER fail_event_insert;")
+                .unwrap();
+            let retried = legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap()));
+            assert!(retried.is_ok(), "retry import failed: {retried:?}");
+            let events = ds
+                .get_events(&conn, "aw-watcher-afk_testhost", None, None, None)
+                .unwrap();
+            assert_eq!(events.len(), 1, "expected the event after retry");
+        }
+
+        #[test]
         fn legacy_dbpath_override_is_honored_over_default_location() {
             // Regression guard for #546: without an override, a custom
             // location (e.g. a testing fixture, or a non-default XDG data

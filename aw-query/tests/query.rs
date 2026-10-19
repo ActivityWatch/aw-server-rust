@@ -858,7 +858,7 @@ mod query_tests {
             id: None,
             timestamp: now,
             duration: Duration::seconds(10),
-            data: json_map! {"app": json!("Firefox")},
+            data: json_map! {"app": json!("Firefox"), "file": json!("base.rs")},
         }];
         ds.insert_events(BUCKET_ID, &base_events).unwrap();
 
@@ -894,7 +894,6 @@ mod query_tests {
             r#"
             events = query_bucket("{}");
             editor_events = flood(query_bucket("editor-testid"));
-            editor_events = filter_period_intersect(editor_events, events);
             events = merge_subwatcher_fields(events, editor_events, ["project", "file"]);
             return  events;"#,
             BUCKET_ID
@@ -906,7 +905,7 @@ mod query_tests {
         let event = events.first().unwrap();
         assert_eq!(event.duration, Duration::seconds(5));
         assert_eq!(event.data.get("project").unwrap(), &json!("gptme"));
-        assert_eq!(event.data.get("file").unwrap(), &json!("src/main.rs"));
+        assert_eq!(event.data.get("file").unwrap(), &json!("base.rs"));
         // language was not in keys, should not be present
         assert!(event.data.get("language").is_none());
         // original fields are preserved
@@ -918,13 +917,14 @@ mod query_tests {
         let code = format!(
             r#"
             events = query_bucket("{}");
-            editor_events = filter_period_intersect(query_bucket("editor-testid"), events);
-            return merge_subwatcher_fields(events, editor_events, ["project"], "sub_wins");"#,
+            editor_events = query_bucket("editor-testid");
+            return merge_subwatcher_fields(events, editor_events, ["file"], "sub_wins");"#,
             BUCKET_ID
         );
         let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
         let events: Vec<Event> = Vec::try_from(&result).unwrap();
-        assert_eq!(events[0].data.get("project").unwrap(), &json!("gptme"));
+        assert_eq!(events[0].data.get("file").unwrap(), &json!("src/main.rs"));
+        assert_eq!(events[1].data.get("file").unwrap(), &json!("base.rs"));
 
         // An invalid conflict policy is a query error, not a panic
         let code = format!(

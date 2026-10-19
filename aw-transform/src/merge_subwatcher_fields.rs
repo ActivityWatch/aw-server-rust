@@ -1,3 +1,6 @@
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap};
+
 use chrono::{DateTime, Utc};
 
 use aw_models::Event;
@@ -14,7 +17,8 @@ use aw_models::Event;
 /// This lets clients categorize by subwatcher fields (browser `url`/`$domain`;
 /// editor `project`/`file`/`language`) without per-watcher client code.
 ///
-/// * `subwatcher_events` should already be clipped via `filter_period_intersect`.
+/// * Pass the original `subwatcher_events`; boundaries are clipped here.
+///   `filter_period_intersect` can discard newer overlapping subwatcher events.
 /// * `conflict` is `"base_wins"` (existing base keys are never overwritten) or
 ///   `"sub_wins"` (subwatcher fields overwrite base fields).
 ///
@@ -43,17 +47,39 @@ pub fn merge_subwatcher_fields(
         .collect();
     sub_sorted.sort_by_key(|(e, _)| e.timestamp);
 
-    let mut result = Vec::with_capacity(base_events.len());
-    for base in base_events {
+    // Sweep in start order so expired subwatcher events are removed once.
+    // Keep per-base output slots to restore the caller's original order.
+    let mut bases: Vec<_> = base_events.into_iter().enumerate().collect();
+    bases.sort_by_key(|(_, base)| base.timestamp);
+    let mut by_base = vec![Vec::new(); bases.len()];
+    let mut next_sub = 0;
+    let mut active = BTreeSet::new();
+    let mut endings = BinaryHeap::new();
+    for (base_index, base) in bases {
         let base_start = base.timestamp;
         let base_end = base.calculate_endtime();
 
-        let mut overlapping: Vec<(&Event, DateTime<Utc>)> = Vec::new();
-        let mut boundaries = vec![base_start, base_end];
-        for &(sub, sub_end) in &sub_sorted {
-            if sub.timestamp >= base_end {
+        while next_sub < sub_sorted.len() && sub_sorted[next_sub].0.timestamp <= base_start {
+            active.insert(next_sub);
+            endings.push(Reverse((sub_sorted[next_sub].1, next_sub)));
+            next_sub += 1;
+        }
+        while let Some(&Reverse((end, index))) = endings.peek() {
+            if end > base_start {
                 break;
             }
+            endings.pop();
+            active.remove(&index);
+        }
+
+        let mut overlapping: Vec<(&Event, DateTime<Utc>)> = Vec::new();
+        let mut boundaries = vec![base_start, base_end];
+        let candidates = active.iter().map(|&i| &sub_sorted[i]).chain(
+            sub_sorted[next_sub..]
+                .iter()
+                .take_while(|(sub, _)| sub.timestamp < base_end),
+        );
+        for &(sub, sub_end) in candidates {
             if sub_end <= base_start {
                 continue;
             }
@@ -67,7 +93,7 @@ pub fn merge_subwatcher_fields(
         }
 
         if overlapping.is_empty() {
-            result.push(base);
+            by_base[base_index].push(base);
             continue;
         }
 
@@ -119,10 +145,10 @@ pub fn merge_subwatcher_fields(
                 _ => segments.push(enriched),
             }
         }
-        result.extend(segments);
+        by_base[base_index] = segments;
     }
 
-    Ok(result)
+    Ok(by_base.into_iter().flatten().collect())
 }
 
 #[cfg(test)]
@@ -286,6 +312,68 @@ mod tests {
 
         let r = merge_subwatcher_fields(base.clone(), vec![], &[], "base_wins").unwrap();
         assert_eq!(r[0].data, base[0].data);
+    }
+
+    #[test]
+    fn test_large_nonoverlapping_streams() {
+        let base: Vec<_> = (0..50_000)
+            .map(|i| ev(m(i), m(1), json!({"app": "vim"})))
+            .collect();
+        let sub: Vec<_> = (0..50_000)
+            .map(|i| ev(m(i), m(1), json!({"project": i})))
+            .collect();
+        let r = merge_subwatcher_fields(base, sub, &keys(&["project"]), "base_wins").unwrap();
+        assert_eq!(r.len(), 50_000);
+        for (i, event) in r.iter().enumerate() {
+            assert_eq!(event.data["project"], json!(i));
+            assert_eq!(event.duration, m(1));
+        }
+    }
+
+    #[test]
+    fn test_nested_overlap_clips_without_prefilter() {
+        let base = vec![ev(m(10), m(10), json!({"app": "vim"}))];
+        let sub = vec![
+            ev(m(0), m(30), json!({"project": "older"})),
+            ev(m(5), m(10), json!({"project": "newer"})),
+        ];
+        let r = merge_subwatcher_fields(base, sub, &keys(&["project"]), "base_wins").unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].data["project"], json!("newer"));
+        assert_eq!(r[1].data["project"], json!("older"));
+        assert_eq!(r[0].duration, m(5));
+        assert_eq!(r[1].duration, m(5));
+        assert_eq!(total(&r), m(10));
+    }
+
+    #[test]
+    fn test_unsorted_overlapping_bases_keep_input_order() {
+        let base = vec![
+            ev(m(20), m(10), json!({"app": "late"})),
+            ev(m(0), m(30), json!({"app": "long"})),
+            ev(m(10), m(10), json!({"app": "middle"})),
+        ];
+        let sub = vec![
+            ev(m(20), m(10), json!({"project": "c"})),
+            ev(m(0), m(10), json!({"project": "a"})),
+            ev(m(10), m(10), json!({"project": "b"})),
+        ];
+        let r = merge_subwatcher_fields(base, sub, &keys(&["project"]), "base_wins").unwrap();
+        let values: Vec<_> = r
+            .iter()
+            .map(|e| (e.data["app"].clone(), e.data["project"].clone()))
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                (json!("late"), json!("c")),
+                (json!("long"), json!("a")),
+                (json!("long"), json!("b")),
+                (json!("long"), json!("c")),
+                (json!("middle"), json!("b")),
+            ]
+        );
+        assert_eq!(total(&r), m(50));
     }
 
     #[test]

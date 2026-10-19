@@ -23,6 +23,7 @@ pub mod config;
 pub mod device_id;
 pub mod dirs;
 pub mod endpoints;
+pub mod hostname;
 pub mod logging;
 pub mod panic_guard;
 pub mod version;

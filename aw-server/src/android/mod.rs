@@ -271,6 +271,22 @@ pub mod android {
         });
     }
 
+    /// Report the Android device hostname from `/api/0/info` instead of the OS
+    /// hostname, which is typically `localhost` and breaks the webui
+    /// "this device" badge (ActivityWatch/aw-android#368).
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_setHostnameOverride(
+        env: JNIEnv,
+        _: JClass,
+        java_hostname: JString,
+    ) {
+        jni_guard_void("setHostnameOverride", || {
+            let hostname = &jstring_to_string(&env, java_hostname);
+            debug!("Setting reported hostname to {}", hostname);
+            crate::hostname::set_hostname_override(hostname);
+        });
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_getBuckets(
         env: JNIEnv,

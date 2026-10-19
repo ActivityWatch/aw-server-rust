@@ -22,6 +22,8 @@ bundled = ["aw-datastore/bundled"]
 encryption = ["aw-datastore/encryption"]
 # Enable SQLCipher encryption with vendored OpenSSL (fully self-contained)
 encryption-vendored = ["aw-datastore/encryption-vendored"]
+# Enable zstd compression for events data
+compression-zstd = ["aw-datastore/compression-zstd"]
 
 [dependencies]
 rocket = { version = "0.5.0", features = ["json"] }

@@ -15,6 +15,7 @@ use aw_models::Event;
 use rusqlite::params;
 use rusqlite::types::ToSql;
 
+use super::compression;
 use super::DatastoreError;
 
 fn _get_db_version(conn: &Connection) -> i32 {
@@ -57,7 +58,9 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
     if !has("table", "key_value") {
         return 3;
     }
-    if has("index", "events_bucketrow_endtime_starttime_index") {
+    if has("table", "compression_dict") {
+        7
+    } else if has("index", "events_bucketrow_endtime_starttime_index") {
         6
     } else if has("index", "events_bucketrow_starttime_endtime_index") {
         5
@@ -75,14 +78,17 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
  * 4: Added 'key_value' table for storing key - value pairs
  * 5: Replaced single-column events indexes with a composite index
  * 6: Added an endtime-first index for recent interval reads
+ * 7: Added 'compression_dict' table for zstd compression of event data
  */
-pub const NEWEST_DB_VERSION: i32 = 6;
+pub const NEWEST_DB_VERSION: i32 = 7;
 
 /// Oldest version a read-only open (aw-sync pulling a peer db) accepts.
 ///
-/// v4, v5 and v6 have identical tables and columns; v5 and v6 only changed
-/// indexes. A read-only connection cannot migrate, so queries adapt to the
-/// indexes the file has (see [`events_source`]) instead of rejecting it.
+/// v4 through v7 have identical `buckets` and `events` columns; v5 and v6
+/// only changed indexes, and v7 only added the `compression_dict` table. A
+/// read-only connection cannot migrate, so queries adapt to the indexes the
+/// file has (see [`events_source`]), and event data is decoded whether it is
+/// stored as TEXT or as a compressed BLOB, instead of rejecting the file.
 ///
 /// Rule for future migrations: if a migration changes tables or columns that
 /// reads depend on, bump this to the new version. If it only adds or drops
@@ -132,6 +138,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 6 {
         _migrate_v5_to_v6(conn);
+    }
+
+    if version < 7 {
+        _migrate_v6_to_v7(conn);
     }
 
     first_init
@@ -295,6 +305,40 @@ fn _migrate_v5_to_v6(conn: &Connection) {
     .expect("Failed to run v6 migration transaction");
 }
 
+fn _migrate_v6_to_v7(conn: &Connection) {
+    // Only adds the dictionary table. `events.data` keeps its declared type:
+    // SQLite stores a compressed BLOB in it as-is, and uncompressed rows stay
+    // TEXT. Dictionary training and compression of existing rows happen at
+    // startup in `ensure_compression`, once the database is large enough.
+    conn.execute_batch(
+        "BEGIN EXCLUSIVE TRANSACTION;
+         CREATE TABLE IF NOT EXISTS compression_dict (
+             id INTEGER PRIMARY KEY CHECK (id = 0),
+             dict BLOB NOT NULL
+         );
+         PRAGMA user_version = 7;
+         COMMIT;",
+    )
+    .expect("Failed to run v7 migration transaction");
+}
+
+/// Load the stored zstd compression dictionary, if one has been trained.
+fn _load_dictionary(conn: &Connection) -> Option<Vec<u8>> {
+    conn.query_row(
+        "SELECT dict FROM compression_dict WHERE id = 0",
+        [],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .ok()
+}
+
+/// Count of events in the database (used to decide whether to train a dictionary).
+#[cfg(feature = "compression-zstd")]
+fn _event_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .unwrap_or(0)
+}
+
 // Both indexes can bound only one of the two interval predicates. Use the
 // bucket's time span as a cheap selectivity estimate; this affects performance,
 // never which rows qualify. Limited queries retain their ordered starttime scan
@@ -350,6 +394,7 @@ pub struct DatastoreInstance {
     buckets_signature: (i64, i64, String),
     first_init: bool,
     pub db_version: i32,
+    compression: compression::CompressionContext,
 }
 
 /// Nanoseconds since the epoch for a time filter, clamped to `i64` for dates chrono can't
@@ -388,14 +433,17 @@ fn _datetime_from_nanos(ns: i64) -> DateTime<Utc> {
 ///
 /// When `clip` is set to `(starttime_filter_ns, endtime_filter_ns)`, the event is
 /// clamped to that query range.
+/// `data` may be stored as TEXT or as a (compressed) BLOB; a row that can't be
+/// decompressed is a row error, like corrupt JSON.
 pub(crate) fn parse_event_row(
     row: &rusqlite::Row,
     clip: Option<(i64, i64)>,
+    compression: &compression::CompressionContext,
 ) -> rusqlite::Result<Event> {
     let id = row.get(0)?;
     let mut starttime_ns: i64 = row.get(1)?;
     let mut endtime_ns: i64 = row.get(2)?;
-    let data_str: String = row.get(3)?;
+    let data_str = compression.read_data(row, 3)?;
 
     if let Some((starttime_filter_ns, endtime_filter_ns)) = clip {
         if starttime_ns < starttime_filter_ns {
@@ -597,9 +645,132 @@ impl DatastoreInstance {
             buckets_signature: (0, 0, String::new()),
             first_init,
             db_version,
+            compression: compression::CompressionContext::empty(),
         };
+        ds.ensure_compression(conn, migrate_enabled);
         ds.get_stored_buckets(conn)?;
         Ok(ds)
+    }
+
+    /// Load the compression dictionary, training and applying one if the
+    /// database is large enough and doesn't have one yet.
+    ///
+    /// Runs once at startup. Loading a dictionary always happens (so compressed
+    /// rows can be read); training/back-filling only happens when migration is
+    /// enabled (we must not write to a read-only/migration-disabled datastore).
+    fn ensure_compression(&mut self, conn: &Connection, migrate_enabled: bool) {
+        if self.reload_dictionary(conn) {
+            return;
+        }
+        #[cfg(feature = "compression-zstd")]
+        {
+            if migrate_enabled
+                && self.db_version >= 7
+                && _event_count(conn) >= compression::MIN_EVENTS_TO_TRAIN
+            {
+                if let Err(e) = self.train_and_backfill(conn) {
+                    warn!("Failed to set up event-data compression: {e:?}");
+                }
+            }
+        }
+        #[cfg(not(feature = "compression-zstd"))]
+        {
+            let _ = migrate_enabled;
+        }
+    }
+
+    /// Load the stored dictionary if none is loaded yet. Returns whether one is
+    /// loaded afterwards.
+    ///
+    /// A reader connection ([`crate::DatastoreMethod::FileReader`]) can open
+    /// before the writer trains a dictionary, so it calls this again before
+    /// reads; once loaded, it is a no-op.
+    pub fn reload_dictionary(&mut self, conn: &Connection) -> bool {
+        // The compression_dict table only exists from v7 onward.
+        if self.compression.has_dictionary() || self.db_version < 7 {
+            return self.compression.has_dictionary();
+        }
+        if let Some(dict) = _load_dictionary(conn) {
+            self.compression = compression::CompressionContext::from_dictionary(&dict);
+            return true;
+        }
+        false
+    }
+
+    /// Train a dictionary from existing events, store it, and recompress all
+    /// rows against it. Only called once, when a database first has enough data.
+    #[cfg(feature = "compression-zstd")]
+    fn train_and_backfill(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
+        let internal = |e: rusqlite::Error| DatastoreError::InternalError(e.to_string());
+
+        // Take the write lock before reading: another writer on the same file
+        // (an older server during history recovery) could otherwise commit an
+        // event change between the read and the rewrite, which the backfill
+        // would then overwrite with stale data. One transaction also keeps the
+        // backfill from fsyncing once per row under synchronous=FULL.
+        conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+            .map_err(internal)?;
+
+        let result = (|| -> Result<Option<compression::CompressionContext>, rusqlite::Error> {
+            // Load every row's data (raw, uncompressed at this point). Rows that
+            // can't be decoded are left untouched rather than failing the backfill.
+            let mut stmt = conn.prepare("SELECT id, data FROM events")?;
+            let rows: Vec<(i64, String)> = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, self.compression.read_data(row, 1).ok()))
+                })?
+                .filter_map(|row| match row {
+                    Ok((id, Some(json))) => Some(Ok((id, json))),
+                    Ok((_, None)) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            let sample_refs: Vec<&[u8]> = rows.iter().map(|(_, json)| json.as_bytes()).collect();
+            let dict = match compression::train_dictionary(&sample_refs) {
+                Some(dict) => dict,
+                None => return Ok(None), // not enough usable data; leave uncompressed
+            };
+            let codec = compression::CompressionContext::from_dictionary(&dict);
+            if !codec.has_dictionary() {
+                return Ok(None);
+            }
+
+            info!(
+                "Trained {}-byte compression dictionary, recompressing {} events",
+                dict.len(),
+                rows.len()
+            );
+
+            conn.execute(
+                "INSERT OR REPLACE INTO compression_dict (id, dict) VALUES (0, ?1)",
+                params![dict],
+            )?;
+            let mut update = conn.prepare("UPDATE events SET data = ?1 WHERE id = ?2")?;
+            for (id, json) in rows {
+                update.execute(params![codec.compress(json), id])?;
+            }
+            Ok(Some(codec))
+        })();
+
+        match result {
+            Ok(Some(codec)) => {
+                conn.execute_batch("COMMIT;").map_err(internal)?;
+                // Only switch to the dictionary once its rows are committed,
+                // so reads never expect compressed rows that were rolled back.
+                self.compression = codec;
+                Ok(())
+            }
+            Ok(None) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(internal(e))
+            }
+        }
     }
 
     /// Re-read the bucket list from the database. A reader instance
@@ -863,6 +1034,7 @@ impl DatastoreInstance {
         crate::export::write_export(
             conn,
             self.db_version,
+            &self.compression,
             &self.buckets_cache,
             bucket_id,
             writer,
@@ -888,6 +1060,7 @@ impl DatastoreInstance {
         crate::export::write_events_csv(
             conn,
             self.db_version,
+            &self.compression,
             &self.buckets_cache,
             bucket_id,
             start,
@@ -928,7 +1101,9 @@ impl DatastoreInstance {
                 }
             };
             let endtime_nanos = starttime_nanos + duration_nanos;
-            let data = serde_json::to_string(&event.data).unwrap();
+            let data = self
+                .compression
+                .compress(serde_json::to_string(&event.data).unwrap());
             let res = stmt.execute([
                 &bucket.bid.unwrap(),
                 &event.id as &dyn ToSql,
@@ -1096,7 +1271,9 @@ impl DatastoreInstance {
             }
         };
         let endtime_nanos = starttime_nanos + duration_nanos;
-        let data = serde_json::to_string(&event.data).unwrap();
+        let data = self
+            .compression
+            .compress(serde_json::to_string(&event.data).unwrap());
         match stmt.execute([
             &bucket.bid.unwrap(),
             &starttime_nanos,
@@ -1198,7 +1375,7 @@ impl DatastoreInstance {
         };
 
         let row = match stmt.query_row([&bucket.bid.unwrap(), &event_id], |row| {
-            parse_event_row(row, None)
+            parse_event_row(row, None, &self.compression)
         }) {
             Ok(rows) => rows,
             Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -1294,6 +1471,7 @@ impl DatastoreInstance {
             match parse_event_row(
                 row,
                 clip_to_query_range.then_some((starttime_filter_ns, endtime_filter_ns)),
+                &self.compression,
             ) {
                 Ok(event) => list.push(event),
                 Err(err) => {

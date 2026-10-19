@@ -21,7 +21,7 @@ dirs = "6"
 serde = "1.0"
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.30", features = ["chrono", "serde_json", "backup"] }
+rusqlite = { version = "0.37", features = ["chrono", "serde_json", "backup"] }
 mpsc_requests = "0.3"
 log = "0.4"
 zeroize = { version = "1", optional = true, features = ["alloc"] }
@@ -34,7 +34,7 @@ regex = "1"
 criterion = "0.5.1"
 tempfile = "3"
 # Used by migration tests to construct databases with old schema versions
-rusqlite = { version = "0.30", features = ["chrono", "serde_json"] }
+rusqlite = { version = "0.37", features = ["chrono", "serde_json"] }
 
 [[bench]]
 name = "interval_reads"

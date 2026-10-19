@@ -2,7 +2,6 @@ use rust_embed::RustEmbed;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use gethostname::gethostname;
 use rocket::fs::FileServer;
 use rocket::http::{ContentType, Status};
 use rocket::request::Request;
@@ -219,11 +218,8 @@ fn root_manifest(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
 
 #[get("/")]
 fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Info> {
-    #[allow(clippy::or_fun_call)]
-    let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
-
     Json(Info {
-        hostname,
+        hostname: crate::hostname::hostname_string(),
         version: crate::version::version_string(),
         testing: config.testing,
         profile: crate::config::get_profile().to_string(),

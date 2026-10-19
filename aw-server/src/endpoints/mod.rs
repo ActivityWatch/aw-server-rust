@@ -139,16 +139,12 @@ impl ServerState {
 
     /// Call after anything that creates, deletes, renames or imports buckets:
     /// drops cached query results (the bucket list changed what queries
-    /// resolve to) and refreshes the reader's bucket cache.
+    /// resolve to). The reader's bucket cache is refreshed lazily on the next
+    /// read via the `buckets_changed()` auto-reload in `handle_request`; an
+    /// explicit synchronous `reader.reload_buckets()` here would block the
+    /// endpoint handler thread waiting for the reader worker, which may be
+    /// processing a long-running query.
     pub fn bucket_list_changed(&self) {
-        // Reader first: clearing bumps the cache generation, so a query that
-        // read the old bucket list before this point cannot be stored, while
-        // one that starts after it already sees the new list.
-        if let Some(reader) = &self.reader {
-            if let Err(e) = reader.reload_buckets() {
-                warn!("Failed to reload the query reader's bucket list: {e:?}");
-            }
-        }
         self.query_cache.clear();
     }
 }

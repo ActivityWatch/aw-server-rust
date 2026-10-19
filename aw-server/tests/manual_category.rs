@@ -158,3 +158,28 @@ fn category_writes_invalidate_cached_queries_and_allow_cors_put() {
         .unwrap();
     assert_eq!(info["manual_event_category"], true);
 }
+
+#[test]
+fn category_capability_preserves_server_hostname_override() {
+    // This integration-test binary owns its process-local override. No other
+    // test here changes it or assumes the default hostname.
+    aw_server::hostname::set_hostname_override("manual_category_test_device");
+    let state = ServerState::new(
+        aw_datastore::Datastore::new_in_memory(false),
+        AssetResolver::new(None),
+        "test-device-id".into(),
+    );
+    let client = Client::untracked(endpoints::build_rocket(state, AWConfig::default())).unwrap();
+    let info = client
+        .get("/api/0/info")
+        .header(Header::new("Host", "127.0.0.1:5600"))
+        .dispatch()
+        .into_json::<Value>()
+        .unwrap();
+    assert_eq!(info["hostname"], "manual_category_test_device");
+    assert_eq!(info["manual_event_category"], true);
+    // Existing typed clients must still deserialize the extended response.
+    let typed: aw_models::Info = serde_json::from_value(info).unwrap();
+    assert_eq!(typed.hostname, "manual_category_test_device");
+    assert_eq!(typed.device_id, "test-device-id");
+}

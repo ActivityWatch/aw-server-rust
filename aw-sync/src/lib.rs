@@ -26,6 +26,10 @@ pub use accessmethod::AccessMethod;
 
 mod dirs;
 #[cfg(feature = "cli")]
+mod legacy_clean;
+#[cfg(feature = "cli")]
+pub use legacy_clean::run_clean_legacy;
+#[cfg(feature = "cli")]
 mod status;
 #[cfg(feature = "cli")]
 pub use status::run_status;

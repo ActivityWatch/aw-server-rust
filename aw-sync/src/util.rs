@@ -291,6 +291,64 @@ mod tests {
     }
 
     #[test]
+    fn select_remote_dbs_prefers_sync_db_over_test_db_in_same_folder() {
+        // When both sync.db and test.db are present in the same device folder
+        // (e.g. during an in-progress migration), sync.db must win regardless
+        // of file size. test.db is the legacy name; sync.db is authoritative.
+        let sync_db = super::RemoteDb {
+            hostname: "host-a".into(),
+            device_id: "aaa".into(),
+            path: std::path::PathBuf::from("/sync/host-a/aaa/sync.db"),
+            size: 8, // smaller — but it's the current name
+        };
+        let test_db = super::RemoteDb {
+            hostname: "host-a".into(),
+            device_id: "aaa".into(),
+            path: std::path::PathBuf::from("/sync/host-a/aaa/test.db"),
+            size: 64, // larger — but it's the legacy name
+        };
+        let selection = super::select_remote_dbs_detailed(vec![test_db.clone(), sync_db.clone()]);
+
+        assert_eq!(selection.selected.len(), 1, "should collapse to one entry");
+        assert_eq!(
+            selection.selected[0].path, sync_db.path,
+            "sync.db must win over test.db even when test.db is larger"
+        );
+        assert_eq!(selection.skipped.len(), 1);
+        assert_eq!(selection.skipped[0].db.path, test_db.path);
+    }
+
+    #[test]
+    fn select_remote_dbs_keeps_larger_db_across_folders() {
+        // The sync.db preference is folder-local: a small sync.db in one device
+        // folder must not shadow a larger test.db in the same device's other
+        // folder. Previously a comparator mixing folder and size had no total
+        // order, so discovery order could flip the winner (#800).
+        let small_sync = super::RemoteDb {
+            hostname: "host-a".into(),
+            device_id: "aaa".into(),
+            path: std::path::PathBuf::from("/sync/host-a/poco/aaa/sync.db"),
+            size: 8,
+        };
+        let large_test = super::RemoteDb {
+            hostname: "host-a-old".into(),
+            device_id: "aaa".into(),
+            path: std::path::PathBuf::from("/sync/host-a-old/POCO F8 Ultra/aaa/test.db"),
+            size: 64,
+        };
+        let selection =
+            super::select_remote_dbs_detailed(vec![small_sync.clone(), large_test.clone()]);
+
+        assert_eq!(selection.selected.len(), 1);
+        assert_eq!(
+            selection.selected[0].path, large_test.path,
+            "the larger test.db in a different folder must win"
+        );
+        assert_eq!(selection.skipped.len(), 1);
+        assert_eq!(selection.skipped[0].db.path, small_sync.path);
+    }
+
+    #[test]
     fn select_db_paths_keeps_largest_per_device_id() {
         let root = temp_sync_root();
         let large = write_remote_db(&root, "poco_f8_ultra", "device-1", 64);
@@ -524,6 +582,39 @@ pub(crate) fn select_remote_dbs_by_device_id(dbs: Vec<RemoteDb>) -> Vec<RemoteDb
     select_remote_dbs_detailed(dbs).selected
 }
 
+/// Index of the database to import among `(path, size)` candidates.
+///
+/// A folder can briefly hold both the legacy `test.db` and the current
+/// `sync.db` during the compat rename. Within one folder `sync.db` is
+/// authoritative, so the legacy `test.db` is dropped there *before* any
+/// cross-folder size comparison; across folders the original "largest wins"
+/// rule is preserved. Filtering first yields a stable total order instead of a
+/// comparator with cycles, and stops a same-folder `sync.db` from shadowing a
+/// larger peer in another folder. See ActivityWatch/aw-server-rust#800.
+pub(crate) fn select_best_candidate(candidates: &[(PathBuf, u64)]) -> Option<usize> {
+    let shadowed = |path: &Path| -> bool {
+        if path.file_name().and_then(|f| f.to_str()) != Some("test.db") {
+            return false;
+        }
+        let Some(dir) = path.parent() else {
+            return false;
+        };
+        candidates.iter().any(|(other, _)| {
+            other.parent() == Some(dir)
+                && other.file_name().and_then(|f| f.to_str()) == Some("sync.db")
+        })
+    };
+
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, (path, _))| !shadowed(path))
+        .max_by(|(_, (a_path, a_size)), (_, (b_path, b_size))| {
+            a_size.cmp(b_size).then_with(|| b_path.cmp(a_path))
+        })
+        .map(|(i, _)| i)
+}
+
 /// Same collapse as [`select_remote_dbs_by_device_id`], but keeps the losers
 /// so a `SyncReport` can record `PeerOutcome::Skipped` instead of a log line.
 pub(crate) fn select_remote_dbs_detailed(dbs: Vec<RemoteDb>) -> RemoteSelection {
@@ -535,10 +626,11 @@ pub(crate) fn select_remote_dbs_detailed(dbs: Vec<RemoteDb>) -> RemoteSelection 
     let mut selected = Vec::with_capacity(by_device.len());
     let mut skipped = Vec::new();
     for (device_id, mut group) in by_device {
-        group.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
-        let mut group = group.into_iter();
-        let winner = group.next().expect("device_id group is non-empty");
-        let losers: Vec<RemoteDb> = group.collect();
+        let candidates: Vec<(PathBuf, u64)> =
+            group.iter().map(|d| (d.path.clone(), d.size)).collect();
+        let winner_idx = select_best_candidate(&candidates).expect("device_id group is non-empty");
+        let winner = group.swap_remove(winner_idx);
+        let losers: Vec<RemoteDb> = group;
         if !losers.is_empty() {
             let skip_paths: Vec<String> = losers
                 .iter()

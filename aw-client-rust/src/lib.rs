@@ -320,6 +320,34 @@ impl AwClient {
         Self::send_success(self.client.get(url)).await?.json().await
     }
 
+    /// Like `get_events` but asks the server to return events with their
+    /// original stored timestamps instead of clipping them to the query
+    /// window. Servers older than the `unclipped` parameter ignore it and
+    /// return clipped events (same behavior as `get_events`).
+    pub async fn get_events_unclipped(
+        &self,
+        bucketname: &str,
+        start: Option<DateTime<Utc>>,
+        stop: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, reqwest::Error> {
+        let mut url = self.api_url(&["buckets", bucketname, "events"]);
+        if let Some(s) = start {
+            url.query_pairs_mut()
+                .append_pair("start", s.to_rfc3339().as_str());
+        };
+        if let Some(s) = stop {
+            url.query_pairs_mut()
+                .append_pair("end", s.to_rfc3339().as_str());
+        };
+        if let Some(s) = limit {
+            url.query_pairs_mut()
+                .append_pair("limit", s.to_string().as_str());
+        };
+        url.query_pairs_mut().append_pair("unclipped", "true");
+        Self::send_success(self.client.get(url)).await?.json().await
+    }
+
     /// Fetch a single event by id. Returns `Ok(None)` when the server responds 404.
     pub async fn get_event(
         &self,
@@ -555,10 +583,10 @@ mod tests {
 
     /// How long the mock waits for a live request before giving up.
     ///
-    /// Above every client deadline the tests pass to `wait_for_server`, so a client
-    /// that gave up first fails the test instead of leaving the mock (and therefore
-    /// `tokio::join!`) waiting forever.
-    const REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+    /// Strictly above every client deadline the tests pass to `wait_for_server`,
+    /// so a client that gave up first fails the test instead of leaving the mock
+    /// (and therefore `tokio::join!`) waiting forever.
+    const REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
     /// Answer the first connection that sends a request with `status_line` and `body`.
     ///

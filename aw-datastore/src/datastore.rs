@@ -703,50 +703,46 @@ impl DatastoreInstance {
     fn train_and_backfill(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
         let internal = |e: rusqlite::Error| DatastoreError::InternalError(e.to_string());
 
-        // Load every row's data (raw, uncompressed at this point). Rows that
-        // can't be decoded are left untouched rather than failing the backfill.
-        let mut stmt = conn
-            .prepare("SELECT id, data FROM events")
-            .map_err(internal)?;
-        let rows: Vec<(i64, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get(0)?, self.compression.read_data(row, 1).ok()))
-            })
-            .map_err(internal)?
-            .filter_map(|row| match row {
-                Ok((id, Some(json))) => Some(Ok((id, json))),
-                Ok((_, None)) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(internal)?;
-        drop(stmt);
-
-        let sample_refs: Vec<&[u8]> = rows.iter().map(|(_, json)| json.as_bytes()).collect();
-        let dict = match compression::train_dictionary(&sample_refs) {
-            Some(dict) => dict,
-            None => return Ok(()), // not enough usable data; leave uncompressed
-        };
-
-        info!(
-            "Trained {}-byte compression dictionary, recompressing {} events",
-            dict.len(),
-            rows.len()
-        );
-
-        let codec = compression::CompressionContext::from_dictionary(&dict);
-        if !codec.has_dictionary() {
-            return Ok(());
-        }
-
-        // Store the dictionary and recompress every row in a single transaction.
-        // Without it, each statement would auto-commit and, with
-        // synchronous=FULL, fsync — turning a one-time backfill into hundreds of
-        // thousands of disk syncs.
+        // Take the write lock before reading: another writer on the same file
+        // (an older server during history recovery) could otherwise commit an
+        // event change between the read and the rewrite, which the backfill
+        // would then overwrite with stale data. One transaction also keeps the
+        // backfill from fsyncing once per row under synchronous=FULL.
         conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
             .map_err(internal)?;
 
-        let result = (|| -> Result<(), rusqlite::Error> {
+        let result = (|| -> Result<Option<compression::CompressionContext>, rusqlite::Error> {
+            // Load every row's data (raw, uncompressed at this point). Rows that
+            // can't be decoded are left untouched rather than failing the backfill.
+            let mut stmt = conn.prepare("SELECT id, data FROM events")?;
+            let rows: Vec<(i64, String)> = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, self.compression.read_data(row, 1).ok()))
+                })?
+                .filter_map(|row| match row {
+                    Ok((id, Some(json))) => Some(Ok((id, json))),
+                    Ok((_, None)) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            let sample_refs: Vec<&[u8]> = rows.iter().map(|(_, json)| json.as_bytes()).collect();
+            let dict = match compression::train_dictionary(&sample_refs) {
+                Some(dict) => dict,
+                None => return Ok(None), // not enough usable data; leave uncompressed
+            };
+            let codec = compression::CompressionContext::from_dictionary(&dict);
+            if !codec.has_dictionary() {
+                return Ok(None);
+            }
+
+            info!(
+                "Trained {}-byte compression dictionary, recompressing {} events",
+                dict.len(),
+                rows.len()
+            );
+
             conn.execute(
                 "INSERT OR REPLACE INTO compression_dict (id, dict) VALUES (0, ?1)",
                 params![dict],
@@ -755,15 +751,19 @@ impl DatastoreInstance {
             for (id, json) in rows {
                 update.execute(params![codec.compress(json), id])?;
             }
-            Ok(())
+            Ok(Some(codec))
         })();
 
         match result {
-            Ok(()) => {
+            Ok(Some(codec)) => {
                 conn.execute_batch("COMMIT;").map_err(internal)?;
                 // Only switch to the dictionary once its rows are committed,
                 // so reads never expect compressed rows that were rolled back.
                 self.compression = codec;
+                Ok(())
+            }
+            Ok(None) => {
+                let _ = conn.execute_batch("ROLLBACK;");
                 Ok(())
             }
             Err(e) => {

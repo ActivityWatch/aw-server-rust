@@ -17,6 +17,7 @@ macro_rules! json_map {
     }};
 }
 
+mod compression;
 mod datastore;
 mod export;
 mod legacy_import;

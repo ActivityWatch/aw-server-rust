@@ -21,21 +21,55 @@ pub enum SingleInstanceError {
     LockDirCreation,
 }
 
+/// The running app's cache dir, as set by [`set_android_cache_dir`].
+#[cfg(target_os = "android")]
+static ANDROID_CACHE_DIR: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+/// Set the Android app's cache dir (`Context.getCacheDir()`), where lock files
+/// are kept. The app's private dirs depend on its package (debug builds add a
+/// `.debug` suffix) and on the Android user (work profiles are not user 0), so
+/// they can't be hardcoded.
+#[cfg(target_os = "android")]
+pub fn set_android_cache_dir(path: &std::path::Path) {
+    *ANDROID_CACHE_DIR.lock().unwrap() = Some(path.to_path_buf());
+}
+
+/// The configured cache dir, else `/data/data/<package>/cache` for the running
+/// package (the package name is the process name in `/proc/self/cmdline`).
+#[cfg(target_os = "android")]
+fn android_cache_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = ANDROID_CACHE_DIR.lock().unwrap().clone() {
+        return Some(dir);
+    }
+    let cmdline = std::fs::read("/proc/self/cmdline").ok()?;
+    let process = cmdline.split(|b| *b == 0).next()?;
+    let process = std::str::from_utf8(process).ok()?;
+    // Service processes are named "<package>:<process>".
+    let package = process.split(':').next()?;
+    if package.is_empty() || package.contains('/') {
+        return None;
+    }
+    Some(
+        std::path::Path::new("/data/data")
+            .join(package)
+            .join("cache"),
+    )
+}
+
 impl SingleInstance {
     pub fn new(client_name: &str) -> Result<SingleInstance, SingleInstanceError> {
         // On Android, use the app-specific cache directory with flock (Android is Unix-based).
         #[cfg(target_os = "android")]
         {
-            use std::path::PathBuf;
-
-            let cache_dir = PathBuf::from("/data/user/0/net.activitywatch.android/cache");
+            let cache_dir = android_cache_dir().ok_or(SingleInstanceError::LockDirCreation)?;
             let lock_dir = cache_dir.join("activitywatch").join("client_locks");
             std::fs::create_dir_all(&lock_dir).map_err(|_| SingleInstanceError::LockDirCreation)?;
 
             let lockfile = lock_dir.join(client_name);
             debug!("SingleInstance lockfile: {:?}", lockfile);
 
-            return match OpenOptions::new()
+            match OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
@@ -54,7 +88,7 @@ impl SingleInstance {
                     Err(e) => Err(SingleInstanceError::Io(e)),
                 },
                 Err(e) => Err(SingleInstanceError::Io(e)),
-            };
+            }
         }
 
         #[cfg(not(target_os = "android"))]

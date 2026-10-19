@@ -28,7 +28,7 @@ pub fn cors(config: &AWConfig) -> rocket_cors::Cors {
     }
 
     let allowed_origins = AllowedOrigins::some(&allowed_exact_origins, &allowed_regex_origins);
-    let allowed_methods = vec![Method::Get, Method::Post, Method::Delete]
+    let allowed_methods = vec![Method::Get, Method::Post, Method::Put, Method::Delete]
         .into_iter()
         .map(From::from)
         .collect();

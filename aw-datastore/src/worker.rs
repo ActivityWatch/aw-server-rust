@@ -831,17 +831,20 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
-            Command::MigrateTestBucketNames() => match ds.migrate_test_bucket_names(tx) {
-                Ok(count) => {
-                    // Renames buckets and moves events between them.
-                    self.last_heartbeat.clear();
-                    if count > 0 {
-                        self.commit = true;
+            Command::MigrateTestBucketNames() => {
+                // Renames buckets and moves events between them, possibly
+                // partway before an error.
+                self.last_heartbeat.clear();
+                match ds.migrate_test_bucket_names(tx) {
+                    Ok(count) => {
+                        if count > 0 {
+                            self.commit = true;
+                        }
+                        Ok(Response::Count(count as i64))
                     }
-                    Ok(Response::Count(count as i64))
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            },
+            }
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())

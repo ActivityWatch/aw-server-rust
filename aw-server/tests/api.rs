@@ -1391,7 +1391,17 @@ mod api_tests {
             })
         };
         // The first cache lookup happens after the request's pre-query flush.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while cache.stats().misses == 0 {
+            assert!(
+                !long_query.is_finished(),
+                "query finished without a cache lookup: {:?}",
+                long_query.join().unwrap()
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "query never reached the cache"
+            );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         // Acknowledged, but not committed: the reader cannot see it yet.
@@ -1409,6 +1419,13 @@ mod api_tests {
                 .status()
         });
         assert_eq!(status, Status::Ok);
+        // The write is invalidated by now. If the last day had not been looked
+        // up yet, its result is stored after the write: the case under test.
+        let lookups = cache.stats().misses;
+        assert!(
+            lookups < 3000,
+            "query finished before the write ({lookups} lookups); the race was not exercised"
+        );
         let (status, text) = long_query.join().unwrap();
         assert_eq!(status, Status::Ok, "{text}");
         let body: Value = serde_json::from_str(&text).unwrap();

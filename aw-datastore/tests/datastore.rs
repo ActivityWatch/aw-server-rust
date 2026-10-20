@@ -941,6 +941,47 @@ mod datastore_tests {
     }
 
     #[test]
+    fn setting_set_is_committed_before_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings-set.db");
+        let ds = Datastore::new(path.to_str().unwrap().to_string(), false);
+        ds.force_commit().unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+
+        for value in ["1", "0"] {
+            ds.set_key_value("settings.startOfWeek", value).unwrap();
+            let stored: String = conn
+                .query_row(
+                    "SELECT value FROM key_value WHERE key = 'settings.startOfWeek'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, value);
+        }
+    }
+
+    #[test]
+    fn setting_delete_is_committed_before_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings-delete.db");
+        let ds = Datastore::new(path.to_str().unwrap().to_string(), false);
+        ds.set_key_value_and_commit("settings.startOfWeek", "1")
+            .unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+
+        ds.delete_key_value("settings.startOfWeek").unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM key_value WHERE key = 'settings.startOfWeek'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn setting_is_committed_before_ack() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.db");

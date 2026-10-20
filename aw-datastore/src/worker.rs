@@ -777,7 +777,11 @@ impl DatastoreWorker {
                 Ok(result) => Ok(Response::KeyValues(result)),
                 Err(e) => Err(e),
             },
-            Command::SetKeyValue(key, data) => self.set_key_value(ds, tx, &key, &data),
+            Command::SetKeyValue(key, data) => {
+                self.set_key_value(ds, tx, &key, &data)?;
+                self.commit = true;
+                Ok(Response::Empty())
+            }
             Command::SetKeyValueAndCommit(key, data) => {
                 self.set_key_value(ds, tx, &key, &data)?;
                 self.commit = true;
@@ -792,6 +796,7 @@ impl DatastoreWorker {
                     if key == PRIVACY_FILTERS_KEY {
                         self.reload_privacy_engine(ds, tx);
                     }
+                    self.commit = true;
                     Ok(Response::Empty())
                 }
                 Err(e) => Err(e),

@@ -670,13 +670,18 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
-            Command::DeleteBucket(bucketname) => match ds.delete_bucket(tx, &bucketname) {
-                Ok(_) => {
-                    self.commit = true;
-                    Ok(Response::Empty())
+            Command::DeleteBucket(bucketname) => {
+                // A bucket re-created under this id must not merge into the
+                // deleted bucket's cached last event.
+                self.last_heartbeat.remove(&bucketname);
+                match ds.delete_bucket(tx, &bucketname) {
+                    Ok(_) => {
+                        self.commit = true;
+                        Ok(Response::Empty())
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            },
+            }
             Command::GetBucket(bucketname) => match ds.get_bucket(&bucketname) {
                 Ok(b) => Ok(Response::Bucket(b)),
                 Err(e) => Err(e),
@@ -761,6 +766,10 @@ impl DatastoreWorker {
                 }
             }
             Command::DeleteEventsById(bucketname, event_ids) => {
+                // The cached last event may be one of the deleted events; a
+                // heartbeat merging into it would update a missing row. Drop
+                // it even if the delete fails partway.
+                self.last_heartbeat.remove(&bucketname);
                 match ds.delete_events_by_id(tx, &bucketname, event_ids) {
                     Ok(()) => {
                         self.commit |= ds.get_bucket(&bucketname)?._type == STOPWATCH_BUCKET_TYPE;
@@ -800,13 +809,17 @@ impl DatastoreWorker {
                 self.reload_privacy_engine(ds, tx);
                 Ok(Response::Empty())
             }
-            Command::RenameBucket(old_id, new_id) => match ds.rename_bucket(tx, &old_id, &new_id) {
-                Ok(()) => {
-                    self.commit = true;
-                    Ok(Response::Empty())
+            Command::RenameBucket(old_id, new_id) => {
+                self.last_heartbeat.remove(&old_id);
+                self.last_heartbeat.remove(&new_id);
+                match ds.rename_bucket(tx, &old_id, &new_id) {
+                    Ok(()) => {
+                        self.commit = true;
+                        Ok(Response::Empty())
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            },
+            }
             Command::MigrateHostname(new_hostname) => {
                 match ds.migrate_hostname(tx, &new_hostname) {
                     Ok(count) => {
@@ -820,6 +833,8 @@ impl DatastoreWorker {
             }
             Command::MigrateTestBucketNames() => match ds.migrate_test_bucket_names(tx) {
                 Ok(count) => {
+                    // Renames buckets and moves events between them.
+                    self.last_heartbeat.clear();
                     if count > 0 {
                         self.commit = true;
                     }

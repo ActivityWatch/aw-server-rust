@@ -1311,6 +1311,126 @@ mod api_tests {
     }
 
     #[test]
+    fn query_cache_skips_period_written_during_request() {
+        use rocket::local::asynchronous::Client as AsyncClient;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.sqlite");
+        let server = setup_file_testserver(path.to_str().unwrap());
+        let cache = Arc::clone(
+            &server
+                .state::<endpoints::ServerState>()
+                .unwrap()
+                .query_cache,
+        );
+        let rt = Arc::new(
+            rocket::tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let client = Arc::new(rt.block_on(AsyncClient::untracked(server)).unwrap());
+        let host = Header::new("Host", "127.0.0.1:5600");
+        let query = |periods: &[String]| {
+            json!({
+                "timeperiods": periods,
+                "query": ["RETURN = query_bucket(\"racebucket\");"]
+            })
+            .to_string()
+        };
+
+        let status = rt.block_on(async {
+            client
+                .post("/api/0/buckets/racebucket")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(
+                    r#"{"id":"racebucket","type":"type","client":"client","hostname":"hostname"}"#,
+                )
+                .dispatch()
+                .await
+                .status()
+        });
+        assert_eq!(status, Status::Ok);
+
+        // Many finished days, so the request is still evaluating when the
+        // write below lands in its last day.
+        let start = chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z").unwrap();
+        let days: Vec<String> = (0..3000)
+            .map(|d| {
+                let day = start + chrono::Duration::days(d);
+                format!(
+                    "{}/{}",
+                    day.to_rfc3339(),
+                    (day + chrono::Duration::days(1)).to_rfc3339()
+                )
+            })
+            .collect();
+        let last_day = days.last().unwrap().clone();
+        let last_start = start + chrono::Duration::days(2999);
+
+        let long_query = {
+            let (rt, client, host, body) = (
+                Arc::clone(&rt),
+                Arc::clone(&client),
+                host.clone(),
+                query(&days),
+            );
+            std::thread::spawn(move || {
+                rt.block_on(async {
+                    let res = client
+                        .post("/api/0/query")
+                        .header(ContentType::JSON)
+                        .header(host)
+                        .body(body)
+                        .dispatch()
+                        .await;
+                    (res.status(), res.into_string().await.unwrap())
+                })
+            })
+        };
+        // The first cache lookup happens after the request's pre-query flush.
+        while cache.stats().misses == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // Acknowledged, but not committed: the reader cannot see it yet.
+        let status = rt.block_on(async {
+            client
+                .post("/api/0/buckets/racebucket/events")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(format!(
+                    r#"[{{"timestamp":"{}","duration":60,"data":{{"k":"late"}}}}]"#,
+                    (last_start + chrono::Duration::hours(12)).to_rfc3339()
+                ))
+                .dispatch()
+                .await
+                .status()
+        });
+        assert_eq!(status, Status::Ok);
+        let (status, text) = long_query.join().unwrap();
+        assert_eq!(status, Status::Ok, "{text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body.as_array().map(|a| a.len()), Some(3000));
+
+        // The long request must not have cached a result that misses the write.
+        let (status, text) = rt.block_on(async {
+            let res = client
+                .post("/api/0/query")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(query(&[last_day]))
+                .dispatch()
+                .await;
+            (res.status(), res.into_string().await.unwrap())
+        });
+        assert_eq!(status, Status::Ok, "{text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body[0][0]["data"]["k"], "late", "{body}");
+    }
+
+    #[test]
     fn test_query() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

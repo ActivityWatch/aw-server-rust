@@ -281,6 +281,23 @@ impl Command {
 const PRIVACY_FILTERS_KEY: &str = "settings.privacy_filters";
 const STOPWATCH_BUCKET_TYPE: &str = "general.stopwatch";
 
+/// Resync the in-memory caches with the database after a failed commit.
+///
+/// Requests in the batch updated the bucket cache (creates, deletes, renames,
+/// bucket bounds) and the last-heartbeat cache as they ran. A failed `COMMIT`
+/// is retried once on drop and otherwise rolled back, so the database may hold
+/// either outcome: re-read it instead of undoing the changes by hand.
+fn resync_after_failed_commit(
+    ds: &mut DatastoreInstance,
+    last_heartbeat: &mut HashMap<String, Option<Event>>,
+    conn: &Connection,
+) {
+    last_heartbeat.clear();
+    if let Err(err) = ds.reload_buckets(conn) {
+        error!("Failed to reload buckets after a failed commit: {err:?}");
+    }
+}
+
 fn _unwrap_empty_response(response: Response) -> Result<(), DatastoreError> {
     match response {
         Response::Empty() => Ok(()),
@@ -580,6 +597,7 @@ impl DatastoreWorker {
                     // connection is not enough: if that read fails, keep-on-error would
                     // preserve the uncommitted engine (empty after a rolled-back delete).
                     self.privacy_engine = privacy_engine_at_tx_start;
+                    resync_after_failed_commit(&mut ds, &mut self.last_heartbeat, &conn);
                     if let Some((sender, _)) = deferred_ack.take() {
                         sender.respond(Err(DatastoreError::InternalError(format!(
                             "Failed to commit datastore transaction: {err}"
@@ -1268,6 +1286,49 @@ impl Datastore {
             // Worker already gone means there is nothing left to close
             Err(e) => warn!("Error closing database: {e:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod resync_after_failed_commit_tests {
+    use std::collections::HashMap;
+
+    use aw_models::{Bucket, Event};
+    use rusqlite::Connection;
+
+    use super::resync_after_failed_commit;
+    use crate::{DatastoreError, DatastoreInstance};
+
+    fn bucket(id: &str) -> Bucket {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn drops_changes_the_database_does_not_hold() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        let tx = conn.transaction().unwrap();
+        ds.create_bucket(&tx, bucket("kept")).unwrap();
+        tx.commit().unwrap();
+
+        // A batch that does not reach the database, as after a failed commit.
+        let tx = conn.transaction().unwrap();
+        ds.create_bucket(&tx, bucket("rolled-back")).unwrap();
+        ds.delete_bucket(&tx, "kept").unwrap();
+        let mut last_heartbeat = HashMap::new();
+        last_heartbeat.insert("kept".to_string(), Some(Event::default()));
+        tx.rollback().unwrap();
+
+        resync_after_failed_commit(&mut ds, &mut last_heartbeat, &conn);
+        assert!(ds.get_bucket("kept").is_ok());
+        assert!(matches!(
+            ds.get_bucket("rolled-back"),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        assert!(last_heartbeat.is_empty());
     }
 }
 

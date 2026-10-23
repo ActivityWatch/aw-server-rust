@@ -901,6 +901,34 @@ impl DatastoreInstance {
         if bucket.device_id.is_empty() {
             bucket.device_id = "local".to_string();
         }
+        // Resolve against the transaction, not a potentially stale writer cache:
+        // an old/new watcher spelling must not split an existing history.
+        if self.buckets_changed(conn)? {
+            self.get_stored_buckets(conn)?;
+        }
+        match crate::bucket_resolution::resolve_bucket(
+            self.buckets_cache.values(),
+            &bucket.id,
+            Some(&bucket.device_id),
+        ) {
+            Ok(existing) => return Err(DatastoreError::BucketAlreadyExists(existing.id)),
+            Err(DatastoreError::NoSuchBucket(_)) => {}
+            Err(err) => return Err(err),
+        }
+        // While callers still address names globally, an exact peer name must
+        // not take over a spelling that already resolves to another history.
+        match self.get_bucket(&bucket.id) {
+            Ok(existing) if existing.device_id != bucket.device_id && existing.id != bucket.id => {
+                return Err(DatastoreError::AmbiguousBucket(
+                    bucket.id.clone(),
+                    vec![(existing.device_id, existing.id)],
+                ));
+            }
+            Err(DatastoreError::AmbiguousBucket(name, candidates)) => {
+                return Err(DatastoreError::AmbiguousBucket(name, candidates));
+            }
+            _ => {}
+        }
         // The v7 schema prepares for device-scoped names, but the public API
         // and cache still address buckets by name. Until the resolver exists,
         // reject every duplicate name before it can hide history or redirect writes.
@@ -975,7 +1003,7 @@ impl DatastoreInstance {
         // Delete bucket itself
         match conn.execute("DELETE FROM buckets WHERE id = ?1", [&bucket.bid]) {
             Ok(_) => {
-                self.buckets_cache.remove(bucket_id);
+                self.buckets_cache.remove(&bucket.id);
                 Ok(())
             }
             Err(err) => match err {
@@ -991,11 +1019,11 @@ impl DatastoreInstance {
     }
 
     pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        let cached_bucket = self.buckets_cache.get(bucket_id);
-        match cached_bucket {
-            Some(bucket) => Ok(bucket.clone()),
-            None => Err(DatastoreError::NoSuchBucket(bucket_id.to_string())),
+        // Keep ordinary watcher reads O(1) while the global-name guard holds.
+        if let Some(bucket) = self.buckets_cache.get(bucket_id) {
+            return Ok(bucket.clone());
         }
+        crate::bucket_resolution::resolve_bucket(self.buckets_cache.values(), bucket_id, None)
     }
 
     pub fn get_buckets(&self) -> HashMap<String, Bucket> {
@@ -1010,14 +1038,17 @@ impl DatastoreInstance {
         bucket_id: Option<&str>,
         writer: impl std::io::Write,
     ) -> Result<Option<String>, DatastoreError> {
+        let selected = bucket_id
+            .map(|id| self.get_bucket(id).map(|b| b.id))
+            .transpose()?;
         crate::export::write_export(
             conn,
             self.db_version,
             &self.buckets_cache,
-            bucket_id,
+            selected.as_deref(),
             writer,
         )?;
-        Ok(bucket_id.map(str::to_owned).or_else(|| {
+        Ok(selected.or_else(|| {
             (self.buckets_cache.len() == 1)
                 .then(|| self.buckets_cache.keys().next().unwrap().clone())
         }))
@@ -1035,11 +1066,12 @@ impl DatastoreInstance {
         limit: Option<u64>,
         writer: impl std::io::Write,
     ) -> Result<(), DatastoreError> {
+        let bucket = self.get_bucket(bucket_id)?;
         crate::export::write_events_csv(
             conn,
             self.db_version,
             &self.buckets_cache,
-            bucket_id,
+            &bucket.id,
             start,
             end,
             limit,
@@ -1277,7 +1309,8 @@ impl DatastoreInstance {
         pulsetime: f64,
         last_heartbeat: &mut HashMap<String, Option<Event>>,
     ) -> Result<Event, DatastoreError> {
-        self.get_bucket(bucket_id)?;
+        let bucket = self.get_bucket(bucket_id)?;
+        let bucket_id = bucket.id.as_str();
         if !last_heartbeat.contains_key(bucket_id) {
             last_heartbeat.insert(bucket_id.to_string(), None);
         }
@@ -1693,9 +1726,8 @@ impl DatastoreInstance {
         old_id: &str,
         new_id: &str,
     ) -> Result<(), DatastoreError> {
-        if !self.buckets_cache.contains_key(old_id) {
-            return Err(DatastoreError::NoSuchBucket(old_id.to_string()));
-        }
+        let source = self.get_bucket(old_id)?;
+        let old_id = source.id.as_str();
         if self.buckets_cache.contains_key(new_id) {
             return Err(DatastoreError::BucketAlreadyExists(new_id.to_string()));
         }

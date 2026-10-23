@@ -17,6 +17,7 @@ macro_rules! json_map {
     }};
 }
 
+mod bucket_resolution;
 mod datastore;
 mod export;
 mod legacy_import;
@@ -66,6 +67,8 @@ impl fmt::Debug for DatastoreMethod {
 #[derive(Debug, Clone)]
 pub enum DatastoreError {
     NoSuchBucket(String),
+    /// A legacy spelling selects more than one (device_id, bucket name).
+    AmbiguousBucket(String, Vec<(String, String)>),
     BucketAlreadyExists(String),
     NoSuchKey(String),
     NoSuchEvent(String, i64),

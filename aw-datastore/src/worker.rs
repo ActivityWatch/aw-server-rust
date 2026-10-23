@@ -268,7 +268,9 @@ impl Command {
             Command::GetBucket(id)
             | Command::GetEvent(id, _)
             | Command::GetEvents(id, ..)
-            | Command::GetEventCount(id, ..) => Some(id),
+            | Command::GetEventCount(id, ..)
+            | Command::ExportCsv(id, ..) => Some(id),
+            Command::Export(Some(id), _) => Some(id),
             _ => None,
         }
     }
@@ -610,7 +612,7 @@ impl DatastoreWorker {
 
     fn handle_request(
         &mut self,
-        request: Command,
+        mut request: Command,
         ds: &mut DatastoreInstance,
         tx: &Transaction,
     ) -> Result<Response, DatastoreError> {
@@ -619,13 +621,34 @@ impl DatastoreWorker {
             // the cache was loaded: before any read that depends on the
             // bucket list, compare a one-row signature of the buckets table
             // and reload when it differs. Cheap compared to the read itself.
-            let depends_on_buckets =
-                matches!(request, Command::GetBuckets()) || request.read_bucket_id().is_some();
+            let depends_on_buckets = matches!(request, Command::GetBuckets() | Command::Export(..))
+                || request.read_bucket_id().is_some();
             if depends_on_buckets && ds.buckets_changed(tx).unwrap_or(true) {
                 if let Err(e) = ds.reload_buckets(tx) {
                     warn!("Reader failed to reload bucket list: {e:?}");
                 }
             }
+        }
+        // Normalize aliases before privacy filtering, cache access or an early
+        // success for an entirely filtered batch. All operations use the real
+        // stored name; the schema guard still guarantees it is globally unique.
+        let target = match &mut request {
+            Command::DeleteBucket(id)
+            | Command::GetBucket(id)
+            | Command::InsertEvents(id, ..)
+            | Command::FilterEvents(id, ..)
+            | Command::Heartbeat(id, ..)
+            | Command::GetEvent(id, ..)
+            | Command::GetEvents(id, ..)
+            | Command::GetEventCount(id, ..)
+            | Command::DeleteEventsById(id, ..)
+            | Command::RenameBucket(id, ..)
+            | Command::ExportCsv(id, ..) => Some(id),
+            Command::Export(Some(id), _) => Some(id),
+            _ => None,
+        };
+        if let Some(id) = target {
+            *id = ds.get_bucket(id)?.id;
         }
         match request {
             Command::ReloadBuckets() => match ds.reload_buckets(tx) {

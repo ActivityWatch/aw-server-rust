@@ -64,7 +64,26 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
         }
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
-            Err(DatastoreError::BucketAlreadyExists(_)) => {
+            Err(DatastoreError::BucketAlreadyExists(canonical_id)) => {
+                let existing = datastore
+                    .get_bucket(&canonical_id)
+                    .map_err(HttpErrorJson::from)?;
+                let incoming_device = if bucket.device_id.is_empty() {
+                    "local"
+                } else {
+                    &bucket.device_id
+                };
+                if existing.device_id != incoming_device {
+                    return Err(HttpErrorJson::new(
+                        Status::Conflict,
+                        format!(
+                            "Cannot merge bucket '{}': device identity differs",
+                            bucket.id
+                        ),
+                    ));
+                }
+                // Retain the stored spelling when importing an old/new watcher alias.
+                bucket.id = existing.id;
                 // Bucket already exists — merge events, skipping duplicates
                 info!("Bucket '{}' already exists, merging events", bucket.id);
                 if let Some(events_vec) = imported {

@@ -29,6 +29,167 @@ mod api_tests {
     }
 
     #[test]
+    fn legacy_bucket_post_cannot_claim_peer_ownership() {
+        let client = Client::untracked(setup_testserver()).expect("valid instance");
+        for hostname in ["hostname", "!local"] {
+            let id = format!("ownership-{hostname}");
+            let response = client
+                .post(format!("/api/0/buckets/{id}"))
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(
+                    json!({
+                        "id": id, "type": "test", "client": "test", "hostname": hostname,
+                        "device_id": "peer-forged", "data": {"device_id": "peer-forged"}
+                    })
+                    .to_string(),
+                )
+                .dispatch();
+            assert_eq!(response.status(), Status::Ok);
+            let response = client
+                .get(format!("/api/0/buckets/{id}"))
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .dispatch();
+            assert_eq!(response.status(), Status::Ok);
+            let stored: Bucket = response.into_json().unwrap();
+            assert_eq!(stored.device_id, "local");
+        }
+    }
+
+    #[test]
+    fn alias_http_roundtrip_and_ambiguous_lookup_fail_closed() {
+        let server = setup_testserver();
+        let ds = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+        for (id, host, device) in [
+            (
+                "window_host_with_underscores",
+                "host_with_underscores",
+                "local",
+            ),
+            ("other_alpha", "alpha", "peer-a"),
+            ("other_beta", "beta", "peer-b"),
+        ] {
+            ds.create_bucket(
+                &serde_json::from_value(json!({"id": id, "hostname": host,
+                "device_id": device, "type": "test", "client": "test"}))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let client = Client::untracked(server).unwrap();
+        let host = Header::new("Host", "127.0.0.1:5600");
+        let response = client.post("/api/0/buckets/window").header(host.clone()).header(ContentType::JSON)
+            .body(json!({"id": "window", "hostname": "host_with_underscores", "type": "test", "client": "test"}).to_string()).dispatch();
+        assert_eq!(response.status(), Status::NotModified);
+        assert_eq!(ds.get_buckets().unwrap().len(), 3);
+        let response = client
+            .get("/api/0/buckets/other")
+            .header(host.clone())
+            .dispatch();
+        assert_eq!(response.status(), Status::Conflict);
+        let response = client
+            .delete("/api/0/buckets/other")
+            .header(host.clone())
+            .dispatch();
+        assert_eq!(response.status(), Status::Conflict);
+        assert_eq!(ds.get_buckets().unwrap().len(), 3);
+        let response = client
+            .post("/api/0/query?cache=false")
+            .header(host.clone())
+            .header(ContentType::JSON)
+            .body(
+                json!({"query": ["return query_bucket(\"other\");"],
+                "timeperiods": ["2026-01-01T00:00:00Z/2026-01-02T00:00:00Z"]})
+                .to_string(),
+            )
+            .dispatch();
+        assert_eq!(response.status(), Status::Conflict);
+        let response = client
+            .get("/api/0/buckets/window/export")
+            .header(host)
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        let export: Value = response.into_json().unwrap();
+        assert_eq!(
+            export["buckets"]["window_host_with_underscores"]["id"],
+            "window_host_with_underscores"
+        );
+    }
+
+    #[test]
+    fn import_retains_the_device_scoped_canonical_alias() {
+        let server = setup_testserver();
+        let ds = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+        for (id, hostname, device) in [
+            ("window_host", "host", "local"),
+            ("window_other", "other", "peer"),
+        ] {
+            ds.create_bucket(
+                &serde_json::from_value(json!({"id": id, "hostname": hostname,
+                "device_id": device, "type": "test", "client": "test"}))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(aw_datastore::DatastoreError::AmbiguousBucket(..))
+        ));
+        let client = Client::untracked(server).unwrap();
+        for _ in 0..2 {
+            let response = client.post("/api/0/import").header(Header::new("Host", "127.0.0.1:5600"))
+                .header(ContentType::JSON).body(json!({"buckets": {"window": {"id": "window", "hostname": "host",
+                    "device_id": "local", "type": "test", "client": "test", "events": [
+                        {"timestamp": "2026-01-01T00:00:00Z", "duration": 1, "data": {"app": "test"}}
+                    ]}}}).to_string()).dispatch();
+            assert_eq!(response.status(), Status::Ok);
+        }
+        assert_eq!(ds.get_event_count("window_host", None, None).unwrap(), 1);
+        assert_eq!(ds.get_event_count("window_other", None, None).unwrap(), 0);
+        assert_eq!(ds.get_buckets().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn import_does_not_merge_history_across_devices() {
+        let server = setup_testserver();
+        let ds = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+        ds.create_bucket(
+            &serde_json::from_value(json!({"id": "same", "hostname": "peer",
+            "device_id": "peer", "type": "test", "client": "test"}))
+            .unwrap(),
+        )
+        .unwrap();
+        let client = Client::untracked(server).unwrap();
+        let response = client
+            .post("/api/0/import")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .header(ContentType::JSON)
+            .body(
+                json!({"buckets": {"same": {"id": "same", "hostname": "local",
+                "device_id": "local", "type": "test", "client": "test", "events": [
+                    {"timestamp": "2026-01-01T00:00:00Z", "duration": 1, "data": {"app": "test"}}
+                ]}}})
+                .to_string(),
+            )
+            .dispatch();
+        assert_eq!(response.status(), Status::Conflict);
+        assert_eq!(ds.get_event_count("same", None, None).unwrap(), 0);
+        assert_eq!(ds.get_bucket("same").unwrap().device_id, "peer");
+    }
+
+    #[test]
     fn export_includes_pending_writes_and_preserves_headers_and_missing_bucket_errors() {
         let server = setup_testserver();
         let datastore = server

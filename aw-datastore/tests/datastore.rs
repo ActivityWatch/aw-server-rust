@@ -1934,10 +1934,9 @@ mod datastore_tests {
             .query_row("SELECT count(*) FROM buckets", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1, "stale cache must not allow an ambiguous SQL row");
-        assert!(matches!(
-            ds2.get_bucket(&bucket.id),
-            Err(DatastoreError::NoSuchBucket(_))
-        ));
+        // Create refreshes the cache before checking compatibility aliases.
+        // The rejected peer cannot hide the original writer's history.
+        assert_eq!(ds2.get_bucket(&bucket.id).unwrap().device_id, "device-A");
         let reopened = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
         assert_eq!(
             reopened.get_bucket(&bucket.id).unwrap().device_id,

@@ -56,6 +56,9 @@ pub fn bucket_new(
     if bucket.id != bucket_id {
         bucket.id = bucket_id.to_string();
     }
+    // This is the local watcher endpoint, not a peer-import path. Ownership
+    // comes from the server, never from client JSON or compatibility metadata.
+    bucket.device_id = "local".to_string();
     // Reject client-supplied hostnames containing whitespace. Such hostnames come from
     // misconfigured clients and produce buckets that are awkward to address and query.
     //

@@ -22,6 +22,7 @@ fn query_error_status(e: &QueryError) -> Status {
         // BucketQueryError also wraps datastore failures, which are server
         // errors rather than malformed client queries.
         QueryError::BucketQueryError(_) => Status::InternalServerError,
+        QueryError::AmbiguousBucket(_) => Status::Conflict,
         // The server gave up, not the client's fault: 503 tells it to retry
         // (with a shorter range), like the Python server's busy heartbeat.
         QueryError::TimeBudgetExceeded(_) => Status::ServiceUnavailable,

@@ -361,6 +361,12 @@ impl From<DatastoreError> for HttpErrorJson {
                 Status::NotFound,
                 format!("The requested bucket '{bucket_id}' does not exist"),
             ),
+            DatastoreError::AmbiguousBucket(bucket_id, candidates) => HttpErrorJson::new(
+                Status::Conflict,
+                format!(
+                    "Bucket '{bucket_id}' is ambiguous; select a device explicitly: {candidates:?}"
+                ),
+            ),
             DatastoreError::BucketAlreadyExists(bucket_id) => HttpErrorJson::new(
                 Status::NotModified,
                 format!("Bucket '{bucket_id}' already exists"),

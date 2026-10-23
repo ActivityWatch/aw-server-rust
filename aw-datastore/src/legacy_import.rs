@@ -279,18 +279,16 @@ mod import {
                         );
                     }
                 }
-                Err(DatastoreError::BucketAlreadyExists(_)) => {
+                Err(DatastoreError::BucketAlreadyExists(canonical_id)) => {
                     // A name collision is only an idempotent re-import if the
-                    // existing bucket belongs to the same device. Read SQLite,
-                    // not the instance cache, which may predate another writer.
-                    let device_id: String = new_conn
-                        .query_row(
-                            "SELECT device_id FROM buckets WHERE name = ?1",
-                            [&bucket.id],
-                            |row| row.get(0),
-                        )
-                        .map_err(|err| LegacyDatastoreImportError::SQLMapError(err.to_string()))?;
-                    if device_id != bucket.device_id {
+                    // existing bucket belongs to the same device.
+                    // create_bucket refreshed the cache against this connection;
+                    // retain its resolved spelling for a compatibility alias.
+                    let existing = new_ds.get_bucket(&canonical_id).map_err(|err| {
+                        LegacyDatastoreImportError::SQLMapError(format!("{err:?}"))
+                    })?;
+                    let device_id = &existing.device_id;
+                    if device_id != &bucket.device_id {
                         return Err(LegacyDatastoreImportError::SQLMapError(format!(
                             "Cannot import legacy bucket '{}': existing device_id '{}' differs from '{}'",
                             bucket.id, device_id, bucket.device_id
@@ -299,10 +297,11 @@ mod import {
                     // Idempotent re-import (e.g. `aw-server --import-legacy` run
                     // again): the bucket already exists from a prior import, so
                     // merge only events not already present instead of panicking.
-                    let new_events = dedup_against_existing(new_ds, new_conn, &bucket.id, events)?;
+                    let new_events =
+                        dedup_against_existing(new_ds, new_conn, &existing.id, events)?;
                     let merged = new_events.len();
                     if !new_events.is_empty() {
-                        if let Err(err) = new_ds.insert_events(new_conn, &bucket.id, new_events) {
+                        if let Err(err) = new_ds.insert_events(new_conn, &existing.id, new_events) {
                             panic!(
                                 "Failed to merge legacy events into bucket '{}': {:?}",
                                 bucket.id, err

@@ -321,3 +321,40 @@ pub fn device_import_json(
     state.bucket_list_changed();
     result
 }
+
+/// A grouped envelope carries stable source identities. Unlike the explicit
+/// single-device import route, it must never reinterpret a source `local`
+/// sentinel as ownership on the receiving server.
+#[post("/import", data = "<json_data>", format = "application/json")]
+pub fn devices_import_json(
+    state: &State<ServerState>,
+    json_data: ApiJson<super::device::DeviceBuckets>,
+) -> Result<(), HttpErrorJson> {
+    let data = json_data.into_inner();
+    for (device, group) in &data.devices {
+        if device.is_empty() || device == "local" {
+            return Err(HttpErrorJson::new(
+                Status::BadRequest,
+                "Grouped imports require explicit source device identities".into(),
+            ));
+        }
+        for (id, bucket) in &group.buckets {
+            if id != &bucket.id || bucket.device_id != *device {
+                return Err(HttpErrorJson::new(
+                    Status::BadRequest,
+                    format!("Bucket '{id}' does not match enclosing device '{device}'"),
+                ));
+            }
+        }
+    }
+    let result = (|| {
+        for (device, group) in data.devices {
+            import(state, group, Some(&device))?;
+        }
+        Ok(())
+    })();
+    // Validation is all-or-nothing; runtime failures may still leave earlier
+    // groups written, just as with the existing multi-bucket import.
+    state.bucket_list_changed();
+    result
+}

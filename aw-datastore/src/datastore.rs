@@ -1090,6 +1090,22 @@ impl DatastoreInstance {
         self.buckets_cache.insert(key, bucket);
     }
 
+    /// Lossless metadata view: bucket names are unique only within a device.
+    pub fn get_device_buckets(&self) -> HashMap<String, HashMap<String, Bucket>> {
+        let mut devices: HashMap<String, HashMap<String, Bucket>> = HashMap::new();
+        for bucket in self.buckets_cache.values().filter(|bucket| {
+            self.device_scope
+                .as_ref()
+                .is_none_or(|device| bucket.device_id == *device)
+        }) {
+            devices
+                .entry(bucket.device_id.clone())
+                .or_default()
+                .insert(bucket.id.clone(), bucket.clone());
+        }
+        devices
+    }
+
     pub fn get_buckets(&self) -> HashMap<String, Bucket> {
         self.buckets_cache
             .values()

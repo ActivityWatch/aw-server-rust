@@ -212,6 +212,7 @@ pub enum Response {
     Empty(),
     Bucket(Bucket),
     BucketMap(HashMap<String, Bucket>),
+    DeviceBuckets(HashMap<String, HashMap<String, Bucket>>),
     Event(Event),
     EventList(Vec<Event>),
     FilteredEvents(Vec<Option<Event>>),
@@ -224,6 +225,7 @@ pub enum Response {
 #[derive(Debug)]
 pub enum Command {
     Export(Option<String>, File),
+    ExportDevices(String, File),
     ExportCsv(
         String,
         Option<DateTime<Utc>>,
@@ -237,6 +239,7 @@ pub enum Command {
     GetBucket(String),
     GetBucketForDevice(String, String),
     GetBuckets(),
+    GetDeviceBuckets(),
     InsertEvents(String, Vec<Event>),
     FilterEvents(String, Vec<Event>),
     Heartbeat(String, Event, f64),
@@ -639,8 +642,13 @@ impl DatastoreWorker {
             // the cache was loaded: before any read that depends on the
             // bucket list, compare a one-row signature of the buckets table
             // and reload when it differs. Cheap compared to the read itself.
-            let depends_on_buckets = matches!(request, Command::GetBuckets() | Command::Export(..))
-                || request.read_bucket_id().is_some();
+            let depends_on_buckets = matches!(
+                request,
+                Command::GetBuckets()
+                    | Command::GetDeviceBuckets()
+                    | Command::Export(..)
+                    | Command::ExportDevices(..)
+            ) || request.read_bucket_id().is_some();
             if depends_on_buckets && ds.buckets_changed(tx).unwrap_or(true) {
                 if let Err(e) = ds.reload_buckets(tx) {
                     warn!("Reader failed to reload bucket list: {e:?}");
@@ -674,6 +682,28 @@ impl DatastoreWorker {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
             },
+            Command::ExportDevices(local_id, mut file) => {
+                let mut devices = ds.get_device_buckets();
+                let local = devices.remove("local").unwrap_or_default();
+                let group = devices.entry(local_id.clone()).or_default();
+                for (id, mut bucket) in local {
+                    if group.contains_key(&id) {
+                        return Err(DatastoreError::AmbiguousBucket(
+                            id.clone(),
+                            vec![("local".into(), id.clone()), (local_id.clone(), id)],
+                        ));
+                    }
+                    bucket.device_id = local_id.clone();
+                    group.insert(id, bucket);
+                }
+                let mut writer = BufWriter::new(&mut file);
+                crate::export::write_device_export(tx, ds.db_version, &devices, &mut writer)?;
+                writer.flush().map_err(|err| {
+                    DatastoreError::InternalError(format!("Failed to flush device export: {err}"))
+                })?;
+                drop(writer);
+                Ok(Response::Export(file, None))
+            }
             Command::Export(bucket_id, mut file) => {
                 let mut writer = BufWriter::new(&mut file);
                 let name = ds.write_export(tx, bucket_id.as_deref(), &mut writer)?;
@@ -730,6 +760,7 @@ impl DatastoreWorker {
                 ds.get_bucket_for_device(&device, &id).map(Response::Bucket)
             }
             Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets())),
+            Command::GetDeviceBuckets() => Ok(Response::DeviceBuckets(ds.get_device_buckets())),
             Command::InsertEvents(bucketname, events) => {
                 let filtered = self.privacy_engine.filter_events(&bucketname, events);
                 if filtered.is_empty() {
@@ -1110,6 +1141,16 @@ impl Datastore {
         }
     }
 
+    /// Return bucket metadata grouped by device without flattening identities.
+    pub fn get_device_buckets(
+        &self,
+    ) -> Result<HashMap<String, HashMap<String, Bucket>>, DatastoreError> {
+        match self.request(Command::GetDeviceBuckets())? {
+            Response::DeviceBuckets(devices) => Ok(devices),
+            _ => panic!("Invalid response"),
+        }
+    }
+
     /// Write a consistent export to an empty temporary file. The file is
     /// returned only after serialization and flushing succeed. Event rows are
     /// serialized individually, including this worker's uncommitted writes.
@@ -1120,6 +1161,19 @@ impl Datastore {
     ) -> Result<(File, Option<String>), DatastoreError> {
         match self.request(Command::Export(bucket_id.map(str::to_owned), file))? {
             Response::Export(file, name) => Ok((file, name)),
+            _ => panic!("Invalid response"),
+        }
+    }
+
+    /// Serialize all devices in one worker transaction, normalizing only the
+    /// exported local identity. Stored bucket names and owners are unchanged.
+    pub fn export_devices_to_file(
+        &self,
+        local_id: &str,
+        file: File,
+    ) -> Result<File, DatastoreError> {
+        match self.request(Command::ExportDevices(local_id.to_owned(), file))? {
+            Response::Export(file, _) => Ok(file),
             _ => panic!("Invalid response"),
         }
     }

@@ -176,6 +176,7 @@ mod util;
 mod apikey;
 mod bucket;
 mod cors;
+mod device;
 mod device_bucket;
 mod export;
 mod extension_cors;
@@ -320,6 +321,10 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
         .mount(
             "/api/0/devices",
             routes![
+                device::devices_get,
+                device::buckets_get,
+                device::export,
+                import::devices_import_json,
                 query::device_query,
                 import::device_import_json,
                 device_bucket::buckets_get,

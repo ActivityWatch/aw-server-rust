@@ -657,3 +657,182 @@ fn scoped_http_writes_refresh_a_real_wal_query_reader_and_survive_reopen() {
         (Status::Ok, "1".into())
     );
 }
+
+#[test]
+fn complete_device_catalogue_and_grouped_lists() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let (status, body) = request(&client, Get, "/api/0/devices", None);
+    assert_eq!(status, Status::Ok, "{body}");
+    let devices: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(devices.as_array().unwrap().len(), 1);
+    assert_eq!(devices[0]["id"], "server-uuid");
+    for (device, id, hostname) in [
+        ("local", "local_bucket", "historic-local-name"),
+        ("peer", "peer_bucket", "peer-host"),
+    ] {
+        let (status, body) = request(
+            &client,
+            Post,
+            &format!("/api/0/devices/{device}/buckets/{id}"),
+            Some(json!({"type":"test", "client":"test", "hostname":hostname})),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+    }
+    let (status, body) = request(&client, Get, "/api/0/devices", None);
+    assert_eq!(status, Status::Ok, "{body}");
+    let devices: Value = serde_json::from_str(&body).unwrap();
+    let devices = devices.as_array().unwrap();
+    assert_eq!(devices.len(), 2);
+    assert!(devices
+        .iter()
+        .any(|d| d["id"] == "peer" && d["hostname"] == "peer-host"));
+    assert!(!devices
+        .iter()
+        .any(|d| d["id"] == "historic-local-name" || d["id"] == "local"));
+    let (status, body) = request(&client, Get, "/api/0/devices/buckets", None);
+    assert_eq!(status, Status::Ok, "{body}");
+    let grouped: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(grouped["devices"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        grouped["devices"]["server-uuid"]["buckets"]["local_bucket"]["device_id"],
+        "server-uuid"
+    );
+    assert_eq!(
+        grouped["devices"]["peer"]["buckets"]["peer_bucket"]["device_id"],
+        "peer"
+    );
+    assert!(grouped["devices"]["peer"]["buckets"]
+        .get("local_bucket")
+        .is_none());
+}
+
+#[test]
+fn grouped_export_import_preserves_source_ownership_and_events() {
+    use rocket::http::Method::{Get, Post};
+    let source = client();
+    for (device, id) in [("local", "one"), ("peer", "two")] {
+        assert_eq!(
+            request(
+                &source,
+                Post,
+                &format!("/api/0/devices/{device}/buckets/{id}"),
+                Some(json!({"type":"test","client":"test","hostname":device}))
+            )
+            .0,
+            Status::Ok
+        );
+        assert_eq!(request(&source, Post, &format!("/api/0/devices/{device}/buckets/{id}/events"), Some(json!([{"timestamp":"2026-01-01T00:00:00Z","duration":3,"data":{"source":device}}]))).0, Status::Ok);
+    }
+    let (status, body) = request(&source, Get, "/api/0/devices/export", None);
+    assert_eq!(status, Status::Ok, "{body}");
+    let data: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        data["devices"]["server-uuid"]["buckets"]["one"]["device_id"],
+        "server-uuid"
+    );
+    assert_eq!(
+        data["devices"]["peer"]["buckets"]["two"]["events"][0]["data"]["source"],
+        "peer"
+    );
+    let destination = Client::untracked(endpoints::build_rocket(
+        ServerState::new(
+            Datastore::new_in_memory(false),
+            AssetResolver::new(None),
+            "destination".into(),
+        ),
+        AWConfig::default(),
+    ))
+    .unwrap();
+    for _ in 0..2 {
+        let (status, body) = request(
+            &destination,
+            Post,
+            "/api/0/devices/import",
+            Some(data.clone()),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+    }
+    for (device, id) in [("server-uuid", "one"), ("peer", "two")] {
+        assert_eq!(
+            request(
+                &destination,
+                Get,
+                &format!("/api/0/devices/{device}/buckets/{id}/events/count"),
+                None
+            ),
+            (Status::Ok, "1".into())
+        );
+        assert_eq!(
+            request(
+                &destination,
+                Get,
+                &format!("/api/0/devices/local/buckets/{id}"),
+                None
+            )
+            .0,
+            Status::NotFound
+        );
+    }
+    // Validate every enclosing identity before any group is written.
+    let invalid = json!({"devices":{"valid":{"buckets":{"untouched":{"id":"untouched","type":"test","client":"test","hostname":"h","device_id":"valid"}}},"wrong":{"buckets":{"bad":{"id":"bad","type":"test","client":"test","hostname":"h","device_id":"forged"}}}}});
+    assert_eq!(
+        request(&destination, Post, "/api/0/devices/import", Some(invalid)).0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(
+            &destination,
+            Get,
+            "/api/0/devices/valid/buckets/untouched",
+            None
+        )
+        .0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(
+            &destination,
+            Post,
+            "/api/0/devices/import",
+            Some(json!({"devices":{"local":{"buckets":{}}}}))
+        )
+        .0,
+        Status::BadRequest
+    );
+}
+
+#[test]
+fn grouped_device_routes_retain_api_key_protection() {
+    use rocket::http::Method::{Get, Post};
+    let mut config = AWConfig::default();
+    config.auth.api_key = Some("test-key".into());
+    let client = Client::untracked(endpoints::build_rocket(
+        ServerState::new(
+            Datastore::new_in_memory(false),
+            AssetResolver::new(None),
+            "server-uuid".into(),
+        ),
+        config,
+    ))
+    .unwrap();
+    for (method, path, body) in [
+        (Get, "/api/0/devices", None),
+        (Get, "/api/0/devices/buckets", None),
+        (Get, "/api/0/devices/export", None),
+        (Post, "/api/0/devices/import", Some(json!({"devices":{}}))),
+    ] {
+        assert_eq!(
+            request(&client, method, path, body.clone()).0,
+            Status::Unauthorized
+        );
+        let mut req = client
+            .req(method, path)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .header(Header::new("Authorization", "Bearer test-key"));
+        if let Some(body) = body {
+            req = req.header(ContentType::JSON).body(body.to_string());
+        }
+        assert_eq!(req.dispatch().status(), Status::Ok);
+    }
+}

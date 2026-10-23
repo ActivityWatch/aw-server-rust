@@ -136,6 +136,43 @@ pub(crate) fn write_export(
     .map_err(|err| DatastoreError::InternalError(format!("Failed to write export: {err}")))
 }
 
+/// Grouped export retains pair identity and streams events from one worker
+/// transaction, using the same per-bucket serializer as legacy exports.
+pub(crate) fn write_device_export(
+    conn: &Connection,
+    db_version: i32,
+    devices: &HashMap<String, HashMap<String, Bucket>>,
+    writer: impl Write,
+) -> Result<(), DatastoreError> {
+    #[derive(Serialize)]
+    struct Group<'a> {
+        buckets: ExportBuckets<'a>,
+    }
+    #[derive(Serialize)]
+    struct Export<'a> {
+        devices: HashMap<&'a str, Group<'a>>,
+    }
+    let devices = devices
+        .iter()
+        .map(|(device, buckets)| {
+            (
+                device.as_str(),
+                Group {
+                    buckets: ExportBuckets {
+                        conn,
+                        db_version,
+                        buckets,
+                        selected: None,
+                    },
+                },
+            )
+        })
+        .collect();
+    serde_json::to_writer(writer, &Export { devices }).map_err(|err| {
+        DatastoreError::InternalError(format!("Failed to write device export: {err}"))
+    })
+}
+
 fn csv_io_err(err: std::io::Error) -> DatastoreError {
     DatastoreError::InternalError(format!("Failed to write CSV export: {err}"))
 }

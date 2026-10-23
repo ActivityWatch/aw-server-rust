@@ -1859,15 +1859,15 @@ impl DatastoreInstance {
         // created `new_id` since this cache was loaded, and the (device_id, name)
         // constraint alone would let a differing device through.
         match conn.execute(
-            "UPDATE buckets SET name = ?1 WHERE name = ?2
+            "UPDATE buckets SET name = ?1 WHERE id = ?2
              AND NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
-            [new_id, old_id],
+            params![new_id, source.bid],
         ) {
             Ok(0) => {
                 let old_exists: bool = conn
                     .query_row(
-                        "SELECT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
-                        [old_id],
+                        "SELECT EXISTS (SELECT 1 FROM buckets WHERE id = ?1)",
+                        [source.bid],
                         |row| row.get(0),
                     )
                     .map_err(|err| {
@@ -2105,6 +2105,56 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
         assert_eq!(ids[0], ids[2]);
         assert_eq!(ids[1], ids[3]);
+    }
+
+    #[test]
+    fn scoped_rename_changes_only_the_resolved_bucket_row() {
+        for selected in ["local", "peer"] {
+            let conn = Connection::open_in_memory().unwrap();
+            let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+            // Prepare future same-name state without lifting either public guard.
+            for device in ["local", "peer"] {
+                conn.execute(
+                    "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                     VALUES ('window', ?1, 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')",
+                    [device],
+                )
+                .unwrap();
+                let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                    "id": "window", "device_id": device, "type": "test",
+                    "client": "test", "hostname": "host"
+                }))
+                .unwrap();
+                ds.cache_bucket(Bucket {
+                    bid: Some(conn.last_insert_rowid()),
+                    ..bucket
+                });
+            }
+            ds.buckets_signature = ds.read_buckets_signature(&conn).unwrap();
+            ds.device_scope = Some(selected.to_owned());
+            let source_bid = ds.get_bucket("window").unwrap().bid;
+            ds.rename_bucket(&conn, "window", "renamed").unwrap();
+            for device in ["local", "peer"] {
+                let expected = if device == selected {
+                    "renamed"
+                } else {
+                    "window"
+                };
+                let stored: String = conn
+                    .query_row(
+                        "SELECT name FROM buckets WHERE device_id = ?1",
+                        [device],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(stored, expected, "rename crossed device ownership");
+                assert_eq!(
+                    ds.get_bucket_for_device(device, expected).unwrap().id,
+                    expected
+                );
+            }
+            assert_eq!(ds.get_bucket("renamed").unwrap().bid, source_bid);
+        }
     }
 
     #[test]

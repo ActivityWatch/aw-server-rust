@@ -469,8 +469,8 @@ pub struct DatastoreInstance {
     // guard remains. Ownership is held by the pair-keyed authoritative cache.
     bucket_names: HashMap<String, (String, String)>,
     pub(crate) device_scope: Option<String>,
-    /// `(count, max id, names and hostnames)` when `buckets_cache` was
-    /// loaded; lets a reader detect creates, deletes, renames and alias repairs by another
+    /// `(count, max id, names, hostnames and devices)` when `buckets_cache` was
+    /// loaded; lets a reader detect creates, deletes, renames and identity repairs by another
     /// connection with one cheap query.
     buckets_signature: (i64, i64, String),
     first_init: bool,
@@ -736,27 +736,36 @@ impl DatastoreInstance {
         self.get_stored_buckets(conn)
     }
 
-    fn read_buckets_signature(conn: &Connection) -> Result<(i64, i64, String), DatastoreError> {
+    fn read_buckets_signature(
+        &self,
+        conn: &Connection,
+    ) -> Result<(i64, i64, String), DatastoreError> {
+        // Peer readers still support schemas predating device ownership.
+        let device = if self.db_version >= 7 {
+            "device_id"
+        } else {
+            "'local'"
+        };
         conn.query_row(
-            "SELECT count(*), coalesce(max(id), 0), \
-             coalesce(group_concat(hex(name) || ':' || hex(hostname), char(10)), '') \
-             FROM (SELECT id, name, hostname FROM buckets ORDER BY id)",
+            &format!("SELECT count(*), coalesce(max(id), 0), \
+             coalesce(group_concat(hex(name) || ':' || hex(hostname) || ':' || hex(device), char(10)), '') \
+             FROM (SELECT id, name, hostname, {device} AS device FROM buckets ORDER BY id)"),
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| DatastoreError::InternalError(format!("Failed to read bucket signature: {e}")))
     }
 
-    /// Whether buckets were created, deleted, renamed or had alias metadata repaired
+    /// Whether buckets were created, deleted, renamed or had identity metadata repaired
     /// since the cache was loaded (ids are AUTOINCREMENT, so a delete-and-recreate
-    /// changes `max(id)`; the name/hostname list catches renames and repairs).
+    /// changes `max(id)`; the name/hostname/device list catches renames and repairs).
     pub fn buckets_changed(&self, conn: &Connection) -> Result<bool, DatastoreError> {
-        Ok(Self::read_buckets_signature(conn)? != self.buckets_signature)
+        Ok(self.read_buckets_signature(conn)? != self.buckets_signature)
     }
 
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
         // Read before the list so a concurrent change lands in the next check.
-        let signature = Self::read_buckets_signature(conn)?;
+        let signature = self.read_buckets_signature(conn)?;
         // Read-only opens of peer DBs (aw-sync) may be at v4-v6, which pre-date the
         // device_id column. Use a literal 'local' for those; v7+ reads the real column.
         let device_id_expr = if self.db_version >= 7 {
@@ -2096,6 +2105,34 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
         assert_eq!(ids[0], ids[2]);
         assert_eq!(ids[1], ids[3]);
+    }
+
+    #[test]
+    fn bucket_signature_detects_device_ownership_repair() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "window", "device_id": "local", "type": "test",
+            "client": "test", "hostname": "host"
+        }))
+        .unwrap();
+        ds.create_bucket(&conn, bucket).unwrap();
+        ds.reload_buckets(&conn).unwrap();
+        assert!(!ds.buckets_changed(&conn).unwrap());
+        conn.execute(
+            "UPDATE buckets SET device_id = 'peer' WHERE name = 'window'",
+            [],
+        )
+        .unwrap();
+        assert!(ds.buckets_changed(&conn).unwrap());
+        ds.reload_buckets(&conn).unwrap();
+        assert!(ds.get_bucket_for_device("local", "window").is_err());
+        assert_eq!(
+            ds.get_bucket_for_device("peer", "window")
+                .unwrap()
+                .device_id,
+            "peer"
+        );
     }
 
     #[test]

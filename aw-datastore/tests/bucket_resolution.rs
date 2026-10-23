@@ -311,3 +311,44 @@ fn scoped_alias_privacy_matches_stored_names_without_filtering_other_devices() {
         assert_eq!(stored[0].data["title"], expected);
     }
 }
+
+#[test]
+fn open_reader_refreshes_device_ownership_after_metadata_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("ownership.sqlite")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let writer = Datastore::new(path.clone(), false);
+    writer
+        .create_bucket(&bucket("window", "host", "local"))
+        .unwrap();
+    writer.force_commit().unwrap();
+    writer.close();
+    let reader = Datastore::open_reader(path.clone()).unwrap();
+    assert_eq!(
+        reader
+            .for_device("local")
+            .get_bucket("window")
+            .unwrap()
+            .device_id,
+        "local"
+    );
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE buckets SET device_id = 'peer' WHERE name = 'window'",
+        [],
+    )
+    .unwrap();
+    assert!(reader.for_device("local").get_bucket("window").is_err());
+    assert_eq!(
+        reader
+            .for_device("peer")
+            .get_bucket("window")
+            .unwrap()
+            .device_id,
+        "peer"
+    );
+}

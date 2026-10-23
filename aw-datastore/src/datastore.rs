@@ -923,9 +923,9 @@ impl DatastoreInstance {
         }
         // Resolve against the transaction, not a potentially stale writer cache:
         // an old/new watcher spelling must not split an existing history.
-        if self.buckets_changed(conn)? {
-            self.get_stored_buckets(conn)?;
-        }
+        // Always reload here: a create followed by an external delete can restore
+        // the old signature while leaving our locally updated cache populated.
+        self.get_stored_buckets(conn)?;
         match crate::bucket_resolution::resolve_bucket(
             self.buckets_cache.values(),
             &bucket.id,
@@ -1050,7 +1050,7 @@ impl DatastoreInstance {
             Ok(_) => {
                 self.buckets_cache
                     .remove(&(bucket.device_id.clone(), bucket.id.clone()));
-                self.bucket_names.remove(&bucket.id);
+                self.refresh_name_index(&bucket.id);
                 Ok(())
             }
             Err(err) => match err {
@@ -1100,9 +1100,24 @@ impl DatastoreInstance {
     }
 
     fn cache_bucket(&mut self, bucket: Bucket) {
-        let key = (bucket.device_id.clone(), bucket.id.clone());
-        self.bucket_names.insert(bucket.id.clone(), key.clone());
-        self.buckets_cache.insert(key, bucket);
+        let name = bucket.id.clone();
+        let key = (bucket.device_id.clone(), name.clone());
+        let added = self.buckets_cache.insert(key, bucket).is_none();
+        if added {
+            self.refresh_name_index(&name);
+        }
+    }
+
+    fn refresh_name_index(&mut self, name: &str) {
+        let mut matching = self.buckets_cache.keys().filter(|(_, id)| id == name);
+        let unique = matching
+            .next()
+            .cloned()
+            .filter(|_| matching.next().is_none());
+        self.bucket_names.remove(name);
+        if let Some(key) = unique {
+            self.bucket_names.insert(name.to_owned(), key);
+        }
     }
 
     /// Lossless metadata view: bucket names are unique only within a device.
@@ -1889,7 +1904,7 @@ impl DatastoreInstance {
                     .buckets_cache
                     .remove(&(source.device_id.clone(), old_id.to_owned()))
                 {
-                    self.bucket_names.remove(old_id);
+                    self.refresh_name_index(old_id);
                     bucket.id = new_id.to_string();
                     self.cache_bucket(bucket);
                 }
@@ -2155,6 +2170,54 @@ mod tests {
             }
             assert_eq!(ds.get_bucket("renamed").unwrap().bid, source_bid);
         }
+    }
+
+    #[test]
+    fn legacy_name_index_never_selects_one_of_same_named_devices() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        // Internal future-state fixture; public duplicate-name guards stay enabled.
+        for device in ["local", "peer", "third"] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES ('window', ?1, 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')",
+                [device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "window", "device_id": device, "type": "test",
+                "client": "test", "hostname": "host"
+            }))
+            .unwrap();
+            ds.cache_bucket(Bucket {
+                bid: Some(conn.last_insert_rowid()),
+                ..bucket
+            });
+        }
+        ds.buckets_signature = ds.read_buckets_signature(&conn).unwrap();
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::AmbiguousBucket(_, candidates)) if candidates.len() == 3
+        ));
+        ds.device_scope = Some("third".to_owned());
+        ds.rename_bucket(&conn, "window", "renamed").unwrap();
+        ds.device_scope = None;
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::AmbiguousBucket(_, candidates)) if candidates.len() == 2
+        ));
+        assert_eq!(ds.get_bucket("renamed").unwrap().device_id, "third");
+        ds.device_scope = Some("peer".to_owned());
+        ds.delete_bucket(&conn, "window").unwrap();
+        ds.device_scope = None;
+        assert_eq!(ds.get_bucket("window").unwrap().device_id, "local");
+        assert!(ds.bucket_names.contains_key("window"));
+        ds.delete_bucket(&conn, "window").unwrap();
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        assert!(!ds.bucket_names.contains_key("window"));
     }
 
     #[test]

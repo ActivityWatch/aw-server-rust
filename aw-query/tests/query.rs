@@ -51,6 +51,7 @@ mod query_tests {
             _type: "testtype".to_string(),
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
+            device_id: "local".to_string(),
             created: Some(chrono::Utc::now()),
             data: json_map! {},
             metadata: BucketMetadata::default(),
@@ -870,6 +871,7 @@ mod query_tests {
             _type: "editor".to_string(),
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
+            device_id: "local".to_string(),
             created: Some(chrono::Utc::now()),
             data: json_map! {},
             metadata: BucketMetadata::default(),
@@ -935,4 +937,33 @@ mod query_tests {
         );
         assert!(aw_query::query(&code, &interval, &ds).is_err());
     }
+}
+
+#[test]
+fn scoped_query_selects_only_its_devices_history() {
+    use aw_datastore::Datastore;
+    use aw_models::{Bucket, Event, TimeInterval};
+    use serde_json::json;
+    let ds = Datastore::new_in_memory(false);
+    for (device, id, host, duration) in [
+        ("local", "window_host", "host", 1),
+        ("peer", "window_other", "other", 2),
+    ] {
+        let bucket: Bucket = serde_json::from_value(json!({"id": id, "hostname": host, "device_id": device, "type": "test", "client": "test"})).unwrap();
+        ds.create_bucket(&bucket).unwrap();
+        let event: Event = serde_json::from_value(
+            json!({"timestamp": "2026-01-01T00:00:00Z", "duration": duration, "data": {}}),
+        )
+        .unwrap();
+        ds.insert_events(id, &[event]).unwrap();
+    }
+    let interval =
+        TimeInterval::new_from_string("2026-01-01T00:00:00Z/2026-01-02T00:00:00Z").unwrap();
+    let code = "return sum_durations(query_bucket(\"window\"));";
+    assert!(aw_query::query(code, &interval, &ds).is_err());
+    for (device, expected) in [("local", 1.0), ("peer", 2.0)] {
+        let result = aw_query::query(code, &interval, &ds.for_device(device)).unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap(), json!(expected));
+    }
+    assert!(aw_query::query(code, &interval, &ds.for_device("absent")).is_err());
 }

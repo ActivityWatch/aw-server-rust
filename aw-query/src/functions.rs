@@ -169,6 +169,11 @@ mod qfunctions {
                     "Failed to find bucket '{bucket_id}'"
                 )))
             }
+            Err(aw_datastore::DatastoreError::AmbiguousBucket(name, candidates)) => {
+                return Err(QueryError::AmbiguousBucket(format!(
+                    "Bucket '{name}' is ambiguous; select a device explicitly: {candidates:?}"
+                )))
+            }
             Err(e) => {
                 return Err(QueryError::BucketQueryError(format!(
                     "Failed to query bucket: {e:?}"

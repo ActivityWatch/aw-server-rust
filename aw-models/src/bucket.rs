@@ -18,6 +18,8 @@ pub struct Bucket {
     #[serde(rename = "type")] /* type is a reserved Rust keyword */ pub _type: String,
     pub client: String,
     pub hostname: String,
+    #[serde(default)]
+    pub device_id: String,
     pub created: Option<DateTime<Utc>>,
     #[serde(default)]
     pub data: Map<String, Value>,
@@ -50,6 +52,7 @@ fn test_bucket() {
         _type: "type".to_string(),
         client: "client".to_string(),
         hostname: "hostname".into(),
+        device_id: "local".to_string(),
         created: None,
         data: json_map! {},
         metadata: BucketMetadata::default(),

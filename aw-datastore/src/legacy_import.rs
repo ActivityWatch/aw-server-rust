@@ -23,7 +23,14 @@ pub fn legacy_import(
     new_conn: &Connection,
     legacy_db_path_override: Option<&str>,
 ) -> Result<bool, LegacyDatastoreImportError> {
-    import::legacy_import(new_ds, new_conn, legacy_db_path_override)
+    // Legacy Python databases have no peer identity. Their buckets belong to
+    // this device, including when a peer owns an exact spelling of a local
+    // compatibility alias. Keep that authority through creation, dedup and
+    // insertion, and restore the caller's scope on both success and failure.
+    let previous = new_ds.device_scope.replace("local".to_owned());
+    let result = import::legacy_import(new_ds, new_conn, legacy_db_path_override);
+    new_ds.device_scope = previous;
+    result
 }
 
 #[cfg(not(target_os = "android"))]
@@ -130,6 +137,7 @@ mod import {
                 _type: row.get(2)?,
                 client: row.get(3)?,
                 hostname: row.get(4)?,
+                device_id: "local".to_string(),
                 created: row.get(5)?,
                 data: json_map! {},
                 events: None,
@@ -280,14 +288,29 @@ mod import {
                         )));
                     }
                 }
-                Err(DatastoreError::BucketAlreadyExists(_)) => {
+                Err(DatastoreError::BucketAlreadyExists(canonical_id)) => {
+                    // A name collision is only an idempotent re-import if the
+                    // existing bucket belongs to the same device.
+                    // create_bucket refreshed the cache against this connection;
+                    // retain its resolved spelling for a compatibility alias.
+                    let existing = new_ds.get_bucket(&canonical_id).map_err(|err| {
+                        LegacyDatastoreImportError::SQLMapError(format!("{err:?}"))
+                    })?;
+                    let device_id = &existing.device_id;
+                    if device_id != &bucket.device_id {
+                        return Err(LegacyDatastoreImportError::SQLMapError(format!(
+                            "Cannot import legacy bucket '{}': existing device_id '{}' differs from '{}'",
+                            bucket.id, device_id, bucket.device_id
+                        )));
+                    }
                     // Idempotent re-import (e.g. `aw-server --import-legacy` run
                     // again): the bucket already exists from a prior import, so
                     // merge only events not already present instead of panicking.
-                    let new_events = dedup_against_existing(new_ds, new_conn, &bucket.id, events)?;
+                    let new_events =
+                        dedup_against_existing(new_ds, new_conn, &existing.id, events)?;
                     let merged = new_events.len();
                     if !new_events.is_empty() {
-                        if let Err(err) = new_ds.insert_events(new_conn, &bucket.id, new_events) {
+                        if let Err(err) = new_ds.insert_events(new_conn, &existing.id, new_events) {
                             return Err(LegacyDatastoreImportError::Import(format!(
                                 "Failed to merge legacy events into bucket '{}': {:?}",
                                 bucket.id, err
@@ -352,7 +375,7 @@ mod import {
             ds.ensure_legacy_import(&new_conn, None, false).unwrap(),
             "Failed to ensure legacy import"
         );
-        let buckets = ds.get_buckets();
+        let buckets = ds.get_buckets().unwrap();
         assert!(!buckets.is_empty());
         let mut num_events = 0;
         for (bucket_id, _bucket) in buckets {
@@ -424,7 +447,7 @@ mod import {
             let imported =
                 legacy_import(&mut ds, &conn, Some(missing_path.to_str().unwrap())).unwrap();
             assert!(!imported);
-            assert!(ds.get_buckets().is_empty());
+            assert!(ds.get_buckets().unwrap().is_empty());
         }
 
         #[test]
@@ -447,7 +470,7 @@ mod import {
                 legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap())).unwrap();
             assert!(imported);
 
-            let buckets = ds.get_buckets();
+            let buckets = ds.get_buckets().unwrap();
             assert_eq!(buckets.len(), 1);
             let bucket_id = buckets.keys().next().unwrap().clone();
             assert_eq!(bucket_id, "aw-watcher-afk_testhost");
@@ -567,7 +590,34 @@ mod import {
             let imported =
                 legacy_import(&mut ds, &conn, Some(custom_path.to_str().unwrap())).unwrap();
             assert!(imported);
-            assert_eq!(ds.get_buckets().len(), 1);
+            assert_eq!(ds.get_buckets().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn reimport_rejects_a_bucket_owned_by_another_device() {
+            let tmp = tempfile::tempdir().unwrap();
+            let legacy_path = tmp.path().join("legacy.db");
+            write_fixture_legacy_db(
+                &legacy_path,
+                &[("2026-01-01 10:00:00+00:00", 5.0, r#"{"status": "afk"}"#)],
+            );
+            let (conn, mut ds) = new_datastore();
+            let mut bucket = get_legacy_buckets(&Connection::open(&legacy_path).unwrap())
+                .unwrap()
+                .remove(0);
+            bucket.device_id = "peer-abc".to_string();
+            ds.create_bucket(&conn, bucket.clone()).unwrap();
+
+            let result = legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap()));
+            assert!(
+                result.is_err(),
+                "must not merge local legacy events into a peer bucket"
+            );
+            assert_eq!(ds.get_bucket(&bucket.id).unwrap().device_id, "peer-abc");
+            assert!(ds
+                .get_events(&conn, &bucket.id, None, None, None)
+                .unwrap()
+                .is_empty());
         }
 
         #[test]
@@ -593,7 +643,7 @@ mod import {
             // BucketAlreadyExists, and must not duplicate events.
             assert!(legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap())).unwrap());
 
-            let bucket_id = ds.get_buckets().keys().next().unwrap().clone();
+            let bucket_id = ds.get_buckets().unwrap().keys().next().unwrap().clone();
             let events = ds.get_events(&conn, &bucket_id, None, None, None).unwrap();
             assert_eq!(events.len(), 2, "re-import must not duplicate events");
         }
@@ -621,7 +671,7 @@ mod import {
             );
             assert!(legacy_import(&mut ds, &conn, Some(legacy_path_v2.to_str().unwrap())).unwrap());
 
-            let bucket_id = ds.get_buckets().keys().next().unwrap().clone();
+            let bucket_id = ds.get_buckets().unwrap().keys().next().unwrap().clone();
             let events = ds.get_events(&conn, &bucket_id, None, None, None).unwrap();
             assert_eq!(
                 events.len(),

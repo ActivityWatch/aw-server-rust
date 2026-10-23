@@ -64,6 +64,13 @@ pub fn fill_env(env: &mut VarEnv) {
         ),
     );
     env.insert(
+        "merge_subwatcher_fields".to_string(),
+        DataType::Function(
+            "merge_subwatcher_fields".to_string(),
+            qfunctions::merge_subwatcher_fields,
+        ),
+    );
+    env.insert(
         "chunk_events_by_key".to_string(),
         DataType::Function(
             "chunk_events_by_key".to_string(),
@@ -460,6 +467,40 @@ mod qfunctions {
             merged_tagged_events.push(DataType::Event(event));
         }
         Ok(DataType::List(merged_tagged_events))
+    }
+
+    pub fn merge_subwatcher_fields(
+        args: Vec<DataType>,
+        _env: &VarEnv,
+        _ds: &Datastore,
+    ) -> Result<DataType, QueryError> {
+        // typecheck
+        if args.len() != 3 && args.len() != 4 {
+            return Err(QueryError::InvalidFunctionParameters(format!(
+                "Expected 3 or 4 parameters in function, got {}",
+                args.len()
+            )));
+        }
+        let base_events: Vec<Event> = (&args[0]).try_into()?;
+        let subwatcher_events: Vec<Event> = (&args[1]).try_into()?;
+        let keys: Vec<String> = (&args[2]).try_into()?;
+
+        // conflict defaults to "base_wins" matching the Python API
+        let conflict = if args.len() >= 4 {
+            String::try_from(&args[3])?
+        } else {
+            "base_wins".to_string()
+        };
+
+        let enriched =
+            aw_transform::merge_subwatcher_fields(base_events, subwatcher_events, &keys, &conflict)
+                .map_err(QueryError::InvalidFunctionParameters)?;
+
+        let mut tagged_events = Vec::new();
+        for event in enriched.into_iter() {
+            tagged_events.push(DataType::Event(event));
+        }
+        Ok(DataType::List(tagged_events))
     }
 
     #[allow(deprecated)]

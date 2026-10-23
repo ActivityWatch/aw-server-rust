@@ -30,6 +30,9 @@ pub use flood::flood;
 mod merge;
 pub use merge::merge_events_by_keys;
 
+mod merge_subwatcher_fields;
+pub use merge_subwatcher_fields::merge_subwatcher_fields;
+
 mod chunk;
 #[allow(deprecated)]
 pub use chunk::chunk_events_by_key;

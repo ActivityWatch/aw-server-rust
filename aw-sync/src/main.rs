@@ -27,6 +27,7 @@ use aw_client_rust::blocking::AwClient;
 mod accessmethod;
 mod dedupe;
 mod dirs;
+mod legacy_clean;
 mod report;
 mod status;
 mod sync;
@@ -142,7 +143,18 @@ enum Commands {
     /// 2-level leftovers and unrecognised entries sit on top of that list.
     /// Also prints the last persisted `SyncReport` (what the previous pass did).
     /// Does not create staging files.
-    Status {},
+    Status {
+        /// After the report, delete re-exported `-synced-from-` buckets from
+        /// this device's own staging databases (leftovers from before #648;
+        /// every reader already ignores them). Peers' files are never touched.
+        /// The deletion replicates to every device sharing the sync folder.
+        #[clap(long)]
+        clean_legacy: bool,
+
+        /// With --clean-legacy: list what would be pruned, change nothing.
+        #[clap(long, requires = "clean_legacy")]
+        dry_run: bool,
+    },
     /// One-off cleanup: collapse exact-duplicate events in `-synced-from-`
     /// buckets (accumulated by pre-#713 pull passes that re-imported the
     /// resume-boundary event on every run).
@@ -384,7 +396,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // List all buckets
         Commands::List {} => sync::list_buckets(&client)?,
-        Commands::Status {} => status::run_status(&client, &opts.host, port, &profile)?,
+        Commands::Status {
+            clean_legacy,
+            dry_run,
+        } => {
+            status::run_status(&client, &opts.host, port, &profile)?;
+            if clean_legacy {
+                legacy_clean::run_clean_legacy(&client, dry_run)?;
+            }
+        }
         Commands::Dedupe { bucket, dry_run } => dedupe::run_dedupe(&client, bucket, dry_run)?,
     }
 

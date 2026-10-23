@@ -7,6 +7,8 @@ pub enum LegacyDatastoreImportError {
     SQLPrepareError(String),
     #[allow(dead_code)]
     SQLMapError(String),
+    #[allow(dead_code)]
+    Import(String),
 }
 
 /// Imports a legacy (Python aw-server) database into `new_ds`, if one is
@@ -273,10 +275,10 @@ mod import {
                         bucket.id, num_events
                     );
                     if let Err(err) = new_ds.insert_events(new_conn, &bucket.id, events) {
-                        panic!(
+                        return Err(LegacyDatastoreImportError::Import(format!(
                             "Failed to insert events to bucket '{}': {:?}",
                             bucket.id, err
-                        );
+                        )));
                     }
                 }
                 Err(DatastoreError::BucketAlreadyExists(canonical_id)) => {
@@ -302,10 +304,10 @@ mod import {
                     let merged = new_events.len();
                     if !new_events.is_empty() {
                         if let Err(err) = new_ds.insert_events(new_conn, &existing.id, new_events) {
-                            panic!(
+                            return Err(LegacyDatastoreImportError::Import(format!(
                                 "Failed to merge legacy events into bucket '{}': {:?}",
                                 bucket.id, err
-                            );
+                            )));
                         }
                     }
                     info!(
@@ -313,7 +315,12 @@ mod import {
                         bucket.id, merged, num_events - merged
                     );
                 }
-                Err(err) => panic!("Failed to create bucket '{}': {:?}", bucket.id, err),
+                Err(err) => {
+                    return Err(LegacyDatastoreImportError::Import(format!(
+                        "Failed to create bucket '{}': {:?}",
+                        bucket.id, err
+                    )));
+                }
             };
         }
         Ok(true)
@@ -463,6 +470,105 @@ mod import {
 
             let events = ds.get_events(&conn, &bucket_id, None, None, None).unwrap();
             assert_eq!(events.len(), 2);
+        }
+
+        #[test]
+        fn bucket_creation_failure_returns_import_error() {
+            let tmp = tempfile::tempdir().unwrap();
+            let legacy_path = tmp.path().join("legacy.db");
+            write_fixture_legacy_db(&legacy_path, &[("2026-01-01 10:00:00+00:00", 5.0, "{}")]);
+            let (conn, mut ds) = new_datastore();
+            // A missing destination table fails bucket creation without being
+            // classified as BucketAlreadyExists (as a constraint error would).
+            conn.execute_batch("DROP TABLE buckets;").unwrap();
+
+            let result = legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap()));
+            match result {
+                Err(LegacyDatastoreImportError::Import(message)) => {
+                    assert!(message.contains("Failed to create bucket 'aw-watcher-afk_testhost'"));
+                    assert!(message.contains("no such table: buckets"));
+                }
+                other => panic!("expected a returned bucket creation error, got {other:?}"),
+            }
+        }
+
+        fn assert_event_insertion_failure_returns_import_error(existing_bucket: bool) {
+            let tmp = tempfile::tempdir().unwrap();
+            let legacy_path = tmp.path().join("legacy.db");
+            write_fixture_legacy_db(&legacy_path, &[("2026-01-01 10:00:00+00:00", 5.0, "{}")]);
+            let (conn, mut ds) = new_datastore();
+            if existing_bucket {
+                let legacy_conn = Connection::open(&legacy_path).unwrap();
+                let bucket = get_legacy_buckets(&legacy_conn).unwrap().remove(0);
+                ds.create_bucket(&conn, bucket).unwrap();
+            }
+            conn.execute_batch(
+                "CREATE TRIGGER fail_event_insert BEFORE INSERT ON events
+                 BEGIN SELECT RAISE(ABORT, 'injected event write failure'); END;",
+            )
+            .unwrap();
+
+            let result = legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap()));
+            let expected_operation = if existing_bucket {
+                "Failed to merge legacy events into bucket 'aw-watcher-afk_testhost'"
+            } else {
+                "Failed to insert events to bucket 'aw-watcher-afk_testhost'"
+            };
+            match result {
+                Err(LegacyDatastoreImportError::Import(message)) => {
+                    assert!(message.contains(expected_operation), "{message}");
+                    assert!(
+                        message.contains("injected event write failure"),
+                        "{message}"
+                    );
+                }
+                other => panic!("expected a returned event insertion error, got {other:?}"),
+            }
+            assert!(ds
+                .get_events(&conn, "aw-watcher-afk_testhost", None, None, None)
+                .unwrap()
+                .is_empty());
+        }
+
+        #[test]
+        fn event_insertion_failure_in_new_bucket_returns_import_error() {
+            assert_event_insertion_failure_returns_import_error(false);
+        }
+
+        #[test]
+        fn event_insertion_failure_in_existing_bucket_returns_import_error() {
+            assert_event_insertion_failure_returns_import_error(true);
+        }
+
+        #[test]
+        fn datastore_remains_importable_after_failed_event_insertion() {
+            // Pins the recovery contract: a failed import returns Err without
+            // leaving the datastore in a state where a later import cannot
+            // succeed. Retry takes the bucket-already-exists merge path.
+            let tmp = tempfile::tempdir().unwrap();
+            let legacy_path = tmp.path().join("legacy.db");
+            write_fixture_legacy_db(&legacy_path, &[("2026-01-01 10:00:00+00:00", 5.0, "{}")]);
+            let (conn, mut ds) = new_datastore();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_event_insert BEFORE INSERT ON events
+                 BEGIN SELECT RAISE(ABORT, 'injected event write failure'); END;",
+            )
+            .unwrap();
+
+            let result = legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap()));
+            assert!(
+                matches!(result, Err(LegacyDatastoreImportError::Import(_))),
+                "expected a returned import error, got {result:?}"
+            );
+
+            conn.execute_batch("DROP TRIGGER fail_event_insert;")
+                .unwrap();
+            let retried = legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap()));
+            assert!(retried.is_ok(), "retry import failed: {retried:?}");
+            let events = ds
+                .get_events(&conn, "aw-watcher-afk_testhost", None, None, None)
+                .unwrap();
+            assert_eq!(events.len(), 1, "expected the event after retry");
         }
 
         #[test]

@@ -161,6 +161,14 @@ pub fn recover_database(
         ds.device_scope = Some(bucket.device_id.clone());
         source_ds.device_scope = Some(bucket.device_id.clone());
         match ds.get_bucket_for_device(&bucket.device_id, &name) {
+            Ok(existing) if existing.id != name => {
+                // Compatibility aliases are useful for watcher requests, but
+                // recovery must preserve the source's exact stored identity.
+                // Creation would also resolve to this alias, so defer the whole
+                // union rather than merge histories or claim completion.
+                warn!("History recovery source {source:?} bucket {name:?} resolves to stored alias {:?}; leaving it untouched for manual recovery", existing.id);
+                return Ok(RecoveryCounts::default());
+            }
             Ok(_) => {}
             Err(DatastoreError::NoSuchBucket(_)) => {
                 bucket.bid = None;
@@ -312,6 +320,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(markers, 0);
+    }
+
+    #[test]
+    fn recovery_defers_alias_collisions_without_renaming_or_merging_history() {
+        for (source_name, target_name) in [("window", "window_test"), ("window_test", "window")] {
+            let root = tempfile::tempdir().unwrap();
+            let target = root.path().join("target.db");
+            let source = root.path().join("source.db");
+            populate(&target, &[(target_name, vec![event(r#"{"target":true}"#)])]);
+            populate(&source, &[(source_name, vec![event(r#"{"source":true}"#)])]);
+            let source_bytes = std::fs::read(&source).unwrap();
+            for attempt in ["first", "retry"] {
+                let backup = root.path().join(format!("backup-{attempt}.db"));
+                assert_eq!(
+                    recover_database(&target, &source, &backup, "alias").unwrap(),
+                    RecoveryCounts::default(),
+                    "recovery must preserve the stored name, not import into a compatibility alias"
+                );
+                assert!(backup.is_file());
+                assert_eq!(count(&backup), 1);
+                assert_eq!(count(&target), 1);
+                assert_eq!(count(&source), 1);
+                assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+                let conn = Connection::open(&target).unwrap();
+                let mut ds = DatastoreInstance::new(&conn, false).unwrap();
+                ds.device_scope = Some("local".into());
+                let stored = ds.get_buckets().unwrap();
+                assert_eq!(stored.len(), 1);
+                assert!(stored.contains_key(target_name));
+                let events = ds
+                    .get_events_unclipped(&conn, target_name, None, None, None)
+                    .unwrap();
+                assert_eq!(events[0].data, event(r#"{"target":true}"#).data);
+                let markers: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM key_value WHERE key = 'windows_recovery:alias'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(markers, 0, "deferred recovery must remain retryable");
+            }
+        }
     }
 
     #[test]

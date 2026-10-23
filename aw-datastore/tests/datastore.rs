@@ -159,6 +159,64 @@ mod datastore_tests {
     }
 
     #[test]
+    fn legacy_name_migration_rejects_peer_destination_without_moving_history() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        let mut old = test_bucket();
+        old.id = old_id.to_owned();
+        old.device_id = "peer".to_owned();
+        ds.for_device("peer").create_bucket(&old).unwrap();
+        create_named_test_bucket(&ds, new_id);
+        let event = test_event(Utc::now(), Duration::seconds(30));
+        ds.for_device("peer")
+            .insert_events(old_id, &[event])
+            .unwrap();
+        assert!(matches!(
+            ds.migrate_test_bucket_names(),
+            Err(DatastoreError::BucketAlreadyExists(_))
+        ));
+        assert_eq!(
+            ds.for_device("peer")
+                .get_events(old_id, None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(ds
+            .for_device("local")
+            .get_events(new_id, None, None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn legacy_name_migration_respects_device_scope() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let mut old = test_bucket();
+        old.id = old_id.to_owned();
+        old.device_id = "peer".to_owned();
+        ds.for_device("peer").create_bucket(&old).unwrap();
+        assert_eq!(
+            ds.for_device("local").migrate_test_bucket_names().unwrap(),
+            0
+        );
+        assert_eq!(ds.for_device("peer").get_bucket(old_id).unwrap().id, old_id);
+        assert_eq!(
+            ds.for_device("peer").migrate_test_bucket_names().unwrap(),
+            1
+        );
+        assert_eq!(
+            ds.for_device("peer")
+                .get_bucket("aw-watcher-android_phone")
+                .unwrap()
+                .device_id,
+            "peer"
+        );
+    }
+
+    #[test]
     fn test_migrate_test_bucket_names_renames_bucket_and_preserves_events() {
         let ds = Datastore::new_in_memory(false);
         let old_id = "aw-watcher-android-test_phone";

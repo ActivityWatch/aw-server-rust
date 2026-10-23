@@ -1992,25 +1992,38 @@ impl DatastoreInstance {
         const NEW_PREFIX: &str = "aw-watcher-android";
 
         info!("Migrating '{OLD_PREFIX}' bucket names to '{NEW_PREFIX}'");
-        let legacy_ids: Vec<String> = self
+        let legacy: Vec<Bucket> = self
             .buckets_cache
             .values()
-            .filter(|bucket| bucket.id.starts_with(OLD_PREFIX))
-            .map(|bucket| bucket.id.clone())
+            .filter(|bucket| {
+                bucket.id.starts_with(OLD_PREFIX)
+                    && self
+                        .device_scope
+                        .as_ref()
+                        .is_none_or(|device| bucket.device_id == *device)
+            })
+            .cloned()
             .collect();
+        // Preserve the public duplicate-name guard before changing any history.
+        // A peer's destination is never a merge target for this device.
+        for old_bucket in &legacy {
+            let new_id = old_bucket.id.replacen(OLD_PREFIX, NEW_PREFIX, 1);
+            if self
+                .buckets_cache
+                .values()
+                .any(|bucket| bucket.id == new_id && bucket.device_id != old_bucket.device_id)
+            {
+                return Err(DatastoreError::BucketAlreadyExists(new_id));
+            }
+        }
         let mut migrated = 0;
         let mut cache_dirty = false;
 
-        for old_id in legacy_ids {
+        for old_bucket in legacy {
+            let old_id = old_bucket.id.clone();
             let new_id = old_id.replacen(OLD_PREFIX, NEW_PREFIX, 1);
-            if let Some(new_key) = self.bucket_names.get(&new_id) {
-                let new_bucket = self.buckets_cache[new_key].clone();
-                let old_key = self
-                    .bucket_names
-                    .get(&old_id)
-                    .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
-                let old_bucket = self.buckets_cache[old_key].clone();
-
+            let new_key = (old_bucket.device_id.clone(), new_id.clone());
+            if let Some(new_bucket) = self.buckets_cache.get(&new_key).cloned() {
                 // Move only events that do not overlap the destination or another
                 // legacy event. A single overlapping cutover heartbeat must not strand
                 // years of disjoint history in the legacy bucket (ActivityWatch/aw-android#243).
@@ -2066,8 +2079,8 @@ impl DatastoreInstance {
                 }
             } else {
                 conn.execute(
-                    "UPDATE buckets SET name = ?1 WHERE name = ?2",
-                    [&new_id, &old_id],
+                    "UPDATE buckets SET name = ?1 WHERE id = ?2",
+                    params![new_id, old_bucket.bid],
                 )
                 .map_err(|err| {
                     DatastoreError::InternalError(format!(

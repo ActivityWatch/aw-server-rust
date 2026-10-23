@@ -321,6 +321,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             "/api/0/devices",
             routes![
                 query::device_query,
+                import::device_import_json,
                 device_bucket::buckets_get,
                 device_bucket::bucket_get,
                 device_bucket::bucket_new,

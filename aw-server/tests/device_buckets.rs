@@ -406,3 +406,149 @@ fn legacy_import_normalizes_server_uuid_before_alias_resolution_and_merge() {
         Status::NotModified
     );
 }
+
+#[test]
+fn scoped_import_binds_route_identity_and_roundtrips_peer_history() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    // A source's local sentinel is relative to its enclosing export/import device.
+    let import = json!({"buckets": {"window_host": {"id": "window_host", "hostname": "host", "device_id": "local", "type": "test", "client": "test", "events": [{"id": 1, "timestamp": "2026-01-01T00:00:00Z", "duration": 2, "data": {"source": "peer"}}]}}});
+    let mut export = Value::Null;
+    for _ in 0..2 {
+        let (status, body) = request(
+            &client,
+            Post,
+            "/api/0/devices/peer/import",
+            Some(import.clone()),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        let (status, body) = request(&client, Get, "/api/0/devices/peer/export", None);
+        assert_eq!(status, Status::Ok, "{body}");
+        export = serde_json::from_str(&body).unwrap();
+        assert_eq!(export["buckets"]["window_host"]["device_id"], "peer");
+        assert_eq!(
+            export["buckets"]["window_host"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            request(
+                &client,
+                Get,
+                "/api/0/devices/local/buckets/window_host",
+                None
+            )
+            .0,
+            Status::NotFound
+        );
+    }
+    let restored = self::client();
+    assert_eq!(
+        request(&restored, Post, "/api/0/devices/peer/import", Some(export)).0,
+        Status::Ok
+    );
+    assert_eq!(
+        request(
+            &restored,
+            Get,
+            "/api/0/devices/peer/buckets/window/events/count",
+            None
+        ),
+        (Status::Ok, "1".into())
+    );
+    let mut forged = import;
+    forged["buckets"]["window_host"]["device_id"] = json!("other-peer");
+    assert_eq!(
+        request(&client, Post, "/api/0/devices/peer/import", Some(forged)).0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/peer/buckets/window/events/count",
+            None
+        ),
+        (Status::Ok, "1".into())
+    );
+}
+
+#[test]
+fn scoped_import_preflights_the_entire_envelope_before_mutating_history() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let bucket = json!({"id": "valid", "hostname": "host", "type": "test", "client": "test", "device_id": "peer"});
+    let mut invalid = bucket.clone();
+    invalid["id"] = json!("not-the-map-key");
+    let body = json!({"buckets": {"valid": bucket, "invalid": invalid}});
+    assert_eq!(
+        request(&client, Post, "/api/0/devices/peer/import", Some(body)).0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(&client, Get, "/api/0/devices/peer/buckets", None),
+        (Status::Ok, "{}".into())
+    );
+    let local = json!({"buckets": {"local-bucket": {"id": "local-bucket", "hostname": "host", "type": "test", "client": "test", "device_id": "server-uuid"}}});
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/server-uuid/import",
+            Some(local)
+        )
+        .0,
+        Status::Ok
+    );
+    let (_, body) = request(
+        &client,
+        Get,
+        "/api/0/devices/local/buckets/local-bucket",
+        None,
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["device_id"],
+        "local"
+    );
+}
+
+#[test]
+fn scoped_import_reports_guarded_name_collision_without_cross_device_merge() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/buckets/window_host",
+            Some(json!({"hostname": "host", "type": "test", "client": "test"}))
+        )
+        .0,
+        Status::Ok
+    );
+    let body = json!({"buckets": {"window_host": {"id": "window_host", "hostname": "host", "device_id": "peer", "type": "test", "client": "test"}}});
+    let (status, body) = request(&client, Post, "/api/0/devices/peer/import", Some(body));
+    assert_eq!(status, Status::Conflict, "{body}");
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/peer/buckets/window_host",
+            None
+        )
+        .0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/local/buckets/window_host",
+            None
+        )
+        .0,
+        Status::Ok
+    );
+}

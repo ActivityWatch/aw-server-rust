@@ -165,8 +165,21 @@ pub fn recover_database(
             Err(DatastoreError::NoSuchBucket(_)) => {
                 bucket.bid = None;
                 bucket.events = None;
-                ds.create_bucket(&tx, bucket).map_err(error)?;
-                counts.buckets_created += 1;
+                match ds.create_bucket(&tx, bucket) {
+                    Ok(()) => counts.buckets_created += 1,
+                    Err(
+                        DatastoreError::AmbiguousBucket(..)
+                        | DatastoreError::BucketAlreadyExists(_),
+                    ) => {
+                        // Like corrupt source content, an unrepresentable pair
+                        // is deferred for manual recovery, not a startup outage.
+                        // Dropping the transaction preserves all target history
+                        // and leaves no completion marker for a partial union.
+                        warn!("History recovery source {source:?} conflicts with another device's bucket {name:?}; leaving it untouched for manual recovery");
+                        return Ok(RecoveryCounts::default());
+                    }
+                    Err(err) => return Err(error(err)),
+                }
             }
             Err(err) => return Err(error(err)),
         }
@@ -284,8 +297,9 @@ mod tests {
             .unwrap();
         // Until public coexistence is enabled, reject the conflict instead of
         // merging a peer's events into the name-matched local bucket.
-        assert!(
-            recover_database(&target, &source, &root.path().join("backup.db"), "peer").is_err()
+        assert_eq!(
+            recover_database(&target, &source, &root.path().join("backup.db"), "peer").unwrap(),
+            RecoveryCounts::default()
         );
         assert_eq!(count(&target), 1);
         assert_eq!(count(&source), 1);

@@ -656,8 +656,8 @@ impl DatastoreWorker {
             }
         }
         // Normalize aliases before privacy filtering, cache access or an early
-        // success for an entirely filtered batch. All operations use the real
-        // stored name; the schema guard still guarantees it is globally unique.
+        // success for an entirely filtered batch. Keep the resolved device as
+        // well: a unique alias may address a canonical name shared by devices.
         let target = match &mut request {
             Command::DeleteBucket(id)
             | Command::GetBucket(id)
@@ -674,8 +674,22 @@ impl DatastoreWorker {
             _ => None,
         };
         if let Some(id) = target {
-            *id = ds.get_bucket(id)?.id;
+            let bucket = ds.get_bucket(id)?;
+            *id = bucket.id;
+            let previous = ds.device_scope.replace(bucket.device_id);
+            let result = self.handle_resolved_request(request, ds, tx);
+            ds.device_scope = previous;
+            return result;
         }
+        self.handle_resolved_request(request, ds, tx)
+    }
+
+    fn handle_resolved_request(
+        &mut self,
+        request: Command,
+        ds: &mut DatastoreInstance,
+        tx: &Transaction,
+    ) -> Result<Response, DatastoreError> {
         match request {
             Command::Scoped(..) => unreachable!("scoped commands are handled above"),
             Command::ReloadBuckets() => match ds.reload_buckets(tx) {
@@ -1402,6 +1416,125 @@ impl Datastore {
             // Worker already gone means there is nothing left to close
             Err(e) => warn!("Error closing database: {e:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod device_dispatch_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unique_legacy_alias_keeps_device_through_worker_dispatch() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let mut ds = crate::datastore::tests::same_name_worker_fixture(&conn);
+        let (_, responder) = mpsc_requests::channel::<Command, Result<Response, DatastoreError>>();
+        let mut worker = DatastoreWorker::new(responder, LegacyImportOptions::default());
+        let tx = conn.transaction().unwrap();
+        for device in ["local", "peer"] {
+            let alias = format!("window_{device}");
+            let event: Event = serde_json::from_value(json!({
+                "timestamp": "2026-01-01T00:00:00Z", "duration": 1,
+                "data": {"device": device}
+            }))
+            .unwrap();
+            let inserted = worker
+                .handle_request(
+                    Command::InsertEvents(alias.clone(), vec![event]),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap();
+            let Response::EventList(events) = inserted else {
+                panic!("expected events")
+            };
+            assert_eq!(events[0].data["device"], device);
+            let Response::EventList(stored) = worker
+                .handle_request(
+                    Command::GetEvents(alias.clone(), None, None, None, false),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap()
+            else {
+                panic!("expected events")
+            };
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].data["device"], device);
+            let Response::Count(count) = worker
+                .handle_request(
+                    Command::GetEventCount(alias.clone(), None, None),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap()
+            else {
+                panic!("expected count")
+            };
+            assert_eq!(count, 1);
+            let Response::Bucket(bucket) = worker
+                .handle_request(Command::GetBucket(alias.clone()), &mut ds, &tx)
+                .unwrap()
+            else {
+                panic!("expected bucket")
+            };
+            assert_eq!(bucket.device_id, device);
+            let Response::Event(row) = worker
+                .handle_request(
+                    Command::GetEvent(alias.clone(), events[0].id.unwrap()),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap()
+            else {
+                panic!("expected event")
+            };
+            assert_eq!(row.data["device"], device);
+            let heartbeat: Event = serde_json::from_value(json!({
+                "timestamp": "2026-01-01T00:00:02Z", "duration": 0,
+                "data": {"device": device}
+            }))
+            .unwrap();
+            worker
+                .handle_request(
+                    Command::Heartbeat(alias.clone(), heartbeat, 10.0),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap();
+            for csv in [false, true] {
+                let file = tempfile::tempfile().unwrap();
+                let command = if csv {
+                    Command::ExportCsv(alias.clone(), None, None, None, file)
+                } else {
+                    Command::Export(Some(alias.clone()), file)
+                };
+                let response = worker.handle_request(command, &mut ds, &tx).unwrap();
+                let mut file = match response {
+                    Response::Export(file, _) | Response::ExportCsv(file) => file,
+                    _ => panic!("expected export"),
+                };
+                use std::io::{Read, Seek, SeekFrom};
+                file.seek(SeekFrom::Start(0)).unwrap();
+                let mut text = String::new();
+                file.read_to_string(&mut text).unwrap();
+                assert!(text.contains(device), "{text}");
+                assert!(
+                    !text.contains(if device == "local" { "peer" } else { "local" }),
+                    "{text}"
+                );
+            }
+            assert!(ds.device_scope.is_none());
+            // A missing event fails inside the resolved command, not at lookup.
+            assert!(worker
+                .handle_request(Command::GetEvent(alias, i64::MAX), &mut ds, &tx)
+                .is_err());
+            assert!(ds.device_scope.is_none(), "failed command leaked scope");
+        }
+        assert!(matches!(
+            worker.handle_request(Command::GetBucket("window".into()), &mut ds, &tx),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
     }
 }
 

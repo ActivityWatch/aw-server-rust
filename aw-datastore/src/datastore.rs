@@ -2125,8 +2125,32 @@ impl DatastoreInstance {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn same_name_worker_fixture(conn: &Connection) -> DatastoreInstance {
+        let mut ds = DatastoreInstance::new(conn, true).unwrap();
+        // Prepare future pair-keyed state without lifting either public guard.
+        for device in ["local", "peer"] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES ('window', ?1, 'test', 'test', ?1, '2026-01-01T00:00:00Z', '{}')",
+                [device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "window", "device_id": device, "type": "test",
+                "client": "test", "hostname": device
+            }))
+            .unwrap();
+            ds.cache_bucket(Bucket {
+                bid: Some(conn.last_insert_rowid()),
+                ..bucket
+            });
+        }
+        ds.buckets_signature = ds.read_buckets_signature(conn).unwrap();
+        ds
+    }
 
     #[test]
     fn heartbeat_cache_separates_same_named_device_buckets() {

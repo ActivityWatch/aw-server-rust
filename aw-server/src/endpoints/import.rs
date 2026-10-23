@@ -62,6 +62,19 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                 bucket.events = Some(TryVec::new(stripped));
             }
         }
+        // Imports already name their device. Canonicalize that scoped alias
+        // before using name-addressed creation/merge commands; a legacy watcher
+        // POST must instead reject when its unscoped writes would select a peer.
+        let device = if bucket.device_id.is_empty() {
+            "local"
+        } else {
+            &bucket.device_id
+        };
+        match datastore.get_bucket_for_device(device, &bucket.id) {
+            Ok(existing) => bucket.id = existing.id,
+            Err(DatastoreError::NoSuchBucket(_)) => {}
+            Err(err) => return Err(err.into()),
+        }
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
             Err(DatastoreError::BucketAlreadyExists(canonical_id)) => {

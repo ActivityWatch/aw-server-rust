@@ -465,8 +465,8 @@ enum EventRead {
 
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
-    /// `(count, max id, names)` of the buckets table when `buckets_cache` was
-    /// loaded; lets a reader detect creates, deletes and renames by another
+    /// `(count, max id, names and hostnames)` when `buckets_cache` was
+    /// loaded; lets a reader detect creates, deletes, renames and alias repairs by another
     /// connection with one cheap query.
     buckets_signature: (i64, i64, String),
     first_init: bool,
@@ -732,17 +732,18 @@ impl DatastoreInstance {
 
     fn read_buckets_signature(conn: &Connection) -> Result<(i64, i64, String), DatastoreError> {
         conn.query_row(
-            "SELECT count(*), coalesce(max(id), 0), coalesce(group_concat(name, char(10)), '') \
-             FROM (SELECT id, name FROM buckets ORDER BY id)",
+            "SELECT count(*), coalesce(max(id), 0), \
+             coalesce(group_concat(hex(name) || ':' || hex(hostname), char(10)), '') \
+             FROM (SELECT id, name, hostname FROM buckets ORDER BY id)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| DatastoreError::InternalError(format!("Failed to read bucket signature: {e}")))
     }
 
-    /// Whether buckets were created, deleted or renamed since the cache was
-    /// loaded (ids are AUTOINCREMENT, so a delete-and-recreate changes
-    /// `max(id)`; the name list catches renames).
+    /// Whether buckets were created, deleted, renamed or had alias metadata repaired
+    /// since the cache was loaded (ids are AUTOINCREMENT, so a delete-and-recreate
+    /// changes `max(id)`; the name/hostname list catches renames and repairs).
     pub fn buckets_changed(&self, conn: &Connection) -> Result<bool, DatastoreError> {
         Ok(Self::read_buckets_signature(conn)? != self.buckets_signature)
     }
@@ -911,7 +912,22 @@ impl DatastoreInstance {
             &bucket.id,
             Some(&bucket.device_id),
         ) {
-            Ok(existing) => return Err(DatastoreError::BucketAlreadyExists(existing.id)),
+            Ok(existing) => {
+                // A successful legacy POST acknowledges the same target that
+                // subsequent unscoped event writes will use, never a scoped
+                // alias hidden by a peer's exact name.
+                let global = self.get_bucket(&bucket.id)?;
+                if global.bid != existing.bid {
+                    return Err(DatastoreError::AmbiguousBucket(
+                        bucket.id.clone(),
+                        vec![
+                            (existing.device_id, existing.id),
+                            (global.device_id, global.id),
+                        ],
+                    ));
+                }
+                return Err(DatastoreError::BucketAlreadyExists(existing.id));
+            }
             Err(DatastoreError::NoSuchBucket(_)) => {}
             Err(err) => return Err(err),
         }
@@ -1024,6 +1040,19 @@ impl DatastoreInstance {
             return Ok(bucket.clone());
         }
         crate::bucket_resolution::resolve_bucket(self.buckets_cache.values(), bucket_id, None)
+    }
+
+    /// Resolve within one device without falling back to any peer.
+    pub fn get_bucket_for_device(
+        &self,
+        device_id: &str,
+        bucket_id: &str,
+    ) -> Result<Bucket, DatastoreError> {
+        crate::bucket_resolution::resolve_bucket(
+            self.buckets_cache.values(),
+            bucket_id,
+            Some(device_id),
+        )
     }
 
     pub fn get_buckets(&self) -> HashMap<String, Bucket> {

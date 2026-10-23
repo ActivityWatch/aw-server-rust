@@ -233,6 +233,7 @@ pub enum Command {
     CreateBucket(Bucket),
     DeleteBucket(String),
     GetBucket(String),
+    GetBucketForDevice(String, String),
     GetBuckets(),
     InsertEvents(String, Vec<Event>),
     FilterEvents(String, Vec<Event>),
@@ -266,6 +267,7 @@ impl Command {
     fn read_bucket_id(&self) -> Option<&str> {
         match self {
             Command::GetBucket(id)
+            | Command::GetBucketForDevice(_, id)
             | Command::GetEvent(id, _)
             | Command::GetEvents(id, ..)
             | Command::GetEventCount(id, ..)
@@ -704,6 +706,9 @@ impl DatastoreWorker {
                 Ok(b) => Ok(Response::Bucket(b)),
                 Err(e) => Err(e),
             },
+            Command::GetBucketForDevice(device, id) => {
+                ds.get_bucket_for_device(&device, &id).map(Response::Bucket)
+            }
             Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets())),
             Command::InsertEvents(bucketname, events) => {
                 let filtered = self.privacy_engine.filter_events(&bucketname, events);
@@ -1041,6 +1046,22 @@ impl Datastore {
         let cmd = Command::GetBucket(bucket_id.to_string());
         match self.request(cmd)? {
             Response::Bucket(b) => Ok(b),
+            _ => panic!("Invalid response"),
+        }
+    }
+
+    /// Resolve a device-scoped identity. Ordinary writes remain name-addressed
+    /// until the full routing contract is implemented.
+    pub fn get_bucket_for_device(
+        &self,
+        device_id: &str,
+        bucket_id: &str,
+    ) -> Result<Bucket, DatastoreError> {
+        match self.request(Command::GetBucketForDevice(
+            device_id.to_owned(),
+            bucket_id.to_owned(),
+        ))? {
+            Response::Bucket(bucket) => Ok(bucket),
             _ => panic!("Invalid response"),
         }
     }

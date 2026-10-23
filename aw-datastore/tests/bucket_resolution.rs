@@ -147,3 +147,35 @@ fn renaming_a_peer_cannot_redirect_an_active_alias() {
     assert!(ds.rename_bucket("unrelated", "window").is_err());
     assert_eq!(ds.get_bucket("window").unwrap().id, "window_host");
 }
+
+#[test]
+fn local_create_cannot_acknowledge_an_alias_that_global_writes_redirect() {
+    let ds = Datastore::new_in_memory(false);
+    ds.create_bucket(&bucket("window", "other", "peer"))
+        .unwrap();
+    ds.create_bucket(&bucket("window_host", "host", "local"))
+        .unwrap();
+    assert!(matches!(
+        ds.create_bucket(&bucket("window", "host", "local")),
+        Err(DatastoreError::AmbiguousBucket(_, _))
+    ));
+}
+
+#[test]
+fn reader_refreshes_aliases_after_hostname_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("aliases.sqlite")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let writer = Datastore::new(path.clone(), false);
+    writer
+        .create_bucket(&bucket("window", "unknown", "local"))
+        .unwrap();
+    let reader = Datastore::open_reader(path).unwrap();
+    assert!(reader.get_bucket("window_host").is_err());
+    assert_eq!(writer.migrate_hostname("host").unwrap(), 1);
+    assert_eq!(reader.get_bucket("window_host").unwrap().id, "window");
+}

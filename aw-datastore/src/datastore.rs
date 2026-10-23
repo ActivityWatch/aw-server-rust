@@ -1460,6 +1460,22 @@ impl DatastoreInstance {
         last_heartbeat: &mut HashMap<(String, String), Option<Event>>,
     ) -> Result<Event, DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
+        // A unique legacy alias can resolve a stored name shared by devices.
+        // Retain that authority while nested reads/writes use the canonical name.
+        let previous = self.device_scope.replace(bucket.device_id.clone());
+        let result = self.heartbeat_in_device(conn, &bucket, heartbeat, pulsetime, last_heartbeat);
+        self.device_scope = previous;
+        result
+    }
+
+    fn heartbeat_in_device(
+        &mut self,
+        conn: &Connection,
+        bucket: &Bucket,
+        heartbeat: Event,
+        pulsetime: f64,
+        last_heartbeat: &mut HashMap<(String, String), Option<Event>>,
+    ) -> Result<Event, DatastoreError> {
         let bucket_id = bucket.id.as_str();
         let key = (bucket.device_id.clone(), bucket.id.clone());
         let last_event = match last_heartbeat.remove(&key).flatten() {
@@ -2162,6 +2178,81 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
         assert_eq!(ids[0], ids[2]);
         assert_eq!(ids[1], ids[3]);
+    }
+
+    #[test]
+    fn unscoped_heartbeat_alias_keeps_the_resolved_device_for_nested_writes() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        // Exercise the future same-name state without lifting public guards.
+        for device in ["local", "peer"] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES ('window', ?1, 'test', 'test', ?1, '2026-01-01T00:00:00Z', '{}')",
+                [device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "window", "device_id": device, "type": "test",
+                "client": "test", "hostname": device
+            }))
+            .unwrap();
+            ds.cache_bucket(Bucket {
+                bid: Some(conn.last_insert_rowid()),
+                ..bucket
+            });
+        }
+        let mut cache = HashMap::new();
+        for second in [0, 1, 2] {
+            for device in ["local", "peer"] {
+                let event: Event = serde_json::from_value(serde_json::json!({
+                    "timestamp": format!("2026-01-01T00:00:0{second}Z"),
+                    "duration": 0, "data": {"device": device}
+                }))
+                .unwrap();
+                ds.heartbeat(&conn, &format!("window_{device}"), event, 10.0, &mut cache)
+                    .unwrap();
+                assert!(ds.device_scope.is_none(), "heartbeat leaked resolved scope");
+            }
+        }
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
+        for device in ["local", "peer"] {
+            let events = ds
+                .get_events(&conn, &format!("window_{device}"), None, None, None)
+                .unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data["device"], device);
+            assert_eq!(events[0].duration, chrono::Duration::seconds(2));
+        }
+        let event = Event::default();
+        assert!(ds
+            .heartbeat(&conn, "missing", event, 10.0, &mut cache)
+            .is_err());
+        assert!(ds.device_scope.is_none());
+        conn.execute_batch(
+            "CREATE TRIGGER reject_heartbeat BEFORE INSERT ON events
+             BEGIN SELECT RAISE(FAIL, 'injected heartbeat failure'); END;",
+        )
+        .unwrap();
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": "2026-01-01T00:01:00Z", "duration": 0,
+            "data": {"different": true}
+        }))
+        .unwrap();
+        assert!(ds
+            .heartbeat(&conn, "window_peer", event, 10.0, &mut cache)
+            .is_err());
+        assert!(
+            ds.device_scope.is_none(),
+            "nested failure leaked peer scope"
+        );
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
     }
 
     #[test]

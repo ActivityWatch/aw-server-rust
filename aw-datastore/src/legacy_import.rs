@@ -368,7 +368,7 @@ mod import {
             ds.ensure_legacy_import(&new_conn, None, false).unwrap(),
             "Failed to ensure legacy import"
         );
-        let buckets = ds.get_buckets();
+        let buckets = ds.get_buckets().unwrap();
         assert!(!buckets.is_empty());
         let mut num_events = 0;
         for (bucket_id, _bucket) in buckets {
@@ -440,7 +440,7 @@ mod import {
             let imported =
                 legacy_import(&mut ds, &conn, Some(missing_path.to_str().unwrap())).unwrap();
             assert!(!imported);
-            assert!(ds.get_buckets().is_empty());
+            assert!(ds.get_buckets().unwrap().is_empty());
         }
 
         #[test]
@@ -463,7 +463,7 @@ mod import {
                 legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap())).unwrap();
             assert!(imported);
 
-            let buckets = ds.get_buckets();
+            let buckets = ds.get_buckets().unwrap();
             assert_eq!(buckets.len(), 1);
             let bucket_id = buckets.keys().next().unwrap().clone();
             assert_eq!(bucket_id, "aw-watcher-afk_testhost");
@@ -583,7 +583,7 @@ mod import {
             let imported =
                 legacy_import(&mut ds, &conn, Some(custom_path.to_str().unwrap())).unwrap();
             assert!(imported);
-            assert_eq!(ds.get_buckets().len(), 1);
+            assert_eq!(ds.get_buckets().unwrap().len(), 1);
         }
 
         #[test]
@@ -636,7 +636,7 @@ mod import {
             // BucketAlreadyExists, and must not duplicate events.
             assert!(legacy_import(&mut ds, &conn, Some(legacy_path.to_str().unwrap())).unwrap());
 
-            let bucket_id = ds.get_buckets().keys().next().unwrap().clone();
+            let bucket_id = ds.get_buckets().unwrap().keys().next().unwrap().clone();
             let events = ds.get_events(&conn, &bucket_id, None, None, None).unwrap();
             assert_eq!(events.len(), 2, "re-import must not duplicate events");
         }
@@ -664,7 +664,7 @@ mod import {
             );
             assert!(legacy_import(&mut ds, &conn, Some(legacy_path_v2.to_str().unwrap())).unwrap());
 
-            let bucket_id = ds.get_buckets().keys().next().unwrap().clone();
+            let bucket_id = ds.get_buckets().unwrap().keys().next().unwrap().clone();
             let events = ds.get_events(&conn, &bucket_id, None, None, None).unwrap();
             assert_eq!(
                 events.len(),

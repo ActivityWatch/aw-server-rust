@@ -150,7 +150,7 @@ pub fn recover_database(
     // stale bucket row IDs and orphan recovered events.
     let mut ds = DatastoreInstance::new(&tx, false).map_err(error)?;
     let mut counts = RecoveryCounts::default();
-    for (name, mut bucket) in source_ds.get_buckets() {
+    for (name, mut bucket) in source_ds.get_buckets().map_err(error)? {
         if ds.get_bucket(&name).is_err() {
             bucket.bid = None;
             bucket.events = None;

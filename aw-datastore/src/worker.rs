@@ -759,7 +759,7 @@ impl DatastoreWorker {
             Command::GetBucketForDevice(device, id) => {
                 ds.get_bucket_for_device(&device, &id).map(Response::Bucket)
             }
-            Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets())),
+            Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets()?)),
             Command::GetDeviceBuckets() => Ok(Response::DeviceBuckets(ds.get_device_buckets())),
             Command::InsertEvents(bucketname, events) => {
                 let filtered = self.privacy_engine.filter_events(&bucketname, events);

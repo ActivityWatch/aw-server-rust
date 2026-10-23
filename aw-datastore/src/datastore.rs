@@ -1136,16 +1136,31 @@ impl DatastoreInstance {
         devices
     }
 
-    pub fn get_buckets(&self) -> HashMap<String, Bucket> {
-        self.buckets_cache
-            .values()
-            .filter(|bucket| {
-                self.device_scope
-                    .as_ref()
-                    .is_none_or(|device| bucket.device_id == *device)
-            })
-            .map(|bucket| (bucket.id.clone(), bucket.clone()))
-            .collect()
+    /// A legacy flat catalogue cannot represent equal names on different devices.
+    /// Reject it before serialization rather than silently retaining one device.
+    pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
+        let mut buckets = HashMap::new();
+        for bucket in self.buckets_cache.values().filter(|bucket| {
+            self.device_scope
+                .as_ref()
+                .is_none_or(|device| bucket.device_id == *device)
+        }) {
+            if buckets.contains_key(&bucket.id) {
+                let mut candidates: Vec<_> = self
+                    .buckets_cache
+                    .keys()
+                    .filter(|(_, id)| id == &bucket.id)
+                    .cloned()
+                    .collect();
+                candidates.sort();
+                return Err(DatastoreError::AmbiguousBucket(
+                    bucket.id.clone(),
+                    candidates,
+                ));
+            }
+            buckets.insert(bucket.id.clone(), bucket.clone());
+        }
+        Ok(buckets)
     }
 
     /// Serialize an export one event at a time using the caller's connection.
@@ -1156,10 +1171,17 @@ impl DatastoreInstance {
         bucket_id: Option<&str>,
         writer: impl std::io::Write,
     ) -> Result<Option<String>, DatastoreError> {
-        let selected = bucket_id
-            .map(|id| self.get_bucket(id).map(|b| b.id))
-            .transpose()?;
-        let buckets = self.get_buckets();
+        // A selected export need not flatten unrelated device buckets.
+        let (selected, buckets) = match bucket_id {
+            Some(id) => {
+                let bucket = self.get_bucket(id)?;
+                (
+                    Some(bucket.id.clone()),
+                    HashMap::from([(bucket.id.clone(), bucket)]),
+                )
+            }
+            None => (None, self.get_buckets()?),
+        };
         crate::export::write_export(conn, self.db_version, &buckets, selected.as_deref(), writer)?;
         Ok(selected
             .or_else(|| (buckets.len() == 1).then(|| buckets.values().next().unwrap().id.clone())))
@@ -1181,7 +1203,7 @@ impl DatastoreInstance {
         crate::export::write_events_csv(
             conn,
             self.db_version,
-            &self.get_buckets(),
+            &HashMap::from([(bucket.id.clone(), bucket.clone())]),
             &bucket.id,
             start,
             end,
@@ -2173,6 +2195,89 @@ mod tests {
     }
 
     #[test]
+    fn flat_catalogue_and_exports_reject_same_named_devices() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        // Seed the future pair-key state without relaxing public creation/reload guards.
+        for (name, device) in [("window", "local"), ("window", "peer"), ("unique", "third")] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES (?1, ?2, 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')",
+                [name, device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": name, "device_id": device, "type": "test",
+                "client": "test", "hostname": "host"
+            }))
+            .unwrap();
+            let bid = conn.last_insert_rowid();
+            ds.cache_bucket(Bucket {
+                bid: Some(bid),
+                ..bucket
+            });
+            conn.execute(
+                "INSERT INTO events (bucketrow, starttime, endtime, data) VALUES (?1, 0, 1000000000, ?2)",
+                rusqlite::params![bid, format!("{{\"device\":\"{device}\"}}")],
+            )
+            .unwrap();
+        }
+        let mut output = Vec::new();
+        assert!(matches!(
+            ds.write_export(&conn, None, &mut output),
+            Err(DatastoreError::AmbiguousBucket(id, candidates))
+                if id == "window" && candidates.len() == 2
+        ));
+        assert!(
+            output.is_empty(),
+            "ambiguous export must fail before writing bytes"
+        );
+        assert!(matches!(
+            ds.get_buckets(),
+            Err(DatastoreError::AmbiguousBucket(_, _))
+        ));
+        assert!(ds.write_export(&conn, Some("window"), &mut output).is_err());
+        ds.write_export(&conn, Some("unique"), &mut output).unwrap();
+        let export: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(export["buckets"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            export["buckets"]["unique"]["events"][0]["data"]["device"],
+            "third"
+        );
+        for device in ["local", "peer"] {
+            ds.device_scope = Some(device.to_owned());
+            output.clear();
+            ds.write_export(&conn, None, &mut output).unwrap();
+            let export: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(export["buckets"]["window"]["device_id"], device);
+            assert_eq!(
+                export["buckets"]["window"]["events"][0]["data"]["device"],
+                device
+            );
+            let mut csv = Vec::new();
+            ds.write_events_csv(&conn, "window", None, None, None, &mut csv)
+                .unwrap();
+            assert!(String::from_utf8(csv).unwrap().contains(device));
+        }
+        ds.device_scope = None;
+        output.clear();
+        crate::export::write_device_export(
+            &conn,
+            ds.db_version,
+            &ds.get_device_buckets(),
+            &mut output,
+        )
+        .unwrap();
+        let export: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        for device in ["local", "peer"] {
+            assert_eq!(
+                export["devices"][device]["buckets"]["window"]["events"][0]["data"]["device"],
+                device
+            );
+        }
+    }
+
+    #[test]
     fn legacy_name_index_never_selects_one_of_same_named_devices() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
@@ -2502,7 +2607,7 @@ mod tests {
         assert!(ds
             .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), false)
             .unwrap());
-        assert_eq!(ds.get_buckets().len(), 1);
+        assert_eq!(ds.get_buckets().unwrap().len(), 1);
 
         // Second call without force: first_init is now false (this is
         // exactly ActivityWatch/aw-server-rust#546 — a restart of an
@@ -2517,7 +2622,7 @@ mod tests {
         assert!(ds
             .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), true)
             .unwrap());
-        let bucket_id = ds.get_buckets().keys().next().unwrap().clone();
+        let bucket_id = ds.get_buckets().unwrap().keys().next().unwrap().clone();
         let events = ds.get_events(&conn, &bucket_id, None, None, None).unwrap();
         assert_eq!(
             events.len(),

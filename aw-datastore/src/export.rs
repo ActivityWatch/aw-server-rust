@@ -517,7 +517,7 @@ mod tests {
     fn streamed_json_matches_materialized_exports() {
         let (conn, mut ds) = setup();
         for selected in [None, Some("populated"), Some("empty")] {
-            let mut buckets = ds.get_buckets();
+            let mut buckets = ds.get_buckets().unwrap();
             buckets.retain(|id, _| selected.is_none() || selected == Some(id.as_str()));
             for (id, bucket) in &mut buckets {
                 bucket.events = Some(TryVec::new(

@@ -1726,8 +1726,20 @@ impl DatastoreInstance {
         old_id: &str,
         new_id: &str,
     ) -> Result<(), DatastoreError> {
+        if self.buckets_changed(conn)? {
+            self.get_stored_buckets(conn)?;
+        }
         let source = self.get_bucket(old_id)?;
         let old_id = source.id.as_str();
+        match self.get_bucket(new_id) {
+            Ok(existing) if existing.bid != source.bid => {
+                return Err(DatastoreError::BucketAlreadyExists(existing.id));
+            }
+            Err(DatastoreError::AmbiguousBucket(name, candidates)) => {
+                return Err(DatastoreError::AmbiguousBucket(name, candidates));
+            }
+            _ => {}
+        }
         if self.buckets_cache.contains_key(new_id) {
             return Err(DatastoreError::BucketAlreadyExists(new_id.to_string()));
         }

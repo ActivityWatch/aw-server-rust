@@ -136,3 +136,14 @@ fn creating_a_peer_exact_name_cannot_redirect_an_active_alias() {
     assert_eq!(ds.get_bucket("window").unwrap().id, "window_host");
     assert_eq!(ds.get_buckets().unwrap().len(), 1);
 }
+
+#[test]
+fn renaming_a_peer_cannot_redirect_an_active_alias() {
+    let ds = Datastore::new_in_memory(false);
+    ds.create_bucket(&bucket("window_host", "host", "local"))
+        .unwrap();
+    ds.create_bucket(&bucket("unrelated", "other", "peer"))
+        .unwrap();
+    assert!(ds.rename_bucket("unrelated", "window").is_err());
+    assert_eq!(ds.get_bucket("window").unwrap().id, "window_host");
+}

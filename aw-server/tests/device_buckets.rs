@@ -552,3 +552,108 @@ fn scoped_import_reports_guarded_name_collision_without_cross_device_merge() {
         Status::Ok
     );
 }
+
+#[test]
+fn scoped_http_writes_refresh_a_real_wal_query_reader_and_survive_reopen() {
+    use rocket::http::Method::{Delete, Get, Post};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("device-reader.sqlite")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let writer = Datastore::new(path.clone(), false);
+    writer.get_buckets().unwrap();
+    let mut state = ServerState::new(
+        writer.clone(),
+        AssetResolver::new(None),
+        "server-uuid".into(),
+    );
+    state.reader = Some(Datastore::open_reader(path.clone()).unwrap());
+    state.query_cache.register_reader();
+    let client = Client::untracked(endpoints::build_rocket(state, AWConfig::default())).unwrap();
+    let query = json!({"query": ["return sum_durations(query_bucket(\"window\"));"], "timeperiods": ["2026-01-01T00:00:00Z/2026-01-02T00:00:00Z"]});
+    for (device, id, host, duration) in [
+        ("local", "window_host", "host", 1.0),
+        ("peer", "window_other", "other", 2.0),
+    ] {
+        assert_eq!(
+            request(
+                &client,
+                Post,
+                &format!("/api/0/devices/{device}/buckets/{id}"),
+                Some(json!({"hostname": host, "type": "test", "client": "test"}))
+            )
+            .0,
+            Status::Ok
+        );
+        assert_eq!(
+            request(
+                &client,
+                Post,
+                &format!("/api/0/devices/{device}/buckets/window/events"),
+                Some(
+                    json!([{"timestamp": "2026-01-01T00:00:00Z", "duration": duration, "data": {}}])
+                )
+            )
+            .0,
+            Status::Ok
+        );
+        for _ in 0..2 {
+            let (status, body) = request(
+                &client,
+                Post,
+                &format!("/api/0/devices/{device}/query"),
+                Some(query.clone()),
+            );
+            assert_eq!(status, Status::Ok, "{body}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).unwrap(),
+                json!([duration])
+            );
+        }
+    }
+    assert_eq!(
+        request(
+            &client,
+            Delete,
+            "/api/0/devices/server-uuid/buckets/window",
+            None
+        )
+        .0,
+        Status::Ok
+    );
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/local/query",
+            Some(query.clone())
+        )
+        .0,
+        Status::BadRequest
+    );
+    let (status, body) = request(&client, Post, "/api/0/devices/peer/query", Some(query));
+    assert_eq!(status, Status::Ok, "{body}");
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), json!([2.0]));
+    writer.force_commit().unwrap();
+    drop(client);
+    drop(writer);
+    let reopened = Datastore::new(path, false);
+    let state = ServerState::new(reopened, AssetResolver::new(None), "server-uuid".into());
+    let client = Client::untracked(endpoints::build_rocket(state, AWConfig::default())).unwrap();
+    assert_eq!(
+        request(&client, Get, "/api/0/devices/local/buckets/window", None).0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/peer/buckets/window/events/count",
+            None
+        ),
+        (Status::Ok, "1".into())
+    );
+}

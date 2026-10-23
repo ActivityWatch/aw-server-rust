@@ -150,12 +150,25 @@ pub fn recover_database(
     // stale bucket row IDs and orphan recovered events.
     let mut ds = DatastoreInstance::new(&tx, false).map_err(error)?;
     let mut counts = RecoveryCounts::default();
-    for (name, mut bucket) in source_ds.get_buckets().map_err(error)? {
-        if ds.get_bucket(&name).is_err() {
-            bucket.bid = None;
-            bucket.events = None;
-            ds.create_bucket(&tx, bucket).map_err(error)?;
-            counts.buckets_created += 1;
+    for (name, mut bucket) in source_ds
+        .get_device_buckets()
+        .into_values()
+        .flat_map(|buckets| buckets.into_iter())
+    {
+        // Recovery authority is the source's stored pair, never an unscoped
+        // name match. Keep the duplicate-name creation guard until coexistence
+        // acceptance is complete; a conflict rolls back this whole union.
+        ds.device_scope = Some(bucket.device_id.clone());
+        source_ds.device_scope = Some(bucket.device_id.clone());
+        match ds.get_bucket_for_device(&bucket.device_id, &name) {
+            Ok(_) => {}
+            Err(DatastoreError::NoSuchBucket(_)) => {
+                bucket.bid = None;
+                bucket.events = None;
+                ds.create_bucket(&tx, bucket).map_err(error)?;
+                counts.buckets_created += 1;
+            }
+            Err(err) => return Err(error(err)),
         }
         let existing = ds
             .get_events_unclipped(&tx, &name, None, None, None)
@@ -256,6 +269,66 @@ mod tests {
             .unwrap()
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn recovery_rejects_cross_device_destination_without_moving_history() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let source = root.path().join("source.db");
+        populate(&target, &[("shared", vec![event(r#"{"local":true}"#)])]);
+        populate(&source, &[("shared", vec![event(r#"{"peer":true}"#)])]);
+        Connection::open(&source)
+            .unwrap()
+            .execute("UPDATE buckets SET device_id = 'peer'", [])
+            .unwrap();
+        // Until public coexistence is enabled, reject the conflict instead of
+        // merging a peer's events into the name-matched local bucket.
+        assert!(
+            recover_database(&target, &source, &root.path().join("backup.db"), "peer").is_err()
+        );
+        assert_eq!(count(&target), 1);
+        assert_eq!(count(&source), 1);
+        let conn = Connection::open(&target).unwrap();
+        let markers: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM key_value WHERE key = 'windows_recovery:peer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(markers, 0);
+    }
+
+    #[test]
+    fn recovery_preserves_peer_ownership_for_new_and_existing_buckets() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let source = root.path().join("source.db");
+        populate(&target, &[]);
+        populate(&source, &[("shared", vec![event(r#"{"peer":true}"#)])]);
+        Connection::open(&source)
+            .unwrap()
+            .execute("UPDATE buckets SET device_id = 'peer'", [])
+            .unwrap();
+        let result =
+            recover_database(&target, &source, &root.path().join("backup.db"), "first").unwrap();
+        assert_eq!(result.buckets_created, 1);
+        assert_eq!(result.events_inserted, 1);
+        let result =
+            recover_database(&target, &source, &root.path().join("backup2.db"), "second").unwrap();
+        assert_eq!(result.buckets_created, 0);
+        assert_eq!(result.duplicates_skipped, 1);
+        let conn = Connection::open(&target).unwrap();
+        let device: String = conn
+            .query_row(
+                "SELECT device_id FROM buckets WHERE name = 'shared'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(device, "peer");
+        assert_eq!(count(&target), 1);
     }
 
     #[test]

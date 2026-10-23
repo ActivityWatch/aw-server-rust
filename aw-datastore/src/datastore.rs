@@ -464,7 +464,11 @@ enum EventRead {
 }
 
 pub struct DatastoreInstance {
-    buckets_cache: HashMap<String, Bucket>,
+    buckets_cache: HashMap<(String, String), Bucket>,
+    // Temporary unique-name index for legacy callers while the global name
+    // guard remains. Ownership is held by the pair-keyed authoritative cache.
+    bucket_names: HashMap<String, (String, String)>,
+    pub(crate) device_scope: Option<String>,
     /// `(count, max id, names and hostnames)` when `buckets_cache` was
     /// loaded; lets a reader detect creates, deletes, renames and alias repairs by another
     /// connection with one cheap query.
@@ -715,6 +719,8 @@ impl DatastoreInstance {
 
         let mut ds = DatastoreInstance {
             buckets_cache: HashMap::new(),
+            bucket_names: HashMap::new(),
+            device_scope: None,
             buckets_signature: (0, 0, String::new()),
             first_init,
             db_version,
@@ -821,16 +827,19 @@ impl DatastoreInstance {
             }
         };
         let mut new_cache = HashMap::new();
+        let mut names = HashMap::new();
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
-                    if new_cache.contains_key(&b.id) {
+                    if names.contains_key(&b.id) {
                         return Err(DatastoreError::InternalError(format!(
                             "Cannot load ambiguous bucket name {:?}: device-aware addressing is not implemented",
                             b.id
                         )));
                     }
-                    new_cache.insert(b.id.clone(), b);
+                    let key = (b.device_id.clone(), b.id.clone());
+                    names.insert(b.id.clone(), key.clone());
+                    new_cache.insert(key, b);
                 }
                 Err(e) => {
                     return Err(DatastoreError::InternalError(format!(
@@ -840,6 +849,7 @@ impl DatastoreInstance {
             }
         }
         self.buckets_cache = new_cache;
+        self.bucket_names = names;
         self.buckets_signature = signature;
         Ok(())
     }
@@ -916,7 +926,11 @@ impl DatastoreInstance {
                 // A successful legacy POST acknowledges the same target that
                 // subsequent unscoped event writes will use, never a scoped
                 // alias hidden by a peer's exact name.
-                let global = self.get_bucket(&bucket.id)?;
+                let global = if self.device_scope.is_some() {
+                    existing.clone()
+                } else {
+                    self.get_bucket_unscoped(&bucket.id)?
+                };
                 if global.bid != existing.bid {
                     return Err(DatastoreError::AmbiguousBucket(
                         bucket.id.clone(),
@@ -933,7 +947,7 @@ impl DatastoreInstance {
         }
         // While callers still address names globally, an exact peer name must
         // not take over a spelling that already resolves to another history.
-        match self.get_bucket(&bucket.id) {
+        match self.get_bucket_unscoped(&bucket.id) {
             Ok(existing) if existing.device_id != bucket.device_id && existing.id != bucket.id => {
                 return Err(DatastoreError::AmbiguousBucket(
                     bucket.id.clone(),
@@ -986,7 +1000,7 @@ impl DatastoreInstance {
                 let events = bucket.events;
                 bucket.events = None;
                 // Cache bucket
-                self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
+                self.cache_bucket(bucket.clone());
                 // Insert events
                 if let Some(events) = events {
                     self.insert_events(conn, &bucket.id, events.take_inner())?;
@@ -1019,7 +1033,9 @@ impl DatastoreInstance {
         // Delete bucket itself
         match conn.execute("DELETE FROM buckets WHERE id = ?1", [&bucket.bid]) {
             Ok(_) => {
-                self.buckets_cache.remove(&bucket.id);
+                self.buckets_cache
+                    .remove(&(bucket.device_id.clone(), bucket.id.clone()));
+                self.bucket_names.remove(&bucket.id);
                 Ok(())
             }
             Err(err) => match err {
@@ -1035,9 +1051,16 @@ impl DatastoreInstance {
     }
 
     pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
+        if let Some(device) = &self.device_scope {
+            return self.get_bucket_for_device(device, bucket_id);
+        }
+        self.get_bucket_unscoped(bucket_id)
+    }
+
+    fn get_bucket_unscoped(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
         // Keep ordinary watcher reads O(1) while the global-name guard holds.
-        if let Some(bucket) = self.buckets_cache.get(bucket_id) {
-            return Ok(bucket.clone());
+        if let Some(key) = self.bucket_names.get(bucket_id) {
+            return Ok(self.buckets_cache[key].clone());
         }
         crate::bucket_resolution::resolve_bucket(self.buckets_cache.values(), bucket_id, None)
     }
@@ -1048,6 +1071,12 @@ impl DatastoreInstance {
         device_id: &str,
         bucket_id: &str,
     ) -> Result<Bucket, DatastoreError> {
+        if let Some(bucket) = self
+            .buckets_cache
+            .get(&(device_id.to_owned(), bucket_id.to_owned()))
+        {
+            return Ok(bucket.clone());
+        }
         crate::bucket_resolution::resolve_bucket(
             self.buckets_cache.values(),
             bucket_id,
@@ -1055,8 +1084,22 @@ impl DatastoreInstance {
         )
     }
 
+    fn cache_bucket(&mut self, bucket: Bucket) {
+        let key = (bucket.device_id.clone(), bucket.id.clone());
+        self.bucket_names.insert(bucket.id.clone(), key.clone());
+        self.buckets_cache.insert(key, bucket);
+    }
+
     pub fn get_buckets(&self) -> HashMap<String, Bucket> {
-        self.buckets_cache.clone()
+        self.buckets_cache
+            .values()
+            .filter(|bucket| {
+                self.device_scope
+                    .as_ref()
+                    .is_none_or(|device| bucket.device_id == *device)
+            })
+            .map(|bucket| (bucket.id.clone(), bucket.clone()))
+            .collect()
     }
 
     /// Serialize an export one event at a time using the caller's connection.
@@ -1070,17 +1113,10 @@ impl DatastoreInstance {
         let selected = bucket_id
             .map(|id| self.get_bucket(id).map(|b| b.id))
             .transpose()?;
-        crate::export::write_export(
-            conn,
-            self.db_version,
-            &self.buckets_cache,
-            selected.as_deref(),
-            writer,
-        )?;
-        Ok(selected.or_else(|| {
-            (self.buckets_cache.len() == 1)
-                .then(|| self.buckets_cache.keys().next().unwrap().clone())
-        }))
+        let buckets = self.get_buckets();
+        crate::export::write_export(conn, self.db_version, &buckets, selected.as_deref(), writer)?;
+        Ok(selected
+            .or_else(|| (buckets.len() == 1).then(|| buckets.values().next().unwrap().id.clone())))
     }
 
     /// Stream one bucket's events as RFC-4180 CSV, one row at a time.
@@ -1099,7 +1135,7 @@ impl DatastoreInstance {
         crate::export::write_events_csv(
             conn,
             self.db_version,
-            &self.buckets_cache,
+            &self.get_buckets(),
             &bucket.id,
             start,
             end,
@@ -1232,7 +1268,7 @@ impl DatastoreInstance {
         };
         bucket.metadata.start = start_ns.map(_datetime_from_nanos);
         bucket.metadata.end = end_ns.map(_datetime_from_nanos);
-        self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
+        self.cache_bucket(bucket.clone());
         Ok(())
     }
 
@@ -1269,7 +1305,7 @@ impl DatastoreInstance {
         }
         /* Update buchets_cache if start or end has been updated */
         if update {
-            self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
+            self.cache_bucket(bucket.clone());
         }
     }
 
@@ -1760,7 +1796,7 @@ impl DatastoreInstance {
         }
         let source = self.get_bucket(old_id)?;
         let old_id = source.id.as_str();
-        match self.get_bucket(new_id) {
+        match self.get_bucket_unscoped(new_id) {
             Ok(existing) if existing.bid != source.bid => {
                 return Err(DatastoreError::BucketAlreadyExists(existing.id));
             }
@@ -1769,7 +1805,7 @@ impl DatastoreInstance {
             }
             _ => {}
         }
-        if self.buckets_cache.contains_key(new_id) {
+        if self.bucket_names.contains_key(new_id) {
             return Err(DatastoreError::BucketAlreadyExists(new_id.to_string()));
         }
 
@@ -1803,9 +1839,13 @@ impl DatastoreInstance {
             Ok(_) => {
                 info!("Renamed bucket '{}' to '{}'", old_id, new_id);
                 // Update the in-memory cache: remove the old entry and re-insert under the new id.
-                if let Some(mut bucket) = self.buckets_cache.remove(old_id) {
+                if let Some(mut bucket) = self
+                    .buckets_cache
+                    .remove(&(source.device_id.clone(), old_id.to_owned()))
+                {
+                    self.bucket_names.remove(old_id);
                     bucket.id = new_id.to_string();
-                    self.buckets_cache.insert(new_id.to_string(), bucket);
+                    self.cache_bucket(bucket);
                 }
                 Ok(())
             }
@@ -1871,21 +1911,22 @@ impl DatastoreInstance {
         info!("Migrating '{OLD_PREFIX}' bucket names to '{NEW_PREFIX}'");
         let legacy_ids: Vec<String> = self
             .buckets_cache
-            .keys()
-            .filter(|id| id.starts_with(OLD_PREFIX))
-            .cloned()
+            .values()
+            .filter(|bucket| bucket.id.starts_with(OLD_PREFIX))
+            .map(|bucket| bucket.id.clone())
             .collect();
         let mut migrated = 0;
         let mut cache_dirty = false;
 
         for old_id in legacy_ids {
             let new_id = old_id.replacen(OLD_PREFIX, NEW_PREFIX, 1);
-            if let Some(new_bucket) = self.buckets_cache.get(&new_id).cloned() {
-                let old_bucket = self
-                    .buckets_cache
+            if let Some(new_key) = self.bucket_names.get(&new_id) {
+                let new_bucket = self.buckets_cache[new_key].clone();
+                let old_key = self
+                    .bucket_names
                     .get(&old_id)
-                    .cloned()
                     .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
+                let old_bucket = self.buckets_cache[old_key].clone();
 
                 // Move only events that do not overlap the destination or another
                 // legacy event. A single overlapping cutover heartbeat must not strand

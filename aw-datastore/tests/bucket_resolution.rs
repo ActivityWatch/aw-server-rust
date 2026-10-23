@@ -179,3 +179,100 @@ fn reader_refreshes_aliases_after_hostname_repair() {
     assert_eq!(writer.migrate_hostname("host").unwrap(), 1);
     assert_eq!(reader.get_bucket("window_host").unwrap().id, "window");
 }
+
+#[test]
+fn device_lookup_is_exact_and_never_falls_back_to_another_device() {
+    let ds = Datastore::new_in_memory(false);
+    ds.create_bucket(&bucket("window_host", "host", "local"))
+        .unwrap();
+    ds.create_bucket(&bucket("window_other", "other", "peer"))
+        .unwrap();
+    assert_eq!(
+        ds.get_bucket_for_device("local", "window").unwrap().id,
+        "window_host"
+    );
+    assert_eq!(
+        ds.get_bucket_for_device("peer", "window").unwrap().id,
+        "window_other"
+    );
+    assert!(matches!(
+        ds.get_bucket_for_device("missing", "window_host"),
+        Err(DatastoreError::NoSuchBucket(_))
+    ));
+    assert!(matches!(
+        ds.get_bucket_for_device("local", "window_other"),
+        Err(DatastoreError::NoSuchBucket(_))
+    ));
+}
+
+#[test]
+fn scoped_handle_routes_events_and_export_without_peer_fallback() {
+    let ds = Datastore::new_in_memory(false);
+    ds.create_bucket(&bucket("window_host", "host", "local"))
+        .unwrap();
+    ds.create_bucket(&bucket("window_other", "other", "peer"))
+        .unwrap();
+    let local = ds.for_device("local");
+    let peer = ds.for_device("peer");
+    assert_eq!(local.get_bucket("window").unwrap().id, "window_host");
+    assert_eq!(peer.get_bucket("window").unwrap().id, "window_other");
+    assert!(matches!(
+        peer.get_bucket("window_host"),
+        Err(DatastoreError::NoSuchBucket(_))
+    ));
+    let event = aw_models::Event::default();
+    local.insert_events("window", &[event]).unwrap();
+    assert_eq!(local.get_event_count("window", None, None).unwrap(), 1);
+    assert_eq!(peer.get_event_count("window", None, None).unwrap(), 0);
+    assert_eq!(peer.get_buckets().unwrap().len(), 1);
+    use std::io::{Read, Seek, SeekFrom};
+    let (mut file, _) = local
+        .export_to_file(None, tempfile::tempfile().unwrap())
+        .unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut text = String::new();
+    file.read_to_string(&mut text).unwrap();
+    let export: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(export["buckets"].as_object().unwrap().len(), 1);
+    assert!(export["buckets"]["window_host"].is_object());
+    peer.delete_bucket("window").unwrap();
+    assert_eq!(local.get_event_count("window", None, None).unwrap(), 1);
+    assert_eq!(ds.get_buckets().unwrap().len(), 1);
+}
+
+#[test]
+fn scoped_creation_uses_selected_ownership_and_restores_unscoped_handle() {
+    let ds = Datastore::new_in_memory(false);
+    let peer = ds.for_device("peer");
+    peer.create_bucket(&bucket("peer_bucket", "host", "forged"))
+        .unwrap();
+    assert_eq!(peer.get_bucket("peer_bucket").unwrap().device_id, "peer");
+    ds.create_bucket(&bucket("local_bucket", "host", "local"))
+        .unwrap();
+    assert!(matches!(
+        peer.get_bucket("local_bucket"),
+        Err(DatastoreError::NoSuchBucket(_))
+    ));
+    assert_eq!(ds.get_buckets().unwrap().len(), 2);
+    assert_eq!(ds.get_bucket("local_bucket").unwrap().device_id, "local");
+    assert_eq!(peer.get_buckets().unwrap().len(), 1);
+}
+
+#[test]
+fn empty_device_scope_cannot_write_into_local_ownership() {
+    let ds = Datastore::new_in_memory(false);
+    assert!(ds
+        .for_device("")
+        .create_bucket(&bucket("unexpected", "host", "local"))
+        .is_err());
+    assert!(ds.get_buckets().unwrap().is_empty());
+}
+
+#[test]
+fn failed_scoped_request_restores_unscoped_resolution() {
+    let ds = Datastore::new_in_memory(false);
+    ds.create_bucket(&bucket("window", "host", "local"))
+        .unwrap();
+    assert!(ds.for_device("peer").get_bucket("window").is_err());
+    assert_eq!(ds.get_bucket("window").unwrap().device_id, "local");
+}

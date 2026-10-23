@@ -188,6 +188,7 @@ fn probe_user_version(path: &str) -> Result<i32, DatastoreError> {
 #[derive(Clone)]
 pub struct Datastore {
     requester: RequestSender,
+    device_scope: Option<String>,
 }
 
 impl fmt::Debug for Datastore {
@@ -230,6 +231,7 @@ pub enum Command {
         Option<u64>,
         File,
     ),
+    Scoped(String, Box<Command>),
     CreateBucket(Bucket),
     DeleteBucket(String),
     GetBucket(String),
@@ -618,6 +620,20 @@ impl DatastoreWorker {
         ds: &mut DatastoreInstance,
         tx: &Transaction,
     ) -> Result<Response, DatastoreError> {
+        if let Command::Scoped(device, command) = request {
+            if device.is_empty() {
+                return Err(DatastoreError::InternalError(
+                    "Device scope must not be empty".to_owned(),
+                ));
+            }
+            // Scope stays on the serialized worker for exactly one command,
+            // including all nested datastore calls. Never resolve on the caller
+            // and send a later unscoped write (that creates a rename/delete race).
+            let previous = ds.device_scope.replace(device);
+            let result = self.handle_request(*command, ds, tx);
+            ds.device_scope = previous;
+            return result;
+        }
         if self.reader {
             // The writer may have created, deleted or renamed buckets since
             // the cache was loaded: before any read that depends on the
@@ -653,6 +669,7 @@ impl DatastoreWorker {
             *id = ds.get_bucket(id)?.id;
         }
         match request {
+            Command::Scoped(..) => unreachable!("scoped commands are handled above"),
             Command::ReloadBuckets() => match ds.reload_buckets(tx) {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
@@ -676,6 +693,9 @@ impl DatastoreWorker {
                 Ok(Response::ExportCsv(file))
             }
             Command::CreateBucket(mut bucket) => {
+                if let Some(device) = &ds.device_scope {
+                    bucket.device_id = device.clone();
+                }
                 // Attached events (import) must use the same privacy gate as
                 // InsertEvents, or a new-bucket import stores data the rules
                 // would drop or redact.
@@ -1010,16 +1030,30 @@ impl Datastore {
             let mut di = DatastoreWorker::new(responder, legacy_import_opts);
             di.work_loop(method);
         });
-        Datastore { requester }
+        Datastore {
+            requester,
+            device_scope: None,
+        }
+    }
+
+    /// Select bucket ownership for commands on a cloned handle. Scope is applied
+    /// inside the serialized worker, not by a separate caller-side lookup. This
+    /// is a routing selector, not an authorization boundary for global settings
+    /// or maintenance commands. HTTP UUID/local normalization belongs upstream.
+    pub fn for_device(&self, device_id: &str) -> Self {
+        Self {
+            requester: self.requester.clone(),
+            device_scope: Some(device_id.to_owned()),
+        }
     }
 
     /// Send a command to the worker thread and wait for its response.
-    ///
-    /// Fails with `InternalError` instead of panicking when the worker thread
-    /// is gone (e.g. it panicked on an earlier request), so callers such as
-    /// HTTP endpoints can degrade to a 5xx response instead of crashing the
-    /// request.
+    /// Return an error rather than panic if the worker is gone.
     fn request(&self, cmd: Command) -> Result<Response, DatastoreError> {
+        let cmd = match &self.device_scope {
+            Some(device) => Command::Scoped(device.clone(), Box::new(cmd)),
+            None => cmd,
+        };
         let receiver = self.requester.request(cmd).map_err(|e| {
             DatastoreError::InternalError(format!(
                 "Failed to send request, datastore worker is gone: {e:?}"

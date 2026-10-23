@@ -276,3 +276,38 @@ fn failed_scoped_request_restores_unscoped_resolution() {
     assert!(ds.for_device("peer").get_bucket("window").is_err());
     assert_eq!(ds.get_bucket("window").unwrap().device_id, "local");
 }
+
+#[test]
+fn scoped_alias_privacy_matches_stored_names_without_filtering_other_devices() {
+    use aw_models::Event;
+    let ds = Datastore::new_in_memory(false);
+    ds.for_device("local")
+        .create_bucket(&bucket("window_private_host", "private_host", "local"))
+        .unwrap();
+    ds.for_device("peer")
+        .create_bucket(&bucket("window_public_host", "public_host", "peer"))
+        .unwrap();
+    ds.set_key_value_and_commit(
+        "settings.privacy_filters",
+        &json!([{
+            "enabled": true, "bucket_prefix": "window_private_host", "field": "title",
+            "pattern": "secret", "action": "redact", "replacement": "hidden"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let event: Event = serde_json::from_value(
+        json!({"timestamp":"2026-01-01T00:00:00Z", "duration": 1, "data":{"title":"secret"}}),
+    )
+    .unwrap();
+    for (device, expected) in [("local", "hidden"), ("peer", "secret")] {
+        let scoped = ds.for_device(device);
+        let inserted = scoped
+            .insert_events("window", std::slice::from_ref(&event))
+            .unwrap();
+        assert_eq!(inserted[0].data["title"], expected);
+        let stored = scoped.get_events("window", None, None, None).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].data["title"], expected);
+    }
+}

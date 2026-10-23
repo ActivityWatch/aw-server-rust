@@ -334,6 +334,43 @@ fn empty_device_scope_cannot_write_into_local_ownership() {
 }
 
 #[test]
+fn legacy_name_migration_refreshes_peer_destinations_before_mutation() {
+    use aw_datastore::DatastoreInstance;
+    use rusqlite::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("migration-refresh.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+    let old = "aw-watcher-android-test_phone";
+    let new = "aw-watcher-android_phone";
+    ds.create_bucket(&conn, bucket(old, "phone", "local"))
+        .unwrap();
+    ds.insert_events(&conn, old, vec![aw_models::Event::default()])
+        .unwrap();
+    let other_conn = Connection::open(&path).unwrap();
+    let mut peer = DatastoreInstance::new(&other_conn, true).unwrap();
+    peer.create_bucket(&other_conn, bucket(new, "peer", "peer"))
+        .unwrap();
+    assert!(matches!(
+        ds.migrate_test_bucket_names(&conn),
+        Err(DatastoreError::BucketAlreadyExists(_))
+    ));
+    let names: Vec<(String, String)> = conn
+        .prepare("SELECT device_id, name FROM buckets ORDER BY device_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        names,
+        vec![("local".into(), old.into()), ("peer".into(), new.into())]
+    );
+    assert_eq!(ds.get_event_count(&conn, old, None, None).unwrap(), 1);
+    DatastoreInstance::new(&conn, false).unwrap();
+}
+
+#[test]
 fn failed_scoped_request_restores_unscoped_resolution() {
     let ds = Datastore::new_in_memory(false);
     ds.create_bucket(&bucket("window", "host", "local"))

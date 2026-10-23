@@ -1995,6 +1995,10 @@ impl DatastoreInstance {
         const NEW_PREFIX: &str = "aw-watcher-android";
 
         info!("Migrating '{OLD_PREFIX}' bucket names to '{NEW_PREFIX}'");
+        // Preflight against the current transaction, not a writer cache that
+        // may predate another connection's destination bucket. The worker holds
+        // its immediate transaction across this refresh and all mutations.
+        self.get_stored_buckets(conn)?;
         let legacy: Vec<Bucket> = self
             .buckets_cache
             .values()

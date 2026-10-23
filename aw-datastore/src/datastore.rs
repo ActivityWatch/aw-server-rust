@@ -1411,14 +1411,12 @@ impl DatastoreInstance {
         bucket_id: &str,
         heartbeat: Event,
         pulsetime: f64,
-        last_heartbeat: &mut HashMap<String, Option<Event>>,
+        last_heartbeat: &mut HashMap<(String, String), Option<Event>>,
     ) -> Result<Event, DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
         let bucket_id = bucket.id.as_str();
-        if !last_heartbeat.contains_key(bucket_id) {
-            last_heartbeat.insert(bucket_id.to_string(), None);
-        }
-        let last_event = match last_heartbeat.remove(bucket_id).unwrap() {
+        let key = (bucket.device_id.clone(), bucket.id.clone());
+        let last_event = match last_heartbeat.remove(&key).flatten() {
             // last heartbeat is in cache
             Some(last_event) => last_event,
             None => {
@@ -1455,7 +1453,7 @@ impl DatastoreInstance {
                 inserted.pop().unwrap()
             }
         };
-        last_heartbeat.insert(bucket_id.to_string(), Some(inserted_heartbeat.clone()));
+        last_heartbeat.insert(key, Some(inserted_heartbeat.clone()));
         Ok(inserted_heartbeat)
     }
 
@@ -2047,6 +2045,58 @@ impl DatastoreInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_cache_separates_same_named_device_buckets() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        // Prepare the future pair-keyed state internally without lifting either
+        // public creation/cache-load guard before full routing acceptance.
+        for device in ["local", "peer"] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES ('window', ?1, 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')",
+                [device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "window", "device_id": device, "type": "test",
+                "client": "test", "hostname": "host"
+            }))
+            .unwrap();
+            ds.cache_bucket(Bucket {
+                bid: Some(conn.last_insert_rowid()),
+                ..bucket
+            });
+        }
+        let mut cache = HashMap::new();
+        let mut ids = Vec::new();
+        for device in ["local", "peer", "local", "peer"] {
+            ds.device_scope = Some(device.to_owned());
+            for second in [0, 1] {
+                let event: Event = serde_json::from_value(serde_json::json!({
+                    "timestamp": format!("2026-01-01T00:00:0{second}Z"),
+                    "duration": 0, "data": {"title": "same"}
+                }))
+                .unwrap();
+                let result = ds
+                    .heartbeat(&conn, "window", event, 10.0, &mut cache)
+                    .unwrap();
+                if second == 1 {
+                    ids.push(result.id.unwrap());
+                }
+            }
+            assert_eq!(
+                ds.get_events(&conn, "window", None, None, None)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(ids[0], ids[2]);
+        assert_eq!(ids[1], ids[3]);
+    }
 
     #[test]
     fn strict_event_read_propagates_sqlite_step_errors() {

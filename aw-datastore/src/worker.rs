@@ -318,7 +318,7 @@ struct DatastoreWorker {
     quit: bool,
     uncommitted_events: usize,
     commit: bool,
-    last_heartbeat: HashMap<String, Option<Event>>,
+    last_heartbeat: HashMap<(String, String), Option<Event>>,
     privacy_engine: PrivacyFilterEngine,
     /// `FileReader`: a bucket missing from the cache may have been created by
     /// the writer since we loaded it, so reload once before failing.
@@ -769,7 +769,8 @@ impl DatastoreWorker {
                 match ds.insert_events(tx, &bucketname, filtered) {
                     Ok(events) => {
                         self.uncommitted_events += events.len();
-                        self.last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
+                        let bucket = ds.get_bucket(&bucketname)?;
+                        self.last_heartbeat.remove(&(bucket.device_id, bucket.id)); // invalidate last_heartbeat cache
 
                         // Manual timer changes must be durable before the UI confirms them.
                         self.commit |= ds.get_bucket(&bucketname)?._type == STOPWATCH_BUCKET_TYPE;
@@ -793,9 +794,10 @@ impl DatastoreWorker {
                         // watcher's heartbeat-merge state machine continues correctly.
                         // Fall back to the incoming event itself if no prior event is cached
                         // (avoids returning a zero-timestamp default Event).
+                        let bucket = ds.get_bucket(&bucketname)?;
                         let last = self
                             .last_heartbeat
-                            .get(&bucketname)
+                            .get(&(bucket.device_id, bucket.id))
                             .and_then(|e| e.clone())
                             .unwrap_or(event);
                         return Ok(Response::Event(last));

@@ -2610,6 +2610,64 @@ mod tests {
     }
 
     #[test]
+    fn legacy_import_uses_local_alias_without_selecting_peer_exact_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy_path = tmp.path().join("legacy.db");
+        write_fixture_legacy_db(&legacy_path);
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        for (name, device, host) in [
+            ("aw-watcher-afk_testhost", "peer", "other"),
+            ("aw-watcher-afk", "local", "testhost"),
+        ] {
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": name, "device_id": device, "hostname": host,
+                "type": "afkstatus", "client": "test"
+            }))
+            .unwrap();
+            ds.create_bucket(&conn, bucket).unwrap();
+        }
+        // Migration has explicit local authority, unlike an unscoped watcher.
+        for _ in 0..2 {
+            assert!(crate::legacy_import::legacy_import(
+                &mut ds,
+                &conn,
+                Some(legacy_path.to_str().unwrap())
+            )
+            .unwrap());
+            assert!(ds.device_scope.is_none(), "import leaked local scope");
+            ds.device_scope = Some("local".into());
+            let events = ds
+                .get_events_unclipped(&conn, "aw-watcher-afk", None, None, None)
+                .unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].duration, Duration::seconds(5));
+            ds.device_scope = Some("peer".into());
+            assert_eq!(
+                ds.get_event_count(&conn, "aw-watcher-afk_testhost", None, None)
+                    .unwrap(),
+                0
+            );
+            ds.device_scope = None;
+        }
+        assert_eq!(
+            ds.get_bucket("aw-watcher-afk_testhost").unwrap().device_id,
+            "peer"
+        );
+        // An error must restore the caller's scope as well.
+        ds.device_scope = Some("peer".into());
+        let broken = tmp.path().join("broken.db");
+        Connection::open(&broken).unwrap();
+        assert!(crate::legacy_import::legacy_import(
+            &mut ds,
+            &conn,
+            Some(broken.to_str().unwrap())
+        )
+        .is_err());
+        assert_eq!(ds.device_scope.as_deref(), Some("peer"));
+    }
+
+    #[test]
     fn ensure_legacy_import_skips_after_first_init_unless_forced() {
         let tmp = tempfile::tempdir().unwrap();
         let legacy_path = tmp.path().join("legacy.db");

@@ -23,7 +23,14 @@ pub fn legacy_import(
     new_conn: &Connection,
     legacy_db_path_override: Option<&str>,
 ) -> Result<bool, LegacyDatastoreImportError> {
-    import::legacy_import(new_ds, new_conn, legacy_db_path_override)
+    // Legacy Python databases have no peer identity. Their buckets belong to
+    // this device, including when a peer owns an exact spelling of a local
+    // compatibility alias. Keep that authority through creation, dedup and
+    // insertion, and restore the caller's scope on both success and failure.
+    let previous = new_ds.device_scope.replace("local".to_owned());
+    let result = import::legacy_import(new_ds, new_conn, legacy_db_path_override);
+    new_ds.device_scope = previous;
+    result
 }
 
 #[cfg(not(target_os = "android"))]

@@ -93,11 +93,7 @@ pub fn device_query(
     cache: Option<bool>,
     state: &State<ServerState>,
 ) -> Result<RawJson<String>, HttpErrorJson> {
-    let device = if device_id == "local" || device_id == state.device_id {
-        "local"
-    } else {
-        device_id
-    };
+    let device = state.normalize_device(device_id);
     run_query(query_req, cache, state, Some(device))
 }
 

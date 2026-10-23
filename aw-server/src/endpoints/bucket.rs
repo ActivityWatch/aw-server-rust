@@ -8,7 +8,7 @@ use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
 
-use aw_datastore::DatastoreError;
+use aw_datastore::{Datastore, DatastoreError};
 use aw_models::Bucket;
 use aw_models::Event;
 
@@ -52,13 +52,22 @@ pub fn bucket_new(
     message: ApiJson<Bucket>,
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
+    bucket_new_in(bucket_id, message, state, &state.datastore, "local")
+}
+
+pub(super) fn bucket_new_in(
+    bucket_id: &str,
+    message: ApiJson<Bucket>,
+    state: &State<ServerState>,
+    datastore: &Datastore,
+    device: &str,
+) -> Result<(), HttpErrorJson> {
     let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
         bucket.id = bucket_id.to_string();
     }
-    // This is the local watcher endpoint, not a peer-import path. Ownership
-    // comes from the server, never from client JSON or compatibility metadata.
-    bucket.device_id = "local".to_string();
+    // Ownership comes from the route (local for legacy POST), never from JSON.
+    bucket.device_id = device.to_string();
     // Reject client-supplied hostnames containing whitespace. Such hostnames come from
     // misconfigured clients and produce buckets that are awkward to address and query.
     //
@@ -73,7 +82,7 @@ pub fn bucket_new(
         // only the former should trigger the whitespace rejection (400). An
         // InternalError means the datastore worker is down and must become 500,
         // not be silently swallowed and misreported as invalid client input.
-        match state.datastore.get_bucket(&bucket.id) {
+        match datastore.get_bucket(&bucket.id) {
             Ok(_) => {} // existing bucket — skip validation; create_bucket returns 304
             Err(DatastoreError::NoSuchBucket(_)) => {
                 // Format the hostname with Debug to escape control characters, so
@@ -89,6 +98,12 @@ pub fn bucket_new(
         }
     }
     if bucket.hostname == "!local" {
+        if device != "local" {
+            return Err(HttpErrorJson::new(
+                Status::BadRequest,
+                "The !local hostname sentinel requires the local device".to_string(),
+            ));
+        }
         bucket.hostname = gethostname()
             .into_string()
             .unwrap_or_else(|_| "unknown".to_string());
@@ -96,7 +111,6 @@ pub fn bucket_new(
             .data
             .insert("device_id".to_string(), state.device_id.clone().into());
     }
-    let datastore = &state.datastore;
     let ret = datastore.create_bucket(&bucket);
     match ret {
         Ok(_) => {
@@ -143,9 +157,18 @@ pub fn bucket_events_get(
     limit: Option<u64>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
+    bucket_events_get_in(bucket_id, start, end, limit, &state.datastore)
+}
+
+pub(super) fn bucket_events_get_in(
+    bucket_id: &str,
+    start: Option<String>,
+    end: Option<String>,
+    limit: Option<u64>,
+    datastore: &Datastore,
+) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     let starttime = parse_time_param("starttime", start)?;
     let endtime = parse_time_param("endtime", end)?;
-    let datastore = &state.datastore;
     let res = datastore.get_events(bucket_id, starttime, endtime, limit);
     match res {
         Ok(events) => Ok(Json(events)),
@@ -177,6 +200,15 @@ pub fn bucket_events_create(
     events: ApiJson<Vec<Event>>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
+    bucket_events_create_in(bucket_id, events, state, &state.datastore)
+}
+
+pub(super) fn bucket_events_create_in(
+    bucket_id: &str,
+    events: ApiJson<Vec<Event>>,
+    state: &State<ServerState>,
+    datastore: &Datastore,
+) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     // Hold the write lock across (read old ranges + write + invalidate) so a
     // concurrent replacement cannot move an event to a range we never record.
     let _guard = state.write_lock.lock().unwrap();
@@ -192,7 +224,6 @@ pub fn bucket_events_create(
             return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
         }
     }
-    let datastore = &state.datastore;
     // Every inserted event changes its own extent; an event with an ID replaces
     // a stored one, whose range changes too.
     let mut affected: Vec<_> = events.iter().map(event_range).collect();
@@ -224,6 +255,22 @@ pub fn bucket_events_heartbeat(
     pulsetime: f64,
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
+    bucket_events_heartbeat_in(
+        bucket_id,
+        heartbeat_json,
+        pulsetime,
+        state,
+        &state.datastore,
+    )
+}
+
+pub(super) fn bucket_events_heartbeat_in(
+    bucket_id: &str,
+    heartbeat_json: ApiJson<Event>,
+    pulsetime: f64,
+    state: &State<ServerState>,
+    datastore: &Datastore,
+) -> Result<Json<Event>, HttpErrorJson> {
     let _guard = state.write_lock.lock().unwrap();
     // Reject negative pulsetime; it has no meaningful interpretation and is
     // almost always a client bug (negated constant, sign-flip on subtraction).
@@ -236,7 +283,6 @@ pub fn bucket_events_heartbeat(
     // The returned event spans every merged/replaced event, so invalidating its
     // extent covers the stored previous event even if it had a different range.
     let heartbeat_range = event_range(&heartbeat);
-    let datastore = &state.datastore;
     match datastore.heartbeat(bucket_id, heartbeat, pulsetime) {
         Ok(e) => {
             state
@@ -267,9 +313,17 @@ pub fn bucket_event_count(
     end: Option<String>,
     state: &State<ServerState>,
 ) -> Result<Json<u64>, HttpErrorJson> {
+    bucket_event_count_in(bucket_id, start, end, &state.datastore)
+}
+
+pub(super) fn bucket_event_count_in(
+    bucket_id: &str,
+    start: Option<String>,
+    end: Option<String>,
+    datastore: &Datastore,
+) -> Result<Json<u64>, HttpErrorJson> {
     let starttime = parse_time_param("starttime", start)?;
     let endtime = parse_time_param("endtime", end)?;
-    let datastore = &state.datastore;
     let res = datastore.get_event_count(bucket_id, starttime, endtime);
     match res {
         Ok(eventcount) => Ok(Json(eventcount as u64)),
@@ -283,8 +337,16 @@ pub fn bucket_events_delete_by_id(
     event_id: i64,
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
+    bucket_events_delete_by_id_in(bucket_id, event_id, state, &state.datastore)
+}
+
+pub(super) fn bucket_events_delete_by_id_in(
+    bucket_id: &str,
+    event_id: i64,
+    state: &State<ServerState>,
+    datastore: &Datastore,
+) -> Result<(), HttpErrorJson> {
     let _guard = state.write_lock.lock().unwrap();
-    let datastore = &state.datastore;
     let old = datastore.get_event(bucket_id, event_id).ok();
     match datastore.delete_events_by_id(bucket_id, vec![event_id]) {
         Ok(_) => {
@@ -311,6 +373,15 @@ pub fn bucket_events_delete_many(
     body: Json<BulkDeleteRequest>,
     state: &State<ServerState>,
 ) -> Result<Json<u64>, HttpErrorJson> {
+    bucket_events_delete_many_in(bucket_id, body, state, &state.datastore)
+}
+
+pub(super) fn bucket_events_delete_many_in(
+    bucket_id: &str,
+    body: Json<BulkDeleteRequest>,
+    state: &State<ServerState>,
+    datastore: &Datastore,
+) -> Result<Json<u64>, HttpErrorJson> {
     // Reject oversized requests before taking the lock: the cap bounds the
     // lock-held work, so it must be checked outside the critical section.
     if body.ids.len() > MAX_BULK_DELETE_IDS {
@@ -330,7 +401,6 @@ pub fn bucket_events_delete_many(
     // that new event while only the stale range was invalidated, and the
     // returned count could include ids another request had already deleted.
     let _guard = state.write_lock.lock().unwrap();
-    let datastore = &state.datastore;
 
     // Validate bucket exists before iterating (handles empty-ids case too).
     datastore
@@ -395,6 +465,16 @@ pub fn bucket_events_get_csv(
     limit: Option<u64>,
     state: &State<ServerState>,
 ) -> Result<BucketEventsCsvRocket, HttpErrorJson> {
+    bucket_events_get_csv_in(bucket_id, start, end, limit, &state.datastore)
+}
+
+pub(super) fn bucket_events_get_csv_in(
+    bucket_id: &str,
+    start: Option<String>,
+    end: Option<String>,
+    limit: Option<u64>,
+    datastore: &Datastore,
+) -> Result<BucketEventsCsvRocket, HttpErrorJson> {
     let starttime: Option<DateTime<Utc>> = match start {
         Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
             Ok(dt) => Some(dt.with_timezone(&Utc)),
@@ -420,12 +500,19 @@ pub fn bucket_events_get_csv(
         },
         None => None,
     };
-    BucketEventsCsvRocket::new(&state.datastore, bucket_id, starttime, endtime, limit)
+    BucketEventsCsvRocket::new(datastore, bucket_id, starttime, endtime, limit)
 }
 
 #[delete("/<bucket_id>")]
 pub fn bucket_delete(bucket_id: &str, state: &State<ServerState>) -> Result<(), HttpErrorJson> {
-    let datastore = &state.datastore;
+    bucket_delete_in(bucket_id, state, &state.datastore)
+}
+
+pub(super) fn bucket_delete_in(
+    bucket_id: &str,
+    state: &State<ServerState>,
+    datastore: &Datastore,
+) -> Result<(), HttpErrorJson> {
     match datastore.delete_bucket(bucket_id) {
         Ok(_) => {
             // Removing a bucket changes what the bucket list resolves to.

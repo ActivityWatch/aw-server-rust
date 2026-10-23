@@ -223,6 +223,20 @@ fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Inf
     })
 }
 
+#[derive(serde::Serialize)]
+struct Device {
+    id: String,
+    hostname: String,
+}
+
+#[get("/")]
+fn devices_get(state: &State<ServerState>) -> Json<Vec<Device>> {
+    Json(vec![Device {
+        id: state.device_id.clone(),
+        hostname: crate::hostname::hostname_string(),
+    }])
+}
+
 fn get_file(file: PathBuf, state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
     let asset = state.asset_resolver.resolve(&file.display().to_string())?;
 
@@ -272,6 +286,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             ],
         )
         .mount("/api/0/info", routes![server_info])
+        .mount("/api/0/devices", routes![devices_get])
         .mount(
             "/api/0/buckets",
             routes![

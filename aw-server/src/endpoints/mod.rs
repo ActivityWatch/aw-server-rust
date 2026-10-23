@@ -299,6 +299,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             ],
         )
         .mount("/api/0/query", routes![query::query])
+        .mount("/api/0/devices", routes![query::device_query])
         .mount(
             "/api/0/import",
             routes![import::bucket_import_json, import::bucket_import_form],

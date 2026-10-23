@@ -1954,3 +1954,63 @@ mod api_tests {
         assert_eq!(cache.stats().hits, 1);
     }
 }
+
+#[test]
+fn device_scoped_queries_normalize_local_uuid_and_isolate_cached_results() {
+    use aw_models::{Bucket, Event};
+    use aw_server::{
+        config::AWConfig,
+        endpoints::{self, AssetResolver, ServerState},
+    };
+    use rocket::http::{ContentType, Header, Status};
+    use rocket::local::blocking::Client;
+    use serde_json::{json, Value};
+    let ds = aw_datastore::Datastore::new_in_memory(false);
+    for (device, id, host, duration) in [
+        ("local", "window_host", "host", 1),
+        ("peer", "window_other", "other", 2),
+    ] {
+        let bucket: Bucket = serde_json::from_value(json!({"id": id, "hostname": host, "device_id": device, "type": "test", "client": "test"})).unwrap();
+        ds.create_bucket(&bucket).unwrap();
+        let event: Event = serde_json::from_value(
+            json!({"timestamp": "2026-01-01T00:00:00Z", "duration": duration, "data": {}}),
+        )
+        .unwrap();
+        ds.insert_events(id, &[event]).unwrap();
+    }
+    let state = ServerState::new(ds, AssetResolver::new(None), "server-uuid".to_owned());
+    let cache = state.query_cache.clone();
+    let client = Client::untracked(endpoints::build_rocket(state, AWConfig::default())).unwrap();
+    let body = json!({"query": ["return sum_durations(query_bucket(\"window\"));"], "timeperiods": ["2026-01-01T00:00:00Z/2026-01-02T00:00:00Z"]}).to_string();
+    for (device, expected) in [
+        ("local", 1.0),
+        ("peer", 2.0),
+        ("server-uuid", 1.0),
+        ("peer", 2.0),
+    ] {
+        let response = client
+            .post(format!("/api/0/devices/{device}/query"))
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(&body)
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok, "device {device}");
+        assert_eq!(response.into_json::<Value>().unwrap(), json!([expected]));
+    }
+    assert_eq!(cache.stats().misses, 2);
+    assert_eq!(cache.stats().hits, 2);
+    let response = client
+        .post("/api/0/query")
+        .header(ContentType::JSON)
+        .header(Header::new("Host", "127.0.0.1:5600"))
+        .body(&body)
+        .dispatch();
+    assert_eq!(response.status(), Status::Conflict);
+    let response = client
+        .post("/api/0/devices/absent/query")
+        .header(ContentType::JSON)
+        .header(Header::new("Host", "127.0.0.1:5600"))
+        .body(&body)
+        .dispatch();
+    assert_eq!(response.status(), Status::BadRequest);
+}

@@ -2504,6 +2504,83 @@ mod tests {
     }
 
     #[test]
+    fn v7_migration_preserves_exact_rows_and_event_ownership() {
+        let conn = v6_connection();
+        let names = ["window_host_with_underscores", "window-synced-from-peer"];
+        for (index, name) in names.iter().enumerate() {
+            let bid = insert_v6_bucket(&conn, name);
+            conn.execute(
+                "UPDATE buckets SET data = ?1, data_deprecated = ?2 WHERE id = ?3",
+                params![
+                    r#"{ "nested": {"raw":true} }"#,
+                    vec![0_u8, 255, index as u8],
+                    bid
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO events (bucketrow, starttime, endtime, data) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    bid,
+                    -1_000_000_001_i64 + index as i64,
+                    123_456_789_i64,
+                    r#"{ "title":"preserved" }"#
+                ],
+            )
+            .unwrap();
+        }
+        let bucket_rows = |conn: &Connection| -> Vec<(i64, String, String, Vec<u8>)> {
+            conn.prepare("SELECT id, name, data, data_deprecated FROM buckets ORDER BY id")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let event_rows = |conn: &Connection| -> Vec<(i64, i64, i64, i64, String)> {
+            conn.prepare("SELECT id, bucketrow, starttime, endtime, data FROM events ORDER BY id")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before_buckets = bucket_rows(&conn);
+        let before_events = event_rows(&conn);
+        _migrate_v6_to_v7(&conn);
+        assert_eq!(bucket_rows(&conn), before_buckets);
+        assert_eq!(event_rows(&conn), before_events);
+        let foreign_key_errors: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_errors, 0);
+        let mut ds = DatastoreInstance::new(&conn, false).unwrap();
+        for name in names {
+            let bucket = ds.get_bucket_for_device("local", name).unwrap();
+            assert_eq!(bucket.id, name);
+            assert_eq!(bucket.device_id, "local");
+            assert_eq!(
+                ds.get_events_unclipped(&conn, name, None, None, None)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn v7_migration_keeps_autoincrement_high_water_mark() {
         let conn = v6_connection();
         insert_v6_bucket(&conn, "a");

@@ -181,6 +181,71 @@ fn reader_refreshes_aliases_after_hostname_repair() {
 }
 
 #[test]
+fn scoped_hostname_repair_preserves_peer_metadata_and_reader_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("hostname-scope.sqlite")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let writer = Datastore::new(path.clone(), false);
+    for (device, id) in [("local", "window"), ("peer", "peer-window")] {
+        writer
+            .create_bucket(&bucket(id, "unknown", device))
+            .unwrap();
+    }
+    writer.force_commit().unwrap();
+    let reader = Datastore::open_reader(path).unwrap();
+    assert!(reader
+        .for_device("local")
+        .get_bucket("window_host")
+        .is_err());
+    assert_eq!(
+        writer.for_device("local").migrate_hostname("host").unwrap(),
+        1
+    );
+    assert_eq!(
+        reader
+            .for_device("local")
+            .get_bucket("window_host")
+            .unwrap()
+            .id,
+        "window"
+    );
+    assert_eq!(
+        reader
+            .for_device("peer")
+            .get_bucket("peer-window")
+            .unwrap()
+            .hostname,
+        "unknown"
+    );
+    assert!(reader
+        .for_device("peer")
+        .get_bucket("peer-window_host")
+        .is_err());
+    // The unscoped startup migration still repairs every remaining unknown row.
+    assert_eq!(writer.migrate_hostname("peer-host").unwrap(), 1);
+    assert_eq!(
+        reader
+            .for_device("local")
+            .get_bucket("window")
+            .unwrap()
+            .hostname,
+        "host"
+    );
+    assert_eq!(
+        reader
+            .for_device("peer")
+            .get_bucket("peer-window_peer-host")
+            .unwrap()
+            .id,
+        "peer-window"
+    );
+}
+
+#[test]
 fn device_lookup_is_exact_and_never_falls_back_to_another_device() {
     let ds = Datastore::new_in_memory(false);
     ds.create_bucket(&bucket("window_host", "host", "local"))

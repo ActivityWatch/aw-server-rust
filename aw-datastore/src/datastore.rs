@@ -1939,7 +1939,8 @@ impl DatastoreInstance {
         }
     }
 
-    /// Migrates all buckets whose hostname is "unknown" or "Unknown" to `new_hostname`.
+    /// Migrates buckets in the selected scope whose hostname is "unknown" or
+    /// "Unknown" to `new_hostname`. An unscoped handle repairs all devices.
     /// Events are left untouched; only the bucket metadata is updated.
     /// Returns the number of buckets that were updated.
     pub fn migrate_hostname(
@@ -1953,8 +1954,10 @@ impl DatastoreInstance {
         );
 
         let updated = match conn.execute(
-            "UPDATE buckets SET hostname = ?1 WHERE hostname = 'unknown' OR hostname = 'Unknown'",
-            [new_hostname],
+            "UPDATE buckets SET hostname = ?1
+             WHERE (hostname = 'unknown' OR hostname = 'Unknown')
+             AND (?2 IS NULL OR device_id = ?2)",
+            params![new_hostname, self.device_scope],
         ) {
             Ok(n) => n,
             Err(err) => {

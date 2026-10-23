@@ -62,10 +62,14 @@ select the same local history. Legacy name-only routes remain supported.
   retry uses existing event deduplication. Importing another server's export does
   not turn its local history into this server's local history.
 
-The global duplicate-name creation/cache guards deliberately remain until Python
-parity and the full migration/same-name acceptance matrix pass. These endpoints
-are not permission to enable watcher rollout or V2 segment import. All routes
-retain the normal host, CORS and configured API-key checks.
+Explicitly scoped creation supports equal bucket names on different devices;
+reload, rename and legacy Android-name migration retain their separate histories.
+Legacy name-only lookup, flat listing and export fail with a conflict when names
+are ambiguous. Globally unique compatibility aliases still resolve their device;
+creating or renaming an exact name cannot take over an active peer alias. Legacy
+unscoped creation retains its cross-device name guard. These endpoints do not
+enable watcher rollout or V2 segment import. All routes retain the normal host,
+CORS and configured API-key checks.
 
 ### Docker
 

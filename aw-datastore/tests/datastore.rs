@@ -159,7 +159,7 @@ mod datastore_tests {
     }
 
     #[test]
-    fn legacy_name_migration_rejects_peer_destination_without_moving_history() {
+    fn legacy_name_migration_keeps_peer_destination_history_separate() {
         let ds = Datastore::new_in_memory(false);
         let old_id = "aw-watcher-android-test_phone";
         let new_id = "aw-watcher-android_phone";
@@ -172,13 +172,10 @@ mod datastore_tests {
         ds.for_device("peer")
             .insert_events(old_id, &[event])
             .unwrap();
-        assert!(matches!(
-            ds.migrate_test_bucket_names(),
-            Err(DatastoreError::BucketAlreadyExists(_))
-        ));
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 1);
         assert_eq!(
             ds.for_device("peer")
-                .get_events(old_id, None, None, None)
+                .get_events(new_id, None, None, None)
                 .unwrap()
                 .len(),
             1
@@ -188,6 +185,43 @@ mod datastore_tests {
             .get_events(new_id, None, None, None)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn scoped_legacy_name_migration_preserves_same_name_peer_histories() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        for device in ["local", "peer", "third"] {
+            let mut bucket = test_bucket();
+            bucket.id = old_id.to_owned();
+            bucket.device_id = device.to_owned();
+            let scoped = ds.for_device(device);
+            scoped.create_bucket(&bucket).unwrap();
+            let mut event = test_event(Utc::now(), Duration::seconds(1));
+            event.data.insert("device".to_owned(), json!(device));
+            scoped.insert_events(old_id, &[event]).unwrap();
+        }
+        for device in ["local", "peer", "third"] {
+            let scoped = ds.for_device(device);
+            let bid = scoped.get_bucket(old_id).unwrap().bid;
+            assert_eq!(scoped.migrate_test_bucket_names().unwrap(), 1);
+            assert_eq!(scoped.get_bucket(new_id).unwrap().bid, bid);
+            let events = scoped.get_events(new_id, None, None, None).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data["device"], device);
+            assert!(matches!(
+                scoped.get_bucket(old_id),
+                Err(DatastoreError::NoSuchBucket(_))
+            ));
+            assert_eq!(scoped.migrate_test_bucket_names().unwrap(), 0);
+        }
+        ds.reload_buckets().unwrap();
+        assert!(matches!(
+            ds.get_bucket(new_id),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
+        assert_eq!(ds.get_device_buckets().unwrap().len(), 3);
     }
 
     #[test]
@@ -1974,6 +2008,136 @@ mod datastore_tests {
     }
 
     #[test]
+    fn scoped_same_name_creation_survives_third_device_and_reader_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scoped-same-name.db");
+        let ds = Datastore::new(path.to_str().unwrap().to_owned(), false);
+        ds.get_buckets().unwrap();
+        let reader = Datastore::open_reader(path.to_str().unwrap().to_owned()).unwrap();
+        let mut bids = Vec::new();
+        for device in ["local", "peer", "third"] {
+            let scoped = ds.for_device(device);
+            let mut bucket = test_bucket();
+            bucket.device_id = device.to_owned();
+            scoped.create_bucket(&bucket).unwrap();
+            let mut event = test_event(Utc::now(), Duration::seconds(1));
+            event.data.insert("device".to_owned(), json!(device));
+            scoped.insert_events(&bucket.id, &[event]).unwrap();
+            ds.force_commit().unwrap();
+            let stored = scoped.get_bucket(&bucket.id).unwrap();
+            bids.push(stored.bid);
+            assert_eq!(stored.device_id, device);
+            for existing in ["local", "peer", "third"].into_iter().take(bids.len()) {
+                let observed = reader.for_device(existing);
+                assert_eq!(observed.get_bucket(&bucket.id).unwrap().device_id, existing);
+                let events = observed.get_events(&bucket.id, None, None, None).unwrap();
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].data["device"], existing);
+            }
+            assert!(matches!(
+                scoped.create_bucket(&bucket),
+                Err(DatastoreError::BucketAlreadyExists(_))
+            ));
+        }
+        bids.sort();
+        bids.dedup();
+        assert_eq!(bids.len(), 3);
+        assert!(matches!(
+            ds.get_bucket("testid"),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
+        assert!(matches!(
+            reader.get_buckets(),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
+        ds.reload_buckets().unwrap();
+        reader.reload_buckets().unwrap();
+        for device in ["local", "peer", "third"] {
+            assert_eq!(
+                ds.for_device(device)
+                    .get_bucket("testid")
+                    .unwrap()
+                    .device_id,
+                device
+            );
+        }
+        reader.close();
+        ds.close();
+        let reopened = Datastore::open_read_only(path.to_str().unwrap().to_owned()).unwrap();
+        for device in ["local", "peer", "third"] {
+            assert_eq!(
+                reopened
+                    .for_device(device)
+                    .get_event_count("testid", None, None)
+                    .unwrap(),
+                1
+            );
+        }
+        reopened.close();
+    }
+
+    #[test]
+    fn scoped_rename_can_share_a_peer_name_and_refresh_unique_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scoped-rename.db");
+        let ds = Datastore::new(path.to_str().unwrap().to_owned(), false);
+        ds.get_buckets().unwrap();
+        let reader = Datastore::open_reader(path.to_str().unwrap().to_owned()).unwrap();
+        for device in ["local", "peer", "third"] {
+            let mut bucket = test_bucket();
+            bucket.id = format!("original-{device}");
+            bucket.device_id = device.to_owned();
+            ds.for_device(device).create_bucket(&bucket).unwrap();
+            ds.for_device(device)
+                .insert_events(&bucket.id, &[test_event(Utc::now(), Duration::seconds(1))])
+                .unwrap();
+            ds.force_commit().unwrap();
+            let before = reader.for_device(device).get_bucket(&bucket.id).unwrap();
+            ds.for_device(device)
+                .rename_bucket(&bucket.id, "shared")
+                .unwrap();
+            assert_eq!(
+                reader.for_device(device).get_bucket("shared").unwrap().bid,
+                before.bid
+            );
+            assert_eq!(
+                reader
+                    .for_device(device)
+                    .get_event_count("shared", None, None)
+                    .unwrap(),
+                1
+            );
+        }
+        assert!(matches!(
+            reader.get_bucket("shared"),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
+        ds.for_device("third")
+            .rename_bucket("shared", "unique")
+            .unwrap();
+        assert_eq!(reader.get_bucket("unique").unwrap().device_id, "third");
+        ds.for_device("peer").delete_bucket("shared").unwrap();
+        assert_eq!(reader.get_bucket("shared").unwrap().device_id, "local");
+        // A same-device destination remains a conflict; names and row IDs survive.
+        let mut collision = test_bucket();
+        collision.id = "taken".to_owned();
+        ds.for_device("local").create_bucket(&collision).unwrap();
+        assert!(matches!(
+            ds.for_device("local").rename_bucket("shared", "taken"),
+            Err(DatastoreError::BucketAlreadyExists(_))
+        ));
+        assert_eq!(
+            reader
+                .for_device("local")
+                .get_event_count("shared", None, None)
+                .unwrap(),
+            1
+        );
+        reader.close();
+        ds.close();
+    }
+
+    #[test]
     fn test_stale_connection_rejects_same_name_different_device() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stale-cache.db");
@@ -2076,12 +2240,11 @@ mod datastore_tests {
     }
 
     #[test]
-    fn test_loading_same_name_device_rows_fails_without_hiding_history() {
+    fn test_loading_same_name_device_rows_preserves_all_history() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
         ds.create_bucket(&conn, test_bucket()).unwrap();
-        // A future device-aware writer can populate this schema, but this
-        // name-only reader must fail closed rather than pick an arbitrary row.
+        // Opening pair-keyed rows must retain both while legacy lookup fails closed.
         conn.execute(
             "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
              SELECT name, 'peer', type, client, hostname, created, data FROM buckets",
@@ -2089,10 +2252,20 @@ mod datastore_tests {
         )
         .unwrap();
         for migrate in [false, true] {
+            let reopened = aw_datastore::DatastoreInstance::new(&conn, migrate).unwrap();
             assert!(matches!(
-                aw_datastore::DatastoreInstance::new(&conn, migrate),
-                Err(DatastoreError::InternalError(message)) if message.contains("ambiguous bucket name")
+                reopened.get_bucket("testid"),
+                Err(DatastoreError::AmbiguousBucket(..))
             ));
+            for device in ["local", "peer"] {
+                assert_eq!(
+                    reopened
+                        .get_bucket_for_device(device, "testid")
+                        .unwrap()
+                        .device_id,
+                    device
+                );
+            }
         }
         let count: i64 = conn
             .query_row("SELECT count(*) FROM buckets", [], |r| r.get(0))

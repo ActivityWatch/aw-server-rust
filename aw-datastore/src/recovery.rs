@@ -156,8 +156,8 @@ pub fn recover_database(
         .flat_map(|buckets| buckets.into_iter())
     {
         // Recovery authority is the source's stored pair, never an unscoped
-        // name match. Keep the duplicate-name creation guard until coexistence
-        // acceptance is complete; a conflict rolls back this whole union.
+        // name match. Equal names on other devices are separate histories;
+        // a same-device alias conflict still rolls back this whole union.
         ds.device_scope = Some(bucket.device_id.clone());
         source_ds.device_scope = Some(bucket.device_id.clone());
         match ds.get_bucket_for_device(&bucket.device_id, &name) {
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_rejects_cross_device_destination_without_moving_history() {
+    fn recovery_preserves_same_name_histories_on_different_devices() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("target.db");
         let source = root.path().join("source.db");
@@ -303,14 +303,19 @@ mod tests {
             .unwrap()
             .execute("UPDATE buckets SET device_id = 'peer'", [])
             .unwrap();
-        // Until public coexistence is enabled, reject the conflict instead of
-        // merging a peer's events into the name-matched local bucket.
+        let source_bytes = std::fs::read(&source).unwrap();
+        // Recover the exact source pair, never into the name-matched local row.
         assert_eq!(
             recover_database(&target, &source, &root.path().join("backup.db"), "peer").unwrap(),
-            RecoveryCounts::default()
+            RecoveryCounts {
+                buckets_created: 1,
+                events_inserted: 1,
+                duplicates_skipped: 0
+            }
         );
-        assert_eq!(count(&target), 1);
+        assert_eq!(count(&target), 2);
         assert_eq!(count(&source), 1);
+        assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
         let conn = Connection::open(&target).unwrap();
         let markers: i64 = conn
             .query_row(
@@ -319,7 +324,33 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(markers, 0);
+        assert_eq!(markers, 1);
+        let ds = DatastoreInstance::new(&conn, false).unwrap();
+        for (device, field) in [("local", "local"), ("peer", "peer")] {
+            let bucket = ds.get_bucket_for_device(device, "shared").unwrap();
+            let data: String = conn
+                .query_row(
+                    "SELECT data FROM events WHERE bucketrow = ?1",
+                    [bucket.bid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&data).unwrap()[field],
+                true
+            );
+        }
+        assert_eq!(
+            recover_database(
+                &target,
+                &source,
+                &root.path().join("retry-backup.db"),
+                "peer"
+            )
+            .unwrap(),
+            RecoveryCounts::default()
+        );
+        assert!(!root.path().join("retry-backup.db").exists());
     }
 
     #[test]

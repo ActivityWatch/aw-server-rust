@@ -655,6 +655,21 @@ impl DatastoreWorker {
                 ds.reload_buckets(tx)?;
             }
         }
+        // Resolving a legacy rename's source must not turn it into permission
+        // to shadow a globally resolving destination alias on another device.
+        if let Command::RenameBucket(old_id, new_id) = &request {
+            if ds.device_scope.is_none() {
+                ds.reload_buckets(tx)?;
+                let source = ds.get_bucket(old_id)?;
+                match ds.get_bucket(new_id) {
+                    Ok(existing) if existing.bid != source.bid => {
+                        return Err(DatastoreError::BucketAlreadyExists(existing.id));
+                    }
+                    Err(err @ DatastoreError::AmbiguousBucket(..)) => return Err(err),
+                    _ => {}
+                }
+            }
+        }
         // Normalize aliases before privacy filtering, cache access or an early
         // success for an entirely filtered batch. Keep the resolved device as
         // well: a unique alias may address a canonical name shared by devices.

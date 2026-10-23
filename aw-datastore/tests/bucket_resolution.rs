@@ -138,6 +138,32 @@ fn creating_a_peer_exact_name_cannot_redirect_an_active_alias() {
 }
 
 #[test]
+fn scoped_creation_and_rename_cannot_redirect_an_active_peer_alias() {
+    let ds = Datastore::new_in_memory(false);
+    ds.create_bucket(&bucket("window_host", "host", "local"))
+        .unwrap();
+    assert!(ds
+        .for_device("peer")
+        .create_bucket(&bucket("window", "other", "peer"))
+        .is_err());
+    ds.for_device("peer")
+        .create_bucket(&bucket("unrelated", "other", "peer"))
+        .unwrap();
+    assert!(ds
+        .for_device("peer")
+        .rename_bucket("unrelated", "window")
+        .is_err());
+    assert_eq!(ds.get_bucket("window").unwrap().id, "window_host");
+    assert_eq!(
+        ds.for_device("peer")
+            .get_bucket("unrelated")
+            .unwrap()
+            .device_id,
+        "peer"
+    );
+}
+
+#[test]
 fn renaming_a_peer_cannot_redirect_an_active_alias() {
     let ds = Datastore::new_in_memory(false);
     ds.create_bucket(&bucket("window_host", "host", "local"))
@@ -351,10 +377,7 @@ fn legacy_name_migration_refreshes_peer_destinations_before_mutation() {
     let mut peer = DatastoreInstance::new(&other_conn, true).unwrap();
     peer.create_bucket(&other_conn, bucket(new, "peer", "peer"))
         .unwrap();
-    assert!(matches!(
-        ds.migrate_test_bucket_names(&conn),
-        Err(DatastoreError::BucketAlreadyExists(_))
-    ));
+    assert_eq!(ds.migrate_test_bucket_names(&conn).unwrap(), 1);
     let names: Vec<(String, String)> = conn
         .prepare("SELECT device_id, name FROM buckets ORDER BY device_id")
         .unwrap()
@@ -364,9 +387,30 @@ fn legacy_name_migration_refreshes_peer_destinations_before_mutation() {
         .unwrap();
     assert_eq!(
         names,
-        vec![("local".into(), old.into()), ("peer".into(), new.into())]
+        vec![("local".into(), new.into()), ("peer".into(), new.into())]
     );
-    assert_eq!(ds.get_event_count(&conn, old, None, None).unwrap(), 1);
+    assert!(matches!(
+        ds.get_bucket(new),
+        Err(DatastoreError::AmbiguousBucket(..))
+    ));
+    assert_eq!(
+        ds.get_bucket_for_device("local", new).unwrap().device_id,
+        "local"
+    );
+    assert_eq!(
+        ds.get_bucket_for_device("peer", new).unwrap().device_id,
+        "peer"
+    );
+    let local_row = ds.get_bucket_for_device("local", new).unwrap().bid;
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM events WHERE bucketrow = ?1",
+            [local_row],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
     DatastoreInstance::new(&conn, false).unwrap();
 }
 
@@ -411,6 +455,62 @@ fn scoped_alias_privacy_matches_stored_names_without_filtering_other_devices() {
         let stored = scoped.get_events("window", None, None, None).unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].data["title"], expected);
+    }
+}
+
+#[test]
+fn same_name_privacy_uses_resolved_pair_for_insert_and_heartbeat() {
+    use aw_models::Event;
+    let ds = Datastore::new_in_memory(false);
+    for device in ["local", "peer", "third"] {
+        ds.for_device(device)
+            .create_bucket(&bucket("window", device, device))
+            .unwrap();
+    }
+    ds.set_key_value_and_commit(
+        "settings.privacy_filters",
+        &json!([{
+            "enabled": true, "bucket_prefix": "window", "field": "title",
+            "pattern": "secret", "action": "redact", "replacement": "hidden"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let event: Event = serde_json::from_value(json!({
+        "timestamp": "2026-01-01T00:00:00Z", "duration": 1,
+        "data": {"title": "secret"}
+    }))
+    .unwrap();
+    for device in ["local", "peer", "third"] {
+        let alias = format!("window_{device}");
+        let inserted = ds
+            .insert_events(&alias, std::slice::from_ref(&event))
+            .unwrap();
+        assert_eq!(inserted[0].data["title"], "hidden");
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
+        let mut heartbeat = event.clone();
+        heartbeat.timestamp += chrono::Duration::seconds(3);
+        heartbeat.duration = chrono::Duration::zero();
+        ds.heartbeat(&alias, heartbeat, 10.0).unwrap();
+        let rows = ds
+            .for_device(device)
+            .get_events("window", None, None, None)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].data["title"], "hidden");
+        assert_eq!(rows[0].duration, chrono::Duration::seconds(3));
+    }
+    ds.reload_buckets().unwrap();
+    for device in ["local", "peer", "third"] {
+        let rows = ds
+            .for_device(device)
+            .get_events("window", None, None, None)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].data["title"], "hidden");
     }
 }
 
@@ -473,8 +573,8 @@ fn reader_rejects_stale_identity_when_catalogue_reload_fails() {
     let reader = Datastore::open_reader(path.clone()).unwrap();
     assert_eq!(reader.get_bucket("window").unwrap().device_id, "local");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    // Simulate a catalogue state rejected by the still-required cache guard.
-    conn.execute("INSERT INTO buckets (name, device_id, type, client, hostname, created, data) VALUES ('window', 'peer', 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')", []).unwrap();
+    // Malformed metadata must fail refresh even though same-name pairs are valid.
+    conn.execute("INSERT INTO buckets (name, device_id, type, client, hostname, created, data) VALUES ('window', 'peer', 'test', 'test', 'host', '2026-01-01T00:00:00Z', 'not-json')", []).unwrap();
     assert!(reader.get_bucket("window").is_err());
     assert!(reader.for_device("local").get_bucket("window").is_err());
     assert!(reader.get_buckets().is_err());

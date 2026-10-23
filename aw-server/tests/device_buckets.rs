@@ -515,7 +515,7 @@ fn scoped_import_preflights_the_entire_envelope_before_mutating_history() {
 }
 
 #[test]
-fn scoped_import_reports_guarded_name_collision_without_cross_device_merge() {
+fn scoped_import_keeps_same_name_peer_history_separate() {
     use rocket::http::Method::{Get, Post};
     let client = client();
     assert_eq!(
@@ -530,16 +530,21 @@ fn scoped_import_reports_guarded_name_collision_without_cross_device_merge() {
     );
     let body = json!({"buckets": {"window_host": {"id": "window_host", "hostname": "host", "device_id": "peer", "type": "test", "client": "test"}}});
     let (status, body) = request(&client, Post, "/api/0/devices/peer/import", Some(body));
-    assert_eq!(status, Status::Conflict, "{body}");
+    assert_eq!(status, Status::Ok, "{body}");
+    let (status, body) = request(
+        &client,
+        Get,
+        "/api/0/devices/peer/buckets/window_host",
+        None,
+    );
+    assert_eq!(status, Status::Ok, "{body}");
     assert_eq!(
-        request(
-            &client,
-            Get,
-            "/api/0/devices/peer/buckets/window_host",
-            None
-        )
-        .0,
-        Status::NotFound
+        serde_json::from_str::<Value>(&body).unwrap()["device_id"],
+        "peer"
+    );
+    assert_eq!(
+        request(&client, Get, "/api/0/buckets/window_host", None).0,
+        Status::Conflict
     );
     assert_eq!(
         request(
@@ -909,7 +914,7 @@ fn scoped_event_ids_cannot_replace_another_devices_history() {
 }
 
 #[test]
-fn guarded_cross_device_creation_returns_conflict_not_already_exists() {
+fn scoped_cross_device_creation_is_distinct_and_local_uuid_is_idempotent() {
     use rocket::http::Method::{Get, Post};
     let client = client();
     let metadata = json!({"hostname": "host", "type": "test", "client": "test"});
@@ -929,10 +934,16 @@ fn guarded_cross_device_creation_returns_conflict_not_already_exists() {
         "/api/0/devices/peer/buckets/window",
         Some(metadata.clone()),
     );
-    assert_eq!(status, Status::Conflict, "{body}");
+    assert_eq!(status, Status::Ok, "{body}");
+    let (status, body) = request(&client, Get, "/api/0/devices/peer/buckets/window", None);
+    assert_eq!(status, Status::Ok, "{body}");
     assert_eq!(
-        request(&client, Get, "/api/0/devices/peer/buckets/window", None).0,
-        Status::NotFound
+        serde_json::from_str::<Value>(&body).unwrap()["device_id"],
+        "peer"
+    );
+    assert_eq!(
+        request(&client, Get, "/api/0/buckets/window", None).0,
+        Status::Conflict
     );
     assert_eq!(
         request(

@@ -465,8 +465,8 @@ enum EventRead {
 
 pub struct DatastoreInstance {
     buckets_cache: HashMap<(String, String), Bucket>,
-    // Temporary unique-name index for legacy callers while the global name
-    // guard remains. Ownership is held by the pair-keyed authoritative cache.
+    // Unique-name fast path for legacy callers. Ambiguous names are absent;
+    // ownership is held by the pair-keyed authoritative cache.
     bucket_names: HashMap<String, (String, String)>,
     pub(crate) device_scope: Option<String>,
     /// `(count, max id, names, hostnames and devices)` when `buckets_cache` was
@@ -837,17 +837,16 @@ impl DatastoreInstance {
         };
         let mut new_cache = HashMap::new();
         let mut names = HashMap::new();
+        let mut ambiguous = std::collections::HashSet::new();
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
-                    if names.contains_key(&b.id) {
-                        return Err(DatastoreError::InternalError(format!(
-                            "Cannot load ambiguous bucket name {:?}: device-aware addressing is not implemented",
-                            b.id
-                        )));
-                    }
                     let key = (b.device_id.clone(), b.id.clone());
-                    names.insert(b.id.clone(), key.clone());
+                    if names.remove(&b.id).is_some() {
+                        ambiguous.insert(b.id.clone());
+                    } else if !ambiguous.contains(&b.id) {
+                        names.insert(b.id.clone(), key.clone());
+                    }
                     new_cache.insert(key, b);
                 }
                 Err(e) => {
@@ -957,25 +956,30 @@ impl DatastoreInstance {
         // While callers still address names globally, an exact peer name must
         // not take over a spelling that already resolves to another history.
         match self.get_bucket_unscoped(&bucket.id) {
-            Ok(existing) if existing.device_id != bucket.device_id && existing.id != bucket.id => {
+            Ok(existing) if existing.id != bucket.id => {
                 return Err(DatastoreError::AmbiguousBucket(
                     bucket.id.clone(),
                     vec![(existing.device_id, existing.id)],
                 ));
             }
-            Err(DatastoreError::AmbiguousBucket(name, candidates)) => {
+            Err(DatastoreError::AmbiguousBucket(name, candidates))
+                if self.device_scope.is_none()
+                    || candidates.iter().any(|(_, id)| id != &bucket.id) =>
+            {
                 return Err(DatastoreError::AmbiguousBucket(name, candidates));
             }
             _ => {}
         }
-        // The v7 schema prepares for device-scoped names, but the public API
-        // and cache still address buckets by name. Until the resolver exists,
-        // reject every duplicate name before it can hide history or redirect writes.
+        // Only an explicitly scoped caller may introduce an equal peer name.
+        // Keep legacy creation fail-closed so its later unscoped writes cannot
+        // silently acquire a different target. The SQL check stays atomic.
         let mut stmt = match conn.prepare_cached(
             "
                 INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
-                WHERE NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM buckets WHERE name = ?1
+                    AND (?8 IS NULL OR device_id = ?2))",
         ) {
             Ok(buckets) => buckets,
             Err(err) => {
@@ -985,14 +989,15 @@ impl DatastoreInstance {
             }
         };
         let data = serde_json::to_string(&bucket.data).unwrap();
-        let res = stmt.execute([
-            &bucket.id,
-            &bucket.device_id,
-            &bucket._type,
-            &bucket.client,
-            &bucket.hostname,
-            &bucket.created as &dyn ToSql,
-            &data,
+        let res = stmt.execute(params![
+            bucket.id,
+            bucket.device_id,
+            bucket._type,
+            bucket.client,
+            bucket.hostname,
+            bucket.created,
+            data,
+            self.device_scope,
         ]);
 
         match res {
@@ -1073,7 +1078,7 @@ impl DatastoreInstance {
     }
 
     fn get_bucket_unscoped(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        // Keep ordinary watcher reads O(1) while the global-name guard holds.
+        // Keep ordinary unique-name watcher reads O(1).
         if let Some(key) = self.bucket_names.get(bucket_id) {
             return Ok(self.buckets_cache[key].clone());
         }
@@ -1895,7 +1900,11 @@ impl DatastoreInstance {
         }
         let source = self.get_bucket(old_id)?;
         let old_id = source.id.as_str();
-        match self.get_bucket_unscoped(new_id) {
+        let destination = match &self.device_scope {
+            Some(device) => self.get_bucket_for_device(device, new_id),
+            None => self.get_bucket_unscoped(new_id),
+        };
+        match destination {
             Ok(existing) if existing.bid != source.bid => {
                 return Err(DatastoreError::BucketAlreadyExists(existing.id));
             }
@@ -1904,17 +1913,26 @@ impl DatastoreInstance {
             }
             _ => {}
         }
-        if self.bucket_names.contains_key(new_id) {
-            return Err(DatastoreError::BucketAlreadyExists(new_id.to_string()));
+        // Equal exact peer names are allowed, but introducing an exact name
+        // must not steal a spelling that already resolves to a peer alias.
+        match self.get_bucket_unscoped(new_id) {
+            Ok(existing) if existing.id != new_id && existing.bid != source.bid => {
+                return Err(DatastoreError::BucketAlreadyExists(existing.id));
+            }
+            Err(DatastoreError::AmbiguousBucket(name, candidates))
+                if candidates.iter().any(|(_, id)| id != new_id) =>
+            {
+                return Err(DatastoreError::AmbiguousBucket(name, candidates));
+            }
+            _ => {}
         }
-
-        // The destination check lives in the UPDATE: another connection may have
-        // created `new_id` since this cache was loaded, and the (device_id, name)
-        // constraint alone would let a differing device through.
+        // The destination check lives in the UPDATE too: a scoped rename may
+        // share a peer name, but must never overwrite a same-device history.
         match conn.execute(
             "UPDATE buckets SET name = ?1 WHERE id = ?2
-             AND NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
-            params![new_id, source.bid],
+             AND NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1
+                             AND (?3 IS NULL OR device_id = ?3))",
+            params![new_id, source.bid, self.device_scope],
         ) {
             Ok(0) => {
                 let old_exists: bool = conn
@@ -2027,18 +2045,8 @@ impl DatastoreInstance {
             })
             .cloned()
             .collect();
-        // Preserve the public duplicate-name guard before changing any history.
-        // A peer's destination is never a merge target for this device.
-        for old_bucket in &legacy {
-            let new_id = old_bucket.id.replacen(OLD_PREFIX, NEW_PREFIX, 1);
-            if self
-                .buckets_cache
-                .values()
-                .any(|bucket| bucket.id == new_id && bucket.device_id != old_bucket.device_id)
-            {
-                return Err(DatastoreError::BucketAlreadyExists(new_id));
-            }
-        }
+        // Only the exact destination pair is a merge target. A peer's equal
+        // name is independent and never prevents a device's own migration.
         let mut migrated = 0;
         let mut cache_dirty = false;
 
@@ -2130,7 +2138,7 @@ pub(crate) mod tests {
 
     pub(crate) fn same_name_worker_fixture(conn: &Connection) -> DatastoreInstance {
         let mut ds = DatastoreInstance::new(conn, true).unwrap();
-        // Prepare future pair-keyed state without lifting either public guard.
+        // Seed exact pair-keyed rows independently of the creation path.
         for device in ["local", "peer"] {
             conn.execute(
                 "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
@@ -2156,8 +2164,7 @@ pub(crate) mod tests {
     fn heartbeat_cache_separates_same_named_device_buckets() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
-        // Prepare the future pair-keyed state internally without lifting either
-        // public creation/cache-load guard before full routing acceptance.
+        // Seed exact pair-keyed rows to exercise heartbeat cache isolation.
         for device in ["local", "peer"] {
             conn.execute(
                 "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
@@ -2208,7 +2215,7 @@ pub(crate) mod tests {
     fn unscoped_heartbeat_alias_keeps_the_resolved_device_for_nested_writes() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
-        // Exercise the future same-name state without lifting public guards.
+        // Seed same-name rows to isolate nested heartbeat authority.
         for device in ["local", "peer"] {
             conn.execute(
                 "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
@@ -2284,7 +2291,7 @@ pub(crate) mod tests {
         for selected in ["local", "peer"] {
             let conn = Connection::open_in_memory().unwrap();
             let mut ds = DatastoreInstance::new(&conn, true).unwrap();
-            // Prepare future same-name state without lifting either public guard.
+            // Seed same-name rows to isolate row-addressed rename behavior.
             for device in ["local", "peer"] {
                 conn.execute(
                     "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
@@ -2333,7 +2340,7 @@ pub(crate) mod tests {
     fn flat_catalogue_and_exports_reject_same_named_devices() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
-        // Seed the future pair-key state without relaxing public creation/reload guards.
+        // Seed pair-keyed rows to isolate flat/grouped serialization behavior.
         for (name, device) in [("window", "local"), ("window", "peer"), ("unique", "third")] {
             conn.execute(
                 "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
@@ -2416,7 +2423,7 @@ pub(crate) mod tests {
     fn legacy_name_index_never_selects_one_of_same_named_devices() {
         let conn = Connection::open_in_memory().unwrap();
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
-        // Internal future-state fixture; public duplicate-name guards stay enabled.
+        // Seed three devices to exercise unique-name index transitions.
         for device in ["local", "peer", "third"] {
             conn.execute(
                 "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)

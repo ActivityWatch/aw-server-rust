@@ -649,10 +649,10 @@ impl DatastoreWorker {
                     | Command::Export(..)
                     | Command::ExportDevices(..)
             ) || request.read_bucket_id().is_some();
-            if depends_on_buckets && ds.buckets_changed(tx).unwrap_or(true) {
-                if let Err(e) = ds.reload_buckets(tx) {
-                    warn!("Reader failed to reload bucket list: {e:?}");
-                }
+            if depends_on_buckets && ds.buckets_changed(tx)? {
+                // Never serve a stale identity after a failed refresh: it can
+                // select an old device or hide newly ambiguous history.
+                ds.reload_buckets(tx)?;
             }
         }
         // Normalize aliases before privacy filtering, cache access or an early

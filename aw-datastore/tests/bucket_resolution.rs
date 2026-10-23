@@ -352,3 +352,31 @@ fn open_reader_refreshes_device_ownership_after_metadata_repair() {
         "peer"
     );
 }
+
+#[test]
+fn reader_rejects_stale_identity_when_catalogue_reload_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("reload-failure.sqlite")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let writer = Datastore::new(path.clone(), false);
+    writer
+        .create_bucket(&bucket("window", "host", "local"))
+        .unwrap();
+    writer.force_commit().unwrap();
+    writer.close();
+    let reader = Datastore::open_reader(path.clone()).unwrap();
+    assert_eq!(reader.get_bucket("window").unwrap().device_id, "local");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    // Simulate a catalogue state rejected by the still-required cache guard.
+    conn.execute("INSERT INTO buckets (name, device_id, type, client, hostname, created, data) VALUES ('window', 'peer', 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')", []).unwrap();
+    assert!(reader.get_bucket("window").is_err());
+    assert!(reader.for_device("local").get_bucket("window").is_err());
+    assert!(reader.get_buckets().is_err());
+    conn.execute("DELETE FROM buckets WHERE device_id = 'peer'", [])
+        .unwrap();
+    assert_eq!(reader.get_bucket("window").unwrap().device_id, "local");
+}

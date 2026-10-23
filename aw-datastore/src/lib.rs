@@ -72,6 +72,8 @@ pub enum DatastoreError {
     BucketAlreadyExists(String),
     NoSuchKey(String),
     NoSuchEvent(String, i64),
+    /// An explicit event ID belongs to a different bucket row.
+    EventIdConflict(i64),
     MpscError,
     InternalError(String),
     /// A stored event row could not be parsed. Content corruption in a file

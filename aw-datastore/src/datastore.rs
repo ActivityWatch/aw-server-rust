@@ -990,7 +990,13 @@ impl DatastoreInstance {
             // The cache may be stale when another connection created this name.
             // Checking in the INSERT makes rejection atomic across writers;
             // a skipped insert must not reuse last_insert_rowid or update the cache.
-            Ok(0) => Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string())),
+            Ok(0) => {
+                let existing = self.get_bucket_unscoped(&bucket.id)?;
+                Err(DatastoreError::AmbiguousBucket(
+                    bucket.id.clone(),
+                    vec![(existing.device_id, existing.id)],
+                ))
+            }
             Ok(_) => {
                 info!("Created bucket {}", bucket.id);
                 // Get and set rowid
@@ -1167,6 +1173,23 @@ impl DatastoreInstance {
         mut events: Vec<Event>,
     ) -> Result<Vec<Event>, DatastoreError> {
         let mut bucket = self.get_bucket(bucket_id)?;
+
+        // The worker holds BEGIN IMMEDIATE across validation and insertion.
+        // Validate the whole batch before mutating: a rejected later ID must
+        // not leave an accepted prefix behind in the worker's transaction.
+        for event in &events {
+            if let Some(id) = event.id {
+                let owner: Option<i64> = conn
+                    .query_row("SELECT bucketrow FROM events WHERE id = ?1", [id], |row| {
+                        row.get(0)
+                    })
+                    .optional()
+                    .map_err(|err| DatastoreError::InternalError(err.to_string()))?;
+                if owner.is_some_and(|owner| Some(owner) != bucket.bid) {
+                    return Err(DatastoreError::EventIdConflict(id));
+                }
+            }
+        }
 
         let mut stmt = match conn.prepare_cached(
             "

@@ -246,6 +246,7 @@ fn import(
                     }
                 }
             }
+            Err(e @ DatastoreError::AmbiguousBucket(_, _)) => return Err(e.into()),
             Err(e) => {
                 let err_msg = format!("Failed to import bucket: {e:?}");
                 warn!("{}", err_msg);

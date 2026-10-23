@@ -1892,12 +1892,14 @@ mod datastore_tests {
 
         let mut b2 = b1.clone();
         b2.device_id = "device-B".to_string();
-        for bucket in [&b1, &b2] {
-            assert!(matches!(
-                ds.create_bucket(bucket),
-                Err(DatastoreError::BucketAlreadyExists(_))
-            ));
-        }
+        assert!(matches!(
+            ds.create_bucket(&b1),
+            Err(DatastoreError::BucketAlreadyExists(_))
+        ));
+        assert!(matches!(
+            ds.create_bucket(&b2),
+            Err(DatastoreError::AmbiguousBucket(_, _))
+        ));
         assert_eq!(ds.get_bucket(&b1.id).unwrap().bid, original.bid);
         assert_eq!(ds.get_buckets().unwrap().len(), 1);
         ds.insert_events(&b1.id, &[event]).unwrap();
@@ -1928,7 +1930,7 @@ mod datastore_tests {
         bucket.device_id = "device-B".to_string();
         assert!(matches!(
             ds2.create_bucket(&conn2, bucket.clone()),
-            Err(DatastoreError::BucketAlreadyExists(_))
+            Err(DatastoreError::AmbiguousBucket(_, _))
         ));
         let count: i64 = conn2
             .query_row("SELECT count(*) FROM buckets", [], |r| r.get(0))

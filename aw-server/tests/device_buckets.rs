@@ -836,3 +836,112 @@ fn grouped_device_routes_retain_api_key_protection() {
         assert_eq!(req.dispatch().status(), Status::Ok);
     }
 }
+
+#[test]
+fn scoped_event_ids_cannot_replace_another_devices_history() {
+    use rocket::http::Method::{Get, Post};
+    for suffix in ["events", "heartbeat?pulsetime=5"] {
+        let client = client();
+        for (device, bid) in [("local", "source"), ("peer", "target")] {
+            let (status, body) = request(
+                &client,
+                Post,
+                &format!("/api/0/devices/{device}/buckets/{bid}"),
+                Some(json!({"hostname": "host", "type": "test", "client": "test"})),
+            );
+            assert_eq!(status, Status::Ok, "{body}");
+        }
+        let event = json!({"timestamp": "2026-01-01T00:00:00Z", "duration": 1, "data": {"owner": "source"}});
+        let (status, body) = request(
+            &client,
+            Post,
+            "/api/0/devices/local/buckets/source/events",
+            Some(json!([event])),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        let original: Value = serde_json::from_str(&body).unwrap();
+        let stolen_id = original[0]["id"].as_i64().unwrap();
+        let forged = json!({"id": stolen_id, "timestamp": "2026-01-01T00:00:00Z", "duration": 2, "data": {"owner": "peer"}});
+        let payload = if suffix == "events" {
+            // A rejected batch must not retain its valid prefix, either.
+            json!([{"timestamp": "2026-01-01T00:00:05Z", "duration": 1, "data": {}}, forged])
+        } else {
+            forged
+        };
+        let (status, body) = request(
+            &client,
+            Post,
+            &format!("/api/0/devices/peer/buckets/target/{suffix}"),
+            Some(payload),
+        );
+        assert_eq!(status, Status::Conflict, "{suffix}: {body}");
+        let (status, body) = request(
+            &client,
+            Get,
+            "/api/0/devices/local/buckets/source/events",
+            None,
+        );
+        assert_eq!(status, Status::Ok);
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), original);
+        assert_eq!(
+            request(
+                &client,
+                Get,
+                "/api/0/devices/peer/buckets/target/events/count",
+                None
+            ),
+            (Status::Ok, "0".into())
+        );
+        // Updating an existing event in its own bucket remains supported.
+        let own = json!({"id": stolen_id, "timestamp": "2026-01-01T00:00:00Z", "duration": 3, "data": {"owner": "source"}});
+        let (status, body) = request(
+            &client,
+            Post,
+            "/api/0/devices/local/buckets/source/events",
+            Some(json!([own])),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()[0]["id"],
+            stolen_id
+        );
+    }
+}
+
+#[test]
+fn guarded_cross_device_creation_returns_conflict_not_already_exists() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let metadata = json!({"hostname": "host", "type": "test", "client": "test"});
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/local/buckets/window",
+            Some(metadata.clone())
+        )
+        .0,
+        Status::Ok
+    );
+    let (status, body) = request(
+        &client,
+        Post,
+        "/api/0/devices/peer/buckets/window",
+        Some(metadata.clone()),
+    );
+    assert_eq!(status, Status::Conflict, "{body}");
+    assert_eq!(
+        request(&client, Get, "/api/0/devices/peer/buckets/window", None).0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/server-uuid/buckets/window",
+            Some(metadata)
+        )
+        .0,
+        Status::NotModified
+    );
+}

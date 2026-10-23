@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use aw_models::{BucketsExport, Event, TryVec};
 
-use aw_datastore::{Datastore, DatastoreError};
+use aw_datastore::DatastoreError;
 
 use crate::endpoints::util::ApiJson;
 use crate::endpoints::{HttpErrorJson, ServerState};
@@ -39,8 +39,16 @@ fn event_identity(
     Ok((event.timestamp, duration_ns, data_json))
 }
 
-fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJson> {
+fn import(state: &ServerState, import: BucketsExport) -> Result<(), HttpErrorJson> {
+    let datastore = &state.datastore;
     for (_bucketname, mut bucket) in import.buckets {
+        // Match HTTP routing before resolving aliases or checking merge ownership.
+        // An export of this server UUID must not create a second local owner.
+        bucket.device_id = if bucket.device_id.is_empty() {
+            "local".to_owned()
+        } else {
+            state.normalize_device(&bucket.device_id).to_owned()
+        };
         // Event ids are unique across all buckets in the datastore, and events are inserted
         // with INSERT OR REPLACE. An exported id (e.g. from another server) could therefore
         // overwrite an unrelated event, so imported events get new ids, except when merging into
@@ -240,7 +248,7 @@ pub fn bucket_import_json(
     state: &State<ServerState>,
     json_data: ApiJson<BucketsExport>,
 ) -> Result<(), HttpErrorJson> {
-    let result = import(&state.datastore, json_data.into_inner());
+    let result = import(state, json_data.into_inner());
     // Clear even on failure: a multi-bucket import can write earlier buckets
     // and then fail on a later one, leaving those writes cached-over.
     state.bucket_list_changed();
@@ -262,7 +270,7 @@ pub fn bucket_import_form(
     state: &State<ServerState>,
     form: Form<ImportForm>,
 ) -> Result<(), HttpErrorJson> {
-    let result = import(&state.datastore, form.into_inner().import.into_inner());
+    let result = import(state, form.into_inner().import.into_inner());
     // Same partial-import failure mode as the JSON handler above.
     state.bucket_list_changed();
     result

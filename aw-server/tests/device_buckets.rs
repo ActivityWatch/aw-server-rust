@@ -366,3 +366,43 @@ fn local_hostname_sentinel_cannot_forge_peer_metadata() {
     assert_eq!(stored.device_id, "local");
     assert_eq!(stored.data["device_id"], "server-uuid");
 }
+
+#[test]
+fn legacy_import_normalizes_server_uuid_before_alias_resolution_and_merge() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let import = json!({"buckets": {"window_host": {"id": "window_host", "hostname": "host", "device_id": "server-uuid", "type": "test", "client": "test", "events": [{"id": 42, "timestamp": "2026-01-01T00:00:00Z", "duration": 2, "data": {"app": "test"}}]}}});
+    for _ in 0..2 {
+        let (status, body) = request(&client, Post, "/api/0/import", Some(import.clone()));
+        assert_eq!(status, Status::Ok, "{body}");
+        let (status, body) = request(
+            &client,
+            Get,
+            "/api/0/devices/server-uuid/buckets/window",
+            None,
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        let stored: Bucket = serde_json::from_str(&body).unwrap();
+        assert_eq!(stored.device_id, "local");
+        assert_eq!(stored.id, "window_host");
+        assert_eq!(
+            request(
+                &client,
+                Get,
+                "/api/0/devices/local/buckets/window/events/count",
+                None
+            ),
+            (Status::Ok, "1".into())
+        );
+    }
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/buckets/window",
+            Some(json!({"hostname": "host", "type": "test", "client": "test"}))
+        )
+        .0,
+        Status::NotModified
+    );
+}

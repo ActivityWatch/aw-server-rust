@@ -3,6 +3,23 @@ use serde_json::value::Value;
 
 use aw_models::Event;
 
+/// Like `a == b`, but numbers are compared by value, also inside lists.
+///
+/// serde_json treats the integer `1` and the float `1.0` as different values,
+/// and numbers in a query are always floats while watchers usually store integers.
+fn value_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        // Only go through f64 when a float is involved, as_f64() rounds large integers
+        (Value::Number(a), Value::Number(b)) if a.is_f64() || b.is_f64() => {
+            a.as_f64() == b.as_f64()
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| value_eq(a, b))
+        }
+        _ => a == b,
+    }
+}
+
 /// Drops events not matching the specified key and value(s)
 ///
 /// # Example
@@ -17,7 +34,7 @@ pub fn filter_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<
     for event in events.drain(..) {
         if let Some(v) = event.data.get(key) {
             for val in vals {
-                if val == v {
+                if value_eq(val, v) {
                     filtered_events.push(event);
                     break;
                 }
@@ -66,7 +83,7 @@ pub fn exclude_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec
     'events: for event in events.drain(..) {
         if let Some(v) = event.data.get(key) {
             for val in vals {
-                if val == v {
+                if value_eq(val, v) {
                     continue 'events;
                 }
             }

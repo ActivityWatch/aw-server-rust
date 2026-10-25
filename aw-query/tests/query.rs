@@ -450,6 +450,42 @@ mod query_tests {
     }
 
     #[test]
+    fn test_filter_keyvals_numbers() {
+        // Numbers in a query are floats, while watchers usually store integers
+        let ds = setup_datastore_with_bucket();
+        let events: Vec<Event> = serde_json::from_str(
+            r#"[
+                {"timestamp": "2026-01-01T10:00:00Z", "duration": 1, "data": {"a": 1}},
+                {"timestamp": "2026-01-01T10:00:01Z", "duration": 1, "data": {"a": 2.0}},
+                {"timestamp": "2026-01-01T10:00:02Z", "duration": 1, "data": {"a": 2.5}},
+                {"timestamp": "2026-01-01T10:00:03Z", "duration": 1, "data": {"a": [1, 2]}},
+                {"timestamp": "2026-01-01T10:00:04Z", "duration": 1, "data": {"a": 3}}
+            ]"#,
+        )
+        .unwrap();
+        ds.insert_events(BUCKET_ID, &events).unwrap();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let values = |function: &str| {
+            let code = format!(
+                r#"events = sort_by_timestamp(query_bucket("{BUCKET_ID}"));
+                return {function}(events, "a", [1, 2, 2.5, [1, 2]]);"#
+            );
+            let result = aw_query::query(&code, &interval, &ds).unwrap();
+            let events: Vec<Event> = Vec::try_from(&result).unwrap();
+            events
+                .into_iter()
+                .map(|e| e.data["a"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            values("filter_keyvals"),
+            [json!(1), json!(2.0), json!(2.5), json!([1, 2])]
+        );
+        assert_eq!(values("exclude_keyvals"), [json!(3)]);
+    }
+
+    #[test]
     fn test_categorize() {
         let ds = setup_datastore_populated();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();

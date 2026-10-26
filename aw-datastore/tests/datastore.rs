@@ -880,6 +880,88 @@ mod datastore_tests {
         assert!(events[0].id.is_some(), "event should have a DB id");
     }
 
+    /// Two merged heartbeats, so the worker's last-heartbeat cache holds the
+    /// stored event. Returns that event.
+    fn cached_heartbeat(ds: &Datastore, bucket_id: &str, now: DateTime<Utc>) -> Event {
+        ds.heartbeat(bucket_id, test_event(now, Duration::seconds(0)), 10.0)
+            .unwrap();
+        ds.heartbeat(
+            bucket_id,
+            test_event(now + Duration::seconds(1), Duration::seconds(0)),
+            10.0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_heartbeat_after_deleting_cached_event() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+        let now = Utc::now();
+        let cached = cached_heartbeat(&ds, &bucket.id, now);
+
+        ds.delete_events_by_id(&bucket.id, vec![cached.id.unwrap()])
+            .unwrap();
+        // Same data within pulsetime: must not merge into the deleted row.
+        let e = ds
+            .heartbeat(
+                &bucket.id,
+                test_event(now + Duration::seconds(2), Duration::seconds(0)),
+                10.0,
+            )
+            .unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, e.id);
+        assert_eq!(events[0].timestamp, now + Duration::seconds(2));
+    }
+
+    #[test]
+    fn test_heartbeat_after_recreating_bucket() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+        let now = Utc::now();
+        cached_heartbeat(&ds, &bucket.id, now);
+
+        ds.delete_bucket(&bucket.id).unwrap();
+        create_test_bucket(&ds);
+        ds.heartbeat(
+            &bucket.id,
+            test_event(now + Duration::seconds(2), Duration::seconds(0)),
+            10.0,
+        )
+        .unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, now + Duration::seconds(2));
+    }
+
+    #[test]
+    fn test_heartbeat_after_renaming_bucket_onto_cached_id() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+        let now = Utc::now();
+        cached_heartbeat(&ds, &bucket.id, now);
+
+        // Move the cached bucket away and rename another one onto its id.
+        ds.rename_bucket(&bucket.id, "moved").unwrap();
+        create_named_test_bucket(&ds, "other");
+        ds.rename_bucket("other", &bucket.id).unwrap();
+        ds.heartbeat(
+            &bucket.id,
+            test_event(now + Duration::seconds(2), Duration::seconds(0)),
+            10.0,
+        )
+        .unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, now + Duration::seconds(2));
+        assert_eq!(ds.get_events("moved", None, None, None).unwrap().len(), 1);
+    }
+
     #[test]
     fn test_event_replace() {
         // Setup datastore

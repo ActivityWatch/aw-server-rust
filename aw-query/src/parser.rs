@@ -258,6 +258,13 @@ parser! {
             span: span!(),
             node: Expr_::Number(i),
         },
+        // Negative number literal, e.g. `-100`. The webui sends category
+        // rules as a literal in the query string, and a rule may carry a
+        // negative priority, so the language has to accept one.
+        Minus Number(i) => Expr {
+            span: span!(),
+            node: Expr_::Number(-i),
+        },
         String(s) => Expr {
             span: span!(),
             node: Expr_::String(s),

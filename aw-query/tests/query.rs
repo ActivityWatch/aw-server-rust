@@ -137,6 +137,35 @@ mod query_tests {
     }
 
     #[test]
+    fn test_negative_number_literal() {
+        let ds = setup_datastore_empty();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // A negative number literal is a value, not a subtraction.
+        let code = String::from("return -100;");
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            aw_query::DataType::Number(n) => assert_eq!(n, -100.0),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        };
+
+        // Subtraction still subtracts.
+        let code = String::from("return 1 - 3;");
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            aw_query::DataType::Number(n) => assert_eq!(n, -2.0),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        };
+
+        // A negative number can be assigned and used in a dict.
+        let code = String::from("a = -5; return { \"priority\": a };");
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            aw_query::DataType::Dict(d) => {
+                assert_eq!(d.get("priority"), Some(&aw_query::DataType::Number(-5.0)))
+            }
+            ref data => panic!("Wrong datatype, {data:?}"),
+        };
+    }
+
+    #[test]
     fn test_equals() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
@@ -517,6 +546,29 @@ mod query_tests {
         assert_eq!(
             events.first().unwrap().data.get("$category").unwrap(),
             &serde_json::json!(vec!["A"])
+        );
+    }
+
+    #[test]
+    fn test_categorize_negative_priority() {
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // A negative priority is a valid rule priority (it deprioritizes the
+        // rule), and the webui sends the rules as a literal in the query
+        // string, so the query language has to parse negative numbers.
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "priority": -100 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            return  events;"#,
+            "testid"
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(
+            events.first().unwrap().data.get("$category").unwrap(),
+            &serde_json::json!(vec!["B", "B1"])
         );
     }
 

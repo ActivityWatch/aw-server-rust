@@ -252,6 +252,7 @@ pub enum Command {
     GetKeyValue(String),
     SetKeyValue(String, String),
     SetKeyValueAndCommit(String, String),
+    SetJsonFieldAndCommit(String, String, serde_json::Value),
     DeleteKeyValue(String),
     RefreshPrivacyFilter(),
     ReloadBuckets(),
@@ -783,6 +784,23 @@ impl DatastoreWorker {
                 self.commit = true;
                 Ok(Response::Empty())
             }
+            Command::SetJsonFieldAndCommit(key, field, value) => {
+                // Read inside the worker's transaction: a caller-side snapshot
+                // could overwrite settings changed by an intervening request.
+                let existing = match ds.get_key_value(tx, &key) {
+                    Ok(data) => serde_json::from_str(&data).unwrap_or(serde_json::Value::Null),
+                    Err(DatastoreError::NoSuchKey(_)) => serde_json::Value::Null,
+                    Err(err) => return Err(err),
+                };
+                let mut object = match existing {
+                    serde_json::Value::Object(object) => object,
+                    _ => Default::default(),
+                };
+                object.insert(field, value);
+                self.set_key_value(ds, tx, &key, &serde_json::Value::Object(object).to_string())?;
+                self.commit = true;
+                Ok(Response::Empty())
+            }
             Command::GetKeyValue(key) => match ds.get_key_value(tx, &key) {
                 Ok(result) => Ok(Response::KeyValue(result)),
                 Err(e) => Err(e),
@@ -1217,6 +1235,27 @@ impl Datastore {
     pub fn set_key_value_and_commit(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
         let cmd = Command::SetKeyValueAndCommit(key.to_string(), data.to_string());
         _unwrap_empty_response(self.request(cmd)?)
+    }
+
+    /// Replaces one top-level JSON object field and commits before success.
+    ///
+    /// The read and write run as one worker request, preserving other fields
+    /// from earlier requests (including uncommitted writes in this batch).
+    /// Missing keys, malformed JSON and non-object JSON start as an empty
+    /// object. Database read/write/commit errors are returned to the caller.
+    /// `field` is a literal key, not a dotted path or JSON Pointer.
+    /// A later whole-value replacement can still overwrite this update.
+    pub fn set_json_field_and_commit(
+        &self,
+        key: &str,
+        field: &str,
+        value: serde_json::Value,
+    ) -> Result<(), DatastoreError> {
+        _unwrap_empty_response(self.request(Command::SetJsonFieldAndCommit(
+            key.to_owned(),
+            field.to_owned(),
+            value,
+        ))?)
     }
 
     pub fn delete_key_value(&self, key: &str) -> Result<(), DatastoreError> {

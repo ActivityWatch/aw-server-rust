@@ -258,6 +258,7 @@ pub enum Command {
     GetKeyValue(String),
     SetKeyValue(String, String),
     SetKeyValueAndCommit(String, String),
+    SetJsonFieldAndCommit(String, String, serde_json::Value),
     DeleteKeyValue(String),
     RefreshPrivacyFilter(),
     ReloadBuckets(),
@@ -774,13 +775,18 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
-            Command::DeleteBucket(bucketname) => match ds.delete_bucket(tx, &bucketname) {
-                Ok(_) => {
-                    self.commit = true;
-                    Ok(Response::Empty())
+            Command::DeleteBucket(bucketname) => {
+                // A bucket re-created under this id must not merge into the
+                // deleted bucket's cached last event.
+                self.last_heartbeat.remove(&bucketname);
+                match ds.delete_bucket(tx, &bucketname) {
+                    Ok(_) => {
+                        self.commit = true;
+                        Ok(Response::Empty())
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            },
+            }
             Command::GetBucket(bucketname) => match ds.get_bucket(&bucketname) {
                 Ok(b) => Ok(Response::Bucket(b)),
                 Err(e) => Err(e),
@@ -871,6 +877,10 @@ impl DatastoreWorker {
                 }
             }
             Command::DeleteEventsById(bucketname, event_ids) => {
+                // The cached last event may be one of the deleted events; a
+                // heartbeat merging into it would update a missing row. Drop
+                // it even if the delete fails partway.
+                self.last_heartbeat.remove(&bucketname);
                 match ds.delete_events_by_id(tx, &bucketname, event_ids) {
                     Ok(()) => {
                         self.commit |= ds.get_bucket(&bucketname)?._type == STOPWATCH_BUCKET_TYPE;
@@ -893,6 +903,23 @@ impl DatastoreWorker {
                 self.commit = true;
                 Ok(Response::Empty())
             }
+            Command::SetJsonFieldAndCommit(key, field, value) => {
+                // Read inside the worker's transaction: a caller-side snapshot
+                // could overwrite settings changed by an intervening request.
+                let existing = match ds.get_key_value(tx, &key) {
+                    Ok(data) => serde_json::from_str(&data).unwrap_or(serde_json::Value::Null),
+                    Err(DatastoreError::NoSuchKey(_)) => serde_json::Value::Null,
+                    Err(err) => return Err(err),
+                };
+                let mut object = match existing {
+                    serde_json::Value::Object(object) => object,
+                    _ => Default::default(),
+                };
+                object.insert(field, value);
+                self.set_key_value(ds, tx, &key, &serde_json::Value::Object(object).to_string())?;
+                self.commit = true;
+                Ok(Response::Empty())
+            }
             Command::GetKeyValue(key) => match ds.get_key_value(tx, &key) {
                 Ok(result) => Ok(Response::KeyValue(result)),
                 Err(e) => Err(e),
@@ -910,13 +937,17 @@ impl DatastoreWorker {
                 self.reload_privacy_engine(ds, tx);
                 Ok(Response::Empty())
             }
-            Command::RenameBucket(old_id, new_id) => match ds.rename_bucket(tx, &old_id, &new_id) {
-                Ok(()) => {
-                    self.commit = true;
-                    Ok(Response::Empty())
+            Command::RenameBucket(old_id, new_id) => {
+                self.last_heartbeat.remove(&old_id);
+                self.last_heartbeat.remove(&new_id);
+                match ds.rename_bucket(tx, &old_id, &new_id) {
+                    Ok(()) => {
+                        self.commit = true;
+                        Ok(Response::Empty())
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            },
+            }
             Command::MigrateHostname(new_hostname) => {
                 match ds.migrate_hostname(tx, &new_hostname) {
                     Ok(count) => {
@@ -928,15 +959,20 @@ impl DatastoreWorker {
                     Err(e) => Err(e),
                 }
             }
-            Command::MigrateTestBucketNames() => match ds.migrate_test_bucket_names(tx) {
-                Ok(count) => {
-                    if count > 0 {
-                        self.commit = true;
+            Command::MigrateTestBucketNames() => {
+                // Renames buckets and moves events between them, possibly
+                // partway before an error.
+                self.last_heartbeat.clear();
+                match ds.migrate_test_bucket_names(tx) {
+                    Ok(count) => {
+                        if count > 0 {
+                            self.commit = true;
+                        }
+                        Ok(Response::Count(count as i64))
                     }
-                    Ok(Response::Count(count as i64))
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            },
+            }
             Command::Close() => {
                 self.quit = true;
                 Ok(Response::Empty())
@@ -1380,6 +1416,27 @@ impl Datastore {
     pub fn set_key_value_and_commit(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
         let cmd = Command::SetKeyValueAndCommit(key.to_string(), data.to_string());
         _unwrap_empty_response(self.request(cmd)?)
+    }
+
+    /// Replaces one top-level JSON object field and commits before success.
+    ///
+    /// The read and write run as one worker request, preserving other fields
+    /// from earlier requests (including uncommitted writes in this batch).
+    /// Missing keys, malformed JSON and non-object JSON start as an empty
+    /// object. Database read/write/commit errors are returned to the caller.
+    /// `field` is a literal key, not a dotted path or JSON Pointer.
+    /// A later whole-value replacement can still overwrite this update.
+    pub fn set_json_field_and_commit(
+        &self,
+        key: &str,
+        field: &str,
+        value: serde_json::Value,
+    ) -> Result<(), DatastoreError> {
+        _unwrap_empty_response(self.request(Command::SetJsonFieldAndCommit(
+            key.to_owned(),
+            field.to_owned(),
+            value,
+        ))?)
     }
 
     pub fn delete_key_value(&self, key: &str) -> Result<(), DatastoreError> {

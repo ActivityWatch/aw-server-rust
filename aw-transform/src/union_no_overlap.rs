@@ -1,7 +1,11 @@
+use super::sort::sort_by_timestamp;
 use aw_models::Event;
 use chrono::{DateTime, Utc};
 
 /// Merges two eventlists and removes overlap, the first eventlist will have precedence
+///
+/// Both inputs are sorted by timestamp first: `query_bucket` returns events
+/// newest-first, and the merge below walks both lists in ascending order.
 ///
 /// aw-core implementation: https://github.com/ActivityWatch/aw-core/blob/master/aw_transform/union_no_overlap.py
 ///
@@ -13,8 +17,8 @@ use chrono::{DateTime, Utc};
 /// ```
 pub fn union_no_overlap(events1: Vec<Event>, events2: Vec<Event>) -> Vec<Event> {
     let mut events_union: Vec<Event> = Vec::new();
-    let mut events1 = events1.into_iter().peekable();
-    let mut events2 = events2.into_iter().peekable();
+    let mut events1 = sort_by_timestamp(events1).into_iter().peekable();
+    let mut events2 = sort_by_timestamp(events2).into_iter().peekable();
     // Keep a split remainder here instead of inserting it ahead of the entire
     // unprocessed suffix. Each step consumes an input or emits a fragment.
     let mut pending = events2.next();
@@ -633,5 +637,26 @@ mod tests {
             spans(&result, now),
             vec![(0, 600, "A".into()), (1200, 600, "A".into())]
         );
+    }
+
+    #[test]
+    fn newest_first_inputs_are_sorted_before_merging() {
+        // `query_bucket` returns events newest-first. Feeding that order straight
+        // into the merge used to emit overlapping events (4200s for a 2400s span).
+        let now = Utc::now();
+        let min = Duration::minutes(1);
+        let events1 = events_from_unit(now, &[(0, 10), (10, 5), (15, 15), (30, 10)], min, "A");
+        let events2 = events_from_unit(now, &[(0, 20), (20, 10), (30, 10)], min, "b");
+        let expected = union_no_overlap(events1.clone(), events2.clone());
+
+        let rev = |mut events: Vec<Event>| {
+            events.reverse();
+            events
+        };
+        let result = union_no_overlap(rev(events1.clone()), rev(events2.clone()));
+        assert_eq!(spans(&result, now), spans(&expected, now));
+        assert_union_invariants(&events1, &events2, &result);
+        let total: Duration = result.iter().map(|e| e.duration).sum();
+        assert_eq!(total, min * 40);
     }
 }

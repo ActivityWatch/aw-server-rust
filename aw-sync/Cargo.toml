@@ -26,7 +26,7 @@ gethostname = "0.4.3"
 # CLI-only dependencies (optional)
 clap = { version = "4.1", features = ["derive"], optional = true }
 ctrlc = { version = "3.4.5", optional = true }
-rusqlite = { version = "0.30", features = ["bundled"], optional = true }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 
 # sync-v2 dependencies (optional)
 zstd = { version = "0.13", optional = true }

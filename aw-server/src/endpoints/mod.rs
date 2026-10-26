@@ -2,7 +2,6 @@ use rust_embed::RustEmbed;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use gethostname::gethostname;
 use rocket::fs::FileServer;
 use rocket::http::{ContentType, Status};
 use rocket::request::Request;
@@ -140,16 +139,12 @@ impl ServerState {
 
     /// Call after anything that creates, deletes, renames or imports buckets:
     /// drops cached query results (the bucket list changed what queries
-    /// resolve to) and refreshes the reader's bucket cache.
+    /// resolve to). The reader's bucket cache is refreshed lazily on the next
+    /// read via the `buckets_changed()` auto-reload in `handle_request`; an
+    /// explicit synchronous `reader.reload_buckets()` here would block the
+    /// endpoint handler thread waiting for the reader worker, which may be
+    /// processing a long-running query.
     pub fn bucket_list_changed(&self) {
-        // Reader first: clearing bumps the cache generation, so a query that
-        // read the old bucket list before this point cannot be stored, while
-        // one that starts after it already sees the new list.
-        if let Some(reader) = &self.reader {
-            if let Err(e) = reader.reload_buckets() {
-                warn!("Failed to reload the query reader's bucket list: {e:?}");
-            }
-        }
         self.query_cache.clear();
     }
 }
@@ -219,11 +214,8 @@ fn root_manifest(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
 
 #[get("/")]
 fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Info> {
-    #[allow(clippy::or_fun_call)]
-    let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
-
     Json(Info {
-        hostname,
+        hostname: crate::hostname::hostname_string(),
         version: crate::version::version_string(),
         testing: config.testing,
         profile: crate::config::get_profile().to_string(),

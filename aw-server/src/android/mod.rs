@@ -38,6 +38,7 @@ pub mod android {
     use crate::panic_guard::catch_panic;
 
     use crate::endpoints;
+    use crate::endpoints::query_cache::{event_range, QueryCache};
     use crate::endpoints::ServerState;
     use aw_client_rust::classes::{classes_from_settings_str, default_classes};
     use aw_client_rust::queries::{
@@ -45,7 +46,7 @@ pub mod android {
     };
     use aw_datastore::Datastore;
     use aw_models::{Bucket, Event, TimeInterval};
-    use std::sync::OnceLock;
+    use std::sync::{Arc, OnceLock};
 
     // Several app threads make their first JNI call at about the same time (the
     // watchers' init threads, the server thread, migrations). With a plain
@@ -64,6 +65,16 @@ pub mod android {
                 Datastore::new(db_dir, false)
             })
             .clone()
+    }
+
+    // The in-process server's query cache. Only the HTTP write handlers
+    // invalidate it, so the JNI writes below, which go straight to the
+    // datastore, must do the same or the server keeps serving stale results
+    // for past periods (e.g. after the usage watcher backfills a day).
+    static QUERY_CACHE: OnceLock<Arc<QueryCache>> = OnceLock::new();
+
+    fn query_cache() -> &'static Arc<QueryCache> {
+        QUERY_CACHE.get_or_init(|| Arc::new(QueryCache::new()))
     }
 
     #[no_mangle]
@@ -195,6 +206,7 @@ pub mod android {
             device_id::get_device_id(),
         );
         info!("Using server_state:: device_id: {}", server_state.device_id);
+        server_state.query_cache = Arc::clone(query_cache());
 
         let mut server_config = crate::config::create_config("default", None);
         server_config.port = port;
@@ -271,6 +283,22 @@ pub mod android {
         });
     }
 
+    /// Report the Android device hostname from `/api/0/info` instead of the OS
+    /// hostname, which is typically `localhost` and breaks the webui
+    /// "this device" badge (ActivityWatch/aw-android#368).
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_setHostnameOverride(
+        env: JNIEnv,
+        _: JClass,
+        java_hostname: JString,
+    ) {
+        jni_guard_void("setHostnameOverride", || {
+            let hostname = &jstring_to_string(&env, java_hostname);
+            debug!("Setting reported hostname to {}", hostname);
+            crate::hostname::set_hostname_override(hostname);
+        });
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_getBuckets(
         env: JNIEnv,
@@ -301,7 +329,10 @@ pub mod android {
                 Err(err) => return create_error_object(&env, err.to_string()),
             };
             match openDatastore().create_bucket(&bucket_json) {
-                Ok(()) => string_to_jstring(&env, "Bucket successfully created".to_string()),
+                Ok(()) => {
+                    query_cache().clear();
+                    string_to_jstring(&env, "Bucket successfully created".to_string())
+                }
                 Err(e) => create_error_object(
                     &env,
                     format!("Something went wrong when trying to create bucket: {:?}", e),
@@ -326,8 +357,14 @@ pub mod android {
                 Ok(json) => json,
                 Err(err) => return create_error_object(&env, err.to_string()),
             };
+            // As in the HTTP handler: the returned event spans every merged
+            // event, and the heartbeat's own range covers a dropped one.
+            let heartbeat_range = event_range(&event_json);
             match openDatastore().heartbeat(&bucket_id, event_json, pulsetime) {
-                Ok(_) => string_to_jstring(&env, "Heartbeat successfully received".to_string()),
+                Ok(e) => {
+                    query_cache().invalidate(vec![event_range(&e), heartbeat_range]);
+                    string_to_jstring(&env, "Heartbeat successfully received".to_string())
+                }
                 Err(e) => create_error_object(
                     &env,
                     format!(
@@ -372,6 +409,8 @@ pub mod android {
             }
             match openDatastore().migrate_hostname(&hostname) {
                 Ok(count) => {
+                    // find_bucket can filter by hostname.
+                    query_cache().clear();
                     string_to_jstring(&env, format!("Migrated hostname for {} bucket(s)", count))
                 }
                 Err(e) => create_error_object(&env, format!("Failed to migrate hostname: {:?}", e)),
@@ -386,10 +425,13 @@ pub mod android {
     ) -> jstring {
         jni_guard(env, "migrateAndroidBucketName", || {
             match openDatastore().rename_bucket("aw-android-test", "aw-android") {
-                Ok(()) => string_to_jstring(
-                    &env,
-                    "Renamed bucket 'aw-android-test' to 'aw-android'".to_string(),
-                ),
+                Ok(()) => {
+                    query_cache().clear();
+                    string_to_jstring(
+                        &env,
+                        "Renamed bucket 'aw-android-test' to 'aw-android'".to_string(),
+                    )
+                }
                 Err(e) => create_error_object(&env, format!("Failed to rename bucket: {:?}", e)),
             }
         })
@@ -400,10 +442,12 @@ pub mod android {
         env: JNIEnv,
         _: JClass,
     ) -> jstring {
-        jni_guard(
-            env,
-            "migrateWatcherAndroidBucketNames",
-            || match openDatastore().migrate_test_bucket_names() {
+        jni_guard(env, "migrateWatcherAndroidBucketNames", || {
+            // Cleared even on error: buckets moved before the failure stay
+            // moved.
+            let result = openDatastore().migrate_test_bucket_names();
+            query_cache().clear();
+            match result {
                 Ok(count) => string_to_jstring(
                     &env,
                     format!("Migrated {} 'aw-watcher-android-test' bucket(s)", count),
@@ -412,8 +456,8 @@ pub mod android {
                     &env,
                     format!("Failed to migrate watcher bucket names: {:?}", e),
                 ),
-            },
-        )
+            }
+        })
     }
 
     /// Map a JNI settings key to its datastore key, or `None` if invalid.

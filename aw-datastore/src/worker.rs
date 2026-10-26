@@ -188,6 +188,7 @@ fn probe_user_version(path: &str) -> Result<i32, DatastoreError> {
 #[derive(Clone)]
 pub struct Datastore {
     requester: RequestSender,
+    device_scope: Option<String>,
 }
 
 impl fmt::Debug for Datastore {
@@ -211,6 +212,7 @@ pub enum Response {
     Empty(),
     Bucket(Bucket),
     BucketMap(HashMap<String, Bucket>),
+    DeviceBuckets(HashMap<String, HashMap<String, Bucket>>),
     Event(Event),
     EventList(Vec<Event>),
     FilteredEvents(Vec<Option<Event>>),
@@ -223,6 +225,7 @@ pub enum Response {
 #[derive(Debug)]
 pub enum Command {
     Export(Option<String>, File),
+    ExportDevices(String, File),
     ExportCsv(
         String,
         Option<DateTime<Utc>>,
@@ -230,10 +233,13 @@ pub enum Command {
         Option<u64>,
         File,
     ),
+    Scoped(String, Box<Command>),
     CreateBucket(Bucket),
     DeleteBucket(String),
     GetBucket(String),
+    GetBucketForDevice(String, String),
     GetBuckets(),
+    GetDeviceBuckets(),
     InsertEvents(String, Vec<Event>),
     FilterEvents(String, Vec<Event>),
     Heartbeat(String, Event, f64),
@@ -267,9 +273,12 @@ impl Command {
     fn read_bucket_id(&self) -> Option<&str> {
         match self {
             Command::GetBucket(id)
+            | Command::GetBucketForDevice(_, id)
             | Command::GetEvent(id, _)
             | Command::GetEvents(id, ..)
-            | Command::GetEventCount(id, ..) => Some(id),
+            | Command::GetEventCount(id, ..)
+            | Command::ExportCsv(id, ..) => Some(id),
+            Command::Export(Some(id), _) => Some(id),
             _ => None,
         }
     }
@@ -310,7 +319,7 @@ struct DatastoreWorker {
     quit: bool,
     uncommitted_events: usize,
     commit: bool,
-    last_heartbeat: HashMap<String, Option<Event>>,
+    last_heartbeat: HashMap<(String, String), Option<Event>>,
     privacy_engine: PrivacyFilterEngine,
     /// `FileReader`: a bucket missing from the cache may have been created by
     /// the writer since we loaded it, so reload once before failing.
@@ -611,28 +620,133 @@ impl DatastoreWorker {
 
     fn handle_request(
         &mut self,
-        request: Command,
+        mut request: Command,
         ds: &mut DatastoreInstance,
         tx: &Transaction,
     ) -> Result<Response, DatastoreError> {
+        if let Command::Scoped(device, command) = request {
+            if device.is_empty() {
+                return Err(DatastoreError::InternalError(
+                    "Device scope must not be empty".to_owned(),
+                ));
+            }
+            // Scope stays on the serialized worker for exactly one command,
+            // including all nested datastore calls. Never resolve on the caller
+            // and send a later unscoped write (that creates a rename/delete race).
+            let previous = ds.device_scope.replace(device);
+            let result = self.handle_request(*command, ds, tx);
+            ds.device_scope = previous;
+            return result;
+        }
         if self.reader {
             // The writer may have created, deleted or renamed buckets since
             // the cache was loaded: before any read that depends on the
             // bucket list, compare a one-row signature of the buckets table
             // and reload when it differs. Cheap compared to the read itself.
-            let depends_on_buckets =
-                matches!(request, Command::GetBuckets()) || request.read_bucket_id().is_some();
-            if depends_on_buckets && ds.buckets_changed(tx).unwrap_or(true) {
-                if let Err(e) = ds.reload_buckets(tx) {
-                    warn!("Reader failed to reload bucket list: {e:?}");
+            let depends_on_buckets = matches!(
+                request,
+                Command::GetBuckets()
+                    | Command::GetDeviceBuckets()
+                    | Command::Export(..)
+                    | Command::ExportDevices(..)
+            ) || request.read_bucket_id().is_some();
+            if depends_on_buckets && ds.buckets_changed(tx)? {
+                // Never serve a stale identity after a failed refresh: it can
+                // select an old device or hide newly ambiguous history.
+                ds.reload_buckets(tx)?;
+            }
+        }
+        // Resolving a legacy rename's source must not turn it into permission
+        // to shadow a globally resolving destination alias on another device.
+        if let Command::RenameBucket(old_id, new_id) = &request {
+            if ds.device_scope.is_none() {
+                ds.reload_buckets(tx)?;
+                let source = ds.get_bucket(old_id)?;
+                match ds.get_bucket(new_id) {
+                    Ok(existing) if existing.bid != source.bid => {
+                        return Err(DatastoreError::BucketAlreadyExists(existing.id));
+                    }
+                    Err(err @ DatastoreError::AmbiguousBucket(..)) => return Err(err),
+                    _ => {}
                 }
             }
         }
+        // Normalize aliases before privacy filtering, cache access or an early
+        // success for an entirely filtered batch. Keep the resolved device as
+        // well: a unique alias may address a canonical name shared by devices.
+        let target = match &mut request {
+            Command::DeleteBucket(id)
+            | Command::GetBucket(id)
+            | Command::InsertEvents(id, ..)
+            | Command::FilterEvents(id, ..)
+            | Command::Heartbeat(id, ..)
+            | Command::GetEvent(id, ..)
+            | Command::GetEvents(id, ..)
+            | Command::GetEventCount(id, ..)
+            | Command::DeleteEventsById(id, ..)
+            | Command::RenameBucket(id, ..)
+            | Command::ExportCsv(id, ..) => Some(id),
+            Command::Export(Some(id), _) => Some(id),
+            _ => None,
+        };
+        if let Some(id) = target {
+            let bucket = ds.get_bucket(id)?;
+            *id = bucket.id;
+            let previous = ds.device_scope.replace(bucket.device_id);
+            let result = self.handle_resolved_request(request, ds, tx);
+            ds.device_scope = previous;
+            return result;
+        }
+        self.handle_resolved_request(request, ds, tx)
+    }
+
+    /// Drop a cached last heartbeat. Cache entries are keyed by
+    /// `(device_id, id)`; without a resolved device, drop the id on every
+    /// device rather than keep a possibly stale entry.
+    fn forget_heartbeat(&mut self, device: Option<&str>, id: &str) {
+        match device {
+            Some(device) => {
+                self.last_heartbeat
+                    .remove(&(device.to_owned(), id.to_owned()));
+            }
+            None => self.last_heartbeat.retain(|(_, bucket), _| bucket != id),
+        }
+    }
+
+    fn handle_resolved_request(
+        &mut self,
+        request: Command,
+        ds: &mut DatastoreInstance,
+        tx: &Transaction,
+    ) -> Result<Response, DatastoreError> {
         match request {
+            Command::Scoped(..) => unreachable!("scoped commands are handled above"),
             Command::ReloadBuckets() => match ds.reload_buckets(tx) {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
             },
+            Command::ExportDevices(local_id, mut file) => {
+                let mut devices = ds.get_device_buckets();
+                let local = devices.remove("local").unwrap_or_default();
+                let group = devices.entry(local_id.clone()).or_default();
+                for (id, mut bucket) in local {
+                    if group.contains_key(&id) {
+                        return Err(DatastoreError::AmbiguousBucket(
+                            id.clone(),
+                            vec![("local".into(), id.clone()), (local_id.clone(), id)],
+                        ));
+                    }
+                    bucket.device_id = local_id.clone();
+                    group.insert(id, bucket);
+                }
+                let mut writer = BufWriter::new(&mut file);
+                crate::export::write_device_export(tx, ds.db_version, &devices, &mut writer)?;
+                writer.flush().map_err(|err| {
+                    DatastoreError::InternalError(format!("Failed to flush device export: {err}"))
+                })?;
+                drop(writer);
+                Ok(Response::Export(file, None))
+            }
             Command::Export(bucket_id, mut file) => {
                 let mut writer = BufWriter::new(&mut file);
                 let name = ds.write_export(tx, bucket_id.as_deref(), &mut writer)?;
@@ -652,6 +766,9 @@ impl DatastoreWorker {
                 Ok(Response::ExportCsv(file))
             }
             Command::CreateBucket(mut bucket) => {
+                if let Some(device) = &ds.device_scope {
+                    bucket.device_id = device.clone();
+                }
                 // Attached events (import) must use the same privacy gate as
                 // InsertEvents, or a new-bucket import stores data the rules
                 // would drop or redact.
@@ -674,7 +791,7 @@ impl DatastoreWorker {
             Command::DeleteBucket(bucketname) => {
                 // A bucket re-created under this id must not merge into the
                 // deleted bucket's cached last event.
-                self.last_heartbeat.remove(&bucketname);
+                self.forget_heartbeat(ds.device_scope.as_deref(), &bucketname);
                 match ds.delete_bucket(tx, &bucketname) {
                     Ok(_) => {
                         self.commit = true;
@@ -687,7 +804,11 @@ impl DatastoreWorker {
                 Ok(b) => Ok(Response::Bucket(b)),
                 Err(e) => Err(e),
             },
-            Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets())),
+            Command::GetBucketForDevice(device, id) => {
+                ds.get_bucket_for_device(&device, &id).map(Response::Bucket)
+            }
+            Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets()?)),
+            Command::GetDeviceBuckets() => Ok(Response::DeviceBuckets(ds.get_device_buckets())),
             Command::InsertEvents(bucketname, events) => {
                 let filtered = self.privacy_engine.filter_events(&bucketname, events);
                 if filtered.is_empty() {
@@ -696,7 +817,8 @@ impl DatastoreWorker {
                 match ds.insert_events(tx, &bucketname, filtered) {
                     Ok(events) => {
                         self.uncommitted_events += events.len();
-                        self.last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
+                        let bucket = ds.get_bucket(&bucketname)?;
+                        self.last_heartbeat.remove(&(bucket.device_id, bucket.id)); // invalidate last_heartbeat cache
 
                         // Manual timer changes must be durable before the UI confirms them.
                         self.commit |= ds.get_bucket(&bucketname)?._type == STOPWATCH_BUCKET_TYPE;
@@ -720,9 +842,10 @@ impl DatastoreWorker {
                         // watcher's heartbeat-merge state machine continues correctly.
                         // Fall back to the incoming event itself if no prior event is cached
                         // (avoids returning a zero-timestamp default Event).
+                        let bucket = ds.get_bucket(&bucketname)?;
                         let last = self
                             .last_heartbeat
-                            .get(&bucketname)
+                            .get(&(bucket.device_id, bucket.id))
                             .and_then(|e| e.clone())
                             .unwrap_or(event);
                         return Ok(Response::Event(last));
@@ -770,7 +893,7 @@ impl DatastoreWorker {
                 // The cached last event may be one of the deleted events; a
                 // heartbeat merging into it would update a missing row. Drop
                 // it even if the delete fails partway.
-                self.last_heartbeat.remove(&bucketname);
+                self.forget_heartbeat(ds.device_scope.as_deref(), &bucketname);
                 match ds.delete_events_by_id(tx, &bucketname, event_ids) {
                     Ok(()) => {
                         self.commit |= ds.get_bucket(&bucketname)?._type == STOPWATCH_BUCKET_TYPE;
@@ -828,8 +951,9 @@ impl DatastoreWorker {
                 Ok(Response::Empty())
             }
             Command::RenameBucket(old_id, new_id) => {
-                self.last_heartbeat.remove(&old_id);
-                self.last_heartbeat.remove(&new_id);
+                // A rename stays on the resolved device.
+                self.forget_heartbeat(ds.device_scope.as_deref(), &old_id);
+                self.forget_heartbeat(ds.device_scope.as_deref(), &new_id);
                 match ds.rename_bucket(tx, &old_id, &new_id) {
                     Ok(()) => {
                         self.commit = true;
@@ -1018,16 +1142,30 @@ impl Datastore {
             let mut di = DatastoreWorker::new(responder, legacy_import_opts);
             di.work_loop(method);
         });
-        Datastore { requester }
+        Datastore {
+            requester,
+            device_scope: None,
+        }
+    }
+
+    /// Select bucket ownership for commands on a cloned handle. Scope is applied
+    /// inside the serialized worker, not by a separate caller-side lookup. This
+    /// is a routing selector, not an authorization boundary for global settings
+    /// or maintenance commands. HTTP UUID/local normalization belongs upstream.
+    pub fn for_device(&self, device_id: &str) -> Self {
+        Self {
+            requester: self.requester.clone(),
+            device_scope: Some(device_id.to_owned()),
+        }
     }
 
     /// Send a command to the worker thread and wait for its response.
-    ///
-    /// Fails with `InternalError` instead of panicking when the worker thread
-    /// is gone (e.g. it panicked on an earlier request), so callers such as
-    /// HTTP endpoints can degrade to a 5xx response instead of crashing the
-    /// request.
+    /// Return an error rather than panic if the worker is gone.
     fn request(&self, cmd: Command) -> Result<Response, DatastoreError> {
+        let cmd = match &self.device_scope {
+            Some(device) => Command::Scoped(device.clone(), Box::new(cmd)),
+            None => cmd,
+        };
         let receiver = self.requester.request(cmd).map_err(|e| {
             DatastoreError::InternalError(format!(
                 "Failed to send request, datastore worker is gone: {e:?}"
@@ -1058,6 +1196,22 @@ impl Datastore {
         }
     }
 
+    /// Resolve a device-scoped identity. Ordinary writes remain name-addressed
+    /// until the full routing contract is implemented.
+    pub fn get_bucket_for_device(
+        &self,
+        device_id: &str,
+        bucket_id: &str,
+    ) -> Result<Bucket, DatastoreError> {
+        match self.request(Command::GetBucketForDevice(
+            device_id.to_owned(),
+            bucket_id.to_owned(),
+        ))? {
+            Response::Bucket(bucket) => Ok(bucket),
+            _ => panic!("Invalid response"),
+        }
+    }
+
     pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
         let cmd = Command::GetBuckets();
         match self.request(cmd)? {
@@ -1065,6 +1219,16 @@ impl Datastore {
             e => Err(DatastoreError::InternalError(format!(
                 "Invalid response: {e:?}"
             ))),
+        }
+    }
+
+    /// Return bucket metadata grouped by device without flattening identities.
+    pub fn get_device_buckets(
+        &self,
+    ) -> Result<HashMap<String, HashMap<String, Bucket>>, DatastoreError> {
+        match self.request(Command::GetDeviceBuckets())? {
+            Response::DeviceBuckets(devices) => Ok(devices),
+            _ => panic!("Invalid response"),
         }
     }
 
@@ -1078,6 +1242,19 @@ impl Datastore {
     ) -> Result<(File, Option<String>), DatastoreError> {
         match self.request(Command::Export(bucket_id.map(str::to_owned), file))? {
             Response::Export(file, name) => Ok((file, name)),
+            _ => panic!("Invalid response"),
+        }
+    }
+
+    /// Serialize all devices in one worker transaction, normalizing only the
+    /// exported local identity. Stored bucket names and owners are unchanged.
+    pub fn export_devices_to_file(
+        &self,
+        local_id: &str,
+        file: File,
+    ) -> Result<File, DatastoreError> {
+        match self.request(Command::ExportDevices(local_id.to_owned(), file))? {
+            Response::Export(file, _) => Ok(file),
             _ => panic!("Invalid response"),
         }
     }
@@ -1325,6 +1502,125 @@ impl Datastore {
             // Worker already gone means there is nothing left to close
             Err(e) => warn!("Error closing database: {e:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod device_dispatch_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unique_legacy_alias_keeps_device_through_worker_dispatch() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let mut ds = crate::datastore::tests::same_name_worker_fixture(&conn);
+        let (_, responder) = mpsc_requests::channel::<Command, Result<Response, DatastoreError>>();
+        let mut worker = DatastoreWorker::new(responder, LegacyImportOptions::default());
+        let tx = conn.transaction().unwrap();
+        for device in ["local", "peer"] {
+            let alias = format!("window_{device}");
+            let event: Event = serde_json::from_value(json!({
+                "timestamp": "2026-01-01T00:00:00Z", "duration": 1,
+                "data": {"device": device}
+            }))
+            .unwrap();
+            let inserted = worker
+                .handle_request(
+                    Command::InsertEvents(alias.clone(), vec![event]),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap();
+            let Response::EventList(events) = inserted else {
+                panic!("expected events")
+            };
+            assert_eq!(events[0].data["device"], device);
+            let Response::EventList(stored) = worker
+                .handle_request(
+                    Command::GetEvents(alias.clone(), None, None, None, false),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap()
+            else {
+                panic!("expected events")
+            };
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].data["device"], device);
+            let Response::Count(count) = worker
+                .handle_request(
+                    Command::GetEventCount(alias.clone(), None, None),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap()
+            else {
+                panic!("expected count")
+            };
+            assert_eq!(count, 1);
+            let Response::Bucket(bucket) = worker
+                .handle_request(Command::GetBucket(alias.clone()), &mut ds, &tx)
+                .unwrap()
+            else {
+                panic!("expected bucket")
+            };
+            assert_eq!(bucket.device_id, device);
+            let Response::Event(row) = worker
+                .handle_request(
+                    Command::GetEvent(alias.clone(), events[0].id.unwrap()),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap()
+            else {
+                panic!("expected event")
+            };
+            assert_eq!(row.data["device"], device);
+            let heartbeat: Event = serde_json::from_value(json!({
+                "timestamp": "2026-01-01T00:00:02Z", "duration": 0,
+                "data": {"device": device}
+            }))
+            .unwrap();
+            worker
+                .handle_request(
+                    Command::Heartbeat(alias.clone(), heartbeat, 10.0),
+                    &mut ds,
+                    &tx,
+                )
+                .unwrap();
+            for csv in [false, true] {
+                let file = tempfile::tempfile().unwrap();
+                let command = if csv {
+                    Command::ExportCsv(alias.clone(), None, None, None, file)
+                } else {
+                    Command::Export(Some(alias.clone()), file)
+                };
+                let response = worker.handle_request(command, &mut ds, &tx).unwrap();
+                let mut file = match response {
+                    Response::Export(file, _) | Response::ExportCsv(file) => file,
+                    _ => panic!("expected export"),
+                };
+                use std::io::{Read, Seek, SeekFrom};
+                file.seek(SeekFrom::Start(0)).unwrap();
+                let mut text = String::new();
+                file.read_to_string(&mut text).unwrap();
+                assert!(text.contains(device), "{text}");
+                assert!(
+                    !text.contains(if device == "local" { "peer" } else { "local" }),
+                    "{text}"
+                );
+            }
+            assert!(ds.device_scope.is_none());
+            // A missing event fails inside the resolved command, not at lookup.
+            assert!(worker
+                .handle_request(Command::GetEvent(alias, i64::MAX), &mut ds, &tx)
+                .is_err());
+            assert!(ds.device_scope.is_none(), "failed command leaked scope");
+        }
+        assert!(matches!(
+            worker.handle_request(Command::GetBucket("window".into()), &mut ds, &tx),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
     }
 }
 

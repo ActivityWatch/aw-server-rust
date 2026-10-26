@@ -361,6 +361,12 @@ impl From<DatastoreError> for HttpErrorJson {
                 Status::NotFound,
                 format!("The requested bucket '{bucket_id}' does not exist"),
             ),
+            DatastoreError::AmbiguousBucket(bucket_id, candidates) => HttpErrorJson::new(
+                Status::Conflict,
+                format!(
+                    "Bucket '{bucket_id}' is ambiguous; select a device explicitly: {candidates:?}"
+                ),
+            ),
             DatastoreError::BucketAlreadyExists(bucket_id) => HttpErrorJson::new(
                 Status::NotModified,
                 format!("Bucket '{bucket_id}' already exists"),
@@ -372,6 +378,10 @@ impl From<DatastoreError> for HttpErrorJson {
             DatastoreError::NoSuchEvent(bucket_id, event_id) => HttpErrorJson::new(
                 Status::NotFound,
                 format!("The requested event '{event_id}' does not exist in bucket '{bucket_id}'"),
+            ),
+            DatastoreError::EventIdConflict(event_id) => HttpErrorJson::new(
+                Status::Conflict,
+                format!("Event '{event_id}' belongs to a different bucket"),
             ),
             DatastoreError::MpscError => HttpErrorJson::new(
                 Status::InternalServerError,

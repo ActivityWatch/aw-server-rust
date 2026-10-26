@@ -22,6 +22,7 @@ fn query_error_status(e: &QueryError) -> Status {
         // BucketQueryError also wraps datastore failures, which are server
         // errors rather than malformed client queries.
         QueryError::BucketQueryError(_) => Status::InternalServerError,
+        QueryError::AmbiguousBucket(_) => Status::Conflict,
         // The server gave up, not the client's fault: 503 tells it to retry
         // (with a shorter range), like the Python server's busy heartbeat.
         QueryError::TimeBudgetExceeded(_) => Status::ServiceUnavailable,
@@ -76,10 +77,39 @@ pub fn query(
     cache: Option<bool>,
     state: &State<ServerState>,
 ) -> Result<RawJson<String>, HttpErrorJson> {
+    run_query(query_req, cache, state, None)
+}
+
+/// Evaluate with an exact device selector. The local sentinel and this server's
+/// UUID share one scope/cache namespace; legacy global queries stay separate.
+#[post(
+    "/<device_id>/query?<cache>",
+    data = "<query_req>",
+    format = "application/json"
+)]
+pub fn device_query(
+    device_id: &str,
+    query_req: ApiJson<Query>,
+    cache: Option<bool>,
+    state: &State<ServerState>,
+) -> Result<RawJson<String>, HttpErrorJson> {
+    let device = state.normalize_device(device_id);
+    run_query(query_req, cache, state, Some(device))
+}
+
+fn run_query(
+    query_req: ApiJson<Query>,
+    cache: Option<bool>,
+    state: &State<ServerState>,
+    device: Option<&str>,
+) -> Result<RawJson<String>, HttpErrorJson> {
     let query_code = query_req.0.query.join("\n");
     let intervals = &query_req.0.timeperiods;
     let use_cache = state.query_cache_enabled && cache.unwrap_or(true);
-    let datastore = state.query_datastore();
+    let datastore = match device {
+        Some(device) => state.query_datastore().for_device(device),
+        None => state.query_datastore().clone(),
+    };
     let request_start = Instant::now();
     // The reader only sees committed data, and writes (heartbeats, but also
     // edits to old events and imports) are acknowledged before the writer's
@@ -110,7 +140,7 @@ pub fn query(
 
     let evaluate = |interval: &aw_models::TimeInterval| -> Result<Arc<str>, HttpErrorJson> {
         let started = Instant::now();
-        let result = aw_query::query_with_deadline(&query_code, interval, datastore, deadline);
+        let result = aw_query::query_with_deadline(&query_code, interval, &datastore, deadline);
         match result {
             Ok(data) => match serde_json::to_string(&data) {
                 Ok(serialized) => {
@@ -170,7 +200,7 @@ pub fn query(
         }
         let period = (interval.start().to_owned(), interval.end().to_owned());
         if use_cache && state.query_cache.cacheable(period) {
-            let key = CacheKey::new(&query_code, period);
+            let key = CacheKey::for_device(&query_code, period, device);
             if let Some(cached) = state.query_cache.get(&key) {
                 bodies.push(cached);
                 continue;

@@ -9,7 +9,7 @@ use aw_datastore::Datastore;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const WRITERS: usize = 4;
 const ROUNDS: usize = 3;
@@ -25,11 +25,13 @@ fn close_keeps_every_acknowledged_write_from_racing_writers() {
 
         let barrier = Arc::new(Barrier::new(WRITERS + 1));
         let closing = Arc::new(AtomicBool::new(false));
+        let (writer_done_tx, writer_done_rx) = mpsc::channel();
         let writers: Vec<_> = (0..WRITERS)
             .map(|id| {
                 let worker = ds.clone();
                 let barrier = barrier.clone();
                 let closing = closing.clone();
+                let writer_done_tx = writer_done_tx.clone();
                 thread::spawn(move || {
                     let key = format!("writer-{id}");
                     // Each writer holds an acknowledged value before Close races it.
@@ -48,6 +50,7 @@ fn close_keeps_every_acknowledged_write_from_racing_writers() {
                             }
                         }
                     }
+                    writer_done_tx.send(()).unwrap();
                     (key, last_ok)
                 })
             })
@@ -65,6 +68,13 @@ fn close_keeps_every_acknowledged_write_from_racing_writers() {
             .recv_timeout(Duration::from_secs(5))
             .expect("active writers starved Close");
 
+        drop(writer_done_tx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for _ in 0..WRITERS {
+            writer_done_rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("writer did not finish after Close");
+        }
         let acknowledged: Vec<_> = writers.into_iter().map(|w| w.join().unwrap()).collect();
         let reader = Datastore::open_reader(path).unwrap();
         for (key, value) in acknowledged {

@@ -1116,6 +1116,35 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_same_name_heartbeat_after_renaming_onto_cached_id() {
+        let ds = Datastore::new_in_memory(false);
+        let now = Utc::now();
+        let [(local, _), (peer, peer_cached)] = same_name_cached_heartbeats(&ds, now);
+
+        // Move the local cached bucket away and rename another one onto its id.
+        local.rename_bucket("testid", "moved").unwrap();
+        let mut other = test_bucket();
+        other.id = "other".to_owned();
+        other.device_id = "local".to_owned();
+        local.create_bucket(&other).unwrap();
+        local.rename_bucket("other", "testid").unwrap();
+        let next = test_event(now + Duration::seconds(2), Duration::seconds(0));
+        local.heartbeat("testid", next.clone(), 10.0).unwrap();
+        peer.heartbeat("testid", next, 10.0).unwrap();
+
+        let events = local.get_events("testid", None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, now + Duration::seconds(2));
+        assert_eq!(
+            local.get_events("moved", None, None, None).unwrap().len(),
+            1
+        );
+        let events = peer.get_events("testid", None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, peer_cached.id);
+    }
+
+    #[test]
     fn test_event_replace() {
         // Setup datastore
         let ds = Datastore::new_in_memory(false);

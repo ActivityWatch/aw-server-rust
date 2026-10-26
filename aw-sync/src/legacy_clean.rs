@@ -398,6 +398,7 @@ mod tests {
             _type: "currentwindow".to_string(),
             client: "test".to_string(),
             hostname: "host".to_string(),
+            device_id: "local".to_string(),
             created: None,
             data: Default::default(),
             metadata: Default::default(),

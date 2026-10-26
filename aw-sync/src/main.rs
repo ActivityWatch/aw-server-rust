@@ -455,8 +455,10 @@ fn daemon(
                 aw_sync_persist(&report);
             }
             Err(e) => {
-                error!("Error during sync cycle: {}", e);
-                return Err(e);
+                // A failed cycle (server not yet listening at login, sync folder
+                // briefly unavailable) is retried on the next tick. Exiting here
+                // made aw-qt restart the daemon until it gave up with a dialog.
+                error!("Error during sync cycle, retrying in 5 minutes: {}", e);
             }
         }
 

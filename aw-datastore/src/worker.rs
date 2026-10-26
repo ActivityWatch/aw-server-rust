@@ -700,6 +700,19 @@ impl DatastoreWorker {
         self.handle_resolved_request(request, ds, tx)
     }
 
+    /// Drop a cached last heartbeat. Cache entries are keyed by
+    /// `(device_id, id)`; without a resolved device, drop the id on every
+    /// device rather than keep a possibly stale entry.
+    fn forget_heartbeat(&mut self, device: Option<&str>, id: &str) {
+        match device {
+            Some(device) => {
+                self.last_heartbeat
+                    .remove(&(device.to_owned(), id.to_owned()));
+            }
+            None => self.last_heartbeat.retain(|(_, bucket), _| bucket != id),
+        }
+    }
+
     fn handle_resolved_request(
         &mut self,
         request: Command,
@@ -778,7 +791,7 @@ impl DatastoreWorker {
             Command::DeleteBucket(bucketname) => {
                 // A bucket re-created under this id must not merge into the
                 // deleted bucket's cached last event.
-                self.last_heartbeat.remove(&bucketname);
+                self.forget_heartbeat(ds.device_scope.as_deref(), &bucketname);
                 match ds.delete_bucket(tx, &bucketname) {
                     Ok(_) => {
                         self.commit = true;
@@ -880,7 +893,7 @@ impl DatastoreWorker {
                 // The cached last event may be one of the deleted events; a
                 // heartbeat merging into it would update a missing row. Drop
                 // it even if the delete fails partway.
-                self.last_heartbeat.remove(&bucketname);
+                self.forget_heartbeat(ds.device_scope.as_deref(), &bucketname);
                 match ds.delete_events_by_id(tx, &bucketname, event_ids) {
                     Ok(()) => {
                         self.commit |= ds.get_bucket(&bucketname)?._type == STOPWATCH_BUCKET_TYPE;
@@ -938,8 +951,9 @@ impl DatastoreWorker {
                 Ok(Response::Empty())
             }
             Command::RenameBucket(old_id, new_id) => {
-                self.last_heartbeat.remove(&old_id);
-                self.last_heartbeat.remove(&new_id);
+                // A rename stays on the resolved device.
+                self.forget_heartbeat(ds.device_scope.as_deref(), &old_id);
+                self.forget_heartbeat(ds.device_scope.as_deref(), &new_id);
                 match ds.rename_bucket(tx, &old_id, &new_id) {
                     Ok(()) => {
                         self.commit = true;

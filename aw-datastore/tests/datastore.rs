@@ -1055,6 +1055,66 @@ mod datastore_tests {
         assert_eq!(ds.get_events("moved", None, None, None).unwrap().len(), 1);
     }
 
+    /// Two devices with the same bucket id, each with a cached last heartbeat.
+    /// Returns the scoped handles and their cached events.
+    fn same_name_cached_heartbeats(ds: &Datastore, now: DateTime<Utc>) -> [(Datastore, Event); 2] {
+        ["local", "peer"].map(|device| {
+            let scoped = ds.for_device(device);
+            let mut bucket = test_bucket();
+            bucket.device_id = device.to_owned();
+            scoped.create_bucket(&bucket).unwrap();
+            let cached = cached_heartbeat(&scoped, &bucket.id, now);
+            (scoped, cached)
+        })
+    }
+
+    #[test]
+    fn test_same_name_heartbeat_after_deleting_cached_event() {
+        let ds = Datastore::new_in_memory(false);
+        let now = Utc::now();
+        let [(local, local_cached), (peer, peer_cached)] = same_name_cached_heartbeats(&ds, now);
+
+        local
+            .delete_events_by_id("testid", vec![local_cached.id.unwrap()])
+            .unwrap();
+        let next = test_event(now + Duration::seconds(2), Duration::seconds(0));
+        let e = local.heartbeat("testid", next.clone(), 10.0).unwrap();
+        peer.heartbeat("testid", next, 10.0).unwrap();
+
+        // The deleting device starts a new event instead of merging into a
+        // missing row; its same-name peer still merges into its own event.
+        let events = local.get_events("testid", None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, e.id);
+        assert_eq!(events[0].timestamp, now + Duration::seconds(2));
+        let events = peer.get_events("testid", None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, peer_cached.id);
+        assert_eq!(events[0].duration, Duration::seconds(2));
+    }
+
+    #[test]
+    fn test_same_name_heartbeat_after_recreating_bucket() {
+        let ds = Datastore::new_in_memory(false);
+        let now = Utc::now();
+        let [(local, _), (peer, peer_cached)] = same_name_cached_heartbeats(&ds, now);
+
+        local.delete_bucket("testid").unwrap();
+        let mut bucket = test_bucket();
+        bucket.device_id = "local".to_owned();
+        local.create_bucket(&bucket).unwrap();
+        let next = test_event(now + Duration::seconds(2), Duration::seconds(0));
+        local.heartbeat("testid", next.clone(), 10.0).unwrap();
+        peer.heartbeat("testid", next, 10.0).unwrap();
+
+        let events = local.get_events("testid", None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, now + Duration::seconds(2));
+        let events = peer.get_events("testid", None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, peer_cached.id);
+    }
+
     #[test]
     fn test_event_replace() {
         // Setup datastore

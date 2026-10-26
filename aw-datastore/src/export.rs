@@ -9,12 +9,14 @@ use serde::{
     Serialize, Serializer,
 };
 
+use crate::compression::CompressionContext;
 use crate::datastore::{events_source, parse_event_row, prefer_endtime_index};
 use crate::DatastoreError;
 
 struct EventRows<'a> {
     conn: &'a Connection,
     db_version: i32,
+    compression: &'a CompressionContext,
     bucket: &'a Bucket,
 }
 
@@ -39,7 +41,7 @@ impl Serialize for EventRows<'_> {
         while let Some(row) = rows.next().map_err(S::Error::custom)? {
             // Match get_events' default range, clipping and corrupt-row policy.
             // i64::MIN so None starttime includes pre-epoch events, like get_events.
-            match crate::datastore::parse_event_row(row, Some((i64::MIN, i64::MAX))) {
+            match parse_event_row(row, Some((i64::MIN, i64::MAX)), self.compression) {
                 Ok(event) => seq.serialize_element(&event)?,
                 Err(err) => warn!("Corrupt event in bucket {}: {}", self.bucket.id, err),
             }
@@ -51,6 +53,7 @@ impl Serialize for EventRows<'_> {
 struct ExportBucket<'a> {
     conn: &'a Connection,
     db_version: i32,
+    compression: &'a CompressionContext,
     bucket: &'a Bucket,
 }
 
@@ -73,6 +76,7 @@ impl Serialize for ExportBucket<'_> {
             &EventRows {
                 conn: self.conn,
                 db_version: self.db_version,
+                compression: self.compression,
                 bucket: self.bucket,
             },
         )?;
@@ -83,6 +87,7 @@ impl Serialize for ExportBucket<'_> {
 struct ExportBuckets<'a> {
     conn: &'a Connection,
     db_version: i32,
+    compression: &'a CompressionContext,
     buckets: &'a HashMap<String, Bucket>,
     selected: Option<&'a str>,
 }
@@ -97,6 +102,7 @@ impl Serialize for ExportBuckets<'_> {
                     &ExportBucket {
                         conn: self.conn,
                         db_version: self.db_version,
+                        compression: self.compression,
                         bucket,
                     },
                 )?;
@@ -109,6 +115,7 @@ impl Serialize for ExportBuckets<'_> {
 pub(crate) fn write_export(
     conn: &Connection,
     db_version: i32,
+    compression: &CompressionContext,
     buckets: &HashMap<String, Bucket>,
     selected: Option<&str>,
     writer: impl Write,
@@ -128,6 +135,7 @@ pub(crate) fn write_export(
             buckets: ExportBuckets {
                 conn,
                 db_version,
+                compression,
                 buckets,
                 selected,
             },
@@ -307,6 +315,7 @@ fn write_csv_event(
 pub(crate) fn write_events_csv(
     conn: &Connection,
     db_version: i32,
+    compression: &CompressionContext,
     buckets: &HashMap<String, Bucket>,
     bucket_id: &str,
     starttime_opt: Option<DateTime<Utc>>,
@@ -370,12 +379,11 @@ pub(crate) fn write_events_csv(
     while let Some(row) = key_rows.next().map_err(|err| {
         DatastoreError::InternalError(format!("Failed to read CSV export key row: {err}"))
     })? {
-        let data: Option<String> = row.get(0).map_err(|err| {
-            DatastoreError::InternalError(format!("Failed to read CSV export key data: {err}"))
-        })?;
-        let data = match data {
-            Some(d) => d,
-            None => continue,
+        // A row whose data can't be decoded is skipped here, and again (with a
+        // warning) by the row pass below.
+        let data = match compression.read_data(row, 0) {
+            Ok(d) => d,
+            Err(_) => continue,
         };
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
             if let Some(obj) = value.as_object() {
@@ -417,7 +425,7 @@ pub(crate) fn write_events_csv(
     while let Some(row) = rows.next().map_err(|err| {
         DatastoreError::InternalError(format!("Failed to read CSV export row: {err}"))
     })? {
-        let event = match parse_event_row(row, clip) {
+        let event = match parse_event_row(row, clip, compression) {
             Ok(event) => event,
             Err(err) => {
                 warn!("Corrupt event in bucket {}: {}", bucket_id, err);

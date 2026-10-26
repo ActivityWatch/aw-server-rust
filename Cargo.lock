@@ -224,6 +224,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "zeroize",
+ "zstd",
 ]
 
 [[package]]

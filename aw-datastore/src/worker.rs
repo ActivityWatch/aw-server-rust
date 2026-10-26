@@ -626,6 +626,9 @@ impl DatastoreWorker {
                     warn!("Reader failed to reload bucket list: {e:?}");
                 }
             }
+            // The writer may have trained a compression dictionary since this
+            // reader opened. One-row lookup until a dictionary is loaded.
+            ds.reload_dictionary(tx);
         }
         match request {
             Command::ReloadBuckets() => match ds.reload_buckets(tx) {

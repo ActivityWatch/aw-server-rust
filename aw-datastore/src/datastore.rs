@@ -247,18 +247,29 @@ fn _migrate_v2_to_v3(conn: &Connection) {
 
 fn _migrate_v3_to_v4(conn: &Connection) {
     info!("Upgrading database to v4, adding table for key-value storage");
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS key_value (
-        key TEXT PRIMARY KEY,
-        value TEXT,
-        last_modified NUMBER NOT NULL
-    );",
-        [],
-    )
-    .expect("Failed to upgrade db and add key-value storage table");
-
-    conn.pragma_update(None, "user_version", 4)
-        .expect("Failed to update database version!");
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to start v4 migration transaction");
+    // The caller read user_version before this lock: a concurrent opener may
+    // have finished later migrations (and written device IDs) while we waited.
+    // Writing user_version = 4 here would regress it, re-run the guarded
+    // v5/v6/v7 steps, and overwrite stored device IDs with 'local'.
+    if _get_db_version(&transaction) >= 4 {
+        return; // Dropped uncommitted: releases the lock without changes
+    }
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS key_value (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                last_modified NUMBER NOT NULL
+            );
+            PRAGMA user_version = 4;",
+        )
+        .expect("Failed to run v4 migration transaction");
+    transaction
+        .commit()
+        .expect("Failed to commit v4 migration transaction");
 }
 
 fn _migrate_v4_to_v5(conn: &Connection) {
@@ -1807,12 +1818,41 @@ impl DatastoreInstance {
 
         for old_id in legacy_ids {
             let new_id = old_id.replacen(OLD_PREFIX, NEW_PREFIX, 1);
-            if let Some(new_bucket) = self.buckets_cache.get(&new_id).cloned() {
-                let old_bucket = self
-                    .buckets_cache
-                    .get(&old_id)
-                    .cloned()
-                    .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
+            let old_bucket = self
+                .buckets_cache
+                .get(&old_id)
+                .cloned()
+                .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
+
+            // Destination may live only in another connection's cache. Look it
+            // up in SQL so a stale cache cannot take the unguarded rename path
+            // and create UNIQUE(device_id, name) collisions that later opens reject.
+            let dest: Option<(i64, String)> = if let Some(bucket) = self.buckets_cache.get(&new_id)
+            {
+                bucket.bid.map(|id| (id, bucket.device_id.clone()))
+            } else {
+                conn.query_row(
+                    "SELECT id, device_id FROM buckets WHERE name = ?1",
+                    [&new_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|err| {
+                    DatastoreError::InternalError(format!(
+                        "Failed to look up destination bucket '{}': {err}",
+                        new_id
+                    ))
+                })?
+            };
+
+            if let Some((dest_bid, dest_device)) = dest {
+                if dest_device != old_bucket.device_id {
+                    warn!(
+                        "Skipping rename of '{}' to '{}': destination is owned by device '{}'",
+                        old_id, new_id, dest_device
+                    );
+                    continue;
+                }
 
                 // Move only events that do not overlap the destination or another
                 // legacy event. A single overlapping cutover heartbeat must not strand
@@ -1824,14 +1864,14 @@ impl DatastoreInstance {
                 // each row (O(n^2)). With a couple of years of Android history it kept the
                 // single datastore worker busy for hours, which blanked the web UI and
                 // produced ANRs in every main-thread datastore call (aw-android#261).
-                let movable = movable_legacy_event_ids(conn, old_bucket.bid, new_bucket.bid)
+                let movable = movable_legacy_event_ids(conn, old_bucket.bid, Some(dest_bid))
                     .map_err(|err| {
                         DatastoreError::InternalError(format!(
                             "Failed to find mergeable events in '{}': {err}",
                             old_id
                         ))
                     })?;
-                move_events_to_bucket(conn, new_bucket.bid, &movable).map_err(|err| {
+                move_events_to_bucket(conn, Some(dest_bid), &movable).map_err(|err| {
                     DatastoreError::InternalError(format!(
                         "Failed to merge bucket '{}' into '{}': {err}",
                         old_id, new_id
@@ -1868,16 +1908,27 @@ impl DatastoreInstance {
                     );
                 }
             } else {
-                conn.execute(
-                    "UPDATE buckets SET name = ?1 WHERE name = ?2",
-                    [&new_id, &old_id],
-                )
-                .map_err(|err| {
-                    DatastoreError::InternalError(format!(
-                        "Failed to rename bucket '{}' to '{}': {err}",
+                // Same atomic name guard as rename_bucket: UNIQUE(device_id, name)
+                // would otherwise let a concurrent different-device row through.
+                let updated = conn
+                    .execute(
+                        "UPDATE buckets SET name = ?1 WHERE name = ?2
+                         AND NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
+                        [&new_id, &old_id],
+                    )
+                    .map_err(|err| {
+                        DatastoreError::InternalError(format!(
+                            "Failed to rename bucket '{}' to '{}': {err}",
+                            old_id, new_id
+                        ))
+                    })?;
+                if updated == 0 {
+                    warn!(
+                        "Skipping rename of '{}' to '{}': destination appeared concurrently",
                         old_id, new_id
-                    ))
-                })?;
+                    );
+                    continue;
+                }
                 info!("Renamed legacy bucket '{}' to '{}'", old_id, new_id);
                 migrated += 1;
                 cache_dirty = true;
@@ -2076,10 +2127,10 @@ mod tests {
         assert_eq!(_get_db_version(&conn), 7);
     }
 
-    /// A concurrent opener that read v5 (or earlier) may reach its pre-v7
+    /// A concurrent opener that read v3 (or earlier) may reach its pre-v7
     /// migration step after the first opener finished v7. Each step takes the
     /// exclusive lock before writing, so it must recheck the version under the
-    /// lock and never regress it — a regression to 6 would re-run the v7
+    /// lock and never regress it — a regression to 4/5/6 would re-run the v7
     /// rebuild and overwrite stored device IDs with 'local'.
     #[test]
     fn pre_v7_migrations_recheck_version_after_taking_the_lock() {
@@ -2088,6 +2139,7 @@ mod tests {
         _migrate_v6_to_v7(&conn);
         conn.execute("UPDATE buckets SET device_id = 'peer-abc'", [])
             .unwrap();
+        _migrate_v3_to_v4(&conn);
         _migrate_v4_to_v5(&conn);
         _migrate_v5_to_v6(&conn);
         let device: String = conn

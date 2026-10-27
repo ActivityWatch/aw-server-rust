@@ -677,6 +677,27 @@ fn move_events_to_bucket(
     Ok(())
 }
 
+fn _persist_inferred_db_version(conn: &Connection) -> i32 {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to lock database for version inference");
+    // Another opener may have migrated since the initial version/schema read.
+    // Re-read both under the write lock; never persist the stale inference.
+    let mut version = _get_db_version(&transaction);
+    if version == 0 {
+        version = _infer_db_version(&transaction);
+        if version > 0 {
+            transaction
+                .pragma_update(None, "user_version", version)
+                .expect("Failed to update database version!");
+        }
+    }
+    transaction
+        .commit()
+        .expect("Failed to commit inferred database version");
+    version
+}
+
 impl DatastoreInstance {
     pub fn new(
         conn: &Connection,
@@ -699,10 +720,10 @@ impl DatastoreInstance {
                         "Database has user_version 0 but a populated schema (restored from a \
                          dump?), treating it as v{inferred}"
                     );
-                    conn.pragma_update(None, "user_version", inferred)
-                        .expect("Failed to update database version!");
+                    db_version = _persist_inferred_db_version(conn);
+                } else {
+                    db_version = inferred;
                 }
-                db_version = inferred;
             }
         }
 
@@ -2155,6 +2176,39 @@ mod tests {
             .unwrap();
         assert_eq!(device, "peer-abc");
         assert_eq!(_get_db_version(&conn), 7);
+    }
+
+    #[test]
+    fn inferred_version_persistence_does_not_regress_concurrent_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restored.db");
+        let first = Connection::open(&path).unwrap();
+        _migrate_v0_to_v1(&first);
+        _migrate_v1_to_v2(&first);
+        _migrate_v2_to_v3(&first);
+        _migrate_v3_to_v4(&first);
+        _migrate_v4_to_v5(&first);
+        _migrate_v5_to_v6(&first);
+        insert_v6_bucket(&first, "a");
+        first.pragma_update(None, "user_version", 0).unwrap();
+        let stale_inferred = _infer_db_version(&first);
+        assert_eq!(stale_inferred, 6);
+
+        // The other opener completes migration after the first inferred v6,
+        // but before it persists that inference. No timing/sleep is needed.
+        let second = Connection::open(&path).unwrap();
+        DatastoreInstance::new(&second, true).unwrap();
+        second
+            .execute("UPDATE buckets SET device_id = 'peer-abc'", [])
+            .unwrap();
+        let version = _persist_inferred_db_version(&first);
+        assert_eq!(version, 7);
+        _create_tables(&first, version);
+        assert_eq!(_get_db_version(&first), 7);
+        let device: String = first
+            .query_row("SELECT device_id FROM buckets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(device, "peer-abc");
     }
 
     /// Minimal legacy (Python aw-server/peewee) sqlite db fixture: one

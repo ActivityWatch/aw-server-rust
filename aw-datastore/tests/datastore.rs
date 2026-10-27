@@ -1627,6 +1627,30 @@ mod datastore_tests {
         conn.pragma_update(None, "user_version", version).unwrap();
     }
 
+    #[test]
+    fn test_reader_reload_preserves_device_ids_after_external_migration() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("migrating-peer.db");
+        write_old_fixture(&path, 5);
+        let reader_conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut reader = aw_datastore::DatastoreInstance::new(&reader_conn, false).unwrap();
+        assert_eq!(reader.get_bucket("testid").unwrap().device_id, "local");
+
+        let writer_conn = rusqlite::Connection::open(&path).unwrap();
+        let mut writer = aw_datastore::DatastoreInstance::new(&writer_conn, true).unwrap();
+        let mut bucket = test_bucket();
+        bucket.id = "new-peer-bucket".to_owned();
+        bucket.device_id = "peer-abc".to_owned();
+        writer.create_bucket(&writer_conn, bucket.clone()).unwrap();
+        reader.reload_buckets(&reader_conn).unwrap();
+        assert_eq!(reader.get_bucket(&bucket.id).unwrap().device_id, "peer-abc");
+        assert_eq!(reader.get_bucket("testid").unwrap().device_id, "local");
+    }
+
     /// Peers written by an older aw-sync (v4/v5) differ only in indexes, so
     /// a read-only pull must read them rather than skip them. Every read path
     /// a pull or export uses must avoid `INDEXED BY` on an index the file

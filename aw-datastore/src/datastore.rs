@@ -761,9 +761,16 @@ impl DatastoreInstance {
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
         // Read before the list so a concurrent change lands in the next check.
         let signature = Self::read_buckets_signature(conn)?;
+        // Another connection may have migrated this file since we opened it.
+        // Refresh index selection and device ownership together on cache reload.
+        let mut db_version = _get_db_version(conn);
+        if db_version == 0 {
+            // Dump-restored read-only databases never persist their inferred version.
+            db_version = _infer_db_version(conn);
+        }
         // Read-only opens of peer DBs (aw-sync) may be at v4-v6, which pre-date the
         // device_id column. Use a literal 'local' for those; v7+ reads the real column.
-        let device_id_expr = if self.db_version >= 7 {
+        let device_id_expr = if db_version >= 7 {
             "buckets.device_id"
         } else {
             "'local'"
@@ -851,6 +858,7 @@ impl DatastoreInstance {
         }
         self.buckets_cache = new_cache;
         self.buckets_signature = signature;
+        self.db_version = db_version;
         Ok(())
     }
 

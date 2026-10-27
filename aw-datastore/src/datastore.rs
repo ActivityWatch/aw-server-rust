@@ -14,6 +14,7 @@ use aw_models::Event;
 
 use rusqlite::params;
 use rusqlite::types::ToSql;
+use rusqlite::OptionalExtension;
 
 use super::DatastoreError;
 
@@ -48,6 +49,10 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
         )
         .is_ok()
     };
+    // Recognise v7 before the earlier schema's column and index checks.
+    if has_column("device_id") {
+        return 7;
+    }
     if !has_column("data") && !has_column("data_deprecated") {
         return 1;
     }
@@ -75,8 +80,9 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
  * 4: Added 'key_value' table for storing key - value pairs
  * 5: Replaced single-column events indexes with a composite index
  * 6: Added an endtime-first index for recent interval reads
+ * 7: Added 'device_id' to 'buckets' (UNIQUE(device_id, name))
  */
-pub const NEWEST_DB_VERSION: i32 = 6;
+pub const NEWEST_DB_VERSION: i32 = 7;
 
 /// Oldest version a read-only open (aw-sync pulling a peer db) accepts.
 ///
@@ -132,6 +138,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 6 {
         _migrate_v5_to_v6(conn);
+    }
+
+    if version < 7 {
+        _migrate_v6_to_v7(conn);
     }
 
     first_init
@@ -237,18 +247,29 @@ fn _migrate_v2_to_v3(conn: &Connection) {
 
 fn _migrate_v3_to_v4(conn: &Connection) {
     info!("Upgrading database to v4, adding table for key-value storage");
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS key_value (
-        key TEXT PRIMARY KEY,
-        value TEXT,
-        last_modified NUMBER NOT NULL
-    );",
-        [],
-    )
-    .expect("Failed to upgrade db and add key-value storage table");
-
-    conn.pragma_update(None, "user_version", 4)
-        .expect("Failed to update database version!");
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to start v4 migration transaction");
+    // The caller read user_version before this lock: a concurrent opener may
+    // have finished later migrations (and written device IDs) while we waited.
+    // Writing user_version = 4 here would regress it, re-run the guarded
+    // v5/v6/v7 steps, and overwrite stored device IDs with 'local'.
+    if _get_db_version(&transaction) >= 4 {
+        return; // Dropped uncommitted: releases the lock without changes
+    }
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS key_value (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                last_modified NUMBER NOT NULL
+            );
+            PRAGMA user_version = 4;",
+        )
+        .expect("Failed to run v4 migration transaction");
+    transaction
+        .commit()
+        .expect("Failed to commit v4 migration transaction");
 }
 
 fn _migrate_v4_to_v5(conn: &Connection) {
@@ -269,30 +290,141 @@ fn _migrate_v4_to_v5(conn: &Connection) {
     // The drops run before the create so the pages they free are reused to
     // build the new index within the same transaction; creating first would
     // permanently grow the database file by the new index's size.
-    conn.execute_batch(
-        "
-        BEGIN EXCLUSIVE TRANSACTION;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to start v5 migration transaction");
+    // The caller read user_version before this lock: a concurrent opener may
+    // have run later migrations already. Writing user_version = 5 here would
+    // regress it and re-trigger the v7 rebuild, which overwrites stored
+    // device IDs with 'local'.
+    if _get_db_version(&transaction) >= 5 {
+        return; // Dropped uncommitted: releases the lock without changes
+    }
+    transaction
+        .execute_batch(
+            "
         DROP INDEX IF EXISTS events_bucketrow_index;
         DROP INDEX IF EXISTS events_starttime_index;
         DROP INDEX IF EXISTS events_endtime_index;
         CREATE INDEX IF NOT EXISTS events_bucketrow_starttime_endtime_index
             ON events(bucketrow, starttime DESC, endtime);
         PRAGMA user_version = 5;
-        COMMIT;
     ",
-    )
-    .expect("Failed to run v5 migration transaction");
+        )
+        .expect("Failed to run v5 migration transaction");
+    transaction
+        .commit()
+        .expect("Failed to commit v5 migration transaction");
 }
 
 fn _migrate_v5_to_v6(conn: &Connection) {
-    conn.execute_batch(
-        "BEGIN EXCLUSIVE TRANSACTION;
-         CREATE INDEX IF NOT EXISTS events_bucketrow_endtime_starttime_index
-             ON events(bucketrow, endtime, starttime DESC);
-         PRAGMA user_version = 6;
-         COMMIT;",
-    )
-    .expect("Failed to run v6 migration transaction");
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to start v6 migration transaction");
+    // The caller read user_version before this lock: a concurrent opener may
+    // have finished the v7 migration (and written device IDs) while we waited.
+    // Writing user_version = 6 here would regress it and cause the v7 rebuild
+    // to re-run, overwriting stored device IDs with 'local'.
+    if _get_db_version(&transaction) >= 6 {
+        return; // Dropped uncommitted: releases the lock without changes
+    }
+    transaction
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS events_bucketrow_endtime_starttime_index
+                 ON events(bucketrow, endtime, starttime DESC);
+             PRAGMA user_version = 6;",
+        )
+        .expect("Failed to run v6 migration transaction");
+    transaction
+        .commit()
+        .expect("Failed to commit v6 migration transaction");
+}
+
+fn _migrate_v6_to_v7(conn: &Connection) {
+    // Add device_id column and change uniqueness from (name) to (device_id, name).
+    // SQLite cannot drop a UNIQUE column constraint in-place, so we recreate the
+    // table. Existing buckets are all locally-created, so they get device_id='local'.
+    // Keep data_deprecated as an archive of the broken pre-v3 field. It must
+    // neither be discarded by this rebuild nor promoted to current metadata.
+    //
+    // PRAGMA foreign_keys must be disabled outside any transaction for the table
+    // recreation to succeed: events→buckets(id) is an IMMEDIATE FK, and even with
+    // defer_foreign_keys=ON the constraint fires during DROP TABLE inside the batch.
+    // All IDs are preserved by the copy, so re-enabling FK checks after COMMIT is safe.
+    info!("Upgrading database to v7, adding device_id to buckets");
+    let foreign_keys: bool = conn
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .expect("Failed to read foreign_keys before v7 migration");
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("Failed to disable foreign_keys for v7 migration");
+    // The transaction guard rolls back on any error before restoring the pragma
+    // (SQLite ignores foreign_keys changes while a transaction is active).
+    let migration = (|| -> rusqlite::Result<()> {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)?;
+        // The caller read user_version before this lock: a concurrent opener may
+        // have finished the migration (and written device IDs) while we waited.
+        if _get_db_version(&transaction) >= 7 {
+            return Ok(());
+        }
+        // DROP TABLE removes the AUTOINCREMENT high-water mark; carry it over so
+        // ids of deleted buckets are never reused by an unrelated bucket.
+        let sequence: Option<i64> = transaction
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'buckets'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // Some historical/restored schemas omit the unused archive column.
+        // Preserve it when present, including SQL NULL and malformed payloads.
+        let has_archive: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('buckets') WHERE name = 'data_deprecated')",
+            [],
+            |row| row.get(0),
+        )?;
+        let archive = if has_archive {
+            "data_deprecated"
+        } else {
+            "NULL"
+        };
+        transaction.execute_batch(&format!(
+            "CREATE TABLE buckets_v7 (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             name TEXT NOT NULL,
+             device_id TEXT NOT NULL DEFAULT 'local',
+             type TEXT NOT NULL,
+             client TEXT NOT NULL,
+             hostname TEXT NOT NULL,
+             created TEXT NOT NULL,
+             data TEXT NOT NULL DEFAULT '{{}}',
+             data_deprecated TEXT DEFAULT '{{}}',
+             UNIQUE(device_id, name)
+         );
+         INSERT INTO buckets_v7 (id, name, device_id, type, client, hostname, created, data, data_deprecated)
+             SELECT id, name, 'local', type, client, hostname, created, data, {archive} FROM buckets;
+         DROP TABLE buckets;
+         ALTER TABLE buckets_v7 RENAME TO buckets;
+         CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id);
+         PRAGMA user_version = 7;"
+        ))?;
+        if let Some(sequence) = sequence {
+            let updated = transaction.execute(
+                "UPDATE sqlite_sequence SET seq = max(seq, ?1) WHERE name = 'buckets'",
+                [sequence],
+            )?;
+            if updated == 0 {
+                transaction.execute(
+                    "INSERT INTO sqlite_sequence (name, seq) VALUES ('buckets', ?1)",
+                    [sequence],
+                )?;
+            }
+        }
+        transaction.commit()
+    })();
+    conn.pragma_update(None, "foreign_keys", foreign_keys)
+        .expect("Failed to restore foreign_keys after v7 migration");
+    migration.expect("Failed to run v7 migration transaction");
 }
 
 // Both indexes can bound only one of the two interval predicates. Use the
@@ -545,6 +677,27 @@ fn move_events_to_bucket(
     Ok(())
 }
 
+fn _persist_inferred_db_version(conn: &Connection) -> i32 {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to lock database for version inference");
+    // Another opener may have migrated since the initial version/schema read.
+    // Re-read both under the write lock; never persist the stale inference.
+    let mut version = _get_db_version(&transaction);
+    if version == 0 {
+        version = _infer_db_version(&transaction);
+        if version > 0 {
+            transaction
+                .pragma_update(None, "user_version", version)
+                .expect("Failed to update database version!");
+        }
+    }
+    transaction
+        .commit()
+        .expect("Failed to commit inferred database version");
+    version
+}
+
 impl DatastoreInstance {
     pub fn new(
         conn: &Connection,
@@ -567,10 +720,10 @@ impl DatastoreInstance {
                         "Database has user_version 0 but a populated schema (restored from a \
                          dump?), treating it as v{inferred}"
                     );
-                    conn.pragma_update(None, "user_version", inferred)
-                        .expect("Failed to update database version!");
+                    db_version = _persist_inferred_db_version(conn);
+                } else {
+                    db_version = inferred;
                 }
-                db_version = inferred;
             }
         }
 
@@ -629,17 +782,32 @@ impl DatastoreInstance {
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
         // Read before the list so a concurrent change lands in the next check.
         let signature = Self::read_buckets_signature(conn)?;
-        let mut stmt = match conn.prepare_cached(
+        // Another connection may have migrated this file since we opened it.
+        // Refresh index selection and device ownership together on cache reload.
+        let mut db_version = _get_db_version(conn);
+        if db_version == 0 {
+            // Dump-restored read-only databases never persist their inferred version.
+            db_version = _infer_db_version(conn);
+        }
+        // Read-only opens of peer DBs (aw-sync) may be at v4-v6, which pre-date the
+        // device_id column. Use a literal 'local' for those; v7+ reads the real column.
+        let device_id_expr = if db_version >= 7 {
+            "buckets.device_id"
+        } else {
+            "'local'"
+        };
+        let sql = format!(
             "
             SELECT  buckets.id, buckets.name, buckets.type, buckets.client,
                     buckets.hostname, buckets.created,
                     min(events.starttime), max(events.endtime),
-                    buckets.data
+                    buckets.data, {device_id_expr}
             FROM buckets
             LEFT OUTER JOIN events ON buckets.id = events.bucketrow
             GROUP BY buckets.id
-            ;",
-        ) {
+            ;"
+        );
+        let mut stmt = match conn.prepare_cached(&sql) {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -673,6 +841,7 @@ impl DatastoreInstance {
                 client: row.get(3)?,
                 hostname: row.get(4)?,
                 created: row.get(5)?,
+                device_id: row.get(9)?,
                 data: data_json,
                 metadata: BucketMetadata {
                     start: opt_start,
@@ -693,6 +862,12 @@ impl DatastoreInstance {
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
+                    if new_cache.contains_key(&b.id) {
+                        return Err(DatastoreError::InternalError(format!(
+                            "Cannot load ambiguous bucket name {:?}: device-aware addressing is not implemented",
+                            b.id
+                        )));
+                    }
                     new_cache.insert(b.id.clone(), b);
                 }
                 Err(e) => {
@@ -704,6 +879,7 @@ impl DatastoreInstance {
         }
         self.buckets_cache = new_cache;
         self.buckets_signature = signature;
+        self.db_version = db_version;
         Ok(())
     }
 
@@ -760,10 +936,19 @@ impl DatastoreInstance {
             Some(created) => Some(created),
             None => Some(Utc::now()),
         };
+        // Stamp device_id = "local" for locally-created buckets.
+        // Peer buckets from aw-sync will carry their own device_id via import.
+        if bucket.device_id.is_empty() {
+            bucket.device_id = "local".to_string();
+        }
+        // The v7 schema prepares for device-scoped names, but the public API
+        // and cache still address buckets by name. Until the resolver exists,
+        // reject every duplicate name before it can hide history or redirect writes.
         let mut stmt = match conn.prepare_cached(
             "
-                INSERT INTO buckets (name, type, client, hostname, created, data)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                WHERE NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
         ) {
             Ok(buckets) => buckets,
             Err(err) => {
@@ -775,6 +960,7 @@ impl DatastoreInstance {
         let data = serde_json::to_string(&bucket.data).unwrap();
         let res = stmt.execute([
             &bucket.id,
+            &bucket.device_id,
             &bucket._type,
             &bucket.client,
             &bucket.hostname,
@@ -783,6 +969,10 @@ impl DatastoreInstance {
         ]);
 
         match res {
+            // The cache may be stale when another connection created this name.
+            // Checking in the INSERT makes rejection atomic across writers;
+            // a skipped insert must not reuse last_insert_rowid or update the cache.
+            Ok(0) => Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string())),
             Ok(_) => {
                 info!("Created bucket {}", bucket.id);
                 // Get and set rowid
@@ -1550,11 +1740,33 @@ impl DatastoreInstance {
             return Err(DatastoreError::BucketAlreadyExists(new_id.to_string()));
         }
 
+        // The destination check lives in the UPDATE: another connection may have
+        // created `new_id` since this cache was loaded, and the (device_id, name)
+        // constraint alone would let a differing device through.
         match conn.execute(
-            "UPDATE buckets SET name = ?1 WHERE name = ?2",
+            "UPDATE buckets SET name = ?1 WHERE name = ?2
+             AND NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
             [new_id, old_id],
         ) {
-            Ok(0) => Err(DatastoreError::NoSuchBucket(old_id.to_string())),
+            Ok(0) => {
+                let old_exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
+                        [old_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|err| {
+                        DatastoreError::InternalError(format!(
+                            "Failed to rename bucket '{}' to '{}': {err}",
+                            old_id, new_id
+                        ))
+                    })?;
+                if old_exists {
+                    Err(DatastoreError::BucketAlreadyExists(new_id.to_string()))
+                } else {
+                    Err(DatastoreError::NoSuchBucket(old_id.to_string()))
+                }
+            }
             Ok(_) => {
                 info!("Renamed bucket '{}' to '{}'", old_id, new_id);
                 // Update the in-memory cache: remove the old entry and re-insert under the new id.
@@ -1635,12 +1847,41 @@ impl DatastoreInstance {
 
         for old_id in legacy_ids {
             let new_id = old_id.replacen(OLD_PREFIX, NEW_PREFIX, 1);
-            if let Some(new_bucket) = self.buckets_cache.get(&new_id).cloned() {
-                let old_bucket = self
-                    .buckets_cache
-                    .get(&old_id)
-                    .cloned()
-                    .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
+            let old_bucket = self
+                .buckets_cache
+                .get(&old_id)
+                .cloned()
+                .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
+
+            // Destination may live only in another connection's cache. Look it
+            // up in SQL so a stale cache cannot take the unguarded rename path
+            // and create UNIQUE(device_id, name) collisions that later opens reject.
+            let dest: Option<(i64, String)> = if let Some(bucket) = self.buckets_cache.get(&new_id)
+            {
+                bucket.bid.map(|id| (id, bucket.device_id.clone()))
+            } else {
+                conn.query_row(
+                    "SELECT id, device_id FROM buckets WHERE name = ?1",
+                    [&new_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|err| {
+                    DatastoreError::InternalError(format!(
+                        "Failed to look up destination bucket '{}': {err}",
+                        new_id
+                    ))
+                })?
+            };
+
+            if let Some((dest_bid, dest_device)) = dest {
+                if dest_device != old_bucket.device_id {
+                    warn!(
+                        "Skipping rename of '{}' to '{}': destination is owned by device '{}'",
+                        old_id, new_id, dest_device
+                    );
+                    continue;
+                }
 
                 // Move only events that do not overlap the destination or another
                 // legacy event. A single overlapping cutover heartbeat must not strand
@@ -1652,14 +1893,14 @@ impl DatastoreInstance {
                 // each row (O(n^2)). With a couple of years of Android history it kept the
                 // single datastore worker busy for hours, which blanked the web UI and
                 // produced ANRs in every main-thread datastore call (aw-android#261).
-                let movable = movable_legacy_event_ids(conn, old_bucket.bid, new_bucket.bid)
+                let movable = movable_legacy_event_ids(conn, old_bucket.bid, Some(dest_bid))
                     .map_err(|err| {
                         DatastoreError::InternalError(format!(
                             "Failed to find mergeable events in '{}': {err}",
                             old_id
                         ))
                     })?;
-                move_events_to_bucket(conn, new_bucket.bid, &movable).map_err(|err| {
+                move_events_to_bucket(conn, Some(dest_bid), &movable).map_err(|err| {
                     DatastoreError::InternalError(format!(
                         "Failed to merge bucket '{}' into '{}': {err}",
                         old_id, new_id
@@ -1696,16 +1937,27 @@ impl DatastoreInstance {
                     );
                 }
             } else {
-                conn.execute(
-                    "UPDATE buckets SET name = ?1 WHERE name = ?2",
-                    [&new_id, &old_id],
-                )
-                .map_err(|err| {
-                    DatastoreError::InternalError(format!(
-                        "Failed to rename bucket '{}' to '{}': {err}",
+                // Same atomic name guard as rename_bucket: UNIQUE(device_id, name)
+                // would otherwise let a concurrent different-device row through.
+                let updated = conn
+                    .execute(
+                        "UPDATE buckets SET name = ?1 WHERE name = ?2
+                         AND NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1)",
+                        [&new_id, &old_id],
+                    )
+                    .map_err(|err| {
+                        DatastoreError::InternalError(format!(
+                            "Failed to rename bucket '{}' to '{}': {err}",
+                            old_id, new_id
+                        ))
+                    })?;
+                if updated == 0 {
+                    warn!(
+                        "Skipping rename of '{}' to '{}': destination appeared concurrently",
                         old_id, new_id
-                    ))
-                })?;
+                    );
+                    continue;
+                }
                 info!("Renamed legacy bucket '{}' to '{}'", old_id, new_id);
                 migrated += 1;
                 cache_dirty = true;
@@ -1729,6 +1981,7 @@ mod tests {
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
         let bucket = Bucket {
             id: "test".to_owned(),
+            device_id: "local".to_owned(),
             _type: "test".to_owned(),
             client: "test".to_owned(),
             hostname: "test".to_owned(),
@@ -1757,6 +2010,205 @@ mod tests {
             matches!(&err, DatastoreError::InternalError(message) if message.contains("integer overflow")),
             "SQLite execution errors must not be deferred as corrupt content: {err:?}"
         );
+    }
+
+    #[test]
+    fn failed_v7_migration_restores_foreign_keys_and_rolls_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        _migrate_v0_to_v1(&conn);
+        _migrate_v1_to_v2(&conn);
+        _migrate_v2_to_v3(&conn);
+        _migrate_v3_to_v4(&conn);
+        _migrate_v4_to_v5(&conn);
+        _migrate_v5_to_v6(&conn);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        // Force failure after the replacement table is created, before COMMIT.
+        conn.execute_batch("ALTER TABLE buckets RENAME COLUMN data TO missing_data;")
+            .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            _migrate_v6_to_v7(&conn);
+        }));
+        assert!(result.is_err());
+        assert!(conn.is_autocommit(), "failed migration must roll back");
+        let foreign_keys: bool = conn
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
+        assert!(
+            foreign_keys,
+            "failure must not leave FK enforcement disabled"
+        );
+        assert_eq!(_get_db_version(&conn), 6);
+        let replacements: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'buckets_v7'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(replacements, 0);
+        assert!(conn
+            .execute(
+                "INSERT INTO events (bucketrow, starttime, endtime, data) VALUES (999, 0, 1, '{}')",
+                [],
+            )
+            .is_err());
+        // The same borrowed connection can retry once the cause is repaired.
+        conn.execute_batch("ALTER TABLE buckets RENAME COLUMN missing_data TO data;")
+            .unwrap();
+        _migrate_v6_to_v7(&conn);
+        assert_eq!(_get_db_version(&conn), 7);
+    }
+
+    fn v6_connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        _migrate_v0_to_v1(&conn);
+        _migrate_v1_to_v2(&conn);
+        _migrate_v2_to_v3(&conn);
+        _migrate_v3_to_v4(&conn);
+        _migrate_v4_to_v5(&conn);
+        _migrate_v5_to_v6(&conn);
+        conn
+    }
+
+    fn insert_v6_bucket(conn: &Connection, name: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO buckets (name, type, client, hostname, created, data)
+             VALUES (?1, 't', 'c', 'h', '2026-01-01T00:00:00+00:00', '{}')",
+            [name],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn v7_migration_preserves_archival_and_current_data_separately() {
+        let conn = v6_connection();
+        for (name, archived) in [("archived", Some("broken legacy bytes")), ("null", None)] {
+            insert_v6_bucket(&conn, name);
+            conn.execute(
+                "UPDATE buckets SET data = '{\"current\":true}', data_deprecated = ?1 WHERE name = ?2",
+                params![archived, name],
+            )
+            .unwrap();
+        }
+        _migrate_v6_to_v7(&conn);
+        for (name, archived) in [("archived", Some("broken legacy bytes")), ("null", None)] {
+            let (data, deprecated): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT data, data_deprecated FROM buckets WHERE name = ?1",
+                    [name],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(data, r#"{"current":true}"#);
+            assert_eq!(deprecated.as_deref(), archived);
+        }
+    }
+
+    #[test]
+    fn v7_migration_keeps_autoincrement_high_water_mark() {
+        let conn = v6_connection();
+        insert_v6_bucket(&conn, "a");
+        let deleted = insert_v6_bucket(&conn, "b");
+        conn.execute("DELETE FROM buckets WHERE id = ?1", [deleted])
+            .unwrap();
+        _migrate_v6_to_v7(&conn);
+        let next = conn
+            .execute(
+                "INSERT INTO buckets (name, type, client, hostname, created) VALUES ('c', 't', 'c', 'h', 'now')",
+                [],
+            )
+            .map(|_| conn.last_insert_rowid())
+            .unwrap();
+        assert_eq!(next, deleted + 1, "deleted bucket ids must not be reused");
+    }
+
+    #[test]
+    fn v7_migration_keeps_sequence_when_table_is_empty() {
+        let conn = v6_connection();
+        let only = insert_v6_bucket(&conn, "a");
+        conn.execute("DELETE FROM buckets", []).unwrap();
+        _migrate_v6_to_v7(&conn);
+        let next = conn
+            .execute(
+                "INSERT INTO buckets (name, type, client, hostname, created) VALUES ('c', 't', 'c', 'h', 'now')",
+                [],
+            )
+            .map(|_| conn.last_insert_rowid())
+            .unwrap();
+        assert_eq!(next, only + 1);
+    }
+
+    #[test]
+    fn v7_migration_rechecks_version_after_taking_the_lock() {
+        let conn = v6_connection();
+        insert_v6_bucket(&conn, "a");
+        _migrate_v6_to_v7(&conn);
+        conn.execute("UPDATE buckets SET device_id = 'peer-abc'", [])
+            .unwrap();
+        // A second opener read v6 before the first finished; once it holds the
+        // lock the migration must be a no-op, not rebuild with 'local'.
+        _migrate_v6_to_v7(&conn);
+        let device: String = conn
+            .query_row("SELECT device_id FROM buckets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(device, "peer-abc");
+        assert_eq!(_get_db_version(&conn), 7);
+    }
+
+    /// A concurrent opener that read v3 (or earlier) may reach its pre-v7
+    /// migration step after the first opener finished v7. Each step takes the
+    /// exclusive lock before writing, so it must recheck the version under the
+    /// lock and never regress it — a regression to 4/5/6 would re-run the v7
+    /// rebuild and overwrite stored device IDs with 'local'.
+    #[test]
+    fn pre_v7_migrations_recheck_version_after_taking_the_lock() {
+        let conn = v6_connection();
+        insert_v6_bucket(&conn, "a");
+        _migrate_v6_to_v7(&conn);
+        conn.execute("UPDATE buckets SET device_id = 'peer-abc'", [])
+            .unwrap();
+        _migrate_v3_to_v4(&conn);
+        _migrate_v4_to_v5(&conn);
+        _migrate_v5_to_v6(&conn);
+        let device: String = conn
+            .query_row("SELECT device_id FROM buckets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(device, "peer-abc");
+        assert_eq!(_get_db_version(&conn), 7);
+    }
+
+    #[test]
+    fn inferred_version_persistence_does_not_regress_concurrent_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restored.db");
+        let first = Connection::open(&path).unwrap();
+        _migrate_v0_to_v1(&first);
+        _migrate_v1_to_v2(&first);
+        _migrate_v2_to_v3(&first);
+        _migrate_v3_to_v4(&first);
+        _migrate_v4_to_v5(&first);
+        _migrate_v5_to_v6(&first);
+        insert_v6_bucket(&first, "a");
+        first.pragma_update(None, "user_version", 0).unwrap();
+        let stale_inferred = _infer_db_version(&first);
+        assert_eq!(stale_inferred, 6);
+
+        // The other opener completes migration after the first inferred v6,
+        // but before it persists that inference. No timing/sleep is needed.
+        let second = Connection::open(&path).unwrap();
+        DatastoreInstance::new(&second, true).unwrap();
+        second
+            .execute("UPDATE buckets SET device_id = 'peer-abc'", [])
+            .unwrap();
+        let version = _persist_inferred_db_version(&first);
+        assert_eq!(version, 7);
+        _create_tables(&first, version);
+        assert_eq!(_get_db_version(&first), 7);
+        let device: String = first
+            .query_row("SELECT device_id FROM buckets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(device, "peer-abc");
     }
 
     /// Minimal legacy (Python aw-server/peewee) sqlite db fixture: one

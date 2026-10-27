@@ -43,6 +43,7 @@ mod query_benchmarks {
             _type: "testtype".to_string(),
             client: "testclient".to_string(),
             hostname: "testhost".to_string(),
+            device_id: "local".to_string(),
             created: Some(chrono::Utc::now()),
             data: json_map! {},
             metadata: BucketMetadata::default(),

@@ -2099,6 +2099,60 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_stale_connection_migrate_test_bucket_names_rejects_ambiguous_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-android-rename.db");
+        let conn1 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds1 = aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+        let mut legacy = test_bucket();
+        legacy.id = "aw-watcher-android-test_phone".to_string();
+        legacy.device_id = "device-A".to_string();
+        ds1.create_bucket(&conn1, legacy).unwrap();
+        let event = test_event(Utc::now(), Duration::seconds(1));
+        ds1.insert_events(&conn1, "aw-watcher-android-test_phone", vec![event])
+            .unwrap();
+
+        // ds1 cached only the legacy name; ds2 then creates the destination
+        // on another device. The unguarded UPDATE used to rename into that
+        // occupied name and leave a database later opens reject.
+        let conn2 = rusqlite::Connection::open(&path).unwrap();
+        let mut ds2 = aw_datastore::DatastoreInstance::new(&conn2, true).unwrap();
+        let mut dest = test_bucket();
+        dest.id = "aw-watcher-android_phone".to_string();
+        dest.device_id = "device-B".to_string();
+        ds2.create_bucket(&conn2, dest).unwrap();
+
+        assert_eq!(ds1.migrate_test_bucket_names(&conn1).unwrap(), 0);
+        let names: i64 = conn1
+            .query_row(
+                "SELECT count(*) FROM buckets WHERE name = 'aw-watcher-android_phone'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(names, 1, "migration must not create a duplicate name");
+        assert!(
+            ds1.get_bucket("aw-watcher-android-test_phone").is_ok(),
+            "skipped rename keeps the legacy bucket"
+        );
+        let mut reopened = aw_datastore::DatastoreInstance::new(&conn1, true).unwrap();
+        assert_eq!(
+            reopened
+                .get_bucket("aw-watcher-android_phone")
+                .unwrap()
+                .device_id,
+            "device-B"
+        );
+        assert_eq!(
+            reopened
+                .get_events(&conn1, "aw-watcher-android-test_phone", None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn test_loading_same_name_device_rows_fails_without_hiding_history() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let mut ds = aw_datastore::DatastoreInstance::new(&conn, true).unwrap();

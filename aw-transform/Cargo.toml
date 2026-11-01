@@ -17,7 +17,7 @@ chrono = { version = "0.4", features = ["serde"] }
 aw-models = { path = "../aw-models" }
 
 [dev-dependencies]
-criterion = "0.5.1"
+criterion = "0.8.2"
 
 [[bench]]
 name = "bench"

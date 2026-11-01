@@ -18,7 +18,7 @@ aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 
 [dev-dependencies]
-criterion = "0.5.1"
+criterion = "0.8.2"
 proptest = "1.4"
 
 [[bench]]

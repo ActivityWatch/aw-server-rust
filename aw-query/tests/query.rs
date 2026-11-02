@@ -96,6 +96,39 @@ mod query_tests {
     }
 
     #[test]
+    fn test_android_schemeless_domain_aggregation() {
+        let ds = setup_datastore_with_bucket();
+        for (index, url) in [
+            "example.com/path",
+            "https://example.com/path",
+            "http://example.com/other",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let event: Event = serde_json::from_value(json!({
+                "timestamp": format!("2026-11-02T00:00:{}Z", index * 10),
+                "duration": 10,
+                "data": {"url": url}
+            }))
+            .unwrap();
+            ds.insert_events(BUCKET_ID, &[event]).unwrap();
+        }
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+        let code = format!(
+            r#"
+            events = split_url_events(query_bucket("{BUCKET_ID}"));
+            events = merge_events_by_keys(events, ["$domain"]);
+            return sum_durations(filter_keyvals(events, "$domain", ["example.com"]));
+        "#
+        );
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 30.0),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        }
+    }
+
+    #[test]
     fn test_sum_durations_precision() {
         // Repro from ActivityWatch/aw-server-rust#745: sum_durations came out 1 ms low
         let ds = setup_datastore_with_bucket();

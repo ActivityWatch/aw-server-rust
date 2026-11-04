@@ -307,9 +307,9 @@ impl fmt::Display for SyncReport {
             for bucket in &self.pushed {
                 writeln!(
                     f,
-                    "  {}  +{} events{}",
+                    "  {}  {} events{}",
                     bucket.bucket_id,
-                    bucket.events_new,
+                    format_event_delta(bucket.events_new),
                     match bucket.resumed_at {
                         Some(t) => format!("  resumed {}", t.to_rfc3339()),
                         None => String::new(),
@@ -318,6 +318,17 @@ impl fmt::Display for SyncReport {
             }
         }
         Ok(())
+    }
+}
+
+/// `events_new` is a net delta: the reconcile pass can remove rows the owner
+/// deleted, so a bucket can legitimately report a negative value. Render the
+/// sign instead of a bare `+` so the summary does not print `+-1 events`.
+fn format_event_delta(events: i64) -> String {
+    if events < 0 {
+        events.to_string()
+    } else {
+        format!("+{events}")
     }
 }
 
@@ -334,7 +345,10 @@ fn format_peer_line(peer: &PeerReport) -> String {
     };
     let events: i64 = peer.buckets.iter().map(|b| b.events_new).sum();
     match &peer.outcome {
-        PeerOutcome::Imported => format!("{host} / {did}  imported  +{events} events"),
+        PeerOutcome::Imported => format!(
+            "{host} / {did}  imported  {} events",
+            format_event_delta(events)
+        ),
         PeerOutcome::Skipped { reason } => {
             format!("{host} / {did}  skipped  {reason}")
         }

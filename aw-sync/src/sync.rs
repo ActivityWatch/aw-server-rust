@@ -1021,7 +1021,9 @@ fn reconcile_updated_events(
 
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for event in dest_events {
-        if event.timestamp >= lookback_start && event.timestamp < resume {
+        // Deletions also own a zero-duration row exactly at the cursor. The
+        // edit map below remains strictly before it for the heartbeat path.
+        if event.timestamp >= lookback_start && event.timestamp <= resume {
             dest_by_identity
                 .entry(event_identity(&event))
                 .or_default()
@@ -1033,14 +1035,18 @@ fn reconcile_updated_events(
     let mut src_timestamps: HashSet<DateTime<Utc>> = HashSet::new();
     let mut src_boundary_fingerprints: HashSet<(i64, String)> = HashSet::new();
     for src in source_events {
+        // A live boundary row (including a clipped ongoing event) backs its
+        // destination copy even though the incremental path owns its edits.
+        if src.timestamp >= lookback_start && src.timestamp <= resume {
+            src_timestamps.insert(src.timestamp);
+            src_boundary_fingerprints.insert(boundary_fingerprint(&src));
+        }
         // Skip events that start at/after the dest cursor; the incremental
         // copy owns those. Do not use end>resume: the dest-latest event starts
         // before resume and must still be title-reconciled.
         if src.timestamp < lookback_start || src.timestamp >= resume {
             continue;
         }
-        src_timestamps.insert(src.timestamp);
-        src_boundary_fingerprints.insert(boundary_fingerprint(&src));
         src_by_identity
             .entry(event_identity(&src))
             .or_default()

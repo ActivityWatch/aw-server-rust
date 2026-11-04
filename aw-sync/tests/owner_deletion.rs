@@ -162,6 +162,37 @@ fn deletion_of_the_latest_event_reaches_destination() {
 }
 
 #[test]
+fn deletion_of_latest_zero_duration_event_reaches_destination() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-deletion-instant", "phone");
+    let t0 = Utc::now() - Duration::minutes(40);
+    let t1 = t0 + Duration::minutes(20);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(19), "keep-me"),
+            event_at(t1, Duration::zero(), "delete-me"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+    // A live instantaneous boundary event must survive a repeated pass too.
+    sync_push(&src, &dest);
+    assert_eq!(titles(&dest, &bucket), titles(&src, &bucket));
+
+    delete_event_at(&src, &bucket, t1);
+    sync_push(&src, &dest);
+    assert_eq!(
+        titles(&dest, &bucket),
+        vec![(t0, "keep-me".to_string())],
+        "a deleted zero-duration event at the resume cursor must be removed"
+    );
+    sync_push(&src, &dest);
+    assert_eq!(titles(&dest, &bucket), titles(&src, &bucket));
+}
+
+#[test]
 fn deletion_older_than_lookback_is_not_propagated() {
     // Documents the memory bound: same contract as edits older than 7 days.
     let (src, dest) = memory_pair();

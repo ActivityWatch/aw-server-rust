@@ -323,11 +323,11 @@ mod sync_tests {
         // owner-originated deletion, so a synthetic row would be pruned.
         state
             .ds_dest
-            .insert_events(legacy_id, &[before_t0])
+            .insert_events(legacy_id, std::slice::from_ref(&before_t0))
             .unwrap();
         state.ds_dest.force_commit().unwrap();
 
-        aw_sync::sync_datastores(
+        let reports = aw_sync::sync_datastores(
             &state.ds_src,
             &state.ds_dest,
             false, // pull
@@ -335,6 +335,12 @@ mod sync_tests {
             &SyncSpec::default(),
         )
         .unwrap();
+        let report = reports.iter().find(|r| r.bucket_id == legacy_id).unwrap();
+        assert_eq!(
+            report.resumed_at,
+            Some(before_t0.timestamp + before_t0.duration),
+            "resume cursor must come from the reused legacy bucket"
+        );
 
         let dest_buckets = state.ds_dest.get_buckets().unwrap();
 
@@ -350,16 +356,15 @@ mod sync_tests {
             "a sanitized fork must not be created; got: {:?}",
             dest_buckets.keys().collect::<Vec<_>>()
         );
-        // Exactly 2 events: the pre-existing one at T0 plus the new T0+1h event.
-        // A count of 3 would mean the cursor was NOT read (full re-import from scratch).
+        // Exactly 2 events: the pre-existing one plus the new T0+1h event.
+        // Dedup can mask a full re-read, so check the cursor separately above.
         let event_count = state
             .ds_dest
             .get_event_count(legacy_id, None, None)
             .unwrap();
         assert_eq!(
             event_count, 2,
-            "legacy bucket must have exactly 2 events (existing + new); \
-             3 would mean the cursor was ignored and history was re-imported"
+            "legacy bucket must have exactly 2 events (existing + new)"
         );
     }
 

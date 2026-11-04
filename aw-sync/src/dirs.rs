@@ -195,7 +195,7 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
 pub fn resolve_sync_dir(
     env_sync_dir: Option<&str>,
     config_sync_dir: Option<&Path>,
-    home: &Path,
+    home_dir: impl FnOnce() -> Option<PathBuf>,
 ) -> Result<PathBuf, Box<dyn Error>> {
     if let Some(dir) = env_sync_dir {
         if !dir.is_empty() {
@@ -212,6 +212,7 @@ pub fn resolve_sync_dir(
         }
         return Ok(dir.to_path_buf());
     }
+    let home = home_dir().ok_or("Unable to read home_dir")?;
     Ok(home.join("ActivityWatchSync"))
 }
 
@@ -231,11 +232,10 @@ fn configured_sync_dir() -> Option<PathBuf> {
 pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
     // if AW_SYNC_DIR is set, use that (`--sync-dir` sets it first)
     let env_sync_dir = std::env::var("AW_SYNC_DIR").ok();
-    let home = home_dir().ok_or("Unable to read home_dir")?;
     resolve_sync_dir(
         env_sync_dir.as_deref(),
         configured_sync_dir().as_deref(),
-        &home,
+        home_dir,
     )
 }
 
@@ -514,7 +514,7 @@ mod tests {
         let resolved = resolve_sync_dir(
             Some(from_env.to_str().unwrap()),
             Some(from_config.as_path()),
-            &home,
+            || Some(home),
         )
         .unwrap();
         assert_eq!(resolved, from_env);
@@ -524,7 +524,7 @@ mod tests {
     fn resolve_sync_dir_config_wins_over_default() {
         let home = abs_test_path("home-user");
         let from_config = abs_test_path("from-config");
-        let resolved = resolve_sync_dir(None, Some(from_config.as_path()), &home).unwrap();
+        let resolved = resolve_sync_dir(None, Some(from_config.as_path()), || Some(home)).unwrap();
         assert_eq!(resolved, from_config);
     }
 
@@ -532,21 +532,48 @@ mod tests {
     fn resolve_sync_dir_empty_env_falls_through_to_config() {
         let home = abs_test_path("home-user");
         let from_config = abs_test_path("from-config");
-        let resolved = resolve_sync_dir(Some(""), Some(from_config.as_path()), &home).unwrap();
+        let resolved =
+            resolve_sync_dir(Some(""), Some(from_config.as_path()), || Some(home)).unwrap();
         assert_eq!(resolved, from_config);
     }
 
     #[test]
     fn resolve_sync_dir_defaults_to_home_activitywatchsync() {
         let home = abs_test_path("home-user");
-        let resolved = resolve_sync_dir(None, None, &home).unwrap();
+        let resolved = resolve_sync_dir(None, None, || Some(home.clone())).unwrap();
         assert_eq!(resolved, home.join("ActivityWatchSync"));
+    }
+
+    #[test]
+    fn resolve_sync_dir_env_does_not_look_up_home() {
+        let from_env = abs_test_path("from-env");
+        let resolved = resolve_sync_dir(Some(from_env.to_str().unwrap()), None, || {
+            panic!("an explicit environment override must not look up home")
+        })
+        .unwrap();
+        assert_eq!(resolved, from_env);
+    }
+
+    #[test]
+    fn resolve_sync_dir_config_does_not_look_up_home() {
+        let from_config = abs_test_path("from-config");
+        let resolved = resolve_sync_dir(Some(""), Some(&from_config), || {
+            panic!("an explicit config override must not look up home")
+        })
+        .unwrap();
+        assert_eq!(resolved, from_config);
+    }
+
+    #[test]
+    fn resolve_sync_dir_default_requires_home() {
+        let err = resolve_sync_dir(None, None, || None).unwrap_err();
+        assert_eq!(err.to_string(), "Unable to read home_dir");
     }
 
     #[test]
     fn resolve_sync_dir_rejects_relative_config_path() {
         let home = PathBuf::from("/home/user");
-        let err = resolve_sync_dir(None, Some(Path::new("relative/sync")), &home)
+        let err = resolve_sync_dir(None, Some(Path::new("relative/sync")), || Some(home))
             .unwrap_err()
             .to_string();
         assert!(

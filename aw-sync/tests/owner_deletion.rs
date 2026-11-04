@@ -85,6 +85,81 @@ fn delete_event_at(ds: &Datastore, bucket_id: &str, ts: DateTime<Utc>) {
 }
 
 #[test]
+fn reused_hostname_bucket_does_not_prune_another_sources_history() {
+    let first = Datastore::new_in_memory(false);
+    let second = Datastore::new_in_memory(false);
+    let dest = Datastore::new_in_memory(false);
+    let bucket = "window".to_string();
+    for (datastore, created) in [
+        (&first, "2026-01-01T00:00:00Z"),
+        (&second, "2026-01-02T00:00:00Z"),
+    ] {
+        let metadata: Bucket = serde_json::from_value(json!({
+            "id": bucket,
+            "type": "currentwindow",
+            "hostname": "phone",
+            "client": "test",
+            "created": created,
+        }))
+        .unwrap();
+        datastore.create_bucket(&metadata).unwrap();
+    }
+    // Different devices can publish the same bucket ID and hostname. Created
+    // timestamps are copied to a new destination, not overwritten on reuse.
+    assert_ne!(
+        first.get_bucket(&bucket).unwrap().created,
+        second.get_bucket(&bucket).unwrap().created
+    );
+    let t0 = Utc::now() - Duration::hours(2);
+    first
+        .insert_events(
+            &bucket,
+            &[
+                event_at(t0, Duration::minutes(1), "first-old"),
+                event_at(
+                    t0 + Duration::minutes(20),
+                    Duration::minutes(1),
+                    "first-new",
+                ),
+            ],
+        )
+        .unwrap();
+    second
+        .insert_events(
+            &bucket,
+            &[
+                event_at(
+                    t0 + Duration::minutes(10),
+                    Duration::minutes(1),
+                    "second-old",
+                ),
+                event_at(
+                    t0 + Duration::minutes(30),
+                    Duration::minutes(1),
+                    "second-new",
+                ),
+            ],
+        )
+        .unwrap();
+    first.force_commit().unwrap();
+    second.force_commit().unwrap();
+    sync_pull(&first, &dest);
+    let dest_bucket = "window-synced-from-phone";
+    for _ in 0..2 {
+        sync_pull(&second, &dest);
+        let rows = titles(&dest, dest_bucket);
+        assert!(
+            rows.iter().any(|(_, title)| title == "first-old"),
+            "hostname collision must not delete another device's old row"
+        );
+        assert!(
+            rows.iter().any(|(_, title)| title == "first-new"),
+            "hostname collision must not delete another device's cursor row"
+        );
+    }
+}
+
+#[test]
 fn owner_deletion_inside_lookback_reaches_destination() {
     let (src, dest) = memory_pair();
     let bucket = create_bucket(&src, "aw-watcher-android-deletion", "phone");

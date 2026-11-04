@@ -107,6 +107,7 @@ We also avoid having to implement complex features such as conflict resolution, 
 - The default `aw-sync` / `aw-sync daemon` command does not pull from the 3-level layout (see Usage). Bare `aw-sync sync` and the Android app do. `aw-sync sync --mode`/`--buckets`/`--start-date` use the two-level path.
 - By default all buckets are synced. `--buckets` is opt-in filtering, not a window/afk-only default.
 - It doesn't sync settings.
+- Edit/deletion reconciliation requires matching, non-missing bucket creation timestamps, preserved on first import. A hostname-derived bucket can be reused by another device with the same hostname and ID; mismatched or missing creation provenance skips reconciliation and warns, retaining append-only sync instead of pruning potentially shared history. This is a conservative guard, not a unique device identity; legacy destinations created independently may need a fresh import before edits/deletions propagate.
 - It mirrors events to all devices,
   - If you have a lot of devices you'll get a lot of duplicates, taking up a lot of space and potentially impacting performance.
 - Owner-originated edits (same timestamp, new data) and deletions are reconciled within 7 days of the destination resume cursor; older ones are skipped to keep peak memory bounded. Deletion needs no tombstone record: inside that window the source is authoritative for its own bucket, so a destination row the source no longer backs is removed. Three consequences are worth knowing:

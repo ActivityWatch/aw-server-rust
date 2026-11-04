@@ -1199,6 +1199,12 @@ fn sync_one(
     bucket_to: Bucket,
     sync_spec: &SyncSpec,
 ) -> Result<BucketReport, String> {
+    // A hostname-derived destination can collide across devices. Creation
+    // provenance is copied on first import and is not replaced on reuse.
+    // A hostname alone is not evidence of single-writer ownership. Legacy
+    // destinations without matching provenance keep append-only sync rather
+    // than risking deletion of another device's history.
+    let can_reconcile = bucket_from.created.is_some() && bucket_from.created == bucket_to.created;
     let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
@@ -1221,8 +1227,12 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    let reconciled_deletions =
-        reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    let reconciled_deletions = if can_reconcile {
+        reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?
+    } else {
+        warn!("   ! Skipping edit/deletion reconciliation for '{}': creation provenance is missing or differs", bucket_to.id);
+        0
+    };
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch

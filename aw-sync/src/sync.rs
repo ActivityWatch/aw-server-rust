@@ -1033,12 +1033,20 @@ fn reconcile_updated_events(
 
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     let mut src_timestamps: HashSet<DateTime<Utc>> = HashSet::new();
+    let mut pending_duration_timestamps: HashSet<DateTime<Utc>> = HashSet::new();
     let mut src_boundary_fingerprints: HashSet<(i64, String)> = HashSet::new();
     for src in source_events {
         // A live boundary row (including a clipped ongoing event) backs its
         // destination copy even though the incremental path owns its edits.
         if src.timestamp >= lookback_start && src.timestamp <= resume {
             src_timestamps.insert(src.timestamp);
+            // A source identity already on dest is a surviving sibling, not
+            // evidence that another duration at this timestamp was updated.
+            // Only an unmatched source identity needs the incremental path's
+            // duration-update protection.
+            if !dest_by_identity.contains_key(&event_identity(&src)) {
+                pending_duration_timestamps.insert(src.timestamp);
+            }
             src_boundary_fingerprints.insert(boundary_fingerprint(&src));
         }
         // Skip events that start at/after the dest cursor; the incremental
@@ -1099,11 +1107,10 @@ fn reconcile_updated_events(
     // conflict. Deletion needs no tombstone record: absence inside the bounded
     // window is the signal.
     //
-    // Only act on timestamps the source has entirely lost. A destination row
-    // whose timestamp still exists on the source is an edit the incremental
-    // path owns (e.g. the latest event's duration shrank, so its identity moved
-    // off the resume boundary); deleting it there would drop the event instead
-    // of updating it.
+    // An unmatched source identity at the same timestamp can be a duration
+    // edit the incremental path owns (e.g. the latest event shrank). Keep its
+    // old destination row for that path. A source identity already matched on
+    // dest cannot justify keeping a different, deleted timestamp sibling.
     //
     // Also keep rows that still match a live source event by the clip-invariant
     // boundary fingerprint: the incremental copy can insert a start-clipped
@@ -1119,7 +1126,7 @@ fn reconcile_updated_events(
     let mut deleted = 0usize;
     for (identity, dsts) in dest_by_identity {
         let ts = identity.0;
-        if src_timestamps.contains(&ts) {
+        if pending_duration_timestamps.contains(&ts) {
             continue;
         }
         if dsts

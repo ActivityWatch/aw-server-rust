@@ -113,7 +113,7 @@ We also avoid having to implement complex features such as conflict resolution, 
   - **A destination row the source does not back is pruned**, even one placed there by hand. Do not seed a destination bucket with data the source does not have.
   - **Deletions older than the window are not propagated.** The copy on the other devices stays; remove the destination bucket and re-sync to recover.
   - A destination bucket whose source slice is empty is never pruned, so an emptied or reset source datastore is not mistaken for "the owner deleted everything".
-- A destination row is matched to its source by timestamp, or by its clip-invariant end time and payload (the same fingerprint the resume-boundary dedup uses), so a start-clipped copy of a live source event is not mistaken for a deletion.
+- A destination row is matched to its source by timestamp and duration. An unmatched source identity at the same timestamp preserves the destination row for incremental duration reconciliation; an already-matched sibling does not preserve a deleted identity. The clip-invariant end time and payload also preserve start-clipped copies of live events (the same fingerprint the resume-boundary dedup uses). This conservative fingerprint exemption can retain a deleted interval if another live interval shares its end time and payload.
 
 ---
 

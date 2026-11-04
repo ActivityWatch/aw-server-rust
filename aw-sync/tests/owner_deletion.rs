@@ -193,6 +193,46 @@ fn deletion_of_latest_zero_duration_event_reaches_destination() {
 }
 
 #[test]
+fn deletion_of_one_timestamp_tied_identity_reaches_destination() {
+    for deleted_duration in [Duration::zero(), Duration::seconds(60)] {
+        let (src, dest) = memory_pair();
+        let bucket = create_bucket(&src, "aw-watcher-android-deletion-tied", "phone");
+        let t0 = Utc::now() - Duration::minutes(40);
+        src.insert_events(
+            &bucket,
+            &[
+                event_at(t0, Duration::zero(), "running"),
+                event_at(t0, Duration::seconds(60), "finished"),
+                event_at(t0 + Duration::seconds(120), Duration::seconds(60), "later"),
+            ],
+        )
+        .unwrap();
+        src.force_commit().unwrap();
+        sync_push(&src, &dest);
+        assert_eq!(titles(&dest, &bucket).len(), 3);
+
+        let deleted = src
+            .get_events(&bucket, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.timestamp == t0 && event.duration == deleted_duration)
+            .unwrap();
+        src.delete_events_by_id(&bucket, vec![deleted.id.unwrap()])
+            .unwrap();
+        src.force_commit().unwrap();
+
+        for _ in 0..2 {
+            sync_push(&src, &dest);
+            assert_eq!(
+                titles(&dest, &bucket),
+                titles(&src, &bucket),
+                "a live timestamp sibling must not preserve the deleted duration {deleted_duration}"
+            );
+        }
+    }
+}
+
+#[test]
 fn deletion_older_than_lookback_is_not_propagated() {
     // Documents the memory bound: same contract as edits older than 7 days.
     let (src, dest) = memory_pair();

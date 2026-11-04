@@ -233,6 +233,39 @@ fn deletion_of_one_timestamp_tied_identity_reaches_destination() {
 }
 
 #[test]
+fn deletion_of_timestamp_sibling_at_resume_boundary_reaches_destination() {
+    for reverse in [false, true] {
+        let (src, dest) = memory_pair();
+        let bucket = create_bucket(&src, "aw-watcher-android-deletion-boundary-tied", "phone");
+        let t0 = Utc::now() - Duration::minutes(40);
+        let mut events = vec![
+            event_at(t0, Duration::zero(), "running"),
+            event_at(t0, Duration::seconds(60), "finished"),
+        ];
+        if reverse {
+            events.reverse();
+        }
+        src.insert_events(&bucket, &events).unwrap();
+        src.force_commit().unwrap();
+        sync_push(&src, &dest);
+        assert_eq!(titles(&dest, &bucket).len(), 2);
+        let deleted = src
+            .get_events(&bucket, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.duration == Duration::seconds(60))
+            .unwrap();
+        src.delete_events_by_id(&bucket, vec![deleted.id.unwrap()])
+            .unwrap();
+        src.force_commit().unwrap();
+        for _ in 0..2 {
+            sync_push(&src, &dest);
+            assert_eq!(titles(&dest, &bucket), titles(&src, &bucket));
+        }
+    }
+}
+
+#[test]
 fn deletion_older_than_lookback_is_not_propagated() {
     // Documents the memory bound: same contract as edits older than 7 days.
     let (src, dest) = memory_pair();
@@ -261,6 +294,32 @@ fn deletion_older_than_lookback_is_not_propagated() {
         ],
         "deletions outside the lookback window stay on the documented limitation"
     );
+}
+
+#[test]
+fn deletion_of_event_overlapping_lookback_reaches_destination() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-deletion-overlap", "phone");
+    let resume = Utc::now();
+    let old_start = resume - Duration::days(8);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(old_start, Duration::days(2), "overlaps-window"),
+            event_at(
+                resume - Duration::minutes(5),
+                Duration::minutes(5),
+                "recent",
+            ),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+    assert_eq!(titles(&dest, &bucket).len(), 2);
+    delete_event_at(&src, &bucket, old_start);
+    sync_push(&src, &dest);
+    assert_eq!(titles(&dest, &bucket), titles(&src, &bucket));
 }
 
 #[test]

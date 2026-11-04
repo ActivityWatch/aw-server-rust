@@ -1129,13 +1129,14 @@ fn reconcile_updated_events(
         if pending_duration_timestamps.contains(&ts) {
             continue;
         }
-        if dsts
-            .iter()
-            .any(|dst| src_boundary_fingerprints.contains(&boundary_fingerprint(dst)))
-        {
-            continue;
-        }
-        let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
+        // Range clipping can collapse distinct durations into one identity.
+        // A live row backs only its own fingerprint, not every sibling in
+        // that identity group.
+        let stale: Vec<i64> = dsts
+            .into_iter()
+            .filter(|dst| !src_boundary_fingerprints.contains(&boundary_fingerprint(dst)))
+            .filter_map(|dst| dst.id)
+            .collect();
         if stale.is_empty() {
             continue;
         }

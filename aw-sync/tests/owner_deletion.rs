@@ -67,6 +67,11 @@ fn sync_push(src: &Datastore, dest: &Datastore) {
         .expect("sync_push failed");
 }
 
+fn sync_pull(src: &Datastore, dest: &Datastore) {
+    aw_sync::sync_datastores(src, dest, false, None, &SyncSpec::default())
+        .expect("sync_pull failed");
+}
+
 /// Delete one event on the source, leaving the rest of the bucket intact.
 fn delete_event_at(ds: &Datastore, bucket_id: &str, ts: DateTime<Utc>) {
     let events = ds.get_events(bucket_id, None, None, None).unwrap();
@@ -221,5 +226,48 @@ fn emptied_source_window_does_not_delete_destination_history() {
         titles(&dest, &bucket).len(),
         2,
         "an empty source window is not proof of deletion"
+    );
+}
+
+#[test]
+fn deletion_propagates_through_staging_to_a_third_device() {
+    // The desktop pulls from the staging directory, not from the phone. A
+    // deletion that stops at the first hop would leave the event on the
+    // desktop, and a later desktop push could hand the stale copy back.
+    let phone = Datastore::new_in_memory(false);
+    let staging = Datastore::new_in_memory(false);
+    let desktop = Datastore::new_in_memory(false);
+    let bucket = create_bucket(&phone, "aw-watcher-android-deletion-hop", "phone");
+    let desktop_bucket = format!("{bucket}-synced-from-phone");
+
+    let t0 = Utc::now() - Duration::hours(2);
+    let t1 = t0 + Duration::minutes(20);
+    phone
+        .insert_events(
+            &bucket,
+            &[
+                event_at(t0, Duration::minutes(19), "keep-me"),
+                event_at(t1, Duration::minutes(19), "delete-me"),
+            ],
+        )
+        .unwrap();
+    phone.force_commit().unwrap();
+
+    sync_push(&phone, &staging);
+    sync_pull(&staging, &desktop);
+    assert_eq!(
+        titles(&desktop, &desktop_bucket).len(),
+        2,
+        "precondition: both events reach the second hop"
+    );
+
+    delete_event_at(&phone, &bucket, t1);
+    sync_push(&phone, &staging);
+    sync_pull(&staging, &desktop);
+
+    assert_eq!(
+        titles(&desktop, &desktop_bucket),
+        vec![(t0, "keep-me".to_string())],
+        "the deletion must survive the staging hop"
     );
 }

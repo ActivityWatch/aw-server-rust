@@ -294,24 +294,10 @@ mod sync_tests {
         .unwrap();
         state.ds_dest.create_bucket(&legacy_bucket).unwrap();
 
-        // Seed the legacy destination bucket with one event at T0 — simulating
-        // previously-imported history.  This establishes the resume cursor.
-        let t0 = Utc::now();
-        let existing_event: Event = serde_json::from_value(serde_json::json!({
-            "timestamp": t0.to_rfc3339(),
-            "duration": 1,
-            "data": {"app": "existing"}
-        }))
-        .unwrap();
-        state
-            .ds_dest
-            .insert_events(legacy_id, &[existing_event])
-            .unwrap();
-        state.ds_dest.force_commit().unwrap();
-
         // Two source events: one before T0 (already covered) and one after T0 (new).
         // The sync must read the cursor from the reused bucket and import only the
         // post-T0 event — not re-import everything from scratch.
+        let t0 = Utc::now();
         let before_t0: Event = serde_json::from_value(serde_json::json!({
             "timestamp": (t0 - Duration::hours(1)).to_rfc3339(),
             "duration": 1,
@@ -326,9 +312,20 @@ mod sync_tests {
         .unwrap();
         state
             .ds_src
-            .insert_events("aw-watcher-android", &[before_t0, after_t0])
+            .insert_events("aw-watcher-android", &[before_t0.clone(), after_t0])
             .unwrap();
         state.ds_src.force_commit().unwrap();
+
+        // Seed the legacy destination bucket with the older source event —
+        // simulating previously-imported history. This establishes the resume
+        // cursor. It must be an event the source still has: aw-sync's reconcile
+        // reads a destination row the source no longer backs as an
+        // owner-originated deletion, so a synthetic row would be pruned.
+        state
+            .ds_dest
+            .insert_events(legacy_id, &[before_t0])
+            .unwrap();
+        state.ds_dest.force_commit().unwrap();
 
         aw_sync::sync_datastores(
             &state.ds_src,

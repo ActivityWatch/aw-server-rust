@@ -9,7 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -946,6 +946,23 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
     )
 }
 
+/// Clip-invariant event identity used by the resume-boundary dedup and by the
+/// deletion reconcile.
+///
+/// A `get_events` call bounded at `resume` clips an event straddling the bound:
+/// its returned start moves forward to the bound and its duration shrinks to
+/// compensate, but its end time and payload survive unchanged. An event's end
+/// is therefore the only representation that matches a clipped copy to its
+/// unclipped counterpart.
+fn boundary_fingerprint(event: &Event) -> (i64, String) {
+    (
+        (event.timestamp + event.duration)
+            .timestamp_nanos_opt()
+            .unwrap_or(0),
+        serde_json::to_string(&event.data).unwrap_or_default(),
+    )
+}
+
 /// Replace dest events whose timestamp+duration still exist on the source but
 /// whose data changed.
 ///
@@ -962,15 +979,18 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
 /// also re-fetched as a start-clipped fragment, and heartbeat() refuses to
 /// merge different data, which would insert a duplicate unless dest already
 /// holds the new payload.
+/// Returns the number of destination rows removed as owner-originated
+/// deletions, so the caller can distinguish that expected shrink from the
+/// incremental copy losing events.
 fn reconcile_updated_events(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let Some(resume) = resume_sync_at else {
-        return Ok(());
+        return Ok(0);
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
 
@@ -1010,6 +1030,8 @@ fn reconcile_updated_events(
     }
 
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
+    let mut src_timestamps: HashSet<DateTime<Utc>> = HashSet::new();
+    let mut src_boundary_fingerprints: HashSet<(i64, String)> = HashSet::new();
     for src in source_events {
         // Skip events that start at/after the dest cursor; the incremental
         // copy owns those. Do not use end>resume: the dest-latest event starts
@@ -1017,6 +1039,8 @@ fn reconcile_updated_events(
         if src.timestamp < lookback_start || src.timestamp >= resume {
             continue;
         }
+        src_timestamps.insert(src.timestamp);
+        src_boundary_fingerprints.insert(boundary_fingerprint(&src));
         src_by_identity
             .entry(event_identity(&src))
             .or_default()
@@ -1060,7 +1084,53 @@ fn reconcile_updated_events(
         }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
-    Ok(())
+
+    // Owner-originated deletions. Everything left in `dest_by_identity` is an
+    // identity that exists only on the destination inside the window. Under the
+    // single-writer model the source is authoritative for its own bucket, so a
+    // row the source no longer has was deleted by its owner — the same
+    // authority argument that makes a differing payload an edit rather than a
+    // conflict. Deletion needs no tombstone record: absence inside the bounded
+    // window is the signal.
+    //
+    // Only act on timestamps the source has entirely lost. A destination row
+    // whose timestamp still exists on the source is an edit the incremental
+    // path owns (e.g. the latest event's duration shrank, so its identity moved
+    // off the resume boundary); deleting it there would drop the event instead
+    // of updating it.
+    //
+    // Also keep rows that still match a live source event by the clip-invariant
+    // boundary fingerprint: the incremental copy can insert a start-clipped
+    // copy of a source event (different timestamp, zeroed duration), which then
+    // looks like a destination-only identity.
+    //
+    // An empty source window means the source's state cannot be distinguished
+    // from a reset datastore, so it must not be read as "the owner deleted
+    // everything".
+    if src_timestamps.is_empty() {
+        return Ok(0);
+    }
+    let mut deleted = 0usize;
+    for (identity, dsts) in dest_by_identity {
+        let ts = identity.0;
+        if src_timestamps.contains(&ts) {
+            continue;
+        }
+        if dsts
+            .iter()
+            .any(|dst| src_boundary_fingerprints.contains(&boundary_fingerprint(dst)))
+        {
+            continue;
+        }
+        let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
+        if stale.is_empty() {
+            continue;
+        }
+        deleted += stale.len();
+        ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
+        info!("   - Reconciled deleted event at {:?}", ts);
+    }
+    Ok(deleted)
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -1093,7 +1163,8 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    let reconciled_deletions =
+        reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch
@@ -1148,13 +1219,7 @@ fn sync_one(
             )
             .map_err(|e| format!("Failed to fetch destination boundary events for dedup: {e}"))?
         {
-            let fp = (
-                (e.timestamp + e.duration)
-                    .timestamp_nanos_opt()
-                    .unwrap_or(0),
-                serde_json::to_string(&e.data).unwrap_or_default(),
-            );
-            *counts.entry(fp).or_insert(0) += 1;
+            *counts.entry(boundary_fingerprint(&e)).or_insert(0) += 1;
         }
         counts
     } else {
@@ -1265,12 +1330,7 @@ fn sync_one(
                 let mut remaining = boundary_dedup.clone();
                 let before_dedup = chunk.len();
                 chunk.retain(|e| {
-                    let fp = (
-                        (e.timestamp + e.duration)
-                            .timestamp_nanos_opt()
-                            .unwrap_or(0),
-                        serde_json::to_string(&e.data).unwrap_or_default(),
-                    );
+                    let fp = boundary_fingerprint(e);
                     match remaining.get_mut(&fp) {
                         Some(count) if *count > 0 => {
                             *count -= 1;
@@ -1311,9 +1371,12 @@ fn sync_one(
 
     let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str())?;
     let new_events_count = eventcount_to_new - eventcount_to_old;
-    if new_events_count < 0 {
+    // Owner-originated deletions reconciled above are an expected shrink. The
+    // invariant this guards is that the *incremental copy* never loses events
+    // (#682); a shrink larger than the reconcile reported still fails.
+    if new_events_count + (reconciled_deletions as i64) < 0 {
         return Err(format!(
-            "Event count of bucket '{}' shrank during sync ({eventcount_to_old} -> {eventcount_to_new})",
+            "Event count of bucket '{}' shrank during sync ({eventcount_to_old} -> {eventcount_to_new}, {reconciled_deletions} reconciled deletion(s))",
             bucket_to.id
         ));
     }

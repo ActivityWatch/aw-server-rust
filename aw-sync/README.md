@@ -109,7 +109,11 @@ We also avoid having to implement complex features such as conflict resolution, 
 - It doesn't sync settings.
 - It mirrors events to all devices,
   - If you have a lot of devices you'll get a lot of duplicates, taking up a lot of space and potentially impacting performance.
-- Event deletion is not synced. Owner-originated edits (same timestamp, new data) are reconciled within 7 days of the destination resume cursor; older edits are skipped to keep peak memory bounded.
+- Owner-originated edits (same timestamp, new data) and deletions are reconciled within 7 days of the destination resume cursor; older ones are skipped to keep peak memory bounded. Deletion needs no tombstone record: inside that window the source is authoritative for its own bucket, so a destination row the source no longer backs is removed. Three consequences are worth knowing:
+  - **A destination row the source does not back is pruned**, even one placed there by hand. Do not seed a destination bucket with data the source does not have.
+  - **Deletions older than the window are not propagated.** The copy on the other devices stays; remove the destination bucket and re-sync to recover.
+  - A destination bucket whose source slice is empty is never pruned, so an emptied or reset source datastore is not mistaken for "the owner deleted everything".
+- A destination row is matched to its source by timestamp, or by its clip-invariant end time and payload (the same fingerprint the resume-boundary dedup uses), so a start-clipped copy of a live source event is not mistaken for a deletion.
 
 ---
 

@@ -1031,6 +1031,16 @@ fn reconcile_updated_events(
         }
     }
 
+    // Query-start clipping changes an event's identity. Keep the source
+    // geometry as well as its payload fingerprint: a title edit must not
+    // turn a still-live clipped interval into evidence of deletion.
+    let mut source_start_by_end: HashMap<DateTime<Utc>, DateTime<Utc>> = HashMap::new();
+    for event in &source_events {
+        source_start_by_end
+            .entry(event.timestamp + event.duration)
+            .and_modify(|start| *start = (*start).min(event.timestamp))
+            .or_insert(event.timestamp);
+    }
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     let mut src_timestamps: HashSet<DateTime<Utc>> = HashSet::new();
     let mut pending_duration_timestamps: HashSet<DateTime<Utc>> = HashSet::new();
@@ -1061,6 +1071,7 @@ fn reconcile_updated_events(
             .push(src);
     }
 
+    let mut deleted = 0usize;
     for (identity, srcs) in src_by_identity {
         let mut dsts = match dest_by_identity.remove(&identity) {
             Some(dsts) if !dsts.is_empty() => dsts,
@@ -1080,6 +1091,7 @@ fn reconcile_updated_events(
             continue;
         }
         let ts = identity.0;
+        let inserted_count = to_insert.len();
         // Insert before delete so a crash cannot drop the row. A later pass
         // sees matching data, skips insert, and still removes remaining stale ids.
         if !to_insert.is_empty() {
@@ -1094,7 +1106,9 @@ fn reconcile_updated_events(
         }
         let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
         if !stale.is_empty() {
+            let removed_count = stale.len();
             ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
+            deleted += removed_count.saturating_sub(inserted_count);
         }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
@@ -1121,9 +1135,8 @@ fn reconcile_updated_events(
     // from a reset datastore, so it must not be read as "the owner deleted
     // everything".
     if src_timestamps.is_empty() {
-        return Ok(0);
+        return Ok(deleted);
     }
-    let mut deleted = 0usize;
     for (identity, dsts) in dest_by_identity {
         let ts = identity.0;
         if pending_duration_timestamps.contains(&ts) {
@@ -1134,7 +1147,12 @@ fn reconcile_updated_events(
         // that identity group.
         let stale: Vec<i64> = dsts
             .into_iter()
-            .filter(|dst| !src_boundary_fingerprints.contains(&boundary_fingerprint(dst)))
+            .filter(|dst| {
+                !src_boundary_fingerprints.contains(&boundary_fingerprint(dst))
+                    && !source_start_by_end
+                        .get(&(dst.timestamp + dst.duration))
+                        .is_some_and(|start| *start < dst.timestamp)
+            })
             .filter_map(|dst| dst.id)
             .collect();
         if stale.is_empty() {

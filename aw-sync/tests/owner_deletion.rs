@@ -266,6 +266,72 @@ fn deletion_of_timestamp_sibling_at_resume_boundary_reaches_destination() {
 }
 
 #[test]
+fn deleting_same_identity_sibling_returns_successful_report() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-deletion-same-identity", "phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(1), "keep"),
+            event_at(t0, Duration::minutes(1), "delete"),
+            event_at(t0 + Duration::minutes(2), Duration::minutes(1), "later"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+    let deleted = src
+        .get_events(&bucket, None, None, None)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.data.get("title") == Some(&json!("delete")))
+        .unwrap();
+    src.delete_events_by_id(&bucket, vec![deleted.id.unwrap()])
+        .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+    assert_eq!(titles(&dest, &bucket), titles(&src, &bucket));
+    sync_push(&src, &dest);
+    assert_eq!(titles(&dest, &bucket), titles(&src, &bucket));
+}
+
+#[test]
+fn edited_start_clipped_event_is_not_deleted() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-edited-start-clip", "phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(1), "original"),
+            event_at(t0 + Duration::minutes(2), Duration::minutes(1), "later"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    let spec = SyncSpec {
+        start: Some(t0 + Duration::seconds(30)),
+        ..SyncSpec::default()
+    };
+    aw_sync::sync_datastores(&src, &dest, true, Some("device-phone"), &spec).unwrap();
+    assert_eq!(titles(&dest, &bucket).len(), 2);
+    delete_event_at(&src, &bucket, t0);
+    src.insert_events(&bucket, &[event_at(t0, Duration::minutes(1), "edited")])
+        .unwrap();
+    src.force_commit().unwrap();
+    for _ in 0..2 {
+        aw_sync::sync_datastores(&src, &dest, true, Some("device-phone"), &spec).unwrap();
+        assert_eq!(
+            titles(&dest, &bucket).len(),
+            2,
+            "a title edit must not delete a live clipped interval"
+        );
+        assert_eq!(titles(&dest, &bucket)[0].0, t0 + Duration::seconds(30));
+    }
+}
+
+#[test]
 fn deletion_older_than_lookback_is_not_propagated() {
     // Documents the memory bound: same contract as edits older than 7 days.
     let (src, dest) = memory_pair();

@@ -1006,18 +1006,37 @@ fn reconcile_updated_events(
     // Datastore errors return rather than unwrap: a panic here aborts the
     // whole pass (and on Android, the JNI frame). The per-bucket skip in
     // ActivityWatch/aw-server-rust#697 then drops this bucket, not the daemon.
-    let source_events = ds_from.get_events(
+    let mut source_events = ds_from.get_events(
         bucket_from.id.as_str(),
         Some(lookback_start),
         Some(resume),
         None,
     )?;
-    let dest_events = ds_to.get_events(
+    let mut dest_events = ds_to.get_events(
         bucket_to.id.as_str(),
         Some(lookback_start),
         Some(resume),
         None,
     )?;
+
+    // A timestamp tie can put the cursor at a zero-duration row while another
+    // row at that timestamp extends past it. The range query returns both with
+    // duration zero, erasing the identity/fingerprint needed for deletion.
+    // Hydrate only cursor-start rows by ID on both sides. This uses the existing
+    // single-event endpoint, keeps the bounded window, and fails before writes
+    // if any lookup fails. Rows starting before the cursor retain the edit
+    // pass's existing clipped representation.
+    for (events, datastore, bucket) in [
+        (&mut source_events, ds_from, bucket_from),
+        (&mut dest_events, ds_to, bucket_to),
+    ] {
+        for event in events.iter_mut().filter(|event| event.timestamp == resume) {
+            let id = event.id.ok_or_else(|| {
+                format!("Missing event ID at reconciliation cursor in {}", bucket.id)
+            })?;
+            *event = datastore.get_event(bucket.id.as_str(), id)?;
+        }
+    }
 
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for event in dest_events {
@@ -1031,15 +1050,21 @@ fn reconcile_updated_events(
         }
     }
 
-    // Query-start clipping changes an event's identity. Keep the source
-    // geometry as well as its payload fingerprint: a title edit must not
-    // turn a still-live clipped interval into evidence of deletion.
-    let mut source_start_by_end: HashMap<DateTime<Utc>, DateTime<Utc>> = HashMap::new();
-    for event in &source_events {
-        source_start_by_end
-            .entry(event.timestamp + event.duration)
-            .and_modify(|start| *start = (*start).min(event.timestamp))
-            .or_insert(event.timestamp);
+    // Query-start clipping changes an event's identity. A later duration or
+    // payload edit must not turn its still-live suffix into evidence of
+    // deletion. Without clip provenance, conservatively preserve a destination
+    // start covered by an earlier source interval, even if its end changed.
+    // Prefix maxima support overlap checks without a scan per destination row.
+    let mut source_coverage: Vec<_> = source_events
+        .iter()
+        .map(|event| (event.timestamp, event.timestamp + event.duration))
+        .collect();
+    source_coverage.sort_unstable_by_key(|(start, _)| *start);
+    let mut max_end = None;
+    for (_, end) in &mut source_coverage {
+        let covered_end = max_end.map_or(*end, |previous: DateTime<Utc>| previous.max(*end));
+        *end = covered_end;
+        max_end = Some(covered_end);
     }
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     let mut src_timestamps: HashSet<DateTime<Utc>> = HashSet::new();
@@ -1149,9 +1174,10 @@ fn reconcile_updated_events(
             .into_iter()
             .filter(|dst| {
                 !src_boundary_fingerprints.contains(&boundary_fingerprint(dst))
-                    && !source_start_by_end
-                        .get(&(dst.timestamp + dst.duration))
-                        .is_some_and(|start| *start < dst.timestamp)
+                    && !source_coverage
+                        .partition_point(|(start, _)| *start < dst.timestamp)
+                        .checked_sub(1)
+                        .is_some_and(|index| source_coverage[index].1 >= dst.timestamp)
             })
             .filter_map(|dst| dst.id)
             .collect();

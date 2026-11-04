@@ -266,6 +266,49 @@ fn deletion_of_timestamp_sibling_at_resume_boundary_reaches_destination() {
 }
 
 #[test]
+fn deletion_of_identical_payload_timestamp_sibling_at_boundary() {
+    for reverse in [false, true] {
+        let (src, dest) = memory_pair();
+        let bucket = create_bucket(
+            &src,
+            "aw-watcher-android-deletion-identical-boundary",
+            "phone",
+        );
+        let t0 = Utc::now() - Duration::minutes(40);
+        let mut events = vec![
+            event_at(t0, Duration::zero(), "same"),
+            event_at(t0, Duration::seconds(60), "same"),
+        ];
+        if reverse {
+            events.reverse();
+        }
+        src.insert_events(&bucket, &events).unwrap();
+        src.force_commit().unwrap();
+        sync_push(&src, &dest);
+        assert_eq!(titles(&dest, &bucket).len(), 2);
+        let deleted = src
+            .get_events(&bucket, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.duration == Duration::seconds(60))
+            .unwrap();
+        src.delete_events_by_id(&bucket, vec![deleted.id.unwrap()])
+            .unwrap();
+        src.force_commit().unwrap();
+        for _ in 0..2 {
+            sync_push(&src, &dest);
+            let remaining = dest.get_events(&bucket, None, None, None).unwrap();
+            assert_eq!(
+                remaining.len(),
+                1,
+                "a clipped fingerprint must not hide a deleted duration"
+            );
+            assert_eq!(remaining[0].duration, Duration::zero());
+        }
+    }
+}
+
+#[test]
 fn deleting_same_identity_sibling_returns_successful_report() {
     let (src, dest) = memory_pair();
     let bucket = create_bucket(&src, "aw-watcher-android-deletion-same-identity", "phone");
@@ -328,6 +371,46 @@ fn edited_start_clipped_event_is_not_deleted() {
             "a title edit must not delete a live clipped interval"
         );
         assert_eq!(titles(&dest, &bucket)[0].0, t0 + Duration::seconds(30));
+    }
+}
+
+#[test]
+fn shortened_start_clipped_event_is_not_deleted() {
+    for edited_title in ["original", "edited"] {
+        let (src, dest) = memory_pair();
+        let bucket = create_bucket(&src, "aw-watcher-android-shortened-start-clip", "phone");
+        let t0 = Utc::now() - Duration::hours(2);
+        src.insert_events(
+            &bucket,
+            &[
+                event_at(t0, Duration::seconds(60), "original"),
+                event_at(t0 + Duration::seconds(120), Duration::seconds(60), "later"),
+            ],
+        )
+        .unwrap();
+        src.force_commit().unwrap();
+        let spec = SyncSpec {
+            start: Some(t0 + Duration::seconds(30)),
+            ..SyncSpec::default()
+        };
+        aw_sync::sync_datastores(&src, &dest, true, Some("device-phone"), &spec).unwrap();
+        assert_eq!(titles(&dest, &bucket).len(), 2);
+        delete_event_at(&src, &bucket, t0);
+        src.insert_events(
+            &bucket,
+            &[event_at(t0, Duration::seconds(50), edited_title)],
+        )
+        .unwrap();
+        src.force_commit().unwrap();
+        for _ in 0..2 {
+            aw_sync::sync_datastores(&src, &dest, true, Some("device-phone"), &spec).unwrap();
+            assert_eq!(
+                titles(&dest, &bucket).len(),
+                2,
+                "shortening a live clipped interval must not delete its destination copy"
+            );
+            assert_eq!(titles(&dest, &bucket)[0].0, t0 + Duration::seconds(30));
+        }
     }
 }
 

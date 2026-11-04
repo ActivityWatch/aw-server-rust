@@ -146,7 +146,16 @@ fn reused_hostname_bucket_does_not_prune_another_sources_history() {
     sync_pull(&first, &dest);
     let dest_bucket = "window-synced-from-phone";
     for _ in 0..2 {
-        sync_pull(&second, &dest);
+        let before = titles(&dest, dest_bucket);
+        let error = aw_sync::sync_datastores(&second, &dest, false, None, &SyncSpec::default())
+            .unwrap_err();
+        assert!(error.contains("creation provenance"));
+        assert_eq!(
+            titles(&dest, dest_bucket),
+            before,
+            "a collision must be refused before writes"
+        );
+        sync_pull(&first, &dest);
         let rows = titles(&dest, dest_bucket);
         assert!(
             rows.iter().any(|(_, title)| title == "first-old"),

@@ -289,7 +289,8 @@ mod sync_tests {
             "type": "currentwindow",
             "hostname": "POCO F8 Ultra",
             "client": "aw-android",
-            "data": {"$aw.sync.origin": "POCO F8 Ultra"}
+            "data": {"$aw.sync.origin": "POCO F8 Ultra"},
+            "created": state.ds_src.get_bucket("aw-watcher-android").unwrap().created
         }))
         .unwrap();
         state.ds_dest.create_bucket(&legacy_bucket).unwrap();
@@ -1470,7 +1471,8 @@ mod sync_tests {
             "id": dest_bucket_id,
             "type": "test",
             "hostname": "device-0",
-            "client": "test"
+            "client": "test",
+            "created": state.ds_src.get_bucket(bucket_id.as_str()).unwrap().created
         }))
         .unwrap();
         state.ds_dest.create_bucket(&dest_bucket).unwrap();

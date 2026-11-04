@@ -1202,10 +1202,18 @@ fn sync_one(
     // A hostname-derived destination can collide across devices. Creation
     // provenance is copied on first import and is not replaced on reuse.
     // A hostname alone is not evidence of single-writer ownership. Legacy
-    // destinations without matching provenance keep append-only sync rather
-    // than risking deletion of another device's history.
+    // destinations without matching provenance must not accept more rows into
+    // nonempty history: a later pull from the original owner could prune those
+    // additions. An empty legacy bucket is safe to populate, but further sync
+    // requires repairing its provenance or importing into a fresh bucket.
     let can_reconcile = bucket_from.created.is_some() && bucket_from.created == bucket_to.created;
     let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
+    if !can_reconcile && eventcount_to_old > 0 {
+        return Err(format!(
+            "Refusing to sync '{}' into nonempty '{}': bucket creation provenance is missing or differs; repair provenance or import into a fresh destination",
+            bucket_from.id, bucket_to.id
+        ));
+    }
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
     // Sync events

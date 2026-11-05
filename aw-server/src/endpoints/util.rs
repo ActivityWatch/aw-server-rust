@@ -95,6 +95,8 @@ pub fn api_error_json(status: Status, req: &Request) -> HttpErrorJson {
 pub struct BucketsExportRocket {
     datastore: aw_datastore::Datastore,
     bucket_id: Option<String>,
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
     filename: String,
 }
 
@@ -178,6 +180,8 @@ fn pipe_writer_to_file(writer: PipeWriter) -> File {
 fn spawn_export_stream(
     datastore: aw_datastore::Datastore,
     bucket_id: Option<String>,
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
     writer: PipeWriter,
 ) {
     thread::spawn(move || {
@@ -188,7 +192,8 @@ fn spawn_export_stream(
                 return;
             }
         };
-        let mut staging = match datastore.export_to_file(bucket_id.as_deref(), staging) {
+        let mut staging = match datastore.export_to_file(bucket_id.as_deref(), start, end, staging)
+        {
             Ok((file, _)) => file,
             Err(err) => {
                 error!("Export stream failed: {err:?}");
@@ -210,6 +215,8 @@ impl BucketsExportRocket {
     pub fn new(
         datastore: &aw_datastore::Datastore,
         bucket_id: Option<&str>,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
     ) -> Result<Self, HttpErrorJson> {
         // Resolve the download name and 404 missing buckets before the
         // response is built. Serialization itself runs after headers so a
@@ -218,6 +225,8 @@ impl BucketsExportRocket {
         Ok(Self {
             datastore: datastore.clone(),
             bucket_id: bucket_id.map(str::to_owned),
+            start,
+            end,
             filename,
         })
     }
@@ -229,7 +238,7 @@ impl<'r> Responder<'r, 'static> for BucketsExportRocket {
             error!("Failed to open export pipe: {err}");
             Status::InternalServerError
         })?;
-        spawn_export_stream(self.datastore, self.bucket_id, writer);
+        spawn_export_stream(self.datastore, self.bucket_id, self.start, self.end, writer);
         Response::build()
             .status(Status::Ok)
             .header(Header::new("Content-Disposition", self.filename))

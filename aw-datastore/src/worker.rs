@@ -222,7 +222,12 @@ pub enum Response {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Command {
-    Export(Option<String>, File),
+    Export(
+        Option<String>,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+        File,
+    ),
     ExportCsv(
         String,
         Option<DateTime<Utc>>,
@@ -633,9 +638,9 @@ impl DatastoreWorker {
                 Ok(()) => Ok(Response::Empty()),
                 Err(e) => Err(e),
             },
-            Command::Export(bucket_id, mut file) => {
+            Command::Export(bucket_id, start, end, mut file) => {
                 let mut writer = BufWriter::new(&mut file);
-                let name = ds.write_export(tx, bucket_id.as_deref(), &mut writer)?;
+                let name = ds.write_export(tx, bucket_id.as_deref(), start, end, &mut writer)?;
                 writer.flush().map_err(|err| {
                     DatastoreError::InternalError(format!("Failed to flush export: {err}"))
                 })?;
@@ -1071,12 +1076,20 @@ impl Datastore {
     /// Write a consistent export to an empty temporary file. The file is
     /// returned only after serialization and flushing succeed. Event rows are
     /// serialized individually, including this worker's uncommitted writes.
+    /// `start`/`end` limit the events to those overlapping that range, cut to it.
     pub fn export_to_file(
         &self,
         bucket_id: Option<&str>,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
         file: File,
     ) -> Result<(File, Option<String>), DatastoreError> {
-        match self.request(Command::Export(bucket_id.map(str::to_owned), file))? {
+        match self.request(Command::Export(
+            bucket_id.map(str::to_owned),
+            start,
+            end,
+            file,
+        ))? {
             Response::Export(file, name) => Ok((file, name)),
             _ => panic!("Invalid response"),
         }

@@ -988,6 +988,7 @@ fn reconcile_updated_events(
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
+    repair_start: Option<DateTime<Utc>>,
 ) -> Result<usize, String> {
     let Some(resume) = resume_sync_at else {
         return Ok(0);
@@ -1038,6 +1039,14 @@ fn reconcile_updated_events(
         }
     }
 
+    // Missing historical rows can be replacements inserted after an earlier
+    // pass observed the delete half of an edit. Retain destination geometry
+    // before consuming the identity map so repair does not duplicate a
+    // start-clipped copy or interfere with duration updates at the same start.
+    let dest_starts: HashSet<_> = dest_events.iter().map(|event| event.timestamp).collect();
+    let dest_fingerprints: HashSet<_> = dest_events.iter().map(boundary_fingerprint).collect();
+    let mut sorted_dest_starts: Vec<_> = dest_starts.iter().copied().collect();
+    sorted_dest_starts.sort_unstable();
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for event in dest_events {
         // Deletions also own a zero-duration row exactly at the cursor. The
@@ -1100,7 +1109,51 @@ fn reconcile_updated_events(
     for (identity, srcs) in src_by_identity {
         let mut dsts = match dest_by_identity.remove(&identity) {
             Some(dsts) if !dsts.is_empty() => dsts,
-            _ => continue,
+            _ => {
+                if dest_starts.contains(&identity.0) {
+                    // A different duration at this start is still owned by
+                    // the incremental duration-update path.
+                    continue;
+                }
+                let mut missing = Vec::new();
+                for src in srcs {
+                    let end = src.timestamp + src.duration;
+                    let next_start = sorted_dest_starts
+                        .get(sorted_dest_starts.partition_point(|start| *start <= src.timestamp));
+                    if dest_fingerprints.contains(&boundary_fingerprint(&src))
+                        || next_start.is_some_and(|start| *start <= end)
+                    {
+                        // It may already exist as a start-clipped copy.
+                        continue;
+                    }
+                    // Range queries clip both ends. Repair only complete
+                    // historical rows within the configured import floor;
+                    // live/cross-boundary intervals stay on the existing path.
+                    let id = src.id.ok_or_else(|| {
+                        format!(
+                            "Missing event ID during historical repair in {}",
+                            bucket_from.id
+                        )
+                    })?;
+                    let mut original = ds_from.get_event(bucket_from.id.as_str(), id)?;
+                    if original.timestamp < lookback_start
+                        || repair_start.is_some_and(|start| original.timestamp < start)
+                        || original.timestamp + original.duration > resume
+                    {
+                        continue;
+                    }
+                    original.id = None;
+                    missing.push(original);
+                }
+                if !missing.is_empty() {
+                    ds_to.insert_events(bucket_to.id.as_str(), missing)?;
+                    info!(
+                        "   + Recovered missing historical event at {:?}",
+                        identity.0
+                    );
+                }
+                continue;
+            }
         };
         let mut to_insert = Vec::new();
         for src in srcs {
@@ -1236,7 +1289,14 @@ fn sync_one(
     }
 
     let reconciled_deletions = if can_reconcile {
-        reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?
+        reconcile_updated_events(
+            ds_from,
+            ds_to,
+            &bucket_from,
+            &bucket_to,
+            resume_sync_at,
+            sync_spec.start,
+        )?
     } else {
         warn!("   ! Skipping edit/deletion reconciliation for '{}': creation provenance is missing or differs", bucket_to.id);
         0

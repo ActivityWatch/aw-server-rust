@@ -118,6 +118,21 @@ We also avoid having to implement complex features such as conflict resolution, 
 
 ---
 
+### Recovery when sync observes an edit's delete/insert gap
+
+The bounded reconciliation pass also recovers complete historical source rows
+missing below the destination cursor. This lets a later pass recover an edit
+whose temporary deletion was already mirrored, including through a staging hop.
+Recovered rows retain their original timestamp, duration and payload but receive
+new destination IDs. Repeated passes do not duplicate matching identities.
+
+Repair stays inside the seven-day window and the configured `--start-date` floor.
+It conservatively skips source rows that could already exist as start-clipped
+copies (matching end/payload, or a destination start inside the source interval),
+as well as unmatched durations at an existing destination start. Those ambiguous
+cases retain the clipped-copy/duration-update limitations above; this is not a
+full historical backfill or a transaction across the owner's edit operations.
+
 ## Advanced usage
 
 ### Syncing real data to a testing instance

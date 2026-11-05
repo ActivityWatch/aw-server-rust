@@ -634,3 +634,110 @@ fn deletion_propagates_through_staging_to_a_third_device() {
         "the deletion must survive the staging hop"
     );
 }
+
+#[test]
+fn historical_edit_recovers_after_sync_between_delete_and_insert() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-interrupted-edit", "phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    let edited_at = t0 + Duration::minutes(20);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(1), "older"),
+            event_at(edited_at, Duration::minutes(1), "original"),
+            event_at(t0 + Duration::minutes(40), Duration::minutes(1), "newest"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+
+    // WebUI edits delete then insert. Sync can observe the committed gap.
+    delete_event_at(&src, &bucket, edited_at);
+    sync_push(&src, &dest);
+    assert_eq!(titles(&dest, &bucket), titles(&src, &bucket));
+    src.insert_events(
+        &bucket,
+        &[event_at(edited_at, Duration::minutes(1), "edited")],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    for _ in 0..2 {
+        sync_push(&src, &dest);
+        assert_eq!(
+            titles(&dest, &bucket),
+            titles(&src, &bucket),
+            "the replacement below the resume cursor must be recovered without duplicates"
+        );
+    }
+}
+
+#[test]
+fn historical_repair_respects_start_date_and_clipped_copies() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-repair-start", "phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(1), "outside import"),
+            event_at(t0 + Duration::minutes(10), Duration::minutes(2), "clipped"),
+            event_at(t0 + Duration::minutes(40), Duration::minutes(1), "newest"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    let spec = SyncSpec {
+        start: Some(t0 + Duration::minutes(11)),
+        ..SyncSpec::default()
+    };
+    aw_sync::sync_datastores(&src, &dest, true, Some("device-phone"), &spec).unwrap();
+    let before = titles(&dest, &bucket);
+    assert_eq!(before.len(), 2);
+    assert_eq!(before[0].0, spec.start.unwrap());
+    for _ in 0..2 {
+        aw_sync::sync_datastores(&src, &dest, true, Some("device-phone"), &spec).unwrap();
+        assert_eq!(titles(&dest, &bucket), before);
+    }
+}
+
+#[test]
+fn interrupted_historical_edit_recovers_through_staging() {
+    let (phone, staging) = memory_pair();
+    let desktop = Datastore::new_in_memory(false);
+    let bucket = create_bucket(&phone, "aw-watcher-android-edit-gap-hop", "phone");
+    let desktop_bucket = format!("{bucket}-synced-from-phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    let edited_at = t0 + Duration::minutes(20);
+    phone
+        .insert_events(
+            &bucket,
+            &[
+                event_at(t0, Duration::minutes(1), "older"),
+                event_at(edited_at, Duration::minutes(1), "original"),
+                event_at(t0 + Duration::minutes(40), Duration::minutes(1), "newest"),
+            ],
+        )
+        .unwrap();
+    phone.force_commit().unwrap();
+    sync_push(&phone, &staging);
+    sync_pull(&staging, &desktop);
+    delete_event_at(&phone, &bucket, edited_at);
+    sync_push(&phone, &staging);
+    sync_pull(&staging, &desktop);
+    assert_eq!(titles(&desktop, &desktop_bucket), titles(&phone, &bucket));
+    phone
+        .insert_events(
+            &bucket,
+            &[event_at(edited_at, Duration::minutes(1), "edited")],
+        )
+        .unwrap();
+    phone.force_commit().unwrap();
+    for _ in 0..2 {
+        sync_push(&phone, &staging);
+        sync_pull(&staging, &desktop);
+        assert_eq!(titles(&staging, &bucket), titles(&phone, &bucket));
+        assert_eq!(titles(&desktop, &desktop_bucket), titles(&phone, &bucket));
+    }
+}

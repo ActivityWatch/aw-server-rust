@@ -128,8 +128,11 @@ new destination IDs. Repeated passes do not duplicate matching identities.
 
 Repair stays inside the seven-day window and the configured `--start-date` floor.
 It conservatively skips source rows that could already exist as start-clipped
-copies (matching end/payload, or a destination start inside the source interval),
-as well as unmatched durations at an existing destination start. Those ambiguous
+copies (matching end/payload, a destination start strictly inside the source
+interval, or a zero-duration destination row at its end),
+as well as unmatched durations at an existing destination start. Endpoint contact
+with an adjacent positive-duration event does not block repair or deletion;
+zero-duration endpoint copies remain protected. Those ambiguous
 cases retain the clipped-copy/duration-update limitations above; this is not a
 full historical backfill or a transaction across the owner's edit operations.
 

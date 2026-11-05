@@ -1045,6 +1045,11 @@ fn reconcile_updated_events(
     // start-clipped copy or interfere with duration updates at the same start.
     let dest_starts: HashSet<_> = dest_events.iter().map(|event| event.timestamp).collect();
     let dest_fingerprints: HashSet<_> = dest_events.iter().map(boundary_fingerprint).collect();
+    let dest_zero_starts: HashSet<_> = dest_events
+        .iter()
+        .filter(|event| event.duration == chrono::Duration::zero())
+        .map(|event| event.timestamp)
+        .collect();
     let mut sorted_dest_starts: Vec<_> = dest_starts.iter().copied().collect();
     sorted_dest_starts.sort_unstable();
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
@@ -1121,9 +1126,14 @@ fn reconcile_updated_events(
                     let next_start = sorted_dest_starts
                         .get(sorted_dest_starts.partition_point(|start| *start <= src.timestamp));
                     if dest_fingerprints.contains(&boundary_fingerprint(&src))
-                        || next_start.is_some_and(|start| *start <= end)
+                        || next_start.is_some_and(|start| {
+                            *start < end || (*start == end && dest_zero_starts.contains(start))
+                        })
                     {
-                        // It may already exist as a start-clipped copy.
+                        // It may already exist as a start-clipped copy. At
+                        // the source end only a zero-duration row can be a
+                        // clipped suffix; a positive-duration adjacent event
+                        // does not cover this source row.
                         continue;
                     }
                     // Range queries clip both ends. Repair only complete
@@ -1230,7 +1240,15 @@ fn reconcile_updated_events(
                     && !source_coverage
                         .partition_point(|(start, _)| *start < dst.timestamp)
                         .checked_sub(1)
-                        .is_some_and(|index| source_coverage[index].1 >= dst.timestamp)
+                        .is_some_and(|index| {
+                            // Endpoint contact alone is not coverage of an
+                            // adjacent positive-duration event. A zero-length
+                            // suffix can legitimately sit at the source end.
+                            let end = source_coverage[index].1;
+                            end > dst.timestamp
+                                || (end == dst.timestamp
+                                    && dst.duration == chrono::Duration::zero())
+                        })
             })
             .filter_map(|dst| dst.id)
             .collect();

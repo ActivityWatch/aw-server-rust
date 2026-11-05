@@ -741,3 +741,106 @@ fn interrupted_historical_edit_recovers_through_staging() {
         assert_eq!(titles(&desktop, &desktop_bucket), titles(&phone, &bucket));
     }
 }
+
+#[test]
+fn adjacent_event_deletion_reaches_destination() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-adjacent-delete", "phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    let deleted_at = t0 + Duration::minutes(1);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(1), "before"),
+            event_at(deleted_at, Duration::minutes(1), "deleted"),
+            event_at(t0 + Duration::minutes(2), Duration::minutes(1), "after"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    sync_push(&src, &dest);
+    delete_event_at(&src, &bucket, deleted_at);
+    for _ in 0..2 {
+        sync_push(&src, &dest);
+        assert_eq!(titles(&dest, &bucket), titles(&src, &bucket));
+    }
+}
+
+#[test]
+fn adjacent_historical_edit_recovers_through_staging() {
+    let (phone, staging) = memory_pair();
+    let desktop = Datastore::new_in_memory(false);
+    let bucket = create_bucket(&phone, "aw-watcher-android-adjacent-edit", "phone");
+    let desktop_bucket = format!("{bucket}-synced-from-phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    let edited_at = t0 + Duration::minutes(2);
+    phone
+        .insert_events(
+            &bucket,
+            &[
+                event_at(t0, Duration::minutes(1), "before"),
+                event_at(edited_at, Duration::minutes(1), "original"),
+                event_at(t0 + Duration::minutes(3), Duration::minutes(1), "after"),
+            ],
+        )
+        .unwrap();
+    phone.force_commit().unwrap();
+    sync_push(&phone, &staging);
+    sync_pull(&staging, &desktop);
+    delete_event_at(&phone, &bucket, edited_at);
+    sync_push(&phone, &staging);
+    sync_pull(&staging, &desktop);
+    assert_eq!(titles(&staging, &bucket), titles(&phone, &bucket));
+    assert_eq!(titles(&desktop, &desktop_bucket), titles(&phone, &bucket));
+    phone
+        .insert_events(
+            &bucket,
+            &[event_at(edited_at, Duration::minutes(1), "edited")],
+        )
+        .unwrap();
+    phone.force_commit().unwrap();
+    for _ in 0..2 {
+        sync_push(&phone, &staging);
+        sync_pull(&staging, &desktop);
+        assert_eq!(titles(&staging, &bucket), titles(&phone, &bucket));
+        assert_eq!(titles(&desktop, &desktop_bucket), titles(&phone, &bucket));
+    }
+}
+
+#[test]
+fn endpoint_zero_duration_clipped_copy_survives_source_title_edit() {
+    let (src, dest) = memory_pair();
+    let bucket = create_bucket(&src, "aw-watcher-android-endpoint-clip", "phone");
+    let t0 = Utc::now() - Duration::hours(2);
+    let end = t0 + Duration::minutes(1);
+    src.insert_events(
+        &bucket,
+        &[
+            event_at(t0, Duration::minutes(1), "original"),
+            event_at(t0 + Duration::minutes(2), Duration::minutes(1), "later"),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    let spec = SyncSpec {
+        start: Some(end),
+        ..SyncSpec::default()
+    };
+    aw_sync::sync_datastores(&src, &dest, true, Some("device-phone"), &spec).unwrap();
+    let before = dest.get_events(&bucket, None, None, None).unwrap();
+    assert_eq!(before.len(), 2);
+    assert!(before
+        .iter()
+        .any(|event| event.timestamp == end && event.duration == Duration::zero()));
+    delete_event_at(&src, &bucket, t0);
+    src.insert_events(&bucket, &[event_at(t0, Duration::minutes(1), "edited")])
+        .unwrap();
+    src.force_commit().unwrap();
+    for _ in 0..2 {
+        // Without an import floor, only the endpoint geometry prevents both
+        // pruning the live clip and duplicating it with the full source row.
+        sync_push(&src, &dest);
+        let after = dest.get_events(&bucket, None, None, None).unwrap();
+        assert_eq!(after, before);
+    }
+}

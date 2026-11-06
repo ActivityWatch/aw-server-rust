@@ -413,11 +413,13 @@ mod tests {
         assert_eq!(count(&source), 1);
     }
 
-    // v3 has the current bucket/event columns, but no key_value table and
-    // only the three original single-column event indexes.
+    // v3 has the current bucket/event columns, but no key_value or category
+    // sidecar table and only the three original single-column event indexes.
     fn downgrade_to_v3(conn: &Connection) {
         conn.execute_batch(
-            "DROP TABLE key_value;
+            "DROP TRIGGER events_delete_category_override;
+             DROP TABLE event_category_overrides;
+             DROP TABLE key_value;
              DROP INDEX events_bucketrow_starttime_endtime_index;
              DROP INDEX events_bucketrow_endtime_starttime_index;
              CREATE INDEX events_bucketrow_index ON events(bucketrow);

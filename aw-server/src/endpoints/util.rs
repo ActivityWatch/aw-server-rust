@@ -373,6 +373,7 @@ impl From<DatastoreError> for HttpErrorJson {
                 Status::NotFound,
                 format!("The requested event '{event_id}' does not exist in bucket '{bucket_id}'"),
             ),
+            DatastoreError::InvalidCategory(msg) => HttpErrorJson::new(Status::BadRequest, msg),
             DatastoreError::MpscError => HttpErrorJson::new(
                 Status::InternalServerError,
                 "Unexpected Mpsc error!".to_string(),

@@ -69,6 +69,7 @@ pub enum DatastoreError {
     BucketAlreadyExists(String),
     NoSuchKey(String),
     NoSuchEvent(String, i64),
+    InvalidCategory(String),
     MpscError,
     InternalError(String),
     /// A stored event row could not be parsed. Content corruption in a file

@@ -29,6 +29,80 @@ mod api_tests {
     }
 
     #[test]
+    fn devices_returns_only_local_device_matching_info() {
+        let server = setup_testserver();
+        let datastore = &server.state::<endpoints::ServerState>().unwrap().datastore;
+        for hostname in ["old-local-name", "peer-hostname"] {
+            let bucket: Bucket = serde_json::from_value(json!({
+                "id": format!("aw-watcher-window_{hostname}"),
+                "type": "currentwindow", "client": "test", "hostname": hostname
+            }))
+            .unwrap();
+            datastore.create_bucket(&bucket).unwrap();
+        }
+        let client = Client::untracked(server).unwrap();
+        let info: Value = client
+            .get("/api/0/info")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch()
+            .into_json()
+            .unwrap();
+        assert_eq!(info["device_id"], "test_id");
+        for _ in 0..2 {
+            let response = client
+                .get("/api/0/devices")
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .dispatch();
+            assert_eq!(response.status(), Status::Ok);
+            assert_eq!(response.content_type(), Some(ContentType::JSON));
+            let devices: Value = response.into_json().unwrap();
+            assert_eq!(
+                devices,
+                json!([{"id": info["device_id"], "hostname": info["hostname"]}])
+            );
+        }
+    }
+
+    #[test]
+    fn devices_requires_configured_api_key() {
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
+        let mut config = config::AWConfig::default();
+        config.auth.api_key = Some("test-key".to_string());
+        let client = Client::untracked(endpoints::build_rocket(state, config)).unwrap();
+        for path in ["/api/0/devices", "/api/0/devices/", "/%61pi/0/devices"] {
+            for authorization in [None, Some("Bearer wrong"), Some("Bearer test-key")] {
+                let mut request = client
+                    .get(path)
+                    .header(Header::new("Host", "127.0.0.1:5600"));
+                if let Some(value) = authorization {
+                    request = request.header(Header::new("Authorization", value));
+                }
+                let response = request.dispatch();
+                if authorization == Some("Bearer test-key") {
+                    assert_eq!(response.status(), Status::Ok, "{path}");
+                    assert_eq!(response.into_json::<Value>().unwrap()[0]["id"], "test_id");
+                } else {
+                    assert_eq!(response.status(), Status::Unauthorized, "{path}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn devices_rejects_invalid_host() {
+        let client = Client::untracked(setup_testserver()).unwrap();
+        let response = client
+            .get("/api/0/devices")
+            .header(Header::new("Host", "untrusted.example"))
+            .dispatch();
+        assert_eq!(response.status(), Status::BadRequest);
+    }
+
+    #[test]
     fn export_includes_pending_writes_and_preserves_headers_and_missing_bucket_errors() {
         let server = setup_testserver();
         let datastore = server

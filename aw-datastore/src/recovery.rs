@@ -151,7 +151,18 @@ pub fn recover_database(
     let mut ds = DatastoreInstance::new(&tx, false).map_err(error)?;
     let mut counts = RecoveryCounts::default();
     for (name, mut bucket) in source_ds.get_buckets() {
-        if ds.get_bucket(&name).is_err() {
+        if let Ok(existing) = ds.get_bucket(&name) {
+            if existing.device_id != bucket.device_id {
+                // A v7 database can already contain explicit peer ownership.
+                // Migration only stamps pre-v7 rows; it does not reset these IDs.
+                // Defer the whole source, rolling back any earlier inserts and
+                // leaving no completion marker, as for unreadable source events.
+                warn!(
+                    "History recovery source {source:?} has a different device for bucket {name:?}; leaving it untouched for manual recovery"
+                );
+                return Ok(RecoveryCounts::default());
+            }
+        } else {
             bucket.bid = None;
             bucket.events = None;
             ds.create_bucket(&tx, bucket).map_err(error)?;
@@ -227,6 +238,7 @@ mod tests {
         for (name, events) in rows {
             let bucket = Bucket {
                 id: (*name).to_owned(),
+                device_id: "local".to_owned(),
                 _type: "test".to_owned(),
                 client: "test".to_owned(),
                 hostname: "test".to_owned(),
@@ -346,6 +358,56 @@ mod tests {
         let ds = Datastore::new_with_legacy_import_opts(target.to_str().unwrap().into(), opts);
         assert_eq!(ds.get_event_count("python", None, None).unwrap(), 1);
         assert_eq!(ds.get_key_value("windows_python_recovery").unwrap(), "done");
+    }
+
+    #[test]
+    fn cross_device_name_collision_defers_union_without_completion_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let source = root.path().join("source.db");
+        populate(&target, &[("shared", vec![event(r#"{"a":1}"#)])]);
+        populate(&source, &[("shared", vec![event(r#"{"a":2}"#)])]);
+        let conn = Connection::open(&target).unwrap();
+        conn.execute("UPDATE buckets SET device_id = 'peer-abc'", [])
+            .unwrap();
+
+        let result = recover_database(
+            &target,
+            &source,
+            &root.path().join("collision-backup.db"),
+            "device-collision",
+        )
+        .unwrap();
+        assert_eq!(result, RecoveryCounts::default());
+        assert_eq!(count(&target), 1);
+        assert_eq!(count(&source), 1);
+        let completed: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM key_value WHERE key = 'windows_recovery:device-collision')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!completed, "a deferred union must remain retryable");
+        let device: String = conn
+            .query_row("SELECT device_id FROM buckets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(device, "peer-abc");
+
+        // Matching non-local identities are safe too; don't ban all peer buckets.
+        Connection::open(&source)
+            .unwrap()
+            .execute("UPDATE buckets SET device_id = 'peer-abc'", [])
+            .unwrap();
+        let retried = recover_database(
+            &target,
+            &source,
+            &root.path().join("retry-backup.db"),
+            "device-collision",
+        )
+        .unwrap();
+        assert_eq!(retried.events_inserted, 1);
+        assert_eq!(count(&target), 2);
     }
 
     #[test]

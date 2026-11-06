@@ -81,6 +81,15 @@ pub fn query(
     let use_cache = state.query_cache_enabled && cache.unwrap_or(true);
     let datastore = state.query_datastore();
     let request_start = Instant::now();
+    // Write generation every cached result is checked against. Recorded
+    // before the flush below: a write after this point may be missing from
+    // what the reader returns (it was not flushed), so `put` must refuse to
+    // cache any period it touched. A per-period generation read later would
+    // already include such a write and let the stale result through.
+    let request_generation = state.query_cache.generation();
+    // Whether results computed here may be stored. A failed flush leaves
+    // overlapping writes invisible to the reader.
+    let mut store_results = use_cache;
     // The reader only sees committed data, and writes (heartbeats, but also
     // edits to old events and imports) are acknowledged before the writer's
     // batch commits. Flush first when any write since the last flush touched
@@ -97,7 +106,10 @@ pub fn query(
         if let Some(generation) = state.query_cache.pending_overlapping(&periods) {
             match state.datastore.force_commit() {
                 Ok(()) => state.query_cache.clear_pending_through(generation),
-                Err(e) => warn!("Failed to flush writes before query: {e:?}"),
+                Err(e) => {
+                    warn!("Failed to flush writes before query: {e:?}");
+                    store_results = false;
+                }
             }
         }
     }
@@ -175,13 +187,12 @@ pub fn query(
                 bodies.push(cached);
                 continue;
             }
-            // Record the write generation before evaluating, so a write that
-            // lands mid-query can refuse the store (see query_cache).
-            let generation = state.query_cache.generation();
             let serialized = evaluate(interval)?;
-            state
-                .query_cache
-                .put(key, period, Arc::clone(&serialized), generation);
+            if store_results {
+                state
+                    .query_cache
+                    .put(key, period, Arc::clone(&serialized), request_generation);
+            }
             bodies.push(serialized);
             continue;
         }

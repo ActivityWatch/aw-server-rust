@@ -4,7 +4,7 @@ use std::fmt;
 use super::functions;
 use super::QueryError;
 use aw_models::Event;
-use aw_transform::classify::{CategoryRule, RegexRule, Rule};
+use aw_transform::classify::{CategoryRule, LogicalOperator, LogicalRule, RegexRule, Rule};
 
 use serde::{Serialize, Serializer};
 use serde_json::value::Value;
@@ -426,6 +426,31 @@ impl TryFrom<&DataType> for Rule {
         };
         if rtype == "none" {
             Ok(Self::None)
+        } else if rtype == "and" || rtype == "or" {
+            let operator = if rtype == "and" {
+                LogicalOperator::And
+            } else {
+                LogicalOperator::Or
+            };
+            let rules = match obj.get("rules") {
+                Some(DataType::List(rules)) => rules
+                    .iter()
+                    .map(Rule::try_from)
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(_) => {
+                    return Err(QueryError::InvalidFunctionParameters(format!(
+                        "the rules field of the {rtype} rule is not a list"
+                    )))
+                }
+                None => {
+                    return Err(QueryError::InvalidFunctionParameters(format!(
+                        "{rtype} rule is missing the 'rules' field"
+                    )))
+                }
+            };
+            LogicalRule::new(rules, operator)
+                .map(Self::Logical)
+                .map_err(QueryError::InvalidFunctionParameters)
         } else if rtype == "regex" {
             let regex_val = match obj.get("regex") {
                 Some(regex_val) => regex_val,

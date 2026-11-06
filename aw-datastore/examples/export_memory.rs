@@ -52,6 +52,7 @@ fn main() {
             _type: "test".into(),
             client: "test".into(),
             hostname: "test".into(),
+            device_id: "local".into(),
             created: Some(Utc::now()),
             data: Default::default(),
             metadata: BucketMetadata::default(),
@@ -99,7 +100,7 @@ fn main() {
             println!("{mode}: {count} synthetic events, {:?}", start.elapsed());
         }
         "materialized" => {
-            let mut buckets = ds.get_buckets();
+            let mut buckets = ds.get_buckets().unwrap();
             for (id, bucket) in &mut buckets {
                 bucket.events = Some(TryVec::new(
                     ds.get_events(&conn, id, None, None, None).unwrap(),

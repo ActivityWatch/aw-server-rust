@@ -87,8 +87,24 @@ pub struct CacheKey {
 
 impl CacheKey {
     pub fn new(query: &str, period: TimeRange) -> Self {
+        Self::for_device(query, period, None)
+    }
+
+    /// Include exact routing scope without delimiter-based composite identities.
+    /// `None` is the legacy global namespace, distinct from every device.
+    pub fn for_device(query: &str, period: TimeRange, device: Option<&str>) -> Self {
+        let mut hash = Sha256::new();
+        match device {
+            None => hash.update([0]),
+            Some(device) => {
+                hash.update([1]);
+                hash.update((device.len() as u64).to_be_bytes());
+                hash.update(device.as_bytes());
+            }
+        }
+        hash.update(query.as_bytes());
         Self {
-            query_id: Sha256::digest(query.as_bytes()).into(),
+            query_id: hash.finalize().into(),
             start: period.0,
             end: period.1,
         }
@@ -417,6 +433,24 @@ mod tests {
                 .unwrap()
                 .as_str(),
         )
+    }
+
+    #[test]
+    fn device_cache_namespaces_are_distinct_and_unambiguous() {
+        let p = period(1);
+        assert_ne!(
+            CacheKey::new("q", p),
+            CacheKey::for_device("q", p, Some("local"))
+        );
+        assert_ne!(
+            CacheKey::for_device("q", p, Some("local")),
+            CacheKey::for_device("q", p, Some("peer"))
+        );
+        assert_ne!(
+            CacheKey::for_device("bc", p, Some("a")),
+            CacheKey::for_device("c", p, Some("ab"))
+        );
+        assert_eq!(CacheKey::new("q", p), CacheKey::for_device("q", p, None));
     }
 
     #[test]

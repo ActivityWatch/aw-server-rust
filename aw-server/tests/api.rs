@@ -72,6 +72,102 @@ mod api_tests {
     }
 
     #[test]
+    fn json_exports_take_a_date_range() {
+        let server = setup_testserver();
+        let datastore = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "days", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        datastore.create_bucket(&bucket).unwrap();
+        // One hour a day on 3, 4 and 5 November, plus one running over midnight into the 4th.
+        let events: Vec<aw_models::Event> = [
+            ("2026-11-03T09:00:00Z", 3600.0, "monday"),
+            ("2026-11-03T23:30:00Z", 3600.0, "midnight"),
+            ("2026-11-04T09:00:00Z", 3600.0, "tuesday"),
+            ("2026-11-05T09:00:00Z", 3600.0, "wednesday"),
+        ]
+        .iter()
+        .map(|(timestamp, duration, title)| {
+            serde_json::from_value(
+                json!({"timestamp": timestamp, "duration": duration, "data": {"title": title}}),
+            )
+            .unwrap()
+        })
+        .collect();
+        datastore.insert_events("days", &events).unwrap();
+        let client = Client::untracked(server).unwrap();
+        let export = |path: &str| {
+            let response = client
+                .get(path)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .dispatch();
+            let status = response.status();
+            let body: Value = serde_json::from_str(&response.into_string().unwrap()).unwrap();
+            (status, body)
+        };
+        let titles = |body: &Value| -> Vec<String> {
+            let mut titles: Vec<String> = body["buckets"]["days"]["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["data"]["title"].as_str().unwrap().to_owned())
+                .collect();
+            titles.sort();
+            titles
+        };
+
+        let range = "start=2026-11-04T00:00:00Z&end=2026-11-05T00:00:00Z";
+        for path in [
+            format!("/api/0/buckets/days/export?{range}"),
+            format!("/api/0/export?{range}"),
+        ] {
+            let (status, body) = export(&path);
+            assert_eq!(status, Status::Ok, "{path}");
+            assert_eq!(titles(&body), ["midnight", "tuesday"], "{path}");
+            // The event running over midnight is cut at the start of the range.
+            let midnight = body["buckets"]["days"]["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["data"]["title"] == "midnight")
+                .unwrap()
+                .clone();
+            assert_eq!(midnight["timestamp"], "2026-11-04T00:00:00Z");
+            assert_eq!(midnight["duration"], 1800.0);
+        }
+
+        // Without a range, the whole bucket, as before.
+        let (_, body) = export("/api/0/buckets/days/export");
+        assert_eq!(
+            titles(&body),
+            ["midnight", "monday", "tuesday", "wednesday"]
+        );
+        // One side only.
+        let (_, body) = export("/api/0/buckets/days/export?start=2026-11-05T00:00:00Z");
+        assert_eq!(titles(&body), ["wednesday"]);
+
+        for bad in [
+            "start=yesterday",
+            "end=2026-11-05",
+            "start=3000-01-01T00:00:00Z",
+        ] {
+            for path in [
+                format!("/api/0/buckets/days/export?{bad}"),
+                format!("/api/0/export?{bad}"),
+            ] {
+                let (status, body) = export(&path);
+                assert_eq!(status, Status::BadRequest, "{path}");
+                assert!(body["message"].is_string(), "{path}");
+            }
+        }
+    }
+
+    #[test]
     fn export_all_empty_uses_plural_filename_and_opens_before_body() {
         let server = setup_testserver();
         let client = Client::untracked(server).unwrap();

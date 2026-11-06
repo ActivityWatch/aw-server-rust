@@ -1658,7 +1658,7 @@ mod datastore_tests {
             assert_eq!(total_count, 4, "v{version} total count");
 
             // Export paths share the index selection.
-            ds.export_to_file(Some("testid"), tempfile::tempfile().unwrap())
+            ds.export_to_file(Some("testid"), None, None, tempfile::tempfile().unwrap())
                 .unwrap_or_else(|e| panic!("v{version} export: {e:?}"));
             ds.export_csv_to_file(
                 "testid",

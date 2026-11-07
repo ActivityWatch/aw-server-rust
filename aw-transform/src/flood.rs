@@ -18,8 +18,8 @@ use chrono::Duration;
 /// Events are processed in (timestamp, duration) order. The output never contains overlapping
 /// events: where events with different data overlap, the later event takes precedence and the
 /// earlier one is cut off at its start (see ActivityWatch/activitywatch#1369). Zero-duration
-/// events are dropped before the pairwise pass so they cannot occupy a neighbour slot and
-/// block a pulsetime-sized gap (ActivityWatch/aw-core#201).
+/// markers inside the preceding retained event are skipped before pairing so they cannot
+/// block a short gap. Standalone and endpoint markers can still bridge nearby events.
 ///
 /// # Example
 ///
@@ -43,10 +43,21 @@ pub fn flood(events: Vec<Event>, pulsetime: Duration) -> Vec<Event> {
     // Sort by (timestamp, duration) so shorter same-timestamp events come first.
     events.sort_by_key(|e| (e.timestamp, e.duration));
     let zero = Duration::zero();
-    // Drop duration<=0 before pairing. A zero-duration event still occupies a
-    // neighbour slot if left in, so a later pulsetime-sized gap is never
-    // considered even though the event itself is filtered from the output.
-    events.retain(|e| e.duration > zero);
+    // Only skip zero markers inside the preceding retained event. An older
+    // event's maximum end is not the boundary: later events take precedence.
+    let mut visible_events: Vec<Event> = Vec::with_capacity(events.len());
+    for event in events {
+        if event.duration == zero
+            && visible_events.last().is_some_and(|previous| {
+                previous.timestamp <= event.timestamp
+                    && event.timestamp < previous.calculate_endtime()
+            })
+        {
+            continue;
+        }
+        visible_events.push(event);
+    }
+    let mut events = visible_events;
 
     // If negative gaps are smaller than this, prune them to become zero
     let negative_gap_trim_thres = Duration::milliseconds(100);
@@ -436,6 +447,68 @@ mod tests {
         assert_eq!(without_marker, expected);
         assert_eq!(with_marker, expected);
         assert_eq!(flood(with_marker.clone(), pt), with_marker);
+    }
+
+    #[test]
+    fn test_flood_preserves_standalone_zero_duration_bridge() {
+        let res = flood(
+            vec![ev(0., 1., "a"), ev(5., 0., "marker"), ev(10., 1., "b")],
+            Duration::seconds(5),
+        );
+        assert_eq!(
+            res,
+            vec![ev(0., 3., "a"), ev(3., 4.5, "marker"), ev(7.5, 3.5, "b")]
+        );
+        assert_eq!(
+            res.iter().map(|e| e.duration).sum::<Duration>(),
+            Duration::seconds(11)
+        );
+    }
+
+    #[test]
+    fn test_flood_zero_marker_after_later_wins_event_still_bridges() {
+        let res = flood(
+            vec![
+                ev(0., 10., "a"),
+                ev(5., 1., "nested"),
+                ev(8., 0., "marker"),
+                ev(12., 1., "b"),
+            ],
+            Duration::seconds(5),
+        );
+        assert_eq!(
+            res,
+            vec![
+                ev(0., 5., "a"),
+                ev(5., 2., "nested"),
+                ev(7., 3., "marker"),
+                ev(10., 3., "b")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_flood_zero_marker_at_endpoint_still_bridges() {
+        let res = flood(
+            vec![ev(0., 1., "a"), ev(1., 0., "marker"), ev(6., 1., "b")],
+            Duration::seconds(5),
+        );
+        assert_eq!(
+            res,
+            vec![ev(0., 1., "a"), ev(1., 2.5, "marker"), ev(3.5, 3.5, "b")]
+        );
+    }
+
+    #[test]
+    fn test_flood_positive_nested_midpoint_unchanged() {
+        let res = flood(
+            vec![ev(0., 10., "a"), ev(5., 2., "nested"), ev(12., 1., "b")],
+            Duration::seconds(5),
+        );
+        assert_eq!(
+            res,
+            vec![ev(0., 5., "a"), ev(5., 4.5, "nested"), ev(9.5, 3.5, "b")]
+        );
     }
 
     #[test]

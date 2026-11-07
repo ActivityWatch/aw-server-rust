@@ -18,7 +18,8 @@ use chrono::Duration;
 /// Events are processed in (timestamp, duration) order. The output never contains overlapping
 /// events: where events with different data overlap, the later event takes precedence and the
 /// earlier one is cut off at its start (see ActivityWatch/activitywatch#1369). Zero-duration
-/// events are dropped.
+/// events are dropped before the pairwise pass so they cannot occupy a neighbour slot and
+/// block a pulsetime-sized gap (ActivityWatch/aw-core#201).
 ///
 /// # Example
 ///
@@ -41,10 +42,14 @@ pub fn flood(events: Vec<Event>, pulsetime: Duration) -> Vec<Event> {
     let mut events = events;
     // Sort by (timestamp, duration) so shorter same-timestamp events come first.
     events.sort_by_key(|e| (e.timestamp, e.duration));
+    let zero = Duration::zero();
+    // Drop duration<=0 before pairing. A zero-duration event still occupies a
+    // neighbour slot if left in, so a later pulsetime-sized gap is never
+    // considered even though the event itself is filtered from the output.
+    events.retain(|e| e.duration > zero);
 
     // If negative gaps are smaller than this, prune them to become zero
     let negative_gap_trim_thres = Duration::milliseconds(100);
-    let zero = Duration::zero();
 
     let mut warned_negative_gap_safe = false;
     let mut warned_negative_gap_unsafe = false;
@@ -409,6 +414,28 @@ mod tests {
             Duration::seconds(5),
         );
         assert_eq!(res, vec![ev(60., 10., "y")]);
+    }
+
+    #[test]
+    fn test_flood_zero_duration_does_not_block_neighbour_gap() {
+        // ActivityWatch/aw-core#201: a duration-0 marker between neighbours must
+        // not prevent filling a pulsetime-sized gap. Reporter fixture, default
+        // pulsetime=5. Times are seconds from 2000-01-01 (ev() epoch).
+        let pt = Duration::seconds(5);
+        let without_marker = flood(vec![ev(9., 1., "b"), ev(9., 7., "c"), ev(18., 1., "a")], pt);
+        let with_marker = flood(
+            vec![
+                ev(9., 1., "b"),
+                ev(9., 7., "c"),
+                ev(12., 0., "marker"),
+                ev(18., 1., "a"),
+            ],
+            pt,
+        );
+        let expected = vec![ev(9., 8., "c"), ev(17., 2., "a")];
+        assert_eq!(without_marker, expected);
+        assert_eq!(with_marker, expected);
+        assert_eq!(flood(with_marker.clone(), pt), with_marker);
     }
 
     #[test]

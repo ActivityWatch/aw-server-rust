@@ -44,21 +44,31 @@ pub fn flood(events: Vec<Event>, pulsetime: Duration) -> Vec<Event> {
     // Sort by (timestamp, duration) so shorter same-timestamp events come first.
     events.sort_by_key(|e| (e.timestamp, e.duration));
     let zero = Duration::zero();
-    // Only skip zero markers inside the preceding retained event. An older
-    // event's maximum end is not the boundary: later events take precedence.
+    // Only skip zero markers inside the preceding retained span. Overlapping
+    // same-data events retain their union; different data resets the boundary
+    // because later events take precedence. Do not change the raw events here:
+    // the pairwise pass still owns positive-event midpoint/threshold semantics.
     let mut visible_events: Vec<Event> = Vec::with_capacity(events.len());
+    let mut retained_end = None;
     for event in events {
         if event.duration < zero {
             continue;
         }
-        if event.duration == zero
-            && visible_events.last().is_some_and(|previous| {
-                previous.timestamp <= event.timestamp
-                    && event.timestamp < previous.calculate_endtime()
-            })
-        {
+        if event.duration == zero && retained_end.is_some_and(|end| event.timestamp < end) {
             continue;
         }
+        let event_end = event.calculate_endtime();
+        retained_end = Some(match retained_end {
+            Some(end)
+                if event.timestamp < end
+                    && visible_events
+                        .last()
+                        .is_some_and(|previous| previous.data == event.data) =>
+            {
+                max(end, event_end)
+            }
+            _ => event_end,
+        });
         visible_events.push(event);
     }
     let mut events = visible_events;
@@ -451,6 +461,26 @@ mod tests {
         assert_eq!(without_marker, expected);
         assert_eq!(with_marker, expected);
         assert_eq!(flood(with_marker.clone(), pt), with_marker);
+    }
+
+    #[test]
+    fn test_flood_zero_marker_inside_equal_data_merged_span() {
+        let pt = Duration::seconds(5);
+        let expected = vec![ev(0., 12.5, "a"), ev(12.5, 3.5, "b")];
+        for overlapping in [
+            vec![ev(0., 10., "a"), ev(5., 1., "a")],
+            vec![ev(0., 10., "a"), ev(5., 1., "a"), ev(7., 0.5, "a")],
+        ] {
+            let mut without_marker = overlapping.clone();
+            without_marker.push(ev(15., 1., "b"));
+            assert_eq!(flood(without_marker, pt), expected);
+
+            let mut with_marker = overlapping;
+            with_marker.extend([ev(8., 0., "marker"), ev(15., 1., "b")]);
+            let res = flood(with_marker, pt);
+            assert_eq!(res, expected);
+            assert_eq!(flood(res.clone(), pt), res);
+        }
     }
 
     #[test]

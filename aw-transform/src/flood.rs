@@ -17,7 +17,8 @@ use chrono::Duration;
 ///
 /// Events are processed in (timestamp, duration) order. The output never contains overlapping
 /// events: where events with different data overlap, the later event takes precedence and the
-/// earlier one is cut off at its start (see ActivityWatch/activitywatch#1369). Zero-duration
+/// earlier one is cut off at its start (see ActivityWatch/activitywatch#1369). Negative-duration
+/// events are discarded before pairing so invalid imports cannot gain activity time. Zero-duration
 /// markers inside the preceding retained event are skipped before pairing so they cannot
 /// block a short gap. Standalone and endpoint markers can still bridge nearby events.
 ///
@@ -47,6 +48,9 @@ pub fn flood(events: Vec<Event>, pulsetime: Duration) -> Vec<Event> {
     // event's maximum end is not the boundary: later events take precedence.
     let mut visible_events: Vec<Event> = Vec::with_capacity(events.len());
     for event in events {
+        if event.duration < zero {
+            continue;
+        }
         if event.duration == zero
             && visible_events.last().is_some_and(|previous| {
                 previous.timestamp <= event.timestamp
@@ -447,6 +451,19 @@ mod tests {
         assert_eq!(without_marker, expected);
         assert_eq!(with_marker, expected);
         assert_eq!(flood(with_marker.clone(), pt), with_marker);
+    }
+
+    #[test]
+    fn test_flood_negative_duration_does_not_bridge_gap() {
+        let pt = Duration::seconds(5);
+        let expected = vec![ev(0., 1., "a"), ev(7., 1., "b")];
+        let res = flood(
+            vec![ev(0., 1., "a"), ev(3., -1., "invalid"), ev(7., 1., "b")],
+            pt,
+        );
+        assert_eq!(res, expected);
+        assert_eq!(flood(res.clone(), pt), res);
+        assert!(flood(vec![ev(3., -1., "invalid")], pt).is_empty());
     }
 
     #[test]

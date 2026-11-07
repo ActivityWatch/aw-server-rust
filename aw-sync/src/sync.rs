@@ -54,17 +54,64 @@ impl Default for SyncSpec {
     }
 }
 
-/// Open (or create) the cursors.db for a given source device under `root`.
+/// Stable tag identifying a sync root, so one root's cursors cannot be read as
+/// another's (ActivityWatch/aw-server-rust#789).
 ///
-/// Cursors are stored under `.cursors/{device_id}/cursors.db`.  The leading dot
-/// means both the 3-level (`list_remote_dbs`) and 2-level (`find_remotes`)
-/// peer-discovery walkers skip the directory, so `cursors.db` is never mistaken
-/// for a peer activity database and chosen over the real data file.
-fn open_or_create_cursor_ds(root: &Path, device_id: &str) -> Result<Datastore, String> {
-    let dir = root.join(".cursors").join(device_id);
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create cursor dir {}: {e}", dir.display()))?;
-    create_datastore(&dir.join("cursors.db"))
+/// FNV-1a rather than `DefaultHasher`: std makes no stability promise for the
+/// latter across releases, and an unstable tag would silently reset every
+/// user's cursors. It also avoids a new dependency — `sha2` is only pulled in
+/// by the optional `sync-v2` feature.
+fn sync_root_tag(sync_root: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in sync_root.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// aw-sync's local state dir, next to `last-sync-report.json`.
+///
+/// Override with `AW_SYNC_CURSORS_DIR` (absolute path) for relocation.
+fn cursor_store_dir() -> Result<PathBuf, String> {
+    if let Ok(p) = std::env::var("AW_SYNC_CURSORS_DIR") {
+        if !p.is_empty() {
+            return Ok(PathBuf::from(p));
+        }
+    }
+    // Read-only resolution: aw-sync follows whichever dir the server uses, and
+    // must not migrate it (same contract as `report::last_report_path`).
+    aw_server::dirs::data_dir_path()
+        .map(|dir| dir.join("aw-sync"))
+        .map_err(|_| "Could not get data dir".to_string())
+}
+
+/// Path of the pull-cursor store for `sync_root`, inside `dir`.
+fn cursor_store_path_in(dir: &Path, sync_root: &Path) -> PathBuf {
+    dir.join(format!("cursors-{}.db", sync_root_tag(sync_root)))
+}
+
+/// Path of the pull-cursor store for `sync_root` in aw-sync's local state dir.
+///
+/// The store must not live in the sync root: that directory is shared state
+/// (Dropbox/Syncthing/NFS/USB), so a live sqlite file there gets replicated to
+/// every peer, invites cloud-sync conflict on a file nobody else reads, and
+/// breaks the "each device only writes files it owns" invariant
+/// (ActivityWatch/aw-server-rust#682). Root-scoping keeps two configured sync
+/// roots from sharing one peer's progress; `cursor_key` already carries the
+/// source device id, so no per-device subdirectory is needed
+/// (ActivityWatch/aw-server-rust#789).
+fn cursor_store_path(sync_root: &Path) -> Result<PathBuf, String> {
+    Ok(cursor_store_path_in(&cursor_store_dir()?, sync_root))
+}
+
+/// Open (or create) the pull-cursor datastore at `path`.
+fn open_or_create_cursor_ds(path: &Path) -> Result<Datastore, String> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("Failed to create cursor dir {}: {e}", dir.display()))?;
+    }
+    create_datastore(path)
 }
 
 /// Key identifying the last-synced source rowid for a given (device, bucket) pair.
@@ -119,11 +166,14 @@ pub fn sync_run(
     sync_run_with_cursor_root(client, sync_spec, mode, sync_spec.path.as_path())
 }
 
-/// [`sync_run`] with an explicit root for the pull-cursor store.
+/// [`sync_run`] with an explicit sync root used to identify the pull-cursor
+/// store.
 ///
 /// Every pull of a given peer must resolve the same cursor store, whatever
 /// `sync_spec.path` points at; otherwise one pull mode replays rows another
-/// mode already copied. Pass the sync root.
+/// mode already copied. Pass the sync **root**: the store path is derived from
+/// it (see [`cursor_store_path`]), so passing a peer host folder would split
+/// one root's cursors across files.
 pub(crate) fn sync_run_with_cursor_root(
     client: &AwClient,
     sync_spec: &SyncSpec,
@@ -233,12 +283,14 @@ pub(crate) fn sync_run_with_cursor_root(
             .iter()
             .map(|(db, ds)| (db, ds as &dyn AccessMethod))
             .collect();
-        // Open a cursor datastore for each peer's device_id so aw-sync can
-        // resume from the last-seen source rowid rather than the destination's
-        // newest timestamp — fixing late-arriving backfill blindness (#696).
+        // Open the local cursor store so aw-sync can resume from the last-seen
+        // source rowid rather than the destination's newest timestamp — fixing
+        // late-arriving backfill blindness (#696). It lives in aw-sync's own
+        // state dir, root-scoped, never in the (shared) sync root (#789).
         // Non-fatal: if cursor_ds creation fails we fall back to the
         // timestamp-based path silently.
-        let cursor_ds = open_or_create_cursor_ds(cursor_root, device_id)
+        let cursor_ds = cursor_store_path(cursor_root)
+            .and_then(|path| open_or_create_cursor_ds(&path))
             .map_err(|e| {
                 warn!("Could not open cursor datastore: {e}; falling back to timestamp-based sync");
             })
@@ -3179,7 +3231,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         // Source bucket hostname must match what sync builds the dest bucket id from.
         let src_hostname = "test-device";
@@ -3274,7 +3326,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -3365,7 +3417,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -3462,7 +3514,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-host").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let bucket_id = "aw-watcher-test";
         ds_a.create_bucket(&make_bucket(bucket_id, "device-a"))
@@ -3550,7 +3602,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -3638,7 +3690,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -3742,7 +3794,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -3831,7 +3883,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -3930,7 +3982,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -4028,7 +4080,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -4099,7 +4151,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -4258,7 +4310,7 @@ mod rowid_cursor_tests {
         ));
         fs::create_dir_all(&cursor_root).unwrap();
         let cursor_ds =
-            open_or_create_cursor_ds(&cursor_root, "test-device").expect("cursor_ds must open");
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
 
         let src_hostname = "test-device";
         let bucket_id = "aw-watcher-test";
@@ -4345,5 +4397,92 @@ mod rowid_cursor_tests {
         ds_src.close();
         ds_dest.close();
         let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// #789: the cursor store must live in aw-sync's local state dir, never in
+    /// the sync root. The root is shared state (Dropbox/Syncthing/NFS/USB), so
+    /// a live sqlite file there is replicated to every peer.
+    #[test]
+    fn cursor_store_is_outside_the_sync_root() {
+        let local_state = std::env::temp_dir().join(format!(
+            "aw-sync-local-state-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        let sync_root = std::env::temp_dir().join(format!(
+            "aw-sync-shared-root-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&sync_root).unwrap();
+
+        let path = cursor_store_path_in(&local_state, &sync_root);
+
+        assert!(
+            path.starts_with(&local_state),
+            "cursor store must live in the local state dir; got {}",
+            path.display()
+        );
+        assert!(
+            !path.starts_with(&sync_root),
+            "cursor store must not live in the shared sync root; got {}",
+            path.display()
+        );
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(format!("cursors-{}.db", sync_root_tag(&sync_root)).as_str()),
+            "the filename carries the root tag"
+        );
+
+        let _ = fs::remove_dir_all(&sync_root);
+    }
+
+    /// #789: two configured sync roots must not share one peer's progress, and
+    /// the same root must always resolve the same file.
+    #[test]
+    fn cursor_store_is_root_scoped() {
+        let dir = std::env::temp_dir().join(format!(
+            "aw-sync-root-scope-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        let root_a = Path::new("/srv/a/Sync");
+        let root_b = Path::new("/srv/b/Sync");
+
+        let a1 = cursor_store_path_in(&dir, root_a);
+        let a2 = cursor_store_path_in(&dir, root_a);
+        let b1 = cursor_store_path_in(&dir, root_b);
+
+        assert_eq!(a1, a2, "same sync root must resolve the same store");
+        assert_ne!(a1, b1, "different sync roots must not share a cursor store");
+    }
+
+    /// #789: no per-device subdirectory. `cursor_key` already carries the
+    /// source device id, so the local device id must not select a directory.
+    #[test]
+    fn cursor_store_has_no_per_device_subdirectory() {
+        let dir = std::env::temp_dir().join(format!(
+            "aw-sync-single-file-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        let root = Path::new("/srv/Sync");
+
+        let path = cursor_store_path_in(&dir, root);
+
+        assert_eq!(
+            path.parent(),
+            Some(dir.as_path()),
+            "the store must sit directly in the state dir, with no per-device nesting"
+        );
+        assert!(
+            !path.to_string_lossy().contains(".cursors"),
+            "the old `.cursors/<device>/` layout must be gone; got {}",
+            path.display()
+        );
+    }
+
+    /// The tag must be stable across processes: an unstable hash would reset
+    /// every user's cursors on upgrade. Pin one value.
+    #[test]
+    fn sync_root_tag_is_stable() {
+        assert_eq!(sync_root_tag(Path::new("/srv/Sync")), "7b03cc74817fff4f");
+        assert_eq!(sync_root_tag(Path::new("/srv/a/Sync")), "075e95dff4e52683");
     }
 }

@@ -146,8 +146,9 @@ fn pull_db(client: &AwClient, host: &str, db_path: &Path) -> Result<SyncReport, 
         buckets: None, // Sync all buckets by default
         start: None,
     };
-    // `path` is the peer's host folder here; keep cursors at the sync root so
-    // this pull and `sync_run` from the root share one cursor store.
+    // `path` is the peer's host folder here; pass the sync root so this pull
+    // and `sync_run` from the root resolve the same cursor store. The store
+    // itself lives in aw-sync's local state dir, not in the shared root (#789).
     sync_run_with_cursor_root(client, &sync_spec, SyncMode::Pull, &sync_root_dir)
 }
 

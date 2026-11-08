@@ -46,19 +46,24 @@ impl RuleTrait for Rule {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogicalOperator {
-    And,
-    Or,
+    /// Every nested rule must match.
+    All,
+    /// At least one nested rule must match.
+    Any,
 }
 
-/// Combines nested rules with `and`/`or`, so one category can match e.g.
+/// Combines nested rules with `all`/`any`, so one category can match e.g.
 /// "app is Safari AND title ends with YouTube", or several unrelated apps.
+///
+/// The names match the extended rule engine proposed in
+/// ActivityWatch/activitywatch#1360 so there is one vocabulary for the concept.
 pub struct LogicalRule {
     rules: Vec<Rule>,
     operator: LogicalOperator,
 }
 
 impl LogicalRule {
-    /// An empty rule list is rejected: a vacuous `and` would match every event.
+    /// An empty rule list is rejected: a vacuous `all` would match every event.
     pub fn new(rules: Vec<Rule>, operator: LogicalOperator) -> Result<Self, String> {
         if rules.is_empty() {
             return Err("logical rule must contain at least one rule".to_string());
@@ -70,8 +75,8 @@ impl LogicalRule {
 impl RuleTrait for LogicalRule {
     fn matches(&self, event: &Event, values: &MatchValues) -> bool {
         match self.operator {
-            LogicalOperator::And => self.rules.iter().all(|r| r.matches(event, values)),
-            LogicalOperator::Or => self.rules.iter().any(|r| r.matches(event, values)),
+            LogicalOperator::All => self.rules.iter().all(|r| r.matches(event, values)),
+            LogicalOperator::Any => self.rules.iter().any(|r| r.matches(event, values)),
         }
     }
 
@@ -878,8 +883,8 @@ fn naive_rule_matches(rule: &Rule, event: &Event) -> bool {
             }
         }
         Rule::Logical(l) => match l.operator {
-            LogicalOperator::And => l.rules.iter().all(|r| naive_rule_matches(r, event)),
-            LogicalOperator::Or => l.rules.iter().any(|r| naive_rule_matches(r, event)),
+            LogicalOperator::All => l.rules.iter().all(|r| naive_rule_matches(r, event)),
+            LogicalOperator::Any => l.rules.iter().any(|r| naive_rule_matches(r, event)),
         },
     }
 }
@@ -935,7 +940,7 @@ fn test_categorize_matches_naive_best_of_all() {
             };
             let mut rule = Rule::Regex(RegexRule::new(pattern, ignore_case, select_keys).unwrap());
             // Occasionally combine rules logically, so the naive oracle cross-check
-            // also covers the new and/or branch (including nesting).
+            // also covers the new all/any branch (including nesting).
             if rng.below(3) == 0 {
                 let pattern2 = PATTERNS[rng.below(PATTERNS.len() as u64) as usize];
                 let ignore_case2 = rng.below(2) == 0;
@@ -951,15 +956,18 @@ fn test_categorize_matches_naive_best_of_all() {
                     let pattern3 = PATTERNS[rng.below(PATTERNS.len() as u64) as usize];
                     let third = Rule::Regex(RegexRule::new(pattern3, false, None).unwrap());
                     let inner = Rule::Logical(
-                        LogicalRule::new(vec![subrules.pop().unwrap(), third], LogicalOperator::Or)
-                            .unwrap(),
+                        LogicalRule::new(
+                            vec![subrules.pop().unwrap(), third],
+                            LogicalOperator::Any,
+                        )
+                        .unwrap(),
                     );
                     subrules.push(inner);
                 }
                 let operator = if rng.below(2) == 0 {
-                    LogicalOperator::And
+                    LogicalOperator::All
                 } else {
-                    LogicalOperator::Or
+                    LogicalOperator::Any
                 };
                 rule = Rule::Logical(LogicalRule::new(subrules, operator).unwrap());
             }
@@ -1028,7 +1036,7 @@ fn test_logical_rule() {
     let and = Rule::Logical(
         LogicalRule::new(
             vec![regex("^Safari$", "app"), regex("YouTube$", "title")],
-            LogicalOperator::And,
+            LogicalOperator::All,
         )
         .unwrap(),
     );
@@ -1037,7 +1045,7 @@ fn test_logical_rule() {
     let and_miss = Rule::Logical(
         LogicalRule::new(
             vec![regex("^Firefox$", "app"), regex("YouTube$", "title")],
-            LogicalOperator::And,
+            LogicalOperator::All,
         )
         .unwrap(),
     );
@@ -1045,7 +1053,7 @@ fn test_logical_rule() {
 
     // Nested: (app=Firefox) OR (app=Safari AND title~YouTube)
     let nested = Rule::Logical(
-        LogicalRule::new(vec![regex("^Firefox$", "app"), and], LogicalOperator::Or).unwrap(),
+        LogicalRule::new(vec![regex("^Firefox$", "app"), and], LogicalOperator::Any).unwrap(),
     );
     assert!(nested.matches(&event, &values));
     assert!(!nested.needs_values());
@@ -1053,12 +1061,12 @@ fn test_logical_rule() {
     let unscoped = Rule::Logical(
         LogicalRule::new(
             vec![Rule::from(Regex::new("Cats").unwrap())],
-            LogicalOperator::Or,
+            LogicalOperator::Any,
         )
         .unwrap(),
     );
     assert!(unscoped.needs_values());
     assert!(unscoped.matches(&event, &values));
 
-    assert!(LogicalRule::new(vec![], LogicalOperator::And).is_err());
+    assert!(LogicalRule::new(vec![], LogicalOperator::All).is_err());
 }

@@ -697,7 +697,7 @@ mod query_tests {
 
     #[test]
     fn test_logical_rules() {
-        // Query-level coverage for the and/or logical rules: the JSON accepted by
+        // Query-level coverage for the all/any logical rules: the JSON accepted by
         // `tag`/`categorize` is exercised end to end, not just the rule constructor.
         let ds = setup_datastore_populated();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
@@ -718,11 +718,11 @@ mod query_tests {
                 .count()
         };
 
-        // `or` matches when any nested rule matches; both populated events match one branch.
+        // `any` matches when any nested rule matches; both populated events match one branch.
         let code = format!(
             r#"
             events = query_bucket("{BUCKET_ID}");
-            events = tag(events, [["logical-or", {{ "type": "or", "rules": [
+            events = tag(events, [["logical-any", {{ "type": "any", "rules": [
                 {{ "type": "regex", "regex": "^value$" }},
                 {{ "type": "regex", "regex": "^value2$" }}
             ] }}]]);
@@ -730,28 +730,28 @@ mod query_tests {
         );
         let events = run(&code);
         assert!(!events.is_empty());
-        assert_eq!(count_tagged(&events, "logical-or"), events.len());
+        assert_eq!(count_tagged(&events, "logical-any"), events.len());
 
-        // `and` requires every nested rule; no event satisfies both, so nothing is tagged.
+        // `all` requires every nested rule; no event satisfies both, so nothing is tagged.
         let code = format!(
             r#"
             events = query_bucket("{BUCKET_ID}");
-            events = tag(events, [["logical-and", {{ "type": "and", "rules": [
+            events = tag(events, [["logical-all", {{ "type": "all", "rules": [
                 {{ "type": "regex", "regex": "^value$" }},
                 {{ "type": "regex", "regex": "^value2$" }}
             ] }}]]);
             return  events;"#
         );
         let events = run(&code);
-        assert_eq!(count_tagged(&events, "logical-and"), 0);
+        assert_eq!(count_tagged(&events, "logical-all"), 0);
 
-        // Nesting: or(value, and(value2, value2)) matches both events.
+        // Nesting: any(value, all(value2, value2)) matches both events.
         let code = format!(
             r#"
             events = query_bucket("{BUCKET_ID}");
-            events = tag(events, [["logical-nested", {{ "type": "or", "rules": [
+            events = tag(events, [["logical-nested", {{ "type": "any", "rules": [
                 {{ "type": "regex", "regex": "^value$" }},
-                {{ "type": "and", "rules": [
+                {{ "type": "all", "rules": [
                     {{ "type": "regex", "regex": "^value2$" }},
                     {{ "type": "regex", "regex": "^value2$" }}
                 ] }}
@@ -761,8 +761,8 @@ mod query_tests {
         let events = run(&code);
         assert_eq!(count_tagged(&events, "logical-nested"), events.len());
 
-        // An empty rule list is rejected: a vacuous `and`/`or` would match every event.
-        for rtype in ["and", "or"] {
+        // An empty rule list is rejected: a vacuous `all`/`any` would match every event.
+        for rtype in ["all", "any"] {
             let code = format!(
                 r#"
                 events = [];
@@ -778,7 +778,7 @@ mod query_tests {
         // A missing `rules` field is rejected.
         let code = r#"
             events = [];
-            events = tag(events, [["t", { "type": "or" }]]);
+            events = tag(events, [["t", { "type": "any" }]]);
             return  events;"#;
         assert_err_type!(
             aw_query::query(code, &interval, &ds),
@@ -788,12 +788,47 @@ mod query_tests {
         // A `rules` field that is not a list is rejected.
         let code = r#"
             events = [];
-            events = tag(events, [["t", { "type": "or", "rules": "nope" }]]);
+            events = tag(events, [["t", { "type": "any", "rules": "nope" }]]);
             return  events;"#;
         assert_err_type!(
             aw_query::query(code, &interval, &ds),
             QueryError::InvalidFunctionParameters(_)
         );
+
+        // Nesting deeper than the parser's bound is rejected rather than
+        // overflowing the stack while parsing.
+        let mut deep = r#"{ "type": "regex", "regex": "^value$" }"#.to_string();
+        for _ in 0..40 {
+            deep = format!(r#"{{ "type": "all", "rules": [{deep}] }}"#);
+        }
+        let code = format!(
+            r#"
+            events = [];
+            events = tag(events, [["t", {deep}]]);
+            return  events;"#
+        );
+        assert_err_type!(
+            aw_query::query(&code, &interval, &ds),
+            QueryError::InvalidFunctionParameters(_)
+        );
+
+        // Nesting within the bound still parses, and wrapping a rule in `all`
+        // groups does not change which events it matches.
+        let leaf = r#"{ "type": "regex", "regex": "^value$" }"#.to_string();
+        let mut nested = leaf.clone();
+        for _ in 0..8 {
+            nested = format!(r#"{{ "type": "all", "rules": [{nested}] }}"#);
+        }
+        let code = format!(
+            r#"
+            events = query_bucket("{BUCKET_ID}");
+            events = tag(events, [["flat", {leaf}], ["deep-ok", {nested}]]);
+            return  events;"#
+        );
+        let events = run(&code);
+        let flat_matches = count_tagged(&events, "flat");
+        assert!(flat_matches > 0, "the leaf rule must match something");
+        assert_eq!(count_tagged(&events, "deep-ok"), flat_matches);
     }
 
     #[test]

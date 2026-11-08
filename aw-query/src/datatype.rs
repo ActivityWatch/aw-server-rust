@@ -396,91 +396,110 @@ impl TryFrom<&DataType> for Vec<Value> {
     }
 }
 
+/// Maximum nesting depth of `all`/`any` rule groups.
+///
+/// Rule parsing recurses once per nesting level, so an unbounded expression
+/// would overflow the stack. The limit matches the one the extended rule
+/// engine proposed in ActivityWatch/activitywatch#1360 uses, so both parsers
+/// accept the same expressions.
+const MAX_RULE_DEPTH: usize = 32;
+
 impl TryFrom<&DataType> for Rule {
     type Error = QueryError;
 
     fn try_from(data: &DataType) -> Result<Self, Self::Error> {
-        let obj = match data {
-            DataType::Dict(dict) => dict,
-            _ => {
+        rule_from_datatype(data, 0)
+    }
+}
+
+fn rule_from_datatype(data: &DataType, depth: usize) -> Result<Rule, QueryError> {
+    let obj = match data {
+        DataType::Dict(dict) => dict,
+        _ => {
+            return Err(QueryError::InvalidFunctionParameters(format!(
+                "Expected rule dict, got {data:?}"
+            )))
+        }
+    };
+    let rtype_val = match obj.get("type") {
+        Some(rtype) => rtype,
+        None => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "rule does not have a type".to_string(),
+            ))
+        }
+    };
+    let rtype = match rtype_val {
+        DataType::String(s) => s,
+        _ => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "rule type is not a string".to_string(),
+            ))
+        }
+    };
+    if rtype == "none" {
+        Ok(Rule::None)
+    } else if rtype == "all" || rtype == "any" {
+        if depth >= MAX_RULE_DEPTH {
+            return Err(QueryError::InvalidFunctionParameters(format!(
+                "rule nesting exceeds the maximum depth of {MAX_RULE_DEPTH}"
+            )));
+        }
+        let operator = if rtype == "all" {
+            LogicalOperator::All
+        } else {
+            LogicalOperator::Any
+        };
+        let rules = match obj.get("rules") {
+            Some(DataType::List(rules)) => rules
+                .iter()
+                .map(|rule| rule_from_datatype(rule, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => {
                 return Err(QueryError::InvalidFunctionParameters(format!(
-                    "Expected rule dict, got {data:?}"
+                    "the rules field of the {rtype} rule is not a list"
+                )))
+            }
+            None => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                    "{rtype} rule is missing the 'rules' field"
                 )))
             }
         };
-        let rtype_val = match obj.get("type") {
-            Some(rtype) => rtype,
+        LogicalRule::new(rules, operator)
+            .map(Rule::Logical)
+            .map_err(QueryError::InvalidFunctionParameters)
+    } else if rtype == "regex" {
+        let regex_val = match obj.get("regex") {
+            Some(regex_val) => regex_val,
             None => {
                 return Err(QueryError::InvalidFunctionParameters(
-                    "rule does not have a type".to_string(),
+                    "regex rule is missing the 'regex' field".to_string(),
                 ))
             }
         };
-        let rtype = match rtype_val {
+        let regex_str = match regex_val {
             DataType::String(s) => s,
             _ => {
                 return Err(QueryError::InvalidFunctionParameters(
-                    "rule type is not a string".to_string(),
+                    "the regex field of the regex rule is not a string".to_string(),
                 ))
             }
         };
-        if rtype == "none" {
-            Ok(Self::None)
-        } else if rtype == "and" || rtype == "or" {
-            let operator = if rtype == "and" {
-                LogicalOperator::And
-            } else {
-                LogicalOperator::Or
-            };
-            let rules = match obj.get("rules") {
-                Some(DataType::List(rules)) => rules
-                    .iter()
-                    .map(Rule::try_from)
-                    .collect::<Result<Vec<_>, _>>()?,
-                Some(_) => {
-                    return Err(QueryError::InvalidFunctionParameters(format!(
-                        "the rules field of the {rtype} rule is not a list"
-                    )))
-                }
-                None => {
-                    return Err(QueryError::InvalidFunctionParameters(format!(
-                        "{rtype} rule is missing the 'rules' field"
-                    )))
-                }
-            };
-            LogicalRule::new(rules, operator)
-                .map(Self::Logical)
-                .map_err(QueryError::InvalidFunctionParameters)
-        } else if rtype == "regex" {
-            let regex_val = match obj.get("regex") {
-                Some(regex_val) => regex_val,
-                None => {
-                    return Err(QueryError::InvalidFunctionParameters(
-                        "regex rule is missing the 'regex' field".to_string(),
-                    ))
-                }
-            };
-            let regex_str = match regex_val {
-                DataType::String(s) => s,
-                _ => {
-                    return Err(QueryError::InvalidFunctionParameters(
-                        "the regex field of the regex rule is not a string".to_string(),
-                    ))
-                }
-            };
-            let ignore_case_val = match obj.get("ignore_case") {
-                Some(case_val) => case_val,
-                None => &DataType::Bool(false),
-            };
-            let ignore_case = match ignore_case_val {
-                DataType::Bool(b) => b,
-                _ => {
-                    return Err(QueryError::InvalidFunctionParameters(
-                        "the ignore_case field of the regex rule is not a bool".to_string(),
-                    ))
-                }
-            };
-            let select_keys = match obj.get("select_keys") {
+        let ignore_case_val = match obj.get("ignore_case") {
+            Some(case_val) => case_val,
+            None => &DataType::Bool(false),
+        };
+        let ignore_case = match ignore_case_val {
+            DataType::Bool(b) => b,
+            _ => {
+                return Err(QueryError::InvalidFunctionParameters(
+                    "the ignore_case field of the regex rule is not a bool".to_string(),
+                ))
+            }
+        };
+        let select_keys =
+            match obj.get("select_keys") {
                 Some(DataType::List(keys)) => {
                     let mut select_keys = Vec::with_capacity(keys.len());
                     for key in keys {
@@ -501,19 +520,18 @@ impl TryFrom<&DataType> for Rule {
                 }
                 None => None,
             };
-            let regex_rule = match RegexRule::new(regex_str, *ignore_case, select_keys) {
-                Ok(regex_rule) => regex_rule,
-                Err(err) => {
-                    return Err(QueryError::RegexCompileError(format!(
-                        "Failed to compile regex string '{regex_str}': '{err:?}"
-                    )))
-                }
-            };
-            Ok(Self::Regex(regex_rule))
-        } else {
-            Err(QueryError::InvalidFunctionParameters(format!(
-                "Unknown rule type '{rtype}'"
-            )))
-        }
+        let regex_rule = match RegexRule::new(regex_str, *ignore_case, select_keys) {
+            Ok(regex_rule) => regex_rule,
+            Err(err) => {
+                return Err(QueryError::RegexCompileError(format!(
+                    "Failed to compile regex string '{regex_str}': '{err:?}"
+                )))
+            }
+        };
+        Ok(Rule::Regex(regex_rule))
+    } else {
+        Err(QueryError::InvalidFunctionParameters(format!(
+            "Unknown rule type '{rtype}'"
+        )))
     }
 }

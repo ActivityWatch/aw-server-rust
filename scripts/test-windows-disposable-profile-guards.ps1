@@ -98,7 +98,16 @@ try {
     if (-not $writeFailed -or -not $script:deletedOwnedUser) {
         throw 'evidence write failure skipped owned-user cleanup'
     }
-    Write-Host 'PASS: existing resources preserved, SQLite readiness retried, cleanup survives evidence failure'
+    $EvidencePath = Join-Path $root 'cim-failure.json'
+    $script:deletedOwnedUser = $false
+    function Get-CimInstance {
+        [CmdletBinding()]
+        param($ClassName, $Filter)
+        Write-Error 'simulated unavailable CIM provider'
+    }
+    . ([scriptblock]::Create($outerTry.Finally.Extent.Text.TrimStart('{').TrimEnd('}')))
+    if (-not $script:deletedOwnedUser) { throw 'CIM query failure skipped account cleanup' }
+    Write-Host 'PASS: existing resources preserved, SQLite readiness retried, cleanup survives evidence and CIM failures'
 }
 finally {
     foreach ($name in $originalEnvironment.Keys) {

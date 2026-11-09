@@ -248,7 +248,7 @@ finally {
             # The new SID is the ownership token. Pre-existing accounts/profiles can
             # never reach this cleanup, even if account creation or a guard fails.
             Start-Sleep -Seconds 2
-            $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($createdUser.SID.Value)'"
+            $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($createdUser.SID.Value)'" -ErrorAction SilentlyContinue
             if ($null -ne $profile) {
                 $profile | Remove-CimInstance -ErrorAction SilentlyContinue
             }

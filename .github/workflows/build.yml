@@ -40,6 +40,15 @@ jobs:
           ${{ runner.os }}-${{ env.cache-name }}-${{ steps.toolchain.outputs.cachekey }}-
     - name: Build
       run: cargo build --workspace --verbose
+    # Known Folder APIs ignore env-var overrides, so the recovery matrix needs a
+    # disposable native profile. This proves that seam before any fixture work.
+    # It runs before the test suite on purpose: the existing tests already create
+    # %LOCALAPPDATA%\activitywatch for the runner user, which would make the
+    # "runner profile untouched" half of the proof unprovable.
+    - name: Prove disposable-profile isolation
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: ./scripts/test-windows-disposable-profile.ps1 -ServerExe target/debug/aw-server.exe
     - name: Run tests
       run: cargo test --workspace --verbose
     - name: Run aw-sync v2 tests (sync-v2 feature)

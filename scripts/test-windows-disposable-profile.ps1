@@ -26,6 +26,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ServerExe,
 
+    [ValidatePattern('^[A-Za-z][A-Za-z0-9_-]{0,19}$')]
     [string]$User = 'awrecovery',
 
     [int]$TimeoutSeconds = 120,
@@ -61,11 +62,6 @@ $disposableProfile = Join-Path $env:SystemDrive "Users\$User"
 $disposableActivityWatch = Join-Path $disposableProfile 'AppData\Local\activitywatch'
 $expectedDb = Join-Path $disposableActivityWatch 'aw-server-rust\sqlite.db'
 
-# A pre-existing tree would make the "nothing under the runner profile" half of
-# this proof meaningless, so refuse instead of guessing.
-Assert-True (-not (Test-Path -LiteralPath $runnerActivityWatch)) `
-    "refusing to run: $runnerActivityWatch already exists, so isolation cannot be proven on this runner"
-
 $password = 'Aw!' + ([guid]::NewGuid().ToString('N').Substring(0, 20)) + 'aA9'
 $port = Get-Random -Minimum 20000 -Maximum 40000
 $evidence = [ordered]@{
@@ -78,8 +74,20 @@ $evidence = [ordered]@{
     started_at          = (Get-Date).ToUniversalTime().ToString('o')
 }
 $failure = $null
+$createdUser = $null
+$serverProcess = $null
+$logFile = $null
+$wrapper = $null
 
 try {
+    # Refuse before creating anything; finally must never remove existing users
+    # or profiles, including when one of these preconditions fails.
+    Assert-True (-not (Test-Path -LiteralPath $runnerActivityWatch)) `
+        "refusing to run: $runnerActivityWatch already exists, so isolation cannot be proven on this runner"
+    Assert-True (-not (Test-Path -LiteralPath $disposableProfile)) `
+        "disposable profile $disposableProfile already exists; it must be created by this run"
+    Assert-True ($null -eq (Get-LocalUser -Name $User -ErrorAction SilentlyContinue)) `
+        "refusing to replace existing local user '$User'"
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $isAdmin = ([Security.Principal.WindowsPrincipal]$identity).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -89,19 +97,15 @@ try {
     Assert-True $isAdmin `
         'the Windows runner user is not elevated; creating a disposable local user needs administrator rights'
 
-    Remove-LocalUser -Name $User -ErrorAction SilentlyContinue
     $secure = ConvertTo-SecureString -String $password -AsPlainText -Force
     try {
-        New-LocalUser -Name $User -Password $secure -PasswordNeverExpires -AccountNeverExpires `
-            -Description 'temporary aw-server isolation check' -ErrorAction Stop | Out-Null
+        $createdUser = New-LocalUser -Name $User -Password $secure -PasswordNeverExpires -AccountNeverExpires `
+            -Description 'temporary aw-server isolation check' -ErrorAction Stop
         Add-LocalGroupMember -Group 'Users' -Member $User -ErrorAction Stop
     }
     catch {
         throw "could not create the disposable local user '$User': $($_.Exception.Message)"
     }
-
-    Assert-True (-not (Test-Path -LiteralPath $disposableProfile)) `
-        "disposable profile $disposableProfile already exists; it must be created by this run"
 
     $credential = New-Object System.Management.Automation.PSCredential($User, $secure)
 
@@ -110,12 +114,19 @@ try {
     # A cross-user child has no inherited console, so a Rust panic would be lost.
     # Launch through a batch wrapper that redirects both streams to a file the
     # disposable user can write, so a red run reports the panic, not just exit 101.
-    $logFile = Join-Path $env:Public 'aw-isolation-server.log'
-    $wrapper = Join-Path $env:Public 'aw-isolation-run.cmd'
-    Remove-Item -LiteralPath $logFile, $wrapper -Force -ErrorAction SilentlyContinue
+    $runId = [guid]::NewGuid().ToString('N')
+    $logFile = Join-Path $env:Public "aw-isolation-$runId.log"
+    $wrapper = Join-Path $env:Public "aw-isolation-$runId.cmd"
+    # Capture only profile-related diagnostics, never the full child environment.
+    # A copied profile tree alone does not prove Known Folder initialization.
     $wrapperBody = @(
         '@echo off',
-        ('"{0}" --profile default --host 127.0.0.1 --port {1} --verbose > "{2}" 2>&1' -f $exe, $port, $logFile)
+        ('whoami > "{0}" 2>&1' -f $logFile),
+        ('echo USERPROFILE=%USERPROFILE% >> "{0}" 2>&1' -f $logFile),
+        ('echo LOCALAPPDATA=%LOCALAPPDATA% >> "{0}" 2>&1' -f $logFile),
+        ('echo APPDATA=%APPDATA% >> "{0}" 2>&1' -f $logFile),
+        ('reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" >> "{0}" 2>&1' -f $logFile),
+        ('"{0}" --profile default --host 127.0.0.1 --port {1} --verbose >> "{2}" 2>&1' -f $exe, $port, $logFile)
     )
     Set-Content -LiteralPath $wrapper -Value $wrapperBody -Encoding ascii
 
@@ -132,8 +143,23 @@ try {
     }
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $dbBytes = $null
+    $databaseReady = $false
     while ((Get-Date) -lt $deadline) {
-        if (Test-Path -LiteralPath $expectedDb) { break }
+        # SQLite creates the file before writing its header. Retry empty files
+        # and transient sharing failures instead of rejecting healthy startup.
+        try {
+            if (Test-Path -LiteralPath $expectedDb) {
+                $dbBytes = [System.IO.File]::ReadAllBytes($expectedDb)
+                $databaseReady = $dbBytes.Length -ge 16 -and
+                    [System.Text.Encoding]::ASCII.GetString($dbBytes, 0, 16) -eq "SQLite format 3`0"
+                if ($databaseReady) { break }
+            }
+        }
+        catch [System.IO.IOException] {
+            $evidence['last_database_read_error'] = $_.Exception.Message
+        }
+        if ($serverProcess.HasExited) { break }
         Start-Sleep -Milliseconds 500
     }
 
@@ -151,8 +177,8 @@ try {
     $evidence['server_processes'] = @(Get-Process -Name 'aw-server' -ErrorAction SilentlyContinue |
         ForEach-Object { "pid=$($_.Id) session=$($_.SessionId)" })
 
-    if (-not (Test-Path -LiteralPath $expectedDb)) {
-        $detail = "aw-server never created $expectedDb (pid $($serverProcess.Id), alive: $alive, exit: $exitCode)."
+    if (-not $databaseReady) {
+        $detail = "aw-server did not initialize a readable SQLite header at $expectedDb (pid $($serverProcess.Id), alive: $alive, exit: $exitCode)."
         foreach ($sub in @('AppData\Local', 'AppData\Roaming')) {
             $dir = Join-Path $disposableProfile $sub
             $detail += "`n$sub entries: " + ((@(Get-ChildItem -LiteralPath $dir -ErrorAction SilentlyContinue | Select-Object -First 15 -ExpandProperty Name)) -join ', ')
@@ -167,11 +193,6 @@ try {
         }
         throw $detail
     }
-
-    $dbBytes = [System.IO.File]::ReadAllBytes($expectedDb)
-    Assert-True ($dbBytes.Length -ge 16) "datastore at $expectedDb is empty"
-    $header = [System.Text.Encoding]::ASCII.GetString($dbBytes, 0, 15)
-    Assert-True ($header -eq 'SQLite format 3') "datastore at $expectedDb is not a SQLite database (header: '$header')"
 
     $dataDir = Split-Path -Parent $expectedDb
     $owner = (Get-Acl -LiteralPath $dataDir).Owner
@@ -208,12 +229,31 @@ finally {
     }
     $evidence['finished_at'] = (Get-Date).ToUniversalTime().ToString('o')
 
-    Get-Process -Name 'aw-server' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    Remove-LocalUser -Name $User -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $disposableProfile) {
-        Remove-Item -LiteralPath $disposableProfile -Recurse -Force -ErrorAction SilentlyContinue
+    if ($null -ne $logFile -and (Test-Path -LiteralPath $logFile)) {
+        $evidence['server_log'] = @(Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue)
     }
+    # Persist before cleanup so an unavailable CIM/cleanup primitive cannot
+    # discard the original startup failure and its child-session diagnostics.
     $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $EvidencePath -Encoding utf8
     Write-Host "Evidence written to $EvidencePath"
+    # Stop only this run's wrapper and its descendants, never every aw-server.
+    if ($null -ne $serverProcess -and -not $serverProcess.HasExited) {
+        & taskkill.exe /PID $serverProcess.Id /T /F 2>$null | Out-Null
+    }
+    if ($null -ne $createdUser) {
+        # The new SID is the ownership token. Pre-existing accounts/profiles can
+        # never reach this cleanup, even if account creation or a guard fails.
+        Start-Sleep -Seconds 2
+        $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($createdUser.SID.Value)'"
+        if ($null -ne $profile) {
+            $profile | Remove-CimInstance -ErrorAction SilentlyContinue
+        }
+        Remove-LocalUser -SID $createdUser.SID -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $wrapper) {
+        Remove-Item -LiteralPath $wrapper -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $logFile) {
+        Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+    }
 }

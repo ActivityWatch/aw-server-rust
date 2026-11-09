@@ -45,10 +45,24 @@ jobs:
     # It runs before the test suite on purpose: the existing tests already create
     # %LOCALAPPDATA%\activitywatch for the runner user, which would make the
     # "runner profile untouched" half of the proof unprovable.
+    - name: Test isolation refusal and readiness guards
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: ./scripts/test-windows-disposable-profile-guards.ps1
     - name: Prove disposable-profile isolation
       if: runner.os == 'Windows'
       shell: pwsh
-      run: ./scripts/test-windows-disposable-profile.ps1 -ServerExe target/debug/aw-server.exe
+      run: >-
+        ./scripts/test-windows-disposable-profile.ps1
+        -ServerExe target/debug/aw-server.exe
+        -EvidencePath "${{ runner.temp }}/windows-disposable-profile-evidence.json"
+    - name: Retain Windows isolation evidence
+      if: always() && runner.os == 'Windows'
+      uses: actions/upload-artifact@v7
+      with:
+        name: windows-disposable-profile-evidence
+        path: ${{ runner.temp }}/windows-disposable-profile-evidence.json
+        if-no-files-found: warn
     - name: Run tests
       run: cargo test --workspace --verbose
     - name: Run aw-sync v2 tests (sync-v2 feature)

@@ -132,7 +132,8 @@ try {
 
     Write-Host "Starting aw-server as disposable user '$User' on port $port (profile: default)"
     try {
-        $serverProcess = Start-Process -FilePath $wrapper `
+        $serverProcess = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" `
+            -ArgumentList @('/d', '/s', '/c', ('""{0}""' -f $wrapper)) `
             -Credential $credential `
             -LoadUserProfile `
             -WorkingDirectory $env:SystemRoot `
@@ -234,26 +235,30 @@ finally {
     }
     # Persist before cleanup so an unavailable CIM/cleanup primitive cannot
     # discard the original startup failure and its child-session diagnostics.
-    $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $EvidencePath -Encoding utf8
-    Write-Host "Evidence written to $EvidencePath"
-    # Stop only this run's wrapper and its descendants, never every aw-server.
-    if ($null -ne $serverProcess -and -not $serverProcess.HasExited) {
-        & taskkill.exe /PID $serverProcess.Id /T /F 2>$null | Out-Null
+    try {
+        $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $EvidencePath -Encoding utf8
+        Write-Host "Evidence written to $EvidencePath"
     }
-    if ($null -ne $createdUser) {
-        # The new SID is the ownership token. Pre-existing accounts/profiles can
-        # never reach this cleanup, even if account creation or a guard fails.
-        Start-Sleep -Seconds 2
-        $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($createdUser.SID.Value)'"
-        if ($null -ne $profile) {
-            $profile | Remove-CimInstance -ErrorAction SilentlyContinue
+    finally {
+        # Stop only this run's wrapper and its descendants, never every aw-server.
+        if ($null -ne $serverProcess -and -not $serverProcess.HasExited) {
+            & taskkill.exe /PID $serverProcess.Id /T /F 2>$null | Out-Null
         }
-        Remove-LocalUser -SID $createdUser.SID -ErrorAction SilentlyContinue
-    }
-    if ($null -ne $wrapper) {
-        Remove-Item -LiteralPath $wrapper -Force -ErrorAction SilentlyContinue
-    }
-    if ($null -ne $logFile) {
-        Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+        if ($null -ne $createdUser) {
+            # The new SID is the ownership token. Pre-existing accounts/profiles can
+            # never reach this cleanup, even if account creation or a guard fails.
+            Start-Sleep -Seconds 2
+            $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($createdUser.SID.Value)'"
+            if ($null -ne $profile) {
+                $profile | Remove-CimInstance -ErrorAction SilentlyContinue
+            }
+            Remove-LocalUser -SID $createdUser.SID -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $wrapper) {
+            Remove-Item -LiteralPath $wrapper -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $logFile) {
+            Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+        }
     }
 }

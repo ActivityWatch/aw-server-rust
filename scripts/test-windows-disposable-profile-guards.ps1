@@ -74,7 +74,31 @@ try {
     $databaseReady = $false
     . ([scriptblock]::Create($loop.Extent.Text))
     if ($databaseReady) { throw 'invalid database accepted' }
-    Write-Host 'PASS: existing profile/account preserved, refusal evidence retained, SQLite header readiness retried'
+    # Evidence persistence may fail; owned cleanup must still execute. Run the
+    # actual outer finally block with fake owned resources and no Windows APIs.
+    $outerTry = $ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.TryStatementAst] }
+    $failure = 'original startup failure'
+    $evidence = @{}
+    $logFile = $null
+    $wrapper = $null
+    $serverProcess = $null
+    $createdUser = [pscustomobject]@{ SID = [pscustomobject]@{ Value = 'owned-test-sid' } }
+    $EvidencePath = Join-Path $root 'missing-directory/evidence.json'
+    $script:deletedOwnedUser = $false
+    function Get-CimInstance { return $null }
+    function Remove-LocalUser {
+        param($SID)
+        if ($SID.Value -ne 'owned-test-sid') { throw 'wrong cleanup identity' }
+        $script:deletedOwnedUser = $true
+    }
+    function Start-Sleep { param($Seconds) }
+    $writeFailed = $false
+    try { . ([scriptblock]::Create($outerTry.Finally.Extent.Text.TrimStart('{').TrimEnd('}'))) }
+    catch { $writeFailed = $true }
+    if (-not $writeFailed -or -not $script:deletedOwnedUser) {
+        throw 'evidence write failure skipped owned-user cleanup'
+    }
+    Write-Host 'PASS: existing resources preserved, SQLite readiness retried, cleanup survives evidence failure'
 }
 finally {
     foreach ($name in $originalEnvironment.Keys) {

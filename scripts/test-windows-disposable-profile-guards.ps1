@@ -276,6 +276,19 @@ try {
     if (-not $databaseReady -or $script:sleeps -ne 1) {
         throw 'polling did not retry the empty SQLite file'
     }
+    # A live server holds the database open for writing; readiness must still
+    # be detected (CI: ReadAllBytes hit a permanent sharing violation).
+    $holder = [IO.File]::Open($expectedDb, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    try {
+        $databaseReady = $false
+        $script:sleeps = 0
+        . ([scriptblock]::Create($loop.Extent.Text))
+        if (-not $databaseReady -or $script:sleeps -ne 0) {
+            throw 'readiness was not detected while another process held the database open'
+        }
+    }
+    finally { $holder.Dispose() }
     [IO.File]::WriteAllBytes($expectedDb, [Text.Encoding]::ASCII.GetBytes('not a SQLite db!'))
     $serverProcess.HasExited = $true
     $databaseReady = $false

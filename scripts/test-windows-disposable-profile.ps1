@@ -368,8 +368,18 @@ try {
         # and transient sharing failures instead of rejecting healthy startup.
         try {
             if (Test-Path -LiteralPath $expectedDb) {
-                $dbBytes = [System.IO.File]::ReadAllBytes($expectedDb)
-                $databaseReady = $dbBytes.Length -ge 16 -and
+                # The running server keeps the database open for writing, so
+                # ReadAllBytes (FileShare.Read) fails with a permanent sharing
+                # violation (seen in CI). Open with the same share mode SQLite uses.
+                $dbStream = [System.IO.File]::Open($expectedDb, [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::Read,
+                    [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+                try {
+                    $dbBytes = New-Object byte[] 16
+                    $got = $dbStream.Read($dbBytes, 0, 16)
+                }
+                finally { $dbStream.Dispose() }
+                $databaseReady = $got -eq 16 -and
                     [System.Text.Encoding]::ASCII.GetString($dbBytes, 0, 16) -eq "SQLite format 3`0"
                 if ($databaseReady) { break }
             }

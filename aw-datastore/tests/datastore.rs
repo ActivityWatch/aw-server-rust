@@ -89,6 +89,21 @@ mod datastore_tests {
         }
         assert_eq!(ds.get_event_count("testid", None, None).unwrap(), 0);
 
+        // A heartbeat with a duration that fits on its own but whose merge
+        // into the last event would not.
+        ds.heartbeat("testid", valid.clone(), 10.0).unwrap();
+        let mut too_long = valid.clone();
+        too_long.timestamp = valid.timestamp + Duration::seconds(1);
+        too_long.duration = Duration::seconds(9_223_372_036);
+        match ds.heartbeat("testid", too_long, 10.0) {
+            Err(DatastoreError::InvalidEvent(_)) => {}
+            other => panic!("expected InvalidEvent, got {other:?}"),
+        }
+        assert_eq!(ds.get_event_count("testid", None, None).unwrap(), 1);
+        let only = ds.get_events("testid", None, None, None).unwrap();
+        ds.delete_events_by_id("testid", vec![only[0].id.unwrap()])
+            .unwrap();
+
         // A new bucket with a bad attached event is not created at all.
         let mut bucket = test_bucket();
         bucket.id = "imported".to_string();

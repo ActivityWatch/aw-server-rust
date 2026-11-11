@@ -1138,6 +1138,8 @@ impl DatastoreInstance {
         last_heartbeat: &mut HashMap<String, Option<Event>>,
     ) -> Result<Event, DatastoreError> {
         self.get_bucket(bucket_id)?;
+        // Reject an unstorable heartbeat before merging it into the last event.
+        event_nanos(&heartbeat)?;
         if !last_heartbeat.contains_key(bucket_id) {
             last_heartbeat.insert(bucket_id.to_string(), None);
         }

@@ -27,7 +27,7 @@ try {
     # 2. Saved testing-profile history in the same Local directory (legacy
     #    shared layout: sqlite-testing.db beside sqlite.db). Fixture only.
     $server = Start-ScenarioServer -Name 'testing-fixture' -Port ($port + 1) `
-        -ExtraArgs ('--dbpath "{0}"' -f (Join-Path $localApp 'sqlite-testing.db'))
+        -ExtraArgs ('--profile default --dbpath "{0}"' -f (Join-Path $localApp 'sqlite-testing.db'))
     Add-FixtureEvents -Port ($port + 1) -Tag 'TEST' -Day '2026-02-01'
     Wait-FixtureCommitted -Port ($port + 1) -Dir $localApp -Name 'testing' -Db 'sqlite-testing.db'
     Stop-ScenarioServer $server
@@ -38,13 +38,20 @@ try {
     # 3. Newer Roaming default history, colliding ids, WAL-only.
     New-Item -ItemType Directory -Path $roamApp -Force | Out-Null
     $server = Start-ScenarioServer -Name 'roam-fixture' -Port ($port + 2) `
-        -ExtraArgs ('--dbpath "{0}"' -f (Join-Path $roamApp 'sqlite.db'))
+        -ExtraArgs ('--profile default --dbpath "{0}"' -f (Join-Path $roamApp 'sqlite.db'))
     Add-FixtureEvents -Port ($port + 2) -Tag 'ROAM' -Day '2026-06-01'
     Wait-FixtureCommitted -Port ($port + 2) -Dir $roamApp -Name 'roaming'
     Stop-ScenarioServer $server
     $server = $null
 
-    # 4. Default start: Roaming selected, stale Local unioned.
+    # 4. Default start: Roaming selected, stale Local unioned. Debug builds
+    #    default to the `testing` profile, which would have created the
+    #    new-layout `activitywatch-testing` root during fixture creation; that
+    #    root takes precedence over legacy files and would hide the scenario
+    #    (CI run 42962833628). The fixture servers therefore run as `default`;
+    #    prove they left no such root before asserting.
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $disposableProfile 'AppData\Local\activitywatch-testing'))) `
+        'fixture creation made the new-layout testing root; the legacy testing scenario would be hidden'
     $server = Start-ScenarioServer -Name 'assert-default1' -Port ($port + 3) -ExtraArgs '--profile default'
     $got = Wait-ScenarioSentinels -Port ($port + 3) -Expected $expected
     $scenario['sentinels_default_first'] = $got

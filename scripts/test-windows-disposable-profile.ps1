@@ -231,18 +231,30 @@ try {
     $stRun = @()
     # Hosted runners may have task history disabled. Enable it before registration
     # so a rejected demand start leaves evidence; failure here is diagnostic only.
+    # Note: $ErrorActionPreference = 'Continue' around 2>&1 captures: on PS 5.1
+    # under Stop, stderr lines from native commands are wrapped in ErrorRecords and
+    # raise a terminating NativeCommandError. Temporarily relax to Continue so
+    # any warning text from schtasks/wevtutil lands in the capture variable and
+    # $LASTEXITCODE carries the real verdict instead.
+    $savedEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $eventLogSetup = & wevtutil.exe sl Microsoft-Windows-TaskScheduler/Operational /e:true 2>&1
+    $ErrorActionPreference = $savedEAP
     if ($LASTEXITCODE -ne 0) { $initEventLogError = "could not enable task history: $eventLogSetup" }
+    $ErrorActionPreference = 'Continue'
     $stCreate = schtasks.exe /Create /TN $initTaskName `
         /TR "cmd.exe /d /c whoami > `"$initLogFile`" 2>&1" `
         /SC ONCE /SD "01/01/2000" /ST "00:00" `
         /RU $User /RP $password /F /RL LIMITED 2>&1
+    $ErrorActionPreference = $savedEAP
     if ($LASTEXITCODE -ne 0) {
         throw "could not create profile-init scheduled task (schtasks returned $LASTEXITCODE): $stCreate"
     }
     try {
         $previousRunTime = (Get-ScheduledTaskInfo -TaskName $initTaskName -ErrorAction Stop).LastRunTime
+        $ErrorActionPreference = 'Continue'
         $stRun = schtasks.exe /Run /TN $initTaskName 2>&1
+        $ErrorActionPreference = $savedEAP
         if ($LASTEXITCODE -ne 0) {
             throw "could not run profile-init scheduled task (schtasks returned $LASTEXITCODE): $stRun"
         }

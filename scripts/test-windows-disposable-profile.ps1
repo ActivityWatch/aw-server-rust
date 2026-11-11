@@ -44,6 +44,77 @@ function Assert-True {
     }
 }
 
+function Set-DisposableBatchLogonRight {
+    param([string]$Sid, [bool]$Grant)
+    # Modify one right on one owned SID through LSA, not a machine-wide secedit
+    # policy import (which could overwrite unrelated runner assignments).
+    if (-not ('AwIsolation.BatchLogon' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+namespace AwIsolation {
+    public static class BatchLogon {
+        [StructLayout(LayoutKind.Sequential)]
+        struct Attributes {
+            public uint Length;
+            public IntPtr RootDirectory, ObjectName;
+            public uint Flags;
+            public IntPtr SecurityDescriptor, SecurityQualityOfService;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct UnicodeString {
+            public ushort Length, MaximumLength;
+            public IntPtr Buffer;
+        }
+        [DllImport("advapi32.dll")]
+        static extern uint LsaOpenPolicy(IntPtr system, ref Attributes attributes, uint access, out IntPtr policy);
+        [DllImport("advapi32.dll")]
+        static extern uint LsaAddAccountRights(IntPtr policy, byte[] sid, UnicodeString[] rights, uint count);
+        [DllImport("advapi32.dll")]
+        static extern uint LsaRemoveAccountRights(IntPtr policy, byte[] sid,
+            [MarshalAs(UnmanagedType.U1)] bool all, UnicodeString[] rights, uint count);
+        [DllImport("advapi32.dll")]
+        static extern uint LsaNtStatusToWinError(uint status);
+        [DllImport("advapi32.dll")]
+        static extern uint LsaClose(IntPtr policy);
+        static void Check(uint status) {
+            if (status != 0) throw new Win32Exception((int)LsaNtStatusToWinError(status));
+        }
+        public static void Set(string sidText, bool grant) {
+            var sid = new SecurityIdentifier(sidText);
+            var bytes = new byte[sid.BinaryLength];
+            sid.GetBinaryForm(bytes, 0);
+            var attributes = new Attributes { Length = (uint)Marshal.SizeOf(typeof(Attributes)) };
+            IntPtr policy;
+            // POLICY_LOOKUP_NAMES | POLICY_CREATE_ACCOUNT
+            Check(LsaOpenPolicy(IntPtr.Zero, ref attributes, 0x810, out policy));
+            IntPtr buffer = IntPtr.Zero;
+            try {
+                const string name = "SeBatchLogonRight";
+                buffer = Marshal.StringToHGlobalUni(name);
+                var rights = new[] { new UnicodeString {
+                    Length = (ushort)(name.Length * 2),
+                    MaximumLength = (ushort)((name.Length + 1) * 2), Buffer = buffer
+                } };
+                uint status = grant ? LsaAddAccountRights(policy, bytes, rights, 1)
+                    : LsaRemoveAccountRights(policy, bytes, false, rights, 1);
+                // No LSA account exists if setup failed before the grant.
+                if (!grant && LsaNtStatusToWinError(status) == 2) return;
+                Check(status);
+            } finally {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                LsaClose(policy);
+            }
+        }
+    }
+}
+'@
+    }
+    [AwIsolation.BatchLogon]::Set($Sid, $Grant)
+}
+
 function Wait-ProfileInitTask {
     param([string]$TaskName, [datetime]$PreviousRunTime, [int]$TimeoutSeconds = 15)
     $initDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -135,6 +206,10 @@ try {
         throw "could not create the disposable local user '$User': $($_.Exception.Message)"
     }
 
+    # CI's Scheduler events 101/104 reported 0x80070569: a new standard
+    # user has no batch-logon right. Grant only this run's SID; revoke in finally.
+    Set-DisposableBatchLogonRight -Sid $createdUser.SID.Value -Grant $true
+    $evidence['batch_logon_right_granted'] = $true
     $credential = New-Object System.Management.Automation.PSCredential($User, $secure)
 
     # Initialize the disposable user's profile via a one-shot scheduled task BEFORE
@@ -185,8 +260,10 @@ try {
             # /Run can be accepted without an action starting. Preserve effective
             # demand-start conditions and registration warnings, not the /RP argv
             # or a full task export that could acquire sensitive fields later.
-            $evidence['profile_init_create_output'] = @($stCreate)
-            $evidence['profile_init_run_output'] = @($stRun)
+            # Native stderr is an ErrorRecord on Windows PowerShell. Persist
+            # text only, not InvocationInfo/argv or nested exception metadata.
+            $evidence['profile_init_create_output'] = @($stCreate | ForEach-Object { [string]$_ })
+            $evidence['profile_init_run_output'] = @($stRun | ForEach-Object { [string]$_ })
             $evidence['profile_init_settings'] = $initTask.Settings | Select-Object `
                 Enabled, AllowDemandStart, DisallowStartIfOnBatteries, StopIfGoingOnBatteries, `
                 RunOnlyIfIdle, RunOnlyIfNetworkAvailable
@@ -370,7 +447,12 @@ finally {
             if ($null -ne $profile) {
                 $profile | Remove-CimInstance -ErrorAction SilentlyContinue
             }
-            Remove-LocalUser -SID $createdUser.SID -ErrorAction SilentlyContinue
+            try {
+                Set-DisposableBatchLogonRight -Sid $createdUser.SID.Value -Grant $false
+            }
+            finally {
+                Remove-LocalUser -SID $createdUser.SID -ErrorAction SilentlyContinue
+            }
         }
         if ($null -ne $wrapper) {
             Remove-Item -LiteralPath $wrapper -Force -ErrorAction SilentlyContinue

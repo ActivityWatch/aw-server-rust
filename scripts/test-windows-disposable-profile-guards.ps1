@@ -50,6 +50,26 @@ try {
         if ($receipt.status -ne 'fail') { throw "$case lost its failure evidence" }
     }
 
+    # Only the newly created account may receive batch logon; grant it before
+    # task registration, and revoke it before deleting that account. Never
+    # replace the machine's existing user-right assignments.
+    $grant = @($ast.FindAll({ param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Set-DisposableBatchLogonRight'
+    }, $true))
+    if ($grant.Count -ne 2 -or
+        $grant[0].Extent.Text -notlike '*-Sid $createdUser.SID.Value -Grant $true*' -or
+        $grant[1].Extent.Text -notlike '*-Sid $createdUser.SID.Value -Grant $false*') {
+        throw 'batch-logon right must be granted and revoked only for the owned SID'
+    }
+    $registration = $ast.Find({ param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text -like 'schtasks.exe /Create*'
+    }, $true)
+    if ($grant[0].Extent.StartOffset -ge $registration.Extent.StartOffset) {
+        throw 'batch-logon right was not granted before task registration'
+    }
+
     # Exercise the production task waiter without Windows APIs. A newly created
     # task can be Ready before its first run, and Queued is not completion.
     $waiter = $ast.Find({ param($node)
@@ -135,7 +155,10 @@ try {
             Principal = [pscustomobject]@{ UserId = 'disposable'; LogonType = 'Password'; RunLevel = 'Limited' }
         }
     }
-    $stCreate = @('registered', 'WARNING: batch logon privilege missing')
+    $nativeError = [System.Management.Automation.ErrorRecord]::new(
+        [Exception]::new('WARNING: batch logon privilege missing'), 'NativeCommandError',
+        [System.Management.Automation.ErrorCategory]::NotSpecified, $null)
+    $stCreate = @('registered', $nativeError)
     $stRun = @('run request accepted')
     $initEventLogError = $null
     $initStartedAt = Get-Date
@@ -218,8 +241,15 @@ try {
     $EvidencePath = Join-Path $root 'missing-directory/evidence.json'
     $script:deletedOwnedUser = $false
     function Get-CimInstance { return $null }
+    $script:revokedBatchLogon = $false
+    function Set-DisposableBatchLogonRight {
+        param($Sid, $Grant)
+        if ($Sid -ne 'owned-test-sid' -or $Grant) { throw 'wrong right-cleanup identity' }
+        $script:revokedBatchLogon = $true
+    }
     function Remove-LocalUser {
         param($SID)
+        if (-not $script:revokedBatchLogon) { throw 'account removed before batch right cleanup' }
         if ($SID.Value -ne 'owned-test-sid') { throw 'wrong cleanup identity' }
         $script:deletedOwnedUser = $true
     }

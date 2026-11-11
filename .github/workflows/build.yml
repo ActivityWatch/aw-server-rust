@@ -92,6 +92,7 @@ jobs:
         ./scripts/test-windows-disposable-profile.ps1
         -ServerExe target/debug/aw-server.exe
         -EvidencePath "${{ runner.temp }}/windows-disposable-profile-evidence.json"
+        -ScenarioPath scripts/windows-recovery-scenarios/row1-local-older-roaming-newer.ps1
     - name: Retain Windows isolation evidence
       if: always() && runner.os == 'Windows'
       uses: actions/upload-artifact@v7

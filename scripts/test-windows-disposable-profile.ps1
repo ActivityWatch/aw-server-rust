@@ -31,7 +31,11 @@ param(
 
     [int]$TimeoutSeconds = 120,
 
-    [string]$EvidencePath = (Join-Path $env:TEMP 'windows-disposable-profile-evidence.json')
+    [string]$EvidencePath = (Join-Path $env:TEMP 'windows-disposable-profile-evidence.json'),
+
+    # Optional recovery scenario, dot-sourced after the isolation proof passes
+    # and while the disposable user, profile and first server still exist.
+    [string]$ScenarioPath
 )
 
 Set-StrictMode -Version Latest
@@ -453,6 +457,14 @@ try {
     Write-Host 'Disposable-profile isolation proven:'
     Write-Host "  datastore: $expectedDb ($($evidence['datastore_bytes']) bytes, owner $owner)"
     Write-Host "  runner profile untouched: $runnerActivityWatch absent"
+
+    if ($ScenarioPath) {
+        # Scenario context: $exe $User $credential $disposableProfile $serverProcess
+        # $port $runId $evidence. The scenario owns every process it starts.
+        Write-Host "Running recovery scenario: $ScenarioPath"
+        . (Resolve-Path -LiteralPath $ScenarioPath).Path
+        $evidence['conclusion'] = 'disposable Known Folder roots proven; recovery scenario passed'
+    }
 }
 catch {
     $failure = $_.Exception.Message

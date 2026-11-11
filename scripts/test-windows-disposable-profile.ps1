@@ -179,6 +179,7 @@ $createdUser = $null
 $serverProcess = $null
 $logFile = $null
 $wrapper = $null
+$kfProbe = $null
 $initLogFile = $null
 
 try {
@@ -312,6 +313,25 @@ try {
     # disposable user can write, so a red run reports the panic, not just exit 101.
     $logFile = Join-Path $env:Public "aw-isolation-$runId.log"
     $wrapper = Join-Path $env:Public "aw-isolation-$runId.cmd"
+    $kfProbe = Join-Path $env:Public "aw-kfprobe-$runId.ps1"
+    # The server panics with "Unable to get log dir" when the `dirs` crate's
+    # SHGetKnownFolderPath call fails. Record the actual HRESULT and path the
+    # launched user sees, so the next red run says why instead of guessing.
+    $kfProbeBody = @(
+        'Add-Type -TypeDefinition @"',
+        'using System; using System.Runtime.InteropServices;',
+        'public static class KF {',
+        '  [DllImport("shell32.dll")] public static extern int SHGetKnownFolderPath([MarshalAs(UnmanagedType.LPStruct)] Guid id, uint flags, IntPtr token, out IntPtr path);',
+        '}',
+        '"@',
+        'foreach ($f in @{ LocalAppData = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"; Profile = "5E6C858F-0E22-4760-9AFE-EA3317B67173" }.GetEnumerator()) {',
+        '  $p = [IntPtr]::Zero',
+        '  $hr = [KF]::SHGetKnownFolderPath([Guid]$f.Value, 0, [IntPtr]::Zero, [ref]$p)',
+        '  $path = if ($hr -eq 0) { [Runtime.InteropServices.Marshal]::PtrToStringUni($p) } else { "" }',
+        '  "KnownFolder {0} hr=0x{1:X8} path={2}" -f $f.Key, ([long]$hr -band 0xffffffffL), $path',
+        '}'
+    )
+    Set-Content -LiteralPath $kfProbe -Value $kfProbeBody -Encoding ascii
     # Capture only profile-related diagnostics, never the full child environment.
     # A copied profile tree alone does not prove Known Folder initialization.
     $wrapperBody = @(
@@ -321,6 +341,7 @@ try {
         ('echo LOCALAPPDATA=%LOCALAPPDATA% >> "{0}" 2>&1' -f $logFile),
         ('echo APPDATA=%APPDATA% >> "{0}" 2>&1' -f $logFile),
         ('reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" >> "{0}" 2>&1' -f $logFile),
+        ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" >> "{1}" 2>&1' -f $kfProbe, $logFile),
         ('"{0}" --profile default --host 127.0.0.1 --port {1} --verbose >> "{2}" 2>&1' -f $exe, $port, $logFile)
     )
     Set-Content -LiteralPath $wrapper -Value $wrapperBody -Encoding ascii
@@ -331,6 +352,7 @@ try {
             -ArgumentList @('/d', '/s', '/c', ('""{0}""' -f $wrapper)) `
             -Credential $credential `
             -LoadUserProfile `
+            -UseNewEnvironment `
             -WorkingDirectory $env:SystemRoot `
             -PassThru
     }
@@ -456,6 +478,9 @@ finally {
             finally {
                 Remove-LocalUser -SID $createdUser.SID -ErrorAction SilentlyContinue
             }
+        }
+        if ($null -ne $kfProbe) {
+            Remove-Item -LiteralPath $kfProbe -Force -ErrorAction SilentlyContinue
         }
         if ($null -ne $wrapper) {
             Remove-Item -LiteralPath $wrapper -Force -ErrorAction SilentlyContinue

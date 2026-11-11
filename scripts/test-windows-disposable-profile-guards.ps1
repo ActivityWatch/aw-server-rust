@@ -289,6 +289,7 @@ try {
     $logFile = $null
     $initLogFile = $null
     $wrapper = $null
+    $kfProbe = $null
     $serverProcess = $null
     $createdUser = [pscustomobject]@{ SID = [pscustomobject]@{ Value = 'owned-test-sid' } }
     $EvidencePath = Join-Path $root 'missing-directory/evidence.json'

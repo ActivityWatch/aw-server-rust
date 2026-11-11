@@ -59,7 +59,11 @@ function Add-FixtureEvents {
 function Get-FixtureSentinels {
     param([int]$Port)
     $events = @(Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/0/buckets/$bucketId/events?limit=1000" -TimeoutSec 15)
-    return @($events | ForEach-Object { $_.data.sentinel } | Sort-Object)
+    # PS 5.1 turns an empty JSON array into $null; drop it before StrictMode
+    # property access, and keep a bucket inventory for the evidence file.
+    $buckets = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/0/buckets/" -TimeoutSec 15
+    $scenario["buckets_$Port"] = @($buckets.PSObject.Properties.Name)
+    return @($events | Where-Object { $null -ne $_ } | ForEach-Object { $_.data.sentinel } | Sort-Object)
 }
 
 $expected = @('LOCAL-1', 'LOCAL-2', 'LOCAL-3', 'ROAM-1', 'ROAM-2', 'ROAM-3')

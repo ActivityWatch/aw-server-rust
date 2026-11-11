@@ -50,6 +50,12 @@ function Wait-ProfileInitTask {
     while ((Get-Date) -lt $initDeadline) {
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
         $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+        # Logon/action-launch HRESULTs can fail before LastRunTime advances.
+        # Scheduler's informational states (0x000413xx) are not failures.
+        $resultCode = [long]$info.LastTaskResult -band 0xffffffffL
+        if (($resultCode -band 0x80000000L) -ne 0) {
+            throw ('profile-init task failed with result 0x{0:X8} (state {1})' -f $resultCode, $task.State)
+        }
         # Ready alone also describes a task that has never started. Require a
         # new execution, a terminal state, and a successful action exit code.
         if ($info.LastRunTime -gt $PreviousRunTime -and
@@ -159,6 +165,20 @@ try {
         $evidence['profile_init_run_time'] = $initResult.LastRunTime.ToUniversalTime().ToString('o')
     }
     finally {
+        # The task may fail before producing a log or advancing LastRunTime.
+        # Snapshot only non-secret status fields before stopping/deleting it.
+        try {
+            $initTask = Get-ScheduledTask -TaskName $initTaskName -ErrorAction Stop
+            $initInfo = Get-ScheduledTaskInfo -TaskName $initTaskName -ErrorAction Stop
+            $evidence['profile_init_state'] = [string]$initTask.State
+            $evidence['profile_init_last_result'] = $initInfo.LastTaskResult
+            $evidence['profile_init_last_result_hex'] = '0x{0:X8}' -f ([long]$initInfo.LastTaskResult -band 0xffffffffL)
+            $evidence['profile_init_last_run_time'] = $initInfo.LastRunTime.ToUniversalTime().ToString('o')
+            $evidence['profile_init_previous_run_time'] = $previousRunTime.ToUniversalTime().ToString('o')
+        }
+        catch {
+            $evidence['profile_init_diagnostic_error'] = $_.Exception.Message
+        }
         # A timed-out/failed task must not keep writing into a profile we remove.
         Stop-ScheduledTask -TaskName $initTaskName -ErrorAction SilentlyContinue
         schtasks.exe /Delete /TN $initTaskName /F 2>$null | Out-Null

@@ -69,7 +69,7 @@ try {
         param($TaskName)
         return [pscustomobject]@{
             LastRunTime = $baseline.AddSeconds([int]($script:taskPoll -ge 2))
-            LastTaskResult = if ($script:taskPoll -eq 2) { 267009 } else { 0 }
+            LastTaskResult = if ($script:taskPoll -lt 2) { 267011 } elseif ($script:taskPoll -eq 2) { 267009 } else { 0 }
         }
     }
     function Start-Sleep { param($Milliseconds) $script:taskPoll++ }
@@ -87,11 +87,59 @@ try {
     if ($null -eq $caught -or $caught -notlike '*failed with result 1*') {
         throw "task failure was not rejected: $caught"
     }
+    # Scheduler can reject logon/action launch without advancing LastRunTime.
+    function Get-ScheduledTask {
+        param($TaskName)
+        return [pscustomobject]@{ State = 'Ready' }
+    }
+    function Get-ScheduledTaskInfo {
+        param($TaskName)
+        return [pscustomobject]@{ LastRunTime = $baseline; LastTaskResult = 2147943785 }
+    }
+    $caught = $null
+    try { Wait-ProfileInitTask -TaskName 'fake-task' -PreviousRunTime $baseline }
+    catch { $caught = $_.Exception.Message }
+    if ($null -eq $caught -or $caught -notlike '*0x80070569*') {
+        throw "task launch failure without a new timestamp was not reported: $caught"
+    }
     $caught = $null
     try { Wait-ProfileInitTask -TaskName 'fake-task' -PreviousRunTime $baseline -TimeoutSeconds 0 }
     catch { $caught = $_.Exception.Message }
     if ($null -eq $caught -or $caught -notlike '*timed out*') {
         throw "task timeout was not rejected: $caught"
+    }
+
+    # Failure diagnostics must be collected before the task is deleted, and a
+    # failed diagnostic query must not prevent owned-task cleanup.
+    $taskCleanup = $ast.Find({ param($node)
+        $node -is [System.Management.Automation.Language.TryStatementAst] -and
+        $null -ne $node.Finally -and
+        $node.Finally.Extent.Text -like '*Stop-ScheduledTask*' -and
+        $node.Body.Extent.Text -like '*$previousRunTime*'
+    }, $true)
+    if ($null -eq $taskCleanup) { throw 'missing profile-init task cleanup block' }
+    $initTaskName = 'fake-task'
+    $previousRunTime = $baseline
+    $evidence = @{}
+    $script:taskDeleted = $false
+    function Get-ScheduledTask {
+        param($TaskName)
+        if ($script:taskDeleted) { throw 'diagnostics queried after deletion' }
+        return [pscustomobject]@{ State = 'Ready' }
+    }
+    function Stop-ScheduledTask { param($TaskName) }
+    function schtasks.exe { $script:taskDeleted = $true }
+    . ([scriptblock]::Create($taskCleanup.Finally.Extent.Text.TrimStart('{').TrimEnd('}')))
+    if (-not $script:taskDeleted -or $evidence['profile_init_last_result_hex'] -ne '0x80070569' -or
+        $evidence['profile_init_state'] -ne 'Ready') {
+        throw 'pre-cleanup Scheduler failure diagnostics were lost'
+    }
+    function Get-ScheduledTask { param($TaskName) throw 'diagnostic query unavailable' }
+    $script:taskDeleted = $false
+    $evidence = @{}
+    . ([scriptblock]::Create($taskCleanup.Finally.Extent.Text.TrimStart('{').TrimEnd('}')))
+    if (-not $script:taskDeleted -or $evidence['profile_init_diagnostic_error'] -ne 'diagnostic query unavailable') {
+        throw 'diagnostic query failure prevented task cleanup or lost its evidence'
     }
 
     # Run the production polling loop against an empty, then initialized file.

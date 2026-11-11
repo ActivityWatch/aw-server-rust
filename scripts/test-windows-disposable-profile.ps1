@@ -434,12 +434,12 @@ try {
     foreach ($file in @(Get-ChildItem -LiteralPath $disposableActivityWatch -Recurse -File)) {
         $relativeEntries += $file.FullName.Substring($disposableProfile.Length).TrimStart('\')
     }
-    $evidence['datastore_bytes'] = $dbBytes.Length
+    $evidence['datastore_bytes'] = (Get-Item -LiteralPath $expectedDb).Length
     $evidence['datastore_owner'] = $owner
     $evidence['profile_entries'] = $relativeEntries
     $evidence['conclusion'] = 'disposable Known Folder roots proven'
     Write-Host 'Disposable-profile isolation proven:'
-    Write-Host "  datastore: $expectedDb ($($dbBytes.Length) bytes, owner $owner)"
+    Write-Host "  datastore: $expectedDb ($($evidence['datastore_bytes']) bytes, owner $owner)"
     Write-Host "  runner profile untouched: $runnerActivityWatch absent"
 }
 catch {

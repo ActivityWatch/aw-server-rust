@@ -50,6 +50,50 @@ try {
         if ($receipt.status -ne 'fail') { throw "$case lost its failure evidence" }
     }
 
+    # Exercise the production task waiter without Windows APIs. A newly created
+    # task can be Ready before its first run, and Queued is not completion.
+    $waiter = $ast.Find({ param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Wait-ProfileInitTask'
+    }, $true)
+    if ($null -eq $waiter) { throw 'missing profile-init task waiter' }
+    . ([scriptblock]::Create($waiter.Extent.Text))
+    $baseline = [datetime]'2000-01-01'
+    $script:taskPoll = 0
+    function Get-ScheduledTask {
+        param($TaskName)
+        $state = @('Ready', 'Queued', 'Running', 'Ready')[$script:taskPoll]
+        return [pscustomobject]@{ State = $state }
+    }
+    function Get-ScheduledTaskInfo {
+        param($TaskName)
+        return [pscustomobject]@{
+            LastRunTime = $baseline.AddSeconds([int]($script:taskPoll -ge 2))
+            LastTaskResult = if ($script:taskPoll -eq 2) { 267009 } else { 0 }
+        }
+    }
+    function Start-Sleep { param($Milliseconds) $script:taskPoll++ }
+    $result = Wait-ProfileInitTask -TaskName 'fake-task' -PreviousRunTime $baseline
+    if ($script:taskPoll -ne 3 -or $result.LastTaskResult -ne 0) {
+        throw 'task waiter accepted an unstarted, queued, or running task'
+    }
+    function Get-ScheduledTaskInfo {
+        param($TaskName)
+        return [pscustomobject]@{ LastRunTime = $baseline.AddSeconds(1); LastTaskResult = 1 }
+    }
+    $caught = $null
+    try { Wait-ProfileInitTask -TaskName 'fake-task' -PreviousRunTime $baseline }
+    catch { $caught = $_.Exception.Message }
+    if ($null -eq $caught -or $caught -notlike '*failed with result 1*') {
+        throw "task failure was not rejected: $caught"
+    }
+    $caught = $null
+    try { Wait-ProfileInitTask -TaskName 'fake-task' -PreviousRunTime $baseline -TimeoutSeconds 0 }
+    catch { $caught = $_.Exception.Message }
+    if ($null -eq $caught -or $caught -notlike '*timed out*') {
+        throw "task timeout was not rejected: $caught"
+    }
+
     # Run the production polling loop against an empty, then initialized file.
     # Use FindAll and select the SQLite readiness loop specifically (identified by
     # $databaseReady), since the script now has a second while loop for schtasks polling.
@@ -85,6 +129,7 @@ try {
     $failure = 'original startup failure'
     $evidence = @{}
     $logFile = $null
+    $initLogFile = $null
     $wrapper = $null
     $serverProcess = $null
     $createdUser = [pscustomobject]@{ SID = [pscustomobject]@{ Value = 'owned-test-sid' } }
@@ -112,7 +157,16 @@ try {
     }
     . ([scriptblock]::Create($outerTry.Finally.Extent.Text.TrimStart('{').TrimEnd('}')))
     if (-not $script:deletedOwnedUser) { throw 'CIM query failure skipped account cleanup' }
-    Write-Host 'PASS: existing resources preserved, SQLite readiness retried, cleanup survives evidence and CIM failures'
+    $initLogFile = Join-Path $root 'profile-init.log'
+    Set-Content -LiteralPath $initLogFile -Value 'disposable-user task diagnostics'
+    $EvidencePath = Join-Path $root 'init-log.json'
+    . ([scriptblock]::Create($outerTry.Finally.Extent.Text.TrimStart('{').TrimEnd('}')))
+    $receipt = Get-Content -LiteralPath $EvidencePath -Raw | ConvertFrom-Json
+    if ($receipt.profile_init_log -notcontains 'disposable-user task diagnostics') {
+        throw 'profile-init diagnostics were not retained'
+    }
+    if (Test-Path -LiteralPath $initLogFile) { throw 'profile-init log was not cleaned up' }
+    Write-Host 'PASS: task completion/failure/timeout checked, init log retained, existing resources preserved, SQLite readiness retried, cleanup survives evidence and CIM failures'
 }
 finally {
     foreach ($name in $originalEnvironment.Keys) {

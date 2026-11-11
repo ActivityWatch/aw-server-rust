@@ -44,6 +44,27 @@ function Assert-True {
     }
 }
 
+function Wait-ProfileInitTask {
+    param([string]$TaskName, [datetime]$PreviousRunTime, [int]$TimeoutSeconds = 15)
+    $initDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $initDeadline) {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+        # Ready alone also describes a task that has never started. Require a
+        # new execution, a terminal state, and a successful action exit code.
+        if ($info.LastRunTime -gt $PreviousRunTime -and
+            $task.State -notin @('Queued', 'Running') -and
+            $info.LastTaskResult -ne 267009) {
+            if ($info.LastTaskResult -ne 0) {
+                throw "profile-init task failed with result $($info.LastTaskResult)"
+            }
+            return $info
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "profile-init task timed out after $TimeoutSeconds seconds"
+}
+
 function Get-ProfileTail {
     param([string]$Dir)
     if (-not (Test-Path -LiteralPath $Dir)) {
@@ -128,19 +149,18 @@ try {
         throw "could not create profile-init scheduled task (schtasks returned $LASTEXITCODE): $stCreate"
     }
     try {
+        $previousRunTime = (Get-ScheduledTaskInfo -TaskName $initTaskName -ErrorAction Stop).LastRunTime
         $stRun = schtasks.exe /Run /TN $initTaskName 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "could not run profile-init scheduled task (schtasks returned $LASTEXITCODE): $stRun"
         }
-        # Poll until the task exits Running (Queued/Ready) or 15 s elapses.
-        $initDeadline = (Get-Date).AddSeconds(15)
-        while ((Get-Date) -lt $initDeadline) {
-            $status = (schtasks.exe /Query /TN $initTaskName /FO CSV /NH 2>&1) -join ''
-            if ($status -notmatch '"Running"') { break }
-            Start-Sleep -Milliseconds 500
-        }
+        $initResult = Wait-ProfileInitTask -TaskName $initTaskName -PreviousRunTime $previousRunTime
+        $evidence['profile_init_result'] = $initResult.LastTaskResult
+        $evidence['profile_init_run_time'] = $initResult.LastRunTime.ToUniversalTime().ToString('o')
     }
     finally {
+        # A timed-out/failed task must not keep writing into a profile we remove.
+        Stop-ScheduledTask -TaskName $initTaskName -ErrorAction SilentlyContinue
         schtasks.exe /Delete /TN $initTaskName /F 2>$null | Out-Null
     }
     Write-Host "Profile initialized for disposable user '$User' via scheduled task"
@@ -267,6 +287,9 @@ finally {
 
     if ($null -ne $logFile -and (Test-Path -LiteralPath $logFile)) {
         $evidence['server_log'] = @(Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue)
+    }
+    if ($null -ne $initLogFile -and (Test-Path -LiteralPath $initLogFile)) {
+        $evidence['profile_init_log'] = @(Get-Content -LiteralPath $initLogFile -ErrorAction SilentlyContinue)
     }
     # Persist before cleanup so an unavailable CIM/cleanup primitive cannot
     # discard the original startup failure and its child-session diagnostics.

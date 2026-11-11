@@ -51,7 +51,12 @@ try {
     }
 
     # Run the production polling loop against an empty, then initialized file.
-    $loop = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.WhileStatementAst] }, $true)
+    # Use FindAll and select the SQLite readiness loop specifically (identified by
+    # $databaseReady), since the script now has a second while loop for schtasks polling.
+    $loop = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.WhileStatementAst] }, $true)) |
+        Where-Object { $_.Extent.Text -clike '*$databaseReady*' } |
+        Select-Object -First 1
+    if ($null -eq $loop) { throw 'could not locate the SQLite readiness polling loop in the production script' }
     $expectedDb = Join-Path $root 'sqlite.db'
     [IO.File]::WriteAllBytes($expectedDb, [byte[]]@())
     $serverProcess = [pscustomobject]@{ HasExited = $false }

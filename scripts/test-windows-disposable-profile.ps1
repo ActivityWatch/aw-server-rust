@@ -484,8 +484,9 @@ finally {
             }
             try {
                 Set-DisposableBatchLogonRight -Sid $createdUser.SID.Value -Grant $false
-            }
-            finally {
+            } catch {
+                Write-Warning "Failed to revoke batch logon right for $($createdUser.SID.Value): $_"
+            } finally {
                 Remove-LocalUser -SID $createdUser.SID -ErrorAction SilentlyContinue
             }
         }

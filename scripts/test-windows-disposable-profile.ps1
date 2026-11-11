@@ -147,6 +147,13 @@ try {
     $runId = [guid]::NewGuid().ToString('N')
     $initTaskName = "AW-ProfileInit-$runId"
     $initLogFile = Join-Path $env:Public "aw-init-$runId.log"
+    $initStartedAt = Get-Date
+    $initEventLogError = $null
+    $stRun = @()
+    # Hosted runners may have task history disabled. Enable it before registration
+    # so a rejected demand start leaves evidence; failure here is diagnostic only.
+    $eventLogSetup = & wevtutil.exe sl Microsoft-Windows-TaskScheduler/Operational /e:true 2>&1
+    if ($LASTEXITCODE -ne 0) { $initEventLogError = "could not enable task history: $eventLogSetup" }
     $stCreate = schtasks.exe /Create /TN $initTaskName `
         /TR "cmd.exe /d /c whoami > `"$initLogFile`" 2>&1" `
         /SC ONCE /SD "01/01/2000" /ST "00:00" `
@@ -175,9 +182,42 @@ try {
             $evidence['profile_init_last_result_hex'] = '0x{0:X8}' -f ([long]$initInfo.LastTaskResult -band 0xffffffffL)
             $evidence['profile_init_last_run_time'] = $initInfo.LastRunTime.ToUniversalTime().ToString('o')
             $evidence['profile_init_previous_run_time'] = $previousRunTime.ToUniversalTime().ToString('o')
+            # /Run can be accepted without an action starting. Preserve effective
+            # demand-start conditions and registration warnings, not the /RP argv
+            # or a full task export that could acquire sensitive fields later.
+            $evidence['profile_init_create_output'] = @($stCreate)
+            $evidence['profile_init_run_output'] = @($stRun)
+            $evidence['profile_init_settings'] = $initTask.Settings | Select-Object `
+                Enabled, AllowDemandStart, DisallowStartIfOnBatteries, StopIfGoingOnBatteries, `
+                RunOnlyIfIdle, RunOnlyIfNetworkAvailable
+            $evidence['profile_init_principal'] = $initTask.Principal | Select-Object UserId, LogonType, RunLevel
         }
         catch {
             $evidence['profile_init_diagnostic_error'] = $_.Exception.Message
+        }
+        try {
+            if ($null -ne $initEventLogError) {
+                $evidence['profile_init_event_error'] = $initEventLogError
+            }
+            $events = @(Get-WinEvent -FilterHashtable @{
+                LogName = 'Microsoft-Windows-TaskScheduler/Operational'
+                StartTime = $initStartedAt
+            } -MaxEvents 200 -ErrorAction Stop)
+            # Never publish free-form event messages or other tasks' data. Event
+            # IDs and numeric payloads retain dispatch failures/HRESULTs safely.
+            $evidence['profile_init_events'] = @($events | Where-Object {
+                @($_.Properties | Where-Object { $_.Value -eq "\$initTaskName" }).Count -gt 0
+            } | ForEach-Object {
+                [ordered]@{
+                    id = $_.Id
+                    time = $_.TimeCreated.ToUniversalTime().ToString('o')
+                    codes = @($_.Properties | Where-Object { $_.Value -is [ValueType] } |
+                        ForEach-Object { [string]$_.Value })
+                }
+            })
+        }
+        catch {
+            $evidence['profile_init_event_error'] = $_.Exception.Message
         }
         # A timed-out/failed task must not keep writing into a profile we remove.
         Stop-ScheduledTask -TaskName $initTaskName -ErrorAction SilentlyContinue

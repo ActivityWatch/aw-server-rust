@@ -125,7 +125,30 @@ try {
     function Get-ScheduledTask {
         param($TaskName)
         if ($script:taskDeleted) { throw 'diagnostics queried after deletion' }
-        return [pscustomobject]@{ State = 'Ready' }
+        return [pscustomobject]@{
+            State = 'Ready'
+            Settings = [pscustomobject]@{
+                Enabled = $true; AllowDemandStart = $false
+                DisallowStartIfOnBatteries = $true; StopIfGoingOnBatteries = $true
+                RunOnlyIfIdle = $false; RunOnlyIfNetworkAvailable = $false
+            }
+            Principal = [pscustomobject]@{ UserId = 'disposable'; LogonType = 'Password'; RunLevel = 'Limited' }
+        }
+    }
+    $stCreate = @('registered', 'WARNING: batch logon privilege missing')
+    $stRun = @('run request accepted')
+    $initEventLogError = $null
+    $initStartedAt = Get-Date
+    function Get-WinEvent {
+        param($FilterHashtable, $MaxEvents)
+        return @(
+            [pscustomobject]@{ Id = 101; TimeCreated = $initStartedAt; Properties = @(
+                [pscustomobject]@{ Value = '\fake-task' }
+            ) },
+            [pscustomobject]@{ Id = 999; TimeCreated = $initStartedAt; Properties = @(
+                [pscustomobject]@{ Value = '\unrelated-task' }
+            ) }
+        )
     }
     function Stop-ScheduledTask { param($TaskName) }
     function schtasks.exe { $script:taskDeleted = $true }
@@ -134,11 +157,22 @@ try {
         $evidence['profile_init_state'] -ne 'Ready') {
         throw 'pre-cleanup Scheduler failure diagnostics were lost'
     }
+    if ($evidence['profile_init_settings'].AllowDemandStart -ne $false -or
+        $evidence['profile_init_principal'].LogonType -ne 'Password' -or
+        $evidence['profile_init_create_output'] -notcontains 'WARNING: batch logon privilege missing' -or
+        $evidence['profile_init_run_output'] -notcontains 'run request accepted') {
+        throw 'unstarted-task conditions, principal or registration warnings were lost'
+    }
+    if (@($evidence['profile_init_events']).Count -ne 1 -or $evidence['profile_init_events'][0].id -ne 101) {
+        throw 'task-specific Scheduler event IDs were not retained or unrelated events leaked'
+    }
+    function Get-WinEvent { param($FilterHashtable, $MaxEvents) throw 'event channel unavailable' }
     function Get-ScheduledTask { param($TaskName) throw 'diagnostic query unavailable' }
     $script:taskDeleted = $false
     $evidence = @{}
     . ([scriptblock]::Create($taskCleanup.Finally.Extent.Text.TrimStart('{').TrimEnd('}')))
-    if (-not $script:taskDeleted -or $evidence['profile_init_diagnostic_error'] -ne 'diagnostic query unavailable') {
+    if (-not $script:taskDeleted -or $evidence['profile_init_diagnostic_error'] -ne 'diagnostic query unavailable' -or
+        $evidence['profile_init_event_error'] -ne 'event channel unavailable') {
         throw 'diagnostic query failure prevented task cleanup or lost its evidence'
     }
 

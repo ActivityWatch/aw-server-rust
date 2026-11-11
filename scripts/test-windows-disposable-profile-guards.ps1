@@ -129,6 +129,59 @@ try {
         throw "task timeout was not rejected: $caught"
     }
 
+    # CI's first batch logon took ~16 seconds after /Run. Exercise a 20-second
+    # cold start with a virtual clock, not a slow test or an assumed instant logon.
+    & {
+        $script:waitClock = [datetime]'2026-01-01'
+        $script:waitStart = $script:waitClock
+        $script:neverComplete = $false
+        function Get-Date { return $script:waitClock }
+        function Start-Sleep {
+            param($Milliseconds)
+            $script:waitClock = $script:waitClock.AddMilliseconds($Milliseconds)
+        }
+        function Get-ScheduledTask {
+            param($TaskName)
+            return [pscustomobject]@{ State = 'Ready' }
+        }
+        function Get-ScheduledTaskInfo {
+            param($TaskName)
+            $complete = -not $script:neverComplete -and
+                ($script:waitClock - $script:waitStart).TotalSeconds -ge 20
+            return [pscustomobject]@{
+                LastRunTime = if ($complete) { $baseline.AddSeconds(1) } else { $baseline }
+                LastTaskResult = if ($complete) { 0 } else { 267011 }
+            }
+        }
+        $result = Wait-ProfileInitTask -TaskName 'cold-task' -PreviousRunTime $baseline
+        if ($result.LastTaskResult -ne 0 -or
+            ($script:waitClock - $script:waitStart).TotalSeconds -ne 20) {
+            throw 'cold profile initialization was not awaited to confirmed completion'
+        }
+        # An explicit shorter budget and a permanently unstarted task still fail.
+        foreach ($case in @('short-budget', 'never-started')) {
+            $script:waitClock = $script:waitStart
+            $script:neverComplete = $case -eq 'never-started'
+            $caught = $null
+            try {
+                if ($case -eq 'short-budget') {
+                    Wait-ProfileInitTask -TaskName 'cold-task' -PreviousRunTime $baseline -TimeoutSeconds 15
+                }
+                else {
+                    Wait-ProfileInitTask -TaskName 'cold-task' -PreviousRunTime $baseline
+                }
+            }
+            catch { $caught = $_.Exception.Message }
+            if ($null -eq $caught -or $caught -notlike '*timed out*') {
+                throw "$case did not fail closed: $caught"
+            }
+            $expectedSeconds = if ($case -eq 'short-budget') { 15 } else { 120 }
+            if (($script:waitClock - $script:waitStart).TotalSeconds -ne $expectedSeconds) {
+                throw "$case did not respect its bounded initialization budget"
+            }
+        }
+    }
+
     # Failure diagnostics must be collected before the task is deleted, and a
     # failed diagnostic query must not prevent owned-task cleanup.
     $taskCleanup = $ast.Find({ param($node)

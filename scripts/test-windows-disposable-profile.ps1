@@ -116,7 +116,10 @@ namespace AwIsolation {
 }
 
 function Wait-ProfileInitTask {
-    param([string]$TaskName, [datetime]$PreviousRunTime, [int]$TimeoutSeconds = 15)
+    # A measured hosted-runner cold batch logon completed ~16 seconds after
+    # /Run. Allow the same bounded 120s startup budget as server readiness,
+    # rather than rejecting successful profile initialization at 15s.
+    param([string]$TaskName, [datetime]$PreviousRunTime, [int]$TimeoutSeconds = 120)
     $initDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $initDeadline) {
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop

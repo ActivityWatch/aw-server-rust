@@ -78,6 +78,7 @@ $createdUser = $null
 $serverProcess = $null
 $logFile = $null
 $wrapper = $null
+$initLogFile = $null
 
 try {
     # Refuse before creating anything; finally must never remove existing users
@@ -109,12 +110,46 @@ try {
 
     $credential = New-Object System.Management.Automation.PSCredential($User, $secure)
 
+    # Initialize the disposable user's profile via a one-shot scheduled task BEFORE
+    # launching aw-server. Start-Process -Credential -LoadUserProfile loads NTUSER.DAT
+    # but does not complete the first-logon initialization: the user's token environment
+    # is missing USERPROFILE, so SHGetKnownFolderPath returns E_FAIL even though the
+    # profile directory was copied from the template. A Task Scheduler batch logon creates
+    # a full user session (LogonUser LOGON32_LOGON_BATCH) which completes that
+    # initialization, so the subsequent Start-Process launch has the correct token env.
+    $runId = [guid]::NewGuid().ToString('N')
+    $initTaskName = "AW-ProfileInit-$runId"
+    $initLogFile = Join-Path $env:Public "aw-init-$runId.log"
+    $stCreate = schtasks.exe /Create /TN $initTaskName `
+        /TR "cmd.exe /d /c whoami > `"$initLogFile`" 2>&1" `
+        /SC ONCE /SD "01/01/2000" /ST "00:00" `
+        /RU $User /RP $password /F /RL LIMITED 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not create profile-init scheduled task (schtasks returned $LASTEXITCODE): $stCreate"
+    }
+    try {
+        $stRun = schtasks.exe /Run /TN $initTaskName 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "could not run profile-init scheduled task (schtasks returned $LASTEXITCODE): $stRun"
+        }
+        # Poll until the task exits Running (Queued/Ready) or 15 s elapses.
+        $initDeadline = (Get-Date).AddSeconds(15)
+        while ((Get-Date) -lt $initDeadline) {
+            $status = (schtasks.exe /Query /TN $initTaskName /FO CSV /NH 2>&1) -join ''
+            if ($status -notmatch '"Running"') { break }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    finally {
+        schtasks.exe /Delete /TN $initTaskName /F 2>$null | Out-Null
+    }
+    Write-Host "Profile initialized for disposable user '$User' via scheduled task"
+
     # Debug builds default to the `testing` profile, and automatic Python legacy
     # import only runs for `default`, so name the profile explicitly.
     # A cross-user child has no inherited console, so a Rust panic would be lost.
     # Launch through a batch wrapper that redirects both streams to a file the
     # disposable user can write, so a red run reports the panic, not just exit 101.
-    $runId = [guid]::NewGuid().ToString('N')
     $logFile = Join-Path $env:Public "aw-isolation-$runId.log"
     $wrapper = Join-Path $env:Public "aw-isolation-$runId.cmd"
     # Capture only profile-related diagnostics, never the full child environment.
@@ -259,6 +294,9 @@ finally {
         }
         if ($null -ne $logFile) {
             Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $initLogFile -and (Test-Path -LiteralPath $initLogFile -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $initLogFile -Force -ErrorAction SilentlyContinue
         }
     }
 }

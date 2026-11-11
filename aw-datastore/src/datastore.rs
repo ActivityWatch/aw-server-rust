@@ -364,6 +364,23 @@ fn filter_nanos(dt: DateTime<Utc>) -> i64 {
     })
 }
 
+/// Start and end of an event as stored: nanoseconds since the epoch. An event
+/// that starts or ends outside that range (1677-2262) can't be stored and is
+/// rejected, instead of panicking the datastore worker.
+fn event_nanos(event: &Event) -> Result<(i64, i64), DatastoreError> {
+    let invalid = || {
+        DatastoreError::InvalidEvent(format!(
+            "Event at {} with duration {}s is outside the supported time range (1677-2262)",
+            event.timestamp,
+            event.duration.num_milliseconds() as f64 / 1000.0
+        ))
+    };
+    let start = event.timestamp.timestamp_nanos_opt().ok_or_else(invalid)?;
+    let duration = event.duration.num_nanoseconds().ok_or_else(invalid)?;
+    let end = start.checked_add(duration).ok_or_else(invalid)?;
+    Ok((start, end))
+}
+
 /// Whether a time filter can't match any stored event: a start after 2262 or an end
 /// before 1677, beyond the range event times are stored in.
 fn filter_excludes_everything(
@@ -760,6 +777,15 @@ impl DatastoreInstance {
             Some(created) => Some(created),
             None => Some(Utc::now()),
         };
+        // Reject unstorable events before the bucket row is written, so an
+        // import with a bad event doesn't leave an empty bucket behind.
+        // Taking them out also keeps them out of the bucket cache.
+        let events = bucket.events.take().map(|events| events.take_inner());
+        if let Some(events) = &events {
+            for event in events {
+                event_nanos(event)?;
+            }
+        }
         let mut stmt = match conn.prepare_cached(
             "
                 INSERT INTO buckets (name, type, client, hostname, created, data)
@@ -788,15 +814,11 @@ impl DatastoreInstance {
                 // Get and set rowid
                 let rowid: i64 = conn.last_insert_rowid();
                 bucket.bid = Some(rowid);
-                // Take out events from struct before caching
-                let events = bucket.events;
-                bucket.events = None;
                 // Cache bucket
                 self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
                 // Insert events
                 if let Some(events) = events {
-                    self.insert_events(conn, &bucket.id, events.take_inner())?;
-                    bucket.events = None;
+                    self.insert_events(conn, &bucket.id, events)?;
                 }
                 Ok(())
             }
@@ -904,6 +926,13 @@ impl DatastoreInstance {
         mut events: Vec<Event>,
     ) -> Result<Vec<Event>, DatastoreError> {
         let mut bucket = self.get_bucket(bucket_id)?;
+        // Check every event before writing any: the worker shares one
+        // transaction across requests, so a failure halfway through would
+        // leave the earlier events of this request stored.
+        let nanos = events
+            .iter()
+            .map(event_nanos)
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut stmt = match conn.prepare_cached(
             "
@@ -917,17 +946,7 @@ impl DatastoreInstance {
                 )))
             }
         };
-        for event in &mut events {
-            let starttime_nanos = event.timestamp.timestamp_nanos_opt().unwrap();
-            let duration_nanos = match event.duration.num_nanoseconds() {
-                Some(nanos) => nanos,
-                None => {
-                    return Err(DatastoreError::InternalError(
-                        "Failed to convert duration to nanoseconds".to_string(),
-                    ))
-                }
-            };
-            let endtime_nanos = starttime_nanos + duration_nanos;
+        for (event, (starttime_nanos, endtime_nanos)) in events.iter_mut().zip(nanos) {
             let data = serde_json::to_string(&event.data).unwrap();
             let res = stmt.execute([
                 &bucket.bid.unwrap(),
@@ -1086,16 +1105,7 @@ impl DatastoreInstance {
                 )))
             }
         };
-        let starttime_nanos = event.timestamp.timestamp_nanos_opt().unwrap();
-        let duration_nanos = match event.duration.num_nanoseconds() {
-            Some(nanos) => nanos,
-            None => {
-                return Err(DatastoreError::InternalError(
-                    "Failed to convert duration to nanoseconds".to_string(),
-                ))
-            }
-        };
-        let endtime_nanos = starttime_nanos + duration_nanos;
+        let (starttime_nanos, endtime_nanos) = event_nanos(event)?;
         let data = serde_json::to_string(&event.data).unwrap();
         match stmt.execute([
             &bucket.bid.unwrap(),

@@ -12,6 +12,15 @@ use aw_datastore::{Datastore, DatastoreError};
 use crate::endpoints::util::ApiJson;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
+/// An unstorable event in the export is the client's fault (400); anything
+/// else is a datastore failure (500).
+fn error_status(e: &DatastoreError) -> Status {
+    match e {
+        DatastoreError::InvalidEvent(_) => Status::BadRequest,
+        _ => Status::InternalServerError,
+    }
+}
+
 /// Computes a dedup identity tuple for an event.
 ///
 /// Uses canonical JSON serialization (sorted keys via `BTreeMap`) so that
@@ -184,10 +193,7 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                                     bucket.id
                                 );
                                 warn!("{}", err_msg);
-                                return Err(HttpErrorJson::new(
-                                    Status::InternalServerError,
-                                    err_msg,
-                                ));
+                                return Err(HttpErrorJson::new(error_status(&e), err_msg));
                             }
                         }
                     }
@@ -196,7 +202,7 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
             Err(e) => {
                 let err_msg = format!("Failed to import bucket: {e:?}");
                 warn!("{}", err_msg);
-                return Err(HttpErrorJson::new(Status::InternalServerError, err_msg));
+                return Err(HttpErrorJson::new(error_status(&e), err_msg));
             }
         }
     }

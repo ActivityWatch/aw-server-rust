@@ -107,11 +107,34 @@ We also avoid having to implement complex features such as conflict resolution, 
 - The default `aw-sync` / `aw-sync daemon` command does not pull from the 3-level layout (see Usage). Bare `aw-sync sync` and the Android app do. `aw-sync sync --mode`/`--buckets`/`--start-date` use the two-level path.
 - By default all buckets are synced. `--buckets` is opt-in filtering, not a window/afk-only default.
 - It doesn't sync settings.
+- Edit/deletion reconciliation requires matching, non-missing bucket creation timestamps, preserved on first import. A hostname-derived bucket can collide with another device using the same hostname and ID. When provenance differs or is missing, sync into a nonempty destination is refused before any writes: merely skipping deletion on that pass would still let the original source prune the other device's additions on its next pass. An empty legacy destination can receive its first import, but subsequent passes require corrected creation provenance or a fresh destination. This is a conservative guard, not a unique device identity; it cannot detect histories already mixed by older sync versions or distinct sources with identical creation timestamps. Do not copy a creation timestamp onto an uncertain mixed history to bypass the refusal.
 - It mirrors events to all devices,
   - If you have a lot of devices you'll get a lot of duplicates, taking up a lot of space and potentially impacting performance.
-- Event deletion is not synced. Owner-originated edits (same timestamp, new data) are reconciled within 7 days of the destination resume cursor; older edits are skipped to keep peak memory bounded.
+- Owner-originated edits (same timestamp, new data) and deletions are reconciled within 7 days of the destination resume cursor; older ones are skipped to keep peak memory bounded. Deletion needs no tombstone record: inside that window the source is authoritative for its own bucket, so a destination row the source no longer backs is removed. Three consequences are worth knowing:
+  - **A destination row the source does not back is pruned**, even one placed there by hand. Do not seed a destination bucket with data the source does not have.
+  - **Deletions entirely before the window are not propagated.** The copy on the other devices stays; remove the destination bucket and re-sync to recover. Events overlapping the window participate even when their original start is older: datastore queries clip them to the window, but deletion removes the original row by ID.
+  - A destination bucket whose source slice is empty is never pruned, so an emptied or reset source datastore is not mistaken for "the owner deleted everything".
+- A destination row is matched to its source by timestamp and duration. Rows starting exactly at the resume cursor are fetched by ID before matching, so range-end clipping cannot disguise distinct timestamp-tied durations as identical zero-duration rows. An unmatched source identity at the same timestamp preserves the destination row for incremental duration reconciliation; an already-matched sibling does not preserve a deleted identity. The clip-invariant end time and payload also preserve start-clipped copies of live events (the same fingerprint the resume-boundary dedup uses). This conservative fingerprint exemption can retain a deleted interval if another live interval shares its end time and payload. A destination start covered by an earlier source interval is also retained even when its payload or end changed: without clip provenance it is unsafe to delete that possible start-clipped live copy. Historical title and duration edits of such clipped copies may therefore remain stale until re-syncing a fresh destination. This overlap exemption can also retain a deleted interval covered by another live source interval; preservation is preferred to deleting potentially live activity.
 
 ---
+
+### Recovery when sync observes an edit's delete/insert gap
+
+The bounded reconciliation pass also recovers complete historical source rows
+missing below the destination cursor. This lets a later pass recover an edit
+whose temporary deletion was already mirrored, including through a staging hop.
+Recovered rows retain their original timestamp, duration and payload but receive
+new destination IDs. Repeated passes do not duplicate matching identities.
+
+Repair stays inside the seven-day window and the configured `--start-date` floor.
+It conservatively skips source rows that could already exist as start-clipped
+copies (matching end/payload, a destination start strictly inside the source
+interval, or a zero-duration destination row at its end),
+as well as unmatched durations at an existing destination start. Endpoint contact
+with an adjacent positive-duration event does not block repair or deletion;
+zero-duration endpoint copies remain protected. Those ambiguous
+cases retain the clipped-copy/duration-update limitations above; this is not a
+full historical backfill or a transaction across the owner's edit operations.
 
 ## Advanced usage
 

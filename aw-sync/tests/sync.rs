@@ -289,29 +289,16 @@ mod sync_tests {
             "type": "currentwindow",
             "hostname": "POCO F8 Ultra",
             "client": "aw-android",
-            "data": {"$aw.sync.origin": "POCO F8 Ultra"}
+            "data": {"$aw.sync.origin": "POCO F8 Ultra"},
+            "created": state.ds_src.get_bucket("aw-watcher-android").unwrap().created
         }))
         .unwrap();
         state.ds_dest.create_bucket(&legacy_bucket).unwrap();
 
-        // Seed the legacy destination bucket with one event at T0 — simulating
-        // previously-imported history.  This establishes the resume cursor.
-        let t0 = Utc::now();
-        let existing_event: Event = serde_json::from_value(serde_json::json!({
-            "timestamp": t0.to_rfc3339(),
-            "duration": 1,
-            "data": {"app": "existing"}
-        }))
-        .unwrap();
-        state
-            .ds_dest
-            .insert_events(legacy_id, &[existing_event])
-            .unwrap();
-        state.ds_dest.force_commit().unwrap();
-
         // Two source events: one before T0 (already covered) and one after T0 (new).
         // The sync must read the cursor from the reused bucket and import only the
         // post-T0 event — not re-import everything from scratch.
+        let t0 = Utc::now();
         let before_t0: Event = serde_json::from_value(serde_json::json!({
             "timestamp": (t0 - Duration::hours(1)).to_rfc3339(),
             "duration": 1,
@@ -326,11 +313,22 @@ mod sync_tests {
         .unwrap();
         state
             .ds_src
-            .insert_events("aw-watcher-android", &[before_t0, after_t0])
+            .insert_events("aw-watcher-android", &[before_t0.clone(), after_t0])
             .unwrap();
         state.ds_src.force_commit().unwrap();
 
-        aw_sync::sync_datastores(
+        // Seed the legacy destination bucket with the older source event —
+        // simulating previously-imported history. This establishes the resume
+        // cursor. It must be an event the source still has: aw-sync's reconcile
+        // reads a destination row the source no longer backs as an
+        // owner-originated deletion, so a synthetic row would be pruned.
+        state
+            .ds_dest
+            .insert_events(legacy_id, std::slice::from_ref(&before_t0))
+            .unwrap();
+        state.ds_dest.force_commit().unwrap();
+
+        let reports = aw_sync::sync_datastores(
             &state.ds_src,
             &state.ds_dest,
             false, // pull
@@ -338,6 +336,12 @@ mod sync_tests {
             &SyncSpec::default(),
         )
         .unwrap();
+        let report = reports.iter().find(|r| r.bucket_id == legacy_id).unwrap();
+        assert_eq!(
+            report.resumed_at,
+            Some(before_t0.timestamp + before_t0.duration),
+            "resume cursor must come from the reused legacy bucket"
+        );
 
         let dest_buckets = state.ds_dest.get_buckets().unwrap();
 
@@ -353,16 +357,15 @@ mod sync_tests {
             "a sanitized fork must not be created; got: {:?}",
             dest_buckets.keys().collect::<Vec<_>>()
         );
-        // Exactly 2 events: the pre-existing one at T0 plus the new T0+1h event.
-        // A count of 3 would mean the cursor was NOT read (full re-import from scratch).
+        // Exactly 2 events: the pre-existing one plus the new T0+1h event.
+        // Dedup can mask a full re-read, so check the cursor separately above.
         let event_count = state
             .ds_dest
             .get_event_count(legacy_id, None, None)
             .unwrap();
         assert_eq!(
             event_count, 2,
-            "legacy bucket must have exactly 2 events (existing + new); \
-             3 would mean the cursor was ignored and history was re-imported"
+            "legacy bucket must have exactly 2 events (existing + new)"
         );
     }
 
@@ -1468,7 +1471,8 @@ mod sync_tests {
             "id": dest_bucket_id,
             "type": "test",
             "hostname": "device-0",
-            "client": "test"
+            "client": "test",
+            "created": state.ds_src.get_bucket(bucket_id.as_str()).unwrap().created
         }))
         .unwrap();
         state.ds_dest.create_bucket(&dest_bucket).unwrap();

@@ -9,7 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -946,6 +946,23 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
     )
 }
 
+/// Clip-invariant event identity used by the resume-boundary dedup and by the
+/// deletion reconcile.
+///
+/// A `get_events` call bounded at `resume` clips an event straddling the bound:
+/// its returned start moves forward to the bound and its duration shrinks to
+/// compensate, but its end time and payload survive unchanged. An event's end
+/// is therefore the only representation that matches a clipped copy to its
+/// unclipped counterpart.
+fn boundary_fingerprint(event: &Event) -> (i64, String) {
+    (
+        (event.timestamp + event.duration)
+            .timestamp_nanos_opt()
+            .unwrap_or(0),
+        serde_json::to_string(&event.data).unwrap_or_default(),
+    )
+}
+
 /// Replace dest events whose timestamp+duration still exist on the source but
 /// whose data changed.
 ///
@@ -962,15 +979,19 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
 /// also re-fetched as a start-clipped fragment, and heartbeat() refuses to
 /// merge different data, which would insert a duplicate unless dest already
 /// holds the new payload.
+/// Returns the number of destination rows removed as owner-originated
+/// deletions, so the caller can distinguish that expected shrink from the
+/// incremental copy losing events.
 fn reconcile_updated_events(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
-) -> Result<(), String> {
+    repair_start: Option<DateTime<Utc>>,
+) -> Result<usize, String> {
     let Some(resume) = resume_sync_at else {
-        return Ok(());
+        return Ok(0);
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
 
@@ -986,22 +1007,56 @@ fn reconcile_updated_events(
     // Datastore errors return rather than unwrap: a panic here aborts the
     // whole pass (and on Android, the JNI frame). The per-bucket skip in
     // ActivityWatch/aw-server-rust#697 then drops this bucket, not the daemon.
-    let source_events = ds_from.get_events(
+    let mut source_events = ds_from.get_events(
         bucket_from.id.as_str(),
         Some(lookback_start),
         Some(resume),
         None,
     )?;
-    let dest_events = ds_to.get_events(
+    let mut dest_events = ds_to.get_events(
         bucket_to.id.as_str(),
         Some(lookback_start),
         Some(resume),
         None,
     )?;
 
+    // A timestamp tie can put the cursor at a zero-duration row while another
+    // row at that timestamp extends past it. The range query returns both with
+    // duration zero, erasing the identity/fingerprint needed for deletion.
+    // Hydrate only cursor-start rows by ID on both sides. This uses the existing
+    // single-event endpoint, keeps the bounded window, and fails before writes
+    // if any lookup fails. Rows starting before the cursor retain the edit
+    // pass's existing clipped representation.
+    for (events, datastore, bucket) in [
+        (&mut source_events, ds_from, bucket_from),
+        (&mut dest_events, ds_to, bucket_to),
+    ] {
+        for event in events.iter_mut().filter(|event| event.timestamp == resume) {
+            let id = event.id.ok_or_else(|| {
+                format!("Missing event ID at reconciliation cursor in {}", bucket.id)
+            })?;
+            *event = datastore.get_event(bucket.id.as_str(), id)?;
+        }
+    }
+
+    // Missing historical rows can be replacements inserted after an earlier
+    // pass observed the delete half of an edit. Retain destination geometry
+    // before consuming the identity map so repair does not duplicate a
+    // start-clipped copy or interfere with duration updates at the same start.
+    let dest_starts: HashSet<_> = dest_events.iter().map(|event| event.timestamp).collect();
+    let dest_fingerprints: HashSet<_> = dest_events.iter().map(boundary_fingerprint).collect();
+    let dest_zero_starts: HashSet<_> = dest_events
+        .iter()
+        .filter(|event| event.duration == chrono::Duration::zero())
+        .map(|event| event.timestamp)
+        .collect();
+    let mut sorted_dest_starts: Vec<_> = dest_starts.iter().copied().collect();
+    sorted_dest_starts.sort_unstable();
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for event in dest_events {
-        if event.timestamp >= lookback_start && event.timestamp < resume {
+        // Deletions also own a zero-duration row exactly at the cursor. The
+        // edit map below remains strictly before it for the heartbeat path.
+        if event.timestamp >= lookback_start && event.timestamp <= resume {
             dest_by_identity
                 .entry(event_identity(&event))
                 .or_default()
@@ -1009,8 +1064,40 @@ fn reconcile_updated_events(
         }
     }
 
+    // Query-start clipping changes an event's identity. A later duration or
+    // payload edit must not turn its still-live suffix into evidence of
+    // deletion. Without clip provenance, conservatively preserve a destination
+    // start covered by an earlier source interval, even if its end changed.
+    // Prefix maxima support overlap checks without a scan per destination row.
+    let mut source_coverage: Vec<_> = source_events
+        .iter()
+        .map(|event| (event.timestamp, event.timestamp + event.duration))
+        .collect();
+    source_coverage.sort_unstable_by_key(|(start, _)| *start);
+    let mut max_end = None;
+    for (_, end) in &mut source_coverage {
+        let covered_end = max_end.map_or(*end, |previous: DateTime<Utc>| previous.max(*end));
+        *end = covered_end;
+        max_end = Some(covered_end);
+    }
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
+    let mut src_timestamps: HashSet<DateTime<Utc>> = HashSet::new();
+    let mut pending_duration_timestamps: HashSet<DateTime<Utc>> = HashSet::new();
+    let mut src_boundary_fingerprints: HashSet<(i64, String)> = HashSet::new();
     for src in source_events {
+        // A live boundary row (including a clipped ongoing event) backs its
+        // destination copy even though the incremental path owns its edits.
+        if src.timestamp >= lookback_start && src.timestamp <= resume {
+            src_timestamps.insert(src.timestamp);
+            // A source identity already on dest is a surviving sibling, not
+            // evidence that another duration at this timestamp was updated.
+            // Only an unmatched source identity needs the incremental path's
+            // duration-update protection.
+            if !dest_by_identity.contains_key(&event_identity(&src)) {
+                pending_duration_timestamps.insert(src.timestamp);
+            }
+            src_boundary_fingerprints.insert(boundary_fingerprint(&src));
+        }
         // Skip events that start at/after the dest cursor; the incremental
         // copy owns those. Do not use end>resume: the dest-latest event starts
         // before resume and must still be title-reconciled.
@@ -1023,10 +1110,60 @@ fn reconcile_updated_events(
             .push(src);
     }
 
+    let mut deleted = 0usize;
     for (identity, srcs) in src_by_identity {
         let mut dsts = match dest_by_identity.remove(&identity) {
             Some(dsts) if !dsts.is_empty() => dsts,
-            _ => continue,
+            _ => {
+                if dest_starts.contains(&identity.0) {
+                    // A different duration at this start is still owned by
+                    // the incremental duration-update path.
+                    continue;
+                }
+                let mut missing = Vec::new();
+                for src in srcs {
+                    let end = src.timestamp + src.duration;
+                    let next_start = sorted_dest_starts
+                        .get(sorted_dest_starts.partition_point(|start| *start <= src.timestamp));
+                    if dest_fingerprints.contains(&boundary_fingerprint(&src))
+                        || next_start.is_some_and(|start| {
+                            *start < end || (*start == end && dest_zero_starts.contains(start))
+                        })
+                    {
+                        // It may already exist as a start-clipped copy. At
+                        // the source end only a zero-duration row can be a
+                        // clipped suffix; a positive-duration adjacent event
+                        // does not cover this source row.
+                        continue;
+                    }
+                    // Range queries clip both ends. Repair only complete
+                    // historical rows within the configured import floor;
+                    // live/cross-boundary intervals stay on the existing path.
+                    let id = src.id.ok_or_else(|| {
+                        format!(
+                            "Missing event ID during historical repair in {}",
+                            bucket_from.id
+                        )
+                    })?;
+                    let mut original = ds_from.get_event(bucket_from.id.as_str(), id)?;
+                    if original.timestamp < lookback_start
+                        || repair_start.is_some_and(|start| original.timestamp < start)
+                        || original.timestamp + original.duration > resume
+                    {
+                        continue;
+                    }
+                    original.id = None;
+                    missing.push(original);
+                }
+                if !missing.is_empty() {
+                    ds_to.insert_events(bucket_to.id.as_str(), missing)?;
+                    info!(
+                        "   + Recovered missing historical event at {:?}",
+                        identity.0
+                    );
+                }
+                continue;
+            }
         };
         let mut to_insert = Vec::new();
         for src in srcs {
@@ -1042,6 +1179,7 @@ fn reconcile_updated_events(
             continue;
         }
         let ts = identity.0;
+        let inserted_count = to_insert.len();
         // Insert before delete so a crash cannot drop the row. A later pass
         // sees matching data, skips insert, and still removes remaining stale ids.
         if !to_insert.is_empty() {
@@ -1056,11 +1194,72 @@ fn reconcile_updated_events(
         }
         let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
         if !stale.is_empty() {
+            let removed_count = stale.len();
             ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
+            deleted += removed_count.saturating_sub(inserted_count);
         }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
-    Ok(())
+
+    // Owner-originated deletions. Everything left in `dest_by_identity` is an
+    // identity that exists only on the destination inside the window. Under the
+    // single-writer model the source is authoritative for its own bucket, so a
+    // row the source no longer has was deleted by its owner — the same
+    // authority argument that makes a differing payload an edit rather than a
+    // conflict. Deletion needs no tombstone record: absence inside the bounded
+    // window is the signal.
+    //
+    // An unmatched source identity at the same timestamp can be a duration
+    // edit the incremental path owns (e.g. the latest event shrank). Keep its
+    // old destination row for that path. A source identity already matched on
+    // dest cannot justify keeping a different, deleted timestamp sibling.
+    //
+    // Also keep rows that still match a live source event by the clip-invariant
+    // boundary fingerprint: the incremental copy can insert a start-clipped
+    // copy of a source event (different timestamp, zeroed duration), which then
+    // looks like a destination-only identity.
+    //
+    // An empty source window means the source's state cannot be distinguished
+    // from a reset datastore, so it must not be read as "the owner deleted
+    // everything".
+    if src_timestamps.is_empty() {
+        return Ok(deleted);
+    }
+    for (identity, dsts) in dest_by_identity {
+        let ts = identity.0;
+        if pending_duration_timestamps.contains(&ts) {
+            continue;
+        }
+        // Range clipping can collapse distinct durations into one identity.
+        // A live row backs only its own fingerprint, not every sibling in
+        // that identity group.
+        let stale: Vec<i64> = dsts
+            .into_iter()
+            .filter(|dst| {
+                !src_boundary_fingerprints.contains(&boundary_fingerprint(dst))
+                    && !source_coverage
+                        .partition_point(|(start, _)| *start < dst.timestamp)
+                        .checked_sub(1)
+                        .is_some_and(|index| {
+                            // Endpoint contact alone is not coverage of an
+                            // adjacent positive-duration event. A zero-length
+                            // suffix can legitimately sit at the source end.
+                            let end = source_coverage[index].1;
+                            end > dst.timestamp
+                                || (end == dst.timestamp
+                                    && dst.duration == chrono::Duration::zero())
+                        })
+            })
+            .filter_map(|dst| dst.id)
+            .collect();
+        if stale.is_empty() {
+            continue;
+        }
+        deleted += stale.len();
+        ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
+        info!("   - Reconciled deleted event at {:?}", ts);
+    }
+    Ok(deleted)
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -1071,7 +1270,21 @@ fn sync_one(
     bucket_to: Bucket,
     sync_spec: &SyncSpec,
 ) -> Result<BucketReport, String> {
+    // A hostname-derived destination can collide across devices. Creation
+    // provenance is copied on first import and is not replaced on reuse.
+    // A hostname alone is not evidence of single-writer ownership. Legacy
+    // destinations without matching provenance must not accept more rows into
+    // nonempty history: a later pull from the original owner could prune those
+    // additions. An empty legacy bucket is safe to populate, but further sync
+    // requires repairing its provenance or importing into a fresh bucket.
+    let can_reconcile = bucket_from.created.is_some() && bucket_from.created == bucket_to.created;
     let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
+    if !can_reconcile && eventcount_to_old > 0 {
+        return Err(format!(
+            "Refusing to sync '{}' into nonempty '{}': bucket creation provenance is missing or differs; repair provenance or import into a fresh destination",
+            bucket_from.id, bucket_to.id
+        ));
+    }
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
     // Sync events
@@ -1093,7 +1306,19 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    let reconciled_deletions = if can_reconcile {
+        reconcile_updated_events(
+            ds_from,
+            ds_to,
+            &bucket_from,
+            &bucket_to,
+            resume_sync_at,
+            sync_spec.start,
+        )?
+    } else {
+        warn!("   ! Skipping edit/deletion reconciliation for '{}': creation provenance is missing or differs", bucket_to.id);
+        0
+    };
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch
@@ -1148,13 +1373,7 @@ fn sync_one(
             )
             .map_err(|e| format!("Failed to fetch destination boundary events for dedup: {e}"))?
         {
-            let fp = (
-                (e.timestamp + e.duration)
-                    .timestamp_nanos_opt()
-                    .unwrap_or(0),
-                serde_json::to_string(&e.data).unwrap_or_default(),
-            );
-            *counts.entry(fp).or_insert(0) += 1;
+            *counts.entry(boundary_fingerprint(&e)).or_insert(0) += 1;
         }
         counts
     } else {
@@ -1265,12 +1484,7 @@ fn sync_one(
                 let mut remaining = boundary_dedup.clone();
                 let before_dedup = chunk.len();
                 chunk.retain(|e| {
-                    let fp = (
-                        (e.timestamp + e.duration)
-                            .timestamp_nanos_opt()
-                            .unwrap_or(0),
-                        serde_json::to_string(&e.data).unwrap_or_default(),
-                    );
+                    let fp = boundary_fingerprint(e);
                     match remaining.get_mut(&fp) {
                         Some(count) if *count > 0 => {
                             *count -= 1;
@@ -1311,9 +1525,12 @@ fn sync_one(
 
     let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str())?;
     let new_events_count = eventcount_to_new - eventcount_to_old;
-    if new_events_count < 0 {
+    // Owner-originated deletions reconciled above are an expected shrink. The
+    // invariant this guards is that the *incremental copy* never loses events
+    // (#682); a shrink larger than the reconcile reported still fails.
+    if new_events_count + (reconciled_deletions as i64) < 0 {
         return Err(format!(
-            "Event count of bucket '{}' shrank during sync ({eventcount_to_old} -> {eventcount_to_new})",
+            "Event count of bucket '{}' shrank during sync ({eventcount_to_old} -> {eventcount_to_new}, {reconciled_deletions} reconciled deletion(s))",
             bucket_to.id
         ));
     }

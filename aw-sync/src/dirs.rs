@@ -84,14 +84,22 @@ pub struct DaemonConfig {
 }
 
 /// aw-sync's own settings, read from `{config_dir}/config.toml`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `sync_dir` is a user-chosen override for the Syncthing/Dropbox folder.
+/// The default remains `~/ActivityWatchSync` so that folder stays visible;
+/// this field does not move the default under an XDG data dir
+/// (ActivityWatch/aw-server-rust#853, distinct from closed #667).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncConfig {
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub sync_dir: Option<PathBuf>,
 }
 
 const DEFAULT_SYNC_CONFIG_TOML: &str = "\
 # aw-sync config
+# sync_dir = \"/absolute/path\"   # optional; else AW_SYNC_DIR, else ~/ActivityWatchSync
 [daemon]
 pull = false   # default; set true to import peers from the sync folder every pass
 ";
@@ -179,13 +187,56 @@ pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
     }
 }
 
-pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
-    // if AW_SYNC_DIR is set, use that
-    if let Ok(dir) = std::env::var("AW_SYNC_DIR") {
-        return Ok(PathBuf::from(dir));
+/// Resolve the sync folder: `AW_SYNC_DIR`, then an absolute `config.toml`
+/// `sync_dir`, then `~/ActivityWatchSync`. The CLI `--sync-dir` flag is
+/// applied by setting the env var before this runs. Relative config paths
+/// are rejected. A missing or unreadable config file is not an error here:
+/// callers that need daemon pull still go through `load_or_create_sync_config`.
+pub fn resolve_sync_dir(
+    env_sync_dir: Option<&str>,
+    config_sync_dir: Option<&Path>,
+    home_dir: impl FnOnce() -> Option<PathBuf>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(dir) = env_sync_dir {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
     }
-    let home_dir = home_dir().ok_or("Unable to read home_dir")?;
-    Ok(home_dir.join("ActivityWatchSync"))
+    if let Some(dir) = config_sync_dir {
+        if !dir.is_absolute() {
+            return Err(format!(
+                "config.toml sync_dir must be an absolute path, got {}",
+                dir.display()
+            )
+            .into());
+        }
+        return Ok(dir.to_path_buf());
+    }
+    let home = home_dir().ok_or("Unable to read home_dir")?;
+    Ok(home.join("ActivityWatchSync"))
+}
+
+fn configured_sync_dir() -> Option<PathBuf> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let dir = config_dir_path().ok()?;
+        let (config, _) = read_sync_config(&dir).ok()?;
+        config.and_then(|cfg| cfg.sync_dir)
+    }
+    #[cfg(target_os = "android")]
+    {
+        None
+    }
+}
+
+pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
+    // if AW_SYNC_DIR is set, use that (`--sync-dir` sets it first)
+    let env_sync_dir = std::env::var("AW_SYNC_DIR").ok();
+    resolve_sync_dir(
+        env_sync_dir.as_deref(),
+        configured_sync_dir().as_deref(),
+        home_dir,
+    )
 }
 
 /// SyncInterface.kt sets `XDG_DATA_HOME=$filesDir/data` before `loadLibrary`.
@@ -377,6 +428,14 @@ mod tests {
             content.contains("[daemon]") && content.contains("pull = false"),
             "commented default should be namespaced under [daemon] and mention pull = false, got: {content}"
         );
+        assert!(
+            content.contains("sync_dir") && content.contains("ActivityWatchSync"),
+            "commented default should mention the optional sync_dir override, got: {content}"
+        );
+        assert!(
+            config.sync_dir.is_none(),
+            "default file must not set sync_dir"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -408,7 +467,118 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("config.toml"), "[daemon]\npull = true\n").unwrap();
         let (config, _path) = read_sync_config(&dir).unwrap();
-        assert!(config.unwrap().daemon.pull, "should read pull = true");
+        let config = config.unwrap();
+        assert!(config.daemon.pull, "should read pull = true");
+        assert!(
+            config.sync_dir.is_none(),
+            "legacy configs without sync_dir must still parse"
+        );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn read_sync_config_reads_optional_sync_dir() {
+        let dir = temp_sync_config_dir("read-sync-dir");
+        fs::create_dir_all(&dir).unwrap();
+        let configured = dir.join("custom-sync");
+        let toml = format!(
+            "sync_dir = \"{}\"\n[daemon]\npull = false\n",
+            configured.display().to_string().replace('\\', "\\\\")
+        );
+        fs::write(dir.join("config.toml"), toml).unwrap();
+        let (config, _path) = read_sync_config(&dir).unwrap();
+        assert_eq!(
+            config.unwrap().sync_dir.as_deref(),
+            Some(configured.as_path())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn abs_test_path(name: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"C:\").join(name)
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/").join(name)
+        }
+    }
+
+    #[test]
+    fn resolve_sync_dir_env_wins_over_config_and_default() {
+        let home = abs_test_path("home-user");
+        let from_config = abs_test_path("from-config");
+        let from_env = abs_test_path("from-env");
+        let resolved = resolve_sync_dir(
+            Some(from_env.to_str().unwrap()),
+            Some(from_config.as_path()),
+            || Some(home),
+        )
+        .unwrap();
+        assert_eq!(resolved, from_env);
+    }
+
+    #[test]
+    fn resolve_sync_dir_config_wins_over_default() {
+        let home = abs_test_path("home-user");
+        let from_config = abs_test_path("from-config");
+        let resolved = resolve_sync_dir(None, Some(from_config.as_path()), || Some(home)).unwrap();
+        assert_eq!(resolved, from_config);
+    }
+
+    #[test]
+    fn resolve_sync_dir_empty_env_falls_through_to_config() {
+        let home = abs_test_path("home-user");
+        let from_config = abs_test_path("from-config");
+        let resolved =
+            resolve_sync_dir(Some(""), Some(from_config.as_path()), || Some(home)).unwrap();
+        assert_eq!(resolved, from_config);
+    }
+
+    #[test]
+    fn resolve_sync_dir_defaults_to_home_activitywatchsync() {
+        let home = abs_test_path("home-user");
+        let resolved = resolve_sync_dir(None, None, || Some(home.clone())).unwrap();
+        assert_eq!(resolved, home.join("ActivityWatchSync"));
+    }
+
+    #[test]
+    fn resolve_sync_dir_env_does_not_look_up_home() {
+        let from_env = abs_test_path("from-env");
+        let resolved = resolve_sync_dir(Some(from_env.to_str().unwrap()), None, || {
+            panic!("an explicit environment override must not look up home")
+        })
+        .unwrap();
+        assert_eq!(resolved, from_env);
+    }
+
+    #[test]
+    fn resolve_sync_dir_config_does_not_look_up_home() {
+        let from_config = abs_test_path("from-config");
+        let resolved = resolve_sync_dir(Some(""), Some(&from_config), || {
+            panic!("an explicit config override must not look up home")
+        })
+        .unwrap();
+        assert_eq!(resolved, from_config);
+    }
+
+    #[test]
+    fn resolve_sync_dir_default_requires_home() {
+        let err = resolve_sync_dir(None, None, || None).unwrap_err();
+        assert_eq!(err.to_string(), "Unable to read home_dir");
+    }
+
+    #[test]
+    fn resolve_sync_dir_rejects_relative_config_path() {
+        let home = PathBuf::from("/home/user");
+        let err = resolve_sync_dir(None, Some(Path::new("relative/sync")), || Some(home))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("absolute"),
+            "relative config path should be rejected, got: {err}"
+        );
     }
 }

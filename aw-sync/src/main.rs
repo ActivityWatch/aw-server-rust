@@ -64,7 +64,7 @@ struct Opts {
     testing: bool,
 
     /// Full path to sync directory.
-    /// If not specified, use AW_SYNC_DIR env var, or default to ~/ActivityWatchSync
+    /// If not specified, use AW_SYNC_DIR, then config.toml sync_dir, then ~/ActivityWatchSync
     #[clap(long)]
     sync_dir: Option<PathBuf>,
 

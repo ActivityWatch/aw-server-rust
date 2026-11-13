@@ -52,6 +52,7 @@ fn bucket(id: &str, hostname: &str) -> Bucket {
         _type: "currentwindow".to_string(),
         client: "aw-watcher-window".to_string(),
         hostname: hostname.to_string(),
+        device_id: "local".to_string(),
         created: None,
         data: serde_json::Map::new(),
         metadata: BucketMetadata::default(),

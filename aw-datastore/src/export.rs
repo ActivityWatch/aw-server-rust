@@ -9,37 +9,42 @@ use serde::{
     Serialize, Serializer,
 };
 
-use crate::datastore::{events_source, parse_event_row, prefer_endtime_index};
+use crate::datastore::{events_source, filter_nanos, parse_event_row, prefer_endtime_index};
 use crate::DatastoreError;
 
 struct EventRows<'a> {
     conn: &'a Connection,
     db_version: i32,
     bucket: &'a Bucket,
+    range: (i64, i64),
 }
 
 impl Serialize for EventRows<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (start, end) = self.range;
+        let mut seq = serializer.serialize_seq(None)?;
+        if start > end {
+            // An empty range, like get_events: no events rather than an error.
+            return seq.end();
+        }
         let sql = format!(
             "SELECT id, starttime, endtime, data
              FROM {}
              WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3
              ORDER BY starttime DESC, endtime ASC, id ASC",
-            events_source(self.db_version, false)
+            events_source(
+                self.db_version,
+                prefer_endtime_index(self.bucket, start, end, None)
+            )
         );
         let mut stmt = self.conn.prepare_cached(&sql).map_err(S::Error::custom)?;
         let mut rows = stmt
-            .query(rusqlite::params![
-                self.bucket.bid.unwrap(),
-                i64::MIN,
-                i64::MAX
-            ])
+            .query(rusqlite::params![self.bucket.bid.unwrap(), start, end])
             .map_err(S::Error::custom)?;
-        let mut seq = serializer.serialize_seq(None)?;
         while let Some(row) = rows.next().map_err(S::Error::custom)? {
-            // Match get_events' default range, clipping and corrupt-row policy.
-            // i64::MIN so None starttime includes pre-epoch events, like get_events.
-            match crate::datastore::parse_event_row(row, Some((i64::MIN, i64::MAX))) {
+            // Match get_events' range, clipping and corrupt-row policy: events
+            // overlapping the range are cut to it.
+            match crate::datastore::parse_event_row(row, Some((start, end))) {
                 Ok(event) => seq.serialize_element(&event)?,
                 Err(err) => warn!("Corrupt event in bucket {}: {}", self.bucket.id, err),
             }
@@ -52,6 +57,7 @@ struct ExportBucket<'a> {
     conn: &'a Connection,
     db_version: i32,
     bucket: &'a Bucket,
+    range: (i64, i64),
 }
 
 impl Serialize for ExportBucket<'_> {
@@ -74,6 +80,7 @@ impl Serialize for ExportBucket<'_> {
                 conn: self.conn,
                 db_version: self.db_version,
                 bucket: self.bucket,
+                range: self.range,
             },
         )?;
         map.end()
@@ -85,6 +92,7 @@ struct ExportBuckets<'a> {
     db_version: i32,
     buckets: &'a HashMap<String, Bucket>,
     selected: Option<&'a str>,
+    range: (i64, i64),
 }
 
 impl Serialize for ExportBuckets<'_> {
@@ -98,6 +106,7 @@ impl Serialize for ExportBuckets<'_> {
                         conn: self.conn,
                         db_version: self.db_version,
                         bucket,
+                        range: self.range,
                     },
                 )?;
             }
@@ -106,13 +115,22 @@ impl Serialize for ExportBuckets<'_> {
     }
 }
 
+/// Serialize buckets with their events overlapping `[start, end]`, cut to it;
+/// `None` leaves that side open, so no range exports everything.
 pub(crate) fn write_export(
     conn: &Connection,
     db_version: i32,
     buckets: &HashMap<String, Bucket>,
     selected: Option<&str>,
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
     writer: impl Write,
 ) -> Result<(), DatastoreError> {
+    // i64::MIN so an open start includes pre-epoch events, like get_events.
+    let range = (
+        start.map_or(i64::MIN, filter_nanos),
+        end.map_or(i64::MAX, filter_nanos),
+    );
     if let Some(id) = selected {
         if !buckets.contains_key(id) {
             return Err(DatastoreError::NoSuchBucket(id.to_owned()));
@@ -130,6 +148,7 @@ pub(crate) fn write_export(
                 db_version,
                 buckets,
                 selected,
+                range,
             },
         },
     )
@@ -488,7 +507,8 @@ mod tests {
             }
             let expected = serde_json::to_value(BucketsExport { buckets }).unwrap();
             let mut output = Vec::new();
-            ds.write_export(&conn, selected, &mut output).unwrap();
+            ds.write_export(&conn, selected, None, None, &mut output)
+                .unwrap();
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
                 expected
@@ -497,11 +517,78 @@ mod tests {
     }
 
     #[test]
+    fn ranged_json_export_matches_get_events_for_the_same_range() {
+        let (conn, mut ds) = setup();
+        let start = DateTime::from_timestamp(10, 0).unwrap();
+        let end = DateTime::from_timestamp(25, 0).unwrap();
+        for selected in [None, Some("populated")] {
+            let mut buckets = ds.get_buckets();
+            buckets.retain(|id, _| selected.is_none() || selected == Some(id.as_str()));
+            for (id, bucket) in &mut buckets {
+                bucket.events = Some(TryVec::new(
+                    ds.get_events(&conn, id, Some(start), Some(end), None)
+                        .unwrap(),
+                ));
+            }
+            let expected = serde_json::to_value(BucketsExport { buckets }).unwrap();
+            let mut output = Vec::new();
+            ds.write_export(&conn, selected, Some(start), Some(end), &mut output)
+                .unwrap();
+            let exported = serde_json::from_slice::<serde_json::Value>(&output).unwrap();
+            assert_eq!(exported, expected);
+        }
+        // Cut to the range: the event from -10s to 10s keeps only its last instant,
+        // the one at 30s is left out.
+        let mut output = Vec::new();
+        ds.write_export(
+            &conn,
+            Some("populated"),
+            Some(start),
+            Some(end),
+            &mut output,
+        )
+        .unwrap();
+        let exported = serde_json::from_slice::<serde_json::Value>(&output).unwrap();
+        let events = exported["buckets"]["populated"]["events"]
+            .as_array()
+            .unwrap();
+        assert_eq!(events.len(), 4);
+        for event in events {
+            let timestamp = DateTime::parse_from_rfc3339(event["timestamp"].as_str().unwrap())
+                .unwrap()
+                .with_timezone(&Utc);
+            let end_of_event = timestamp
+                + Duration::nanoseconds((event["duration"].as_f64().unwrap() * 1e9) as i64);
+            assert!(
+                timestamp >= start && end_of_event <= end,
+                "{event} is outside the range"
+            );
+        }
+    }
+
+    #[test]
+    fn json_export_with_an_empty_range_has_no_events() {
+        let (conn, ds) = setup();
+        let (start, end) = (
+            DateTime::from_timestamp(25, 0).unwrap(),
+            DateTime::from_timestamp(10, 0).unwrap(),
+        );
+        let mut output = Vec::new();
+        ds.write_export(&conn, None, Some(start), Some(end), &mut output)
+            .unwrap();
+        let exported = serde_json::from_slice::<serde_json::Value>(&output).unwrap();
+        for id in ["populated", "empty"] {
+            assert_eq!(exported["buckets"][id]["events"], serde_json::json!([]));
+            assert_eq!(exported["buckets"][id]["id"], id); // the bucket itself is still there
+        }
+    }
+
+    #[test]
     fn missing_bucket_and_writer_failures_propagate() {
         let (conn, ds) = setup();
         let mut output = Vec::new();
         assert!(matches!(
-            ds.write_export(&conn, Some("missing"), &mut output),
+            ds.write_export(&conn, Some("missing"), None, None, &mut output),
             Err(DatastoreError::NoSuchBucket(_))
         ));
         assert!(output.is_empty());
@@ -520,7 +607,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            ds.write_export(&conn, None, FailingWriter(500)),
+            ds.write_export(&conn, None, None, None, FailingWriter(500)),
             Err(DatastoreError::InternalError(_))
         ));
     }

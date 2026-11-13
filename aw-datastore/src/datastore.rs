@@ -356,7 +356,7 @@ pub struct DatastoreInstance {
 /// express in nanoseconds (before 1677 or after 2262), so such a bound means "no limit"
 /// instead of panicking the datastore worker. Bounds that can't match anything are
 /// caught first by [`filter_excludes_everything`].
-fn filter_nanos(dt: DateTime<Utc>) -> i64 {
+pub(crate) fn filter_nanos(dt: DateTime<Utc>) -> i64 {
     dt.timestamp_nanos_opt().unwrap_or(if dt.timestamp() < 0 {
         i64::MIN
     } else {
@@ -854,10 +854,13 @@ impl DatastoreInstance {
 
     /// Serialize an export one event at a time using the caller's connection.
     /// Returns the bucket ID for a single-bucket export (for download naming).
+    /// Events are limited to those overlapping `[start, end]`, cut to it.
     pub fn write_export(
         &self,
         conn: &Connection,
         bucket_id: Option<&str>,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
         writer: impl std::io::Write,
     ) -> Result<Option<String>, DatastoreError> {
         crate::export::write_export(
@@ -865,6 +868,8 @@ impl DatastoreInstance {
             self.db_version,
             &self.buckets_cache,
             bucket_id,
+            start,
+            end,
             writer,
         )?;
         Ok(bucket_id.map(str::to_owned).or_else(|| {

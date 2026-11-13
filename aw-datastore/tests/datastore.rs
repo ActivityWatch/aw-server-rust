@@ -59,6 +59,70 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_out_of_range_event_is_rejected_and_worker_survives() {
+        let ds = Datastore::new_in_memory(false);
+        create_test_bucket(&ds);
+        let valid = test_event(
+            "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            Duration::seconds(1),
+        );
+        let far_future = test_event(
+            "3000-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            Duration::seconds(1),
+        );
+        // Starts in range, but its end overflows the nanosecond range.
+        let ends_too_late = test_event(
+            "2262-04-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            Duration::days(30),
+        );
+
+        for bad in [&far_future, &ends_too_late] {
+            // A batch with one bad event stores none of them.
+            match ds.insert_events("testid", &[valid.clone(), bad.clone()]) {
+                Err(DatastoreError::InvalidEvent(_)) => {}
+                other => panic!("expected InvalidEvent, got {other:?}"),
+            }
+            match ds.heartbeat("testid", bad.clone(), 10.0) {
+                Err(DatastoreError::InvalidEvent(_)) => {}
+                other => panic!("expected InvalidEvent, got {other:?}"),
+            }
+        }
+        assert_eq!(ds.get_event_count("testid", None, None).unwrap(), 0);
+
+        // A heartbeat with a duration that fits on its own but whose merge
+        // into the last event would not.
+        ds.heartbeat("testid", valid.clone(), 10.0).unwrap();
+        let mut too_long = valid.clone();
+        too_long.timestamp = valid.timestamp + Duration::seconds(1);
+        too_long.duration = Duration::seconds(9_223_372_036);
+        match ds.heartbeat("testid", too_long, 10.0) {
+            Err(DatastoreError::InvalidEvent(_)) => {}
+            other => panic!("expected InvalidEvent, got {other:?}"),
+        }
+        assert_eq!(ds.get_event_count("testid", None, None).unwrap(), 1);
+        let only = ds.get_events("testid", None, None, None).unwrap();
+        ds.delete_events_by_id("testid", vec![only[0].id.unwrap()])
+            .unwrap();
+
+        // A new bucket with a bad attached event is not created at all.
+        let mut bucket = test_bucket();
+        bucket.id = "imported".to_string();
+        bucket.events = Some(TryVec::new(vec![far_future.clone()]));
+        match ds.create_bucket(&bucket) {
+            Err(DatastoreError::InvalidEvent(_)) => {}
+            other => panic!("expected InvalidEvent, got {other:?}"),
+        }
+        assert!(matches!(
+            ds.get_bucket("imported"),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+
+        // The worker is still alive.
+        ds.insert_events("testid", &[valid]).unwrap();
+        assert_eq!(ds.get_event_count("testid", None, None).unwrap(), 1);
+    }
+
+    #[test]
     fn interval_access_paths_preserve_overlaps_ties_and_clipping() {
         let ds = Datastore::new_in_memory(false);
         let bucket = create_test_bucket(&ds);

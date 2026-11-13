@@ -69,6 +69,9 @@ pub enum DatastoreError {
     BucketAlreadyExists(String),
     NoSuchKey(String),
     NoSuchEvent(String, i64),
+    /// An event that can't be stored, such as one outside the supported time
+    /// range. The caller's input is at fault, not the datastore.
+    InvalidEvent(String),
     MpscError,
     InternalError(String),
     /// A stored event row could not be parsed. Content corruption in a file

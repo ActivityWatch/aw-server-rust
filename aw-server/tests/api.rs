@@ -696,6 +696,85 @@ mod api_tests {
     }
 
     #[test]
+    fn test_out_of_range_timestamp_rejected() {
+        // Events are stored as nanoseconds since the epoch (1677-2262). An event
+        // outside that range used to panic the datastore worker, after which
+        // every request failed until the server was restarted.
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = || Header::new("Host", "127.0.0.1:5600");
+        let count = |client: &Client| {
+            client
+                .get("/api/0/buckets/id/events/count")
+                .header(host())
+                .dispatch()
+                .into_string()
+                .unwrap()
+        };
+
+        client
+            .post("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"id":"id","type":"test","client":"test","hostname":"127.0.0.1"}"#)
+            .dispatch();
+
+        // A start past 2262, and a valid start whose end is past 2262. The
+        // batch also holds a valid event: nothing in it may be stored.
+        for body in [
+            r#"[{"timestamp":"2018-01-01T00:00:00Z","duration":1.0,"data":{}},
+                {"timestamp":"3000-01-01T00:00:00Z","duration":1.0,"data":{}}]"#,
+            r#"[{"timestamp":"2262-04-01T00:00:00Z","duration":3000000.0,"data":{}}]"#,
+        ] {
+            let res = client
+                .post("/api/0/buckets/id/events")
+                .header(ContentType::JSON)
+                .header(host())
+                .body(body)
+                .dispatch();
+            assert_eq!(res.status(), rocket::http::Status::BadRequest, "{body}");
+        }
+        assert_eq!(count(&client), "0");
+
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=10")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"timestamp":"3000-01-01T00:00:00Z","duration":0.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+
+        // Importing a new bucket with such an event fails without creating it.
+        let res = client
+            .post("/api/0/import")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(
+                r#"{"buckets": {"imported": {"id": "imported", "type": "t", "client": "c",
+                    "hostname": "h", "events": [
+                        {"timestamp": "3000-01-01T00:00:00Z", "duration": 1.0, "data": {}}
+                    ]}}}"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+        let res = client
+            .get("/api/0/buckets/imported")
+            .header(host())
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+
+        // The datastore is still alive and accepts valid events.
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=10")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"timestamp":"2018-01-01T00:00:00Z","duration":0.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(count(&client), "1");
+    }
+
+    #[test]
     fn test_import_does_not_overwrite_events_with_the_same_id() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

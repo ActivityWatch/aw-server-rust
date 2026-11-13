@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use aw_models::{BucketsExport, Event, TryVec};
 
-use aw_datastore::{Datastore, DatastoreError};
+use aw_datastore::DatastoreError;
 
 use crate::endpoints::util::ApiJson;
 use crate::endpoints::{HttpErrorJson, ServerState};
@@ -39,8 +39,20 @@ fn event_identity(
     Ok((event.timestamp, duration_ns, data_json))
 }
 
-fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJson> {
+fn import(
+    state: &ServerState,
+    import: BucketsExport,
+    device: Option<&str>,
+) -> Result<(), HttpErrorJson> {
+    let datastore = state.bucket_datastore(device);
     for (_bucketname, mut bucket) in import.buckets {
+        // Match HTTP routing before resolving aliases or checking merge ownership.
+        // An export of this server UUID must not create a second local owner.
+        bucket.device_id = match device {
+            Some(device) => state.normalize_device(device).to_owned(),
+            None if bucket.device_id.is_empty() => "local".to_owned(),
+            None => state.normalize_device(&bucket.device_id).to_owned(),
+        };
         // Event ids are unique across all buckets in the datastore, and events are inserted
         // with INSERT OR REPLACE. An exported id (e.g. from another server) could therefore
         // overwrite an unrelated event, so imported events get new ids, except when merging into
@@ -62,9 +74,50 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                 bucket.events = Some(TryVec::new(stripped));
             }
         }
+        // Imports already name their device. Canonicalize that scoped alias
+        // before using name-addressed creation/merge commands; a legacy watcher
+        // POST must instead reject when its unscoped writes would select a peer.
+        let incoming_scope = if bucket.device_id.is_empty() {
+            "local"
+        } else {
+            &bucket.device_id
+        };
+        match datastore.get_bucket_for_device(incoming_scope, &bucket.id) {
+            Ok(existing) => bucket.id = existing.id,
+            Err(DatastoreError::NoSuchBucket(_)) => {}
+            Err(err) => return Err(err.into()),
+        }
         match datastore.create_bucket(&bucket) {
             Ok(_) => (),
-            Err(DatastoreError::BucketAlreadyExists(_)) => {
+            Err(DatastoreError::BucketAlreadyExists(canonical_id)) => {
+                let existing = match datastore.get_bucket(&canonical_id) {
+                    Ok(existing) => existing,
+                    Err(DatastoreError::NoSuchBucket(_)) if device.is_some() => {
+                        // The temporary global-name guard can reject a name
+                        // owned by another device. Never merge outside scope.
+                        return Err(HttpErrorJson::new(
+                            Status::Conflict,
+                            format!("Cannot import bucket '{canonical_id}': name is owned by another device"),
+                        ));
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                let incoming_device = if bucket.device_id.is_empty() {
+                    "local"
+                } else {
+                    &bucket.device_id
+                };
+                if existing.device_id != incoming_device {
+                    return Err(HttpErrorJson::new(
+                        Status::Conflict,
+                        format!(
+                            "Cannot merge bucket '{}': device identity differs",
+                            bucket.id
+                        ),
+                    ));
+                }
+                // Retain the stored spelling when importing an old/new watcher alias.
+                bucket.id = existing.id;
                 // Bucket already exists — merge events, skipping duplicates
                 info!("Bucket '{}' already exists, merging events", bucket.id);
                 if let Some(events_vec) = imported {
@@ -193,6 +246,7 @@ fn import(datastore: &Datastore, import: BucketsExport) -> Result<(), HttpErrorJ
                     }
                 }
             }
+            Err(e @ DatastoreError::AmbiguousBucket(_, _)) => return Err(e.into()),
             Err(e) => {
                 let err_msg = format!("Failed to import bucket: {e:?}");
                 warn!("{}", err_msg);
@@ -208,7 +262,7 @@ pub fn bucket_import_json(
     state: &State<ServerState>,
     json_data: ApiJson<BucketsExport>,
 ) -> Result<(), HttpErrorJson> {
-    let result = import(&state.datastore, json_data.into_inner());
+    let result = import(state, json_data.into_inner(), None);
     // Clear even on failure: a multi-bucket import can write earlier buckets
     // and then fail on a later one, leaving those writes cached-over.
     state.bucket_list_changed();
@@ -230,8 +284,78 @@ pub fn bucket_import_form(
     state: &State<ServerState>,
     form: Form<ImportForm>,
 ) -> Result<(), HttpErrorJson> {
-    let result = import(&state.datastore, form.into_inner().import.into_inner());
+    let result = import(state, form.into_inner().import.into_inner(), None);
     // Same partial-import failure mode as the JSON handler above.
+    state.bucket_list_changed();
+    result
+}
+
+/// Import a single device's legacy-shaped export. Empty/local metadata denotes
+/// the source device selected by the route; an explicit differing peer is an
+/// error, never silently reassigned. Validate the full envelope before writes.
+#[post(
+    "/<device_id>/import",
+    data = "<json_data>",
+    format = "application/json"
+)]
+pub fn device_import_json(
+    device_id: &str,
+    state: &State<ServerState>,
+    json_data: ApiJson<BucketsExport>,
+) -> Result<(), HttpErrorJson> {
+    let device = state.normalize_device(device_id);
+    let data = json_data.into_inner();
+    for (id, bucket) in &data.buckets {
+        if id != &bucket.id
+            || (!bucket.device_id.is_empty()
+                && bucket.device_id != "local"
+                && state.normalize_device(&bucket.device_id) != device)
+        {
+            return Err(HttpErrorJson::new(
+                Status::BadRequest,
+                format!("Bucket '{id}' does not match the selected import identity"),
+            ));
+        }
+    }
+    let result = import(state, data, Some(device));
+    // Keep the same partial-import invalidation guarantee as legacy imports.
+    state.bucket_list_changed();
+    result
+}
+
+/// A grouped envelope carries stable source identities. Unlike the explicit
+/// single-device import route, it must never reinterpret a source `local`
+/// sentinel as ownership on the receiving server.
+#[post("/import", data = "<json_data>", format = "application/json")]
+pub fn devices_import_json(
+    state: &State<ServerState>,
+    json_data: ApiJson<super::device::DeviceBuckets>,
+) -> Result<(), HttpErrorJson> {
+    let data = json_data.into_inner();
+    for (device, group) in &data.devices {
+        if device.is_empty() || device == "local" {
+            return Err(HttpErrorJson::new(
+                Status::BadRequest,
+                "Grouped imports require explicit source device identities".into(),
+            ));
+        }
+        for (id, bucket) in &group.buckets {
+            if id != &bucket.id || bucket.device_id != *device {
+                return Err(HttpErrorJson::new(
+                    Status::BadRequest,
+                    format!("Bucket '{id}' does not match enclosing device '{device}'"),
+                ));
+            }
+        }
+    }
+    let result = (|| {
+        for (device, group) in data.devices {
+            import(state, group, Some(&device))?;
+        }
+        Ok(())
+    })();
+    // Validation is all-or-nothing; runtime failures may still leave earlier
+    // groups written, just as with the existing multi-bucket import.
     state.bucket_list_changed();
     result
 }

@@ -150,12 +150,46 @@ pub fn recover_database(
     // stale bucket row IDs and orphan recovered events.
     let mut ds = DatastoreInstance::new(&tx, false).map_err(error)?;
     let mut counts = RecoveryCounts::default();
-    for (name, mut bucket) in source_ds.get_buckets() {
-        if ds.get_bucket(&name).is_err() {
-            bucket.bid = None;
-            bucket.events = None;
-            ds.create_bucket(&tx, bucket).map_err(error)?;
-            counts.buckets_created += 1;
+    for (name, mut bucket) in source_ds
+        .get_device_buckets()
+        .into_values()
+        .flat_map(|buckets| buckets.into_iter())
+    {
+        // Recovery authority is the source's stored pair, never an unscoped
+        // name match. Equal names on other devices are separate histories;
+        // a same-device alias conflict still rolls back this whole union.
+        ds.device_scope = Some(bucket.device_id.clone());
+        source_ds.device_scope = Some(bucket.device_id.clone());
+        match ds.get_bucket_for_device(&bucket.device_id, &name) {
+            Ok(existing) if existing.id != name => {
+                // Compatibility aliases are useful for watcher requests, but
+                // recovery must preserve the source's exact stored identity.
+                // Creation would also resolve to this alias, so defer the whole
+                // union rather than merge histories or claim completion.
+                warn!("History recovery source {source:?} bucket {name:?} resolves to stored alias {:?}; leaving it untouched for manual recovery", existing.id);
+                return Ok(RecoveryCounts::default());
+            }
+            Ok(_) => {}
+            Err(DatastoreError::NoSuchBucket(_)) => {
+                bucket.bid = None;
+                bucket.events = None;
+                match ds.create_bucket(&tx, bucket) {
+                    Ok(()) => counts.buckets_created += 1,
+                    Err(
+                        DatastoreError::AmbiguousBucket(..)
+                        | DatastoreError::BucketAlreadyExists(_),
+                    ) => {
+                        // Like corrupt source content, an unrepresentable pair
+                        // is deferred for manual recovery, not a startup outage.
+                        // Dropping the transaction preserves all target history
+                        // and leaves no completion marker for a partial union.
+                        warn!("History recovery source {source:?} conflicts with another device's bucket {name:?}; leaving it untouched for manual recovery");
+                        return Ok(RecoveryCounts::default());
+                    }
+                    Err(err) => return Err(error(err)),
+                }
+            }
+            Err(err) => return Err(error(err)),
         }
         let existing = ds
             .get_events_unclipped(&tx, &name, None, None, None)
@@ -227,6 +261,7 @@ mod tests {
         for (name, events) in rows {
             let bucket = Bucket {
                 id: (*name).to_owned(),
+                device_id: "local".to_owned(),
                 _type: "test".to_owned(),
                 client: "test".to_owned(),
                 hostname: "test".to_owned(),
@@ -255,6 +290,141 @@ mod tests {
             .unwrap()
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn recovery_preserves_same_name_histories_on_different_devices() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let source = root.path().join("source.db");
+        populate(&target, &[("shared", vec![event(r#"{"local":true}"#)])]);
+        populate(&source, &[("shared", vec![event(r#"{"peer":true}"#)])]);
+        Connection::open(&source)
+            .unwrap()
+            .execute("UPDATE buckets SET device_id = 'peer'", [])
+            .unwrap();
+        let source_bytes = std::fs::read(&source).unwrap();
+        // Recover the exact source pair, never into the name-matched local row.
+        assert_eq!(
+            recover_database(&target, &source, &root.path().join("backup.db"), "peer").unwrap(),
+            RecoveryCounts {
+                buckets_created: 1,
+                events_inserted: 1,
+                duplicates_skipped: 0
+            }
+        );
+        assert_eq!(count(&target), 2);
+        assert_eq!(count(&source), 1);
+        assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+        let conn = Connection::open(&target).unwrap();
+        let markers: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM key_value WHERE key = 'windows_recovery:peer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(markers, 1);
+        let ds = DatastoreInstance::new(&conn, false).unwrap();
+        for (device, field) in [("local", "local"), ("peer", "peer")] {
+            let bucket = ds.get_bucket_for_device(device, "shared").unwrap();
+            let data: String = conn
+                .query_row(
+                    "SELECT data FROM events WHERE bucketrow = ?1",
+                    [bucket.bid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&data).unwrap()[field],
+                true
+            );
+        }
+        assert_eq!(
+            recover_database(
+                &target,
+                &source,
+                &root.path().join("retry-backup.db"),
+                "peer"
+            )
+            .unwrap(),
+            RecoveryCounts::default()
+        );
+        assert!(!root.path().join("retry-backup.db").exists());
+    }
+
+    #[test]
+    fn recovery_defers_alias_collisions_without_renaming_or_merging_history() {
+        for (source_name, target_name) in [("window", "window_test"), ("window_test", "window")] {
+            let root = tempfile::tempdir().unwrap();
+            let target = root.path().join("target.db");
+            let source = root.path().join("source.db");
+            populate(&target, &[(target_name, vec![event(r#"{"target":true}"#)])]);
+            populate(&source, &[(source_name, vec![event(r#"{"source":true}"#)])]);
+            let source_bytes = std::fs::read(&source).unwrap();
+            for attempt in ["first", "retry"] {
+                let backup = root.path().join(format!("backup-{attempt}.db"));
+                assert_eq!(
+                    recover_database(&target, &source, &backup, "alias").unwrap(),
+                    RecoveryCounts::default(),
+                    "recovery must preserve the stored name, not import into a compatibility alias"
+                );
+                assert!(backup.is_file());
+                assert_eq!(count(&backup), 1);
+                assert_eq!(count(&target), 1);
+                assert_eq!(count(&source), 1);
+                assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+                let conn = Connection::open(&target).unwrap();
+                let mut ds = DatastoreInstance::new(&conn, false).unwrap();
+                ds.device_scope = Some("local".into());
+                let stored = ds.get_buckets().unwrap();
+                assert_eq!(stored.len(), 1);
+                assert!(stored.contains_key(target_name));
+                let events = ds
+                    .get_events_unclipped(&conn, target_name, None, None, None)
+                    .unwrap();
+                assert_eq!(events[0].data, event(r#"{"target":true}"#).data);
+                let markers: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM key_value WHERE key = 'windows_recovery:alias'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(markers, 0, "deferred recovery must remain retryable");
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_peer_ownership_for_new_and_existing_buckets() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.db");
+        let source = root.path().join("source.db");
+        populate(&target, &[]);
+        populate(&source, &[("shared", vec![event(r#"{"peer":true}"#)])]);
+        Connection::open(&source)
+            .unwrap()
+            .execute("UPDATE buckets SET device_id = 'peer'", [])
+            .unwrap();
+        let result =
+            recover_database(&target, &source, &root.path().join("backup.db"), "first").unwrap();
+        assert_eq!(result.buckets_created, 1);
+        assert_eq!(result.events_inserted, 1);
+        let result =
+            recover_database(&target, &source, &root.path().join("backup2.db"), "second").unwrap();
+        assert_eq!(result.buckets_created, 0);
+        assert_eq!(result.duplicates_skipped, 1);
+        let conn = Connection::open(&target).unwrap();
+        let device: String = conn
+            .query_row(
+                "SELECT device_id FROM buckets WHERE name = 'shared'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(device, "peer");
+        assert_eq!(count(&target), 1);
     }
 
     #[test]

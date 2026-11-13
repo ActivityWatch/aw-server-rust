@@ -14,6 +14,7 @@ use aw_models::Event;
 
 use rusqlite::params;
 use rusqlite::types::ToSql;
+use rusqlite::OptionalExtension;
 
 use super::DatastoreError;
 
@@ -48,6 +49,10 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
         )
         .is_ok()
     };
+    // Recognise v7 before the earlier schema's column and index checks.
+    if has_column("device_id") {
+        return 7;
+    }
     if !has_column("data") && !has_column("data_deprecated") {
         return 1;
     }
@@ -75,8 +80,9 @@ pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
  * 4: Added 'key_value' table for storing key - value pairs
  * 5: Replaced single-column events indexes with a composite index
  * 6: Added an endtime-first index for recent interval reads
+ * 7: Added 'device_id' to 'buckets' (UNIQUE(device_id, name))
  */
-pub const NEWEST_DB_VERSION: i32 = 6;
+pub const NEWEST_DB_VERSION: i32 = 7;
 
 /// Oldest version a read-only open (aw-sync pulling a peer db) accepts.
 ///
@@ -132,6 +138,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 6 {
         _migrate_v5_to_v6(conn);
+    }
+
+    if version < 7 {
+        _migrate_v6_to_v7(conn);
     }
 
     first_init
@@ -269,30 +279,141 @@ fn _migrate_v4_to_v5(conn: &Connection) {
     // The drops run before the create so the pages they free are reused to
     // build the new index within the same transaction; creating first would
     // permanently grow the database file by the new index's size.
-    conn.execute_batch(
-        "
-        BEGIN EXCLUSIVE TRANSACTION;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to start v5 migration transaction");
+    // The caller read user_version before this lock: a concurrent opener may
+    // have run later migrations already. Writing user_version = 5 here would
+    // regress it and re-trigger the v7 rebuild, which overwrites stored
+    // device IDs with 'local'.
+    if _get_db_version(&transaction) >= 5 {
+        return; // Dropped uncommitted: releases the lock without changes
+    }
+    transaction
+        .execute_batch(
+            "
         DROP INDEX IF EXISTS events_bucketrow_index;
         DROP INDEX IF EXISTS events_starttime_index;
         DROP INDEX IF EXISTS events_endtime_index;
         CREATE INDEX IF NOT EXISTS events_bucketrow_starttime_endtime_index
             ON events(bucketrow, starttime DESC, endtime);
         PRAGMA user_version = 5;
-        COMMIT;
     ",
-    )
-    .expect("Failed to run v5 migration transaction");
+        )
+        .expect("Failed to run v5 migration transaction");
+    transaction
+        .commit()
+        .expect("Failed to commit v5 migration transaction");
 }
 
 fn _migrate_v5_to_v6(conn: &Connection) {
-    conn.execute_batch(
-        "BEGIN EXCLUSIVE TRANSACTION;
-         CREATE INDEX IF NOT EXISTS events_bucketrow_endtime_starttime_index
-             ON events(bucketrow, endtime, starttime DESC);
-         PRAGMA user_version = 6;
-         COMMIT;",
-    )
-    .expect("Failed to run v6 migration transaction");
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)
+            .expect("Failed to start v6 migration transaction");
+    // The caller read user_version before this lock: a concurrent opener may
+    // have finished the v7 migration (and written device IDs) while we waited.
+    // Writing user_version = 6 here would regress it and cause the v7 rebuild
+    // to re-run, overwriting stored device IDs with 'local'.
+    if _get_db_version(&transaction) >= 6 {
+        return; // Dropped uncommitted: releases the lock without changes
+    }
+    transaction
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS events_bucketrow_endtime_starttime_index
+                 ON events(bucketrow, endtime, starttime DESC);
+             PRAGMA user_version = 6;",
+        )
+        .expect("Failed to run v6 migration transaction");
+    transaction
+        .commit()
+        .expect("Failed to commit v6 migration transaction");
+}
+
+fn _migrate_v6_to_v7(conn: &Connection) {
+    // Add device_id column and change uniqueness from (name) to (device_id, name).
+    // SQLite cannot drop a UNIQUE column constraint in-place, so we recreate the
+    // table. Existing buckets are all locally-created, so they get device_id='local'.
+    // Keep data_deprecated as an archive of the broken pre-v3 field. It must
+    // neither be discarded by this rebuild nor promoted to current metadata.
+    //
+    // PRAGMA foreign_keys must be disabled outside any transaction for the table
+    // recreation to succeed: events→buckets(id) is an IMMEDIATE FK, and even with
+    // defer_foreign_keys=ON the constraint fires during DROP TABLE inside the batch.
+    // All IDs are preserved by the copy, so re-enabling FK checks after COMMIT is safe.
+    info!("Upgrading database to v7, adding device_id to buckets");
+    let foreign_keys: bool = conn
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .expect("Failed to read foreign_keys before v7 migration");
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("Failed to disable foreign_keys for v7 migration");
+    // The transaction guard rolls back on any error before restoring the pragma
+    // (SQLite ignores foreign_keys changes while a transaction is active).
+    let migration = (|| -> rusqlite::Result<()> {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Exclusive)?;
+        // The caller read user_version before this lock: a concurrent opener may
+        // have finished the migration (and written device IDs) while we waited.
+        if _get_db_version(&transaction) >= 7 {
+            return Ok(());
+        }
+        // DROP TABLE removes the AUTOINCREMENT high-water mark; carry it over so
+        // ids of deleted buckets are never reused by an unrelated bucket.
+        let sequence: Option<i64> = transaction
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'buckets'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // Some historical/restored schemas omit the unused archive column.
+        // Preserve it when present, including SQL NULL and malformed payloads.
+        let has_archive: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('buckets') WHERE name = 'data_deprecated')",
+            [],
+            |row| row.get(0),
+        )?;
+        let archive = if has_archive {
+            "data_deprecated"
+        } else {
+            "NULL"
+        };
+        transaction.execute_batch(&format!(
+            "CREATE TABLE buckets_v7 (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             name TEXT NOT NULL,
+             device_id TEXT NOT NULL DEFAULT 'local',
+             type TEXT NOT NULL,
+             client TEXT NOT NULL,
+             hostname TEXT NOT NULL,
+             created TEXT NOT NULL,
+             data TEXT NOT NULL DEFAULT '{{}}',
+             data_deprecated TEXT DEFAULT '{{}}',
+             UNIQUE(device_id, name)
+         );
+         INSERT INTO buckets_v7 (id, name, device_id, type, client, hostname, created, data, data_deprecated)
+             SELECT id, name, 'local', type, client, hostname, created, data, {archive} FROM buckets;
+         DROP TABLE buckets;
+         ALTER TABLE buckets_v7 RENAME TO buckets;
+         CREATE INDEX IF NOT EXISTS bucket_id_index ON buckets(id);
+         PRAGMA user_version = 7;"
+        ))?;
+        if let Some(sequence) = sequence {
+            let updated = transaction.execute(
+                "UPDATE sqlite_sequence SET seq = max(seq, ?1) WHERE name = 'buckets'",
+                [sequence],
+            )?;
+            if updated == 0 {
+                transaction.execute(
+                    "INSERT INTO sqlite_sequence (name, seq) VALUES ('buckets', ?1)",
+                    [sequence],
+                )?;
+            }
+        }
+        transaction.commit()
+    })();
+    conn.pragma_update(None, "foreign_keys", foreign_keys)
+        .expect("Failed to restore foreign_keys after v7 migration");
+    migration.expect("Failed to run v7 migration transaction");
 }
 
 // Both indexes can bound only one of the two interval predicates. Use the
@@ -343,9 +464,13 @@ enum EventRead {
 }
 
 pub struct DatastoreInstance {
-    buckets_cache: HashMap<String, Bucket>,
-    /// `(count, max id, names)` of the buckets table when `buckets_cache` was
-    /// loaded; lets a reader detect creates, deletes and renames by another
+    buckets_cache: HashMap<(String, String), Bucket>,
+    // Unique-name fast path for legacy callers. Ambiguous names are absent;
+    // ownership is held by the pair-keyed authoritative cache.
+    bucket_names: HashMap<String, (String, String)>,
+    pub(crate) device_scope: Option<String>,
+    /// `(count, max id, names, hostnames and devices)` when `buckets_cache` was
+    /// loaded; lets a reader detect creates, deletes, renames and identity repairs by another
     /// connection with one cheap query.
     buckets_signature: (i64, i64, String),
     first_init: bool,
@@ -594,6 +719,8 @@ impl DatastoreInstance {
 
         let mut ds = DatastoreInstance {
             buckets_cache: HashMap::new(),
+            bucket_names: HashMap::new(),
+            device_scope: None,
             buckets_signature: (0, 0, String::new()),
             first_init,
             db_version,
@@ -609,37 +736,55 @@ impl DatastoreInstance {
         self.get_stored_buckets(conn)
     }
 
-    fn read_buckets_signature(conn: &Connection) -> Result<(i64, i64, String), DatastoreError> {
+    fn read_buckets_signature(
+        &self,
+        conn: &Connection,
+    ) -> Result<(i64, i64, String), DatastoreError> {
+        // Peer readers still support schemas predating device ownership.
+        let device = if self.db_version >= 7 {
+            "device_id"
+        } else {
+            "'local'"
+        };
         conn.query_row(
-            "SELECT count(*), coalesce(max(id), 0), coalesce(group_concat(name, char(10)), '') \
-             FROM (SELECT id, name FROM buckets ORDER BY id)",
+            &format!("SELECT count(*), coalesce(max(id), 0), \
+             coalesce(group_concat(hex(name) || ':' || hex(hostname) || ':' || hex(device), char(10)), '') \
+             FROM (SELECT id, name, hostname, {device} AS device FROM buckets ORDER BY id)"),
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| DatastoreError::InternalError(format!("Failed to read bucket signature: {e}")))
     }
 
-    /// Whether buckets were created, deleted or renamed since the cache was
-    /// loaded (ids are AUTOINCREMENT, so a delete-and-recreate changes
-    /// `max(id)`; the name list catches renames).
+    /// Whether buckets were created, deleted, renamed or had identity metadata repaired
+    /// since the cache was loaded (ids are AUTOINCREMENT, so a delete-and-recreate
+    /// changes `max(id)`; the name/hostname/device list catches renames and repairs).
     pub fn buckets_changed(&self, conn: &Connection) -> Result<bool, DatastoreError> {
-        Ok(Self::read_buckets_signature(conn)? != self.buckets_signature)
+        Ok(self.read_buckets_signature(conn)? != self.buckets_signature)
     }
 
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
         // Read before the list so a concurrent change lands in the next check.
-        let signature = Self::read_buckets_signature(conn)?;
-        let mut stmt = match conn.prepare_cached(
+        let signature = self.read_buckets_signature(conn)?;
+        // Read-only opens of peer DBs (aw-sync) may be at v4-v6, which pre-date the
+        // device_id column. Use a literal 'local' for those; v7+ reads the real column.
+        let device_id_expr = if self.db_version >= 7 {
+            "buckets.device_id"
+        } else {
+            "'local'"
+        };
+        let sql = format!(
             "
             SELECT  buckets.id, buckets.name, buckets.type, buckets.client,
                     buckets.hostname, buckets.created,
                     min(events.starttime), max(events.endtime),
-                    buckets.data
+                    buckets.data, {device_id_expr}
             FROM buckets
             LEFT OUTER JOIN events ON buckets.id = events.bucketrow
             GROUP BY buckets.id
-            ;",
-        ) {
+            ;"
+        );
+        let mut stmt = match conn.prepare_cached(&sql) {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -673,6 +818,7 @@ impl DatastoreInstance {
                 client: row.get(3)?,
                 hostname: row.get(4)?,
                 created: row.get(5)?,
+                device_id: row.get(9)?,
                 data: data_json,
                 metadata: BucketMetadata {
                     start: opt_start,
@@ -690,10 +836,18 @@ impl DatastoreInstance {
             }
         };
         let mut new_cache = HashMap::new();
+        let mut names = HashMap::new();
+        let mut ambiguous = std::collections::HashSet::new();
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
-                    new_cache.insert(b.id.clone(), b);
+                    let key = (b.device_id.clone(), b.id.clone());
+                    if names.remove(&b.id).is_some() {
+                        ambiguous.insert(b.id.clone());
+                    } else if !ambiguous.contains(&b.id) {
+                        names.insert(b.id.clone(), key.clone());
+                    }
+                    new_cache.insert(key, b);
                 }
                 Err(e) => {
                     return Err(DatastoreError::InternalError(format!(
@@ -703,6 +857,7 @@ impl DatastoreInstance {
             }
         }
         self.buckets_cache = new_cache;
+        self.bucket_names = names;
         self.buckets_signature = signature;
         Ok(())
     }
@@ -760,10 +915,71 @@ impl DatastoreInstance {
             Some(created) => Some(created),
             None => Some(Utc::now()),
         };
+        // Stamp device_id = "local" for locally-created buckets.
+        // Peer buckets from aw-sync will carry their own device_id via import.
+        if bucket.device_id.is_empty() {
+            bucket.device_id = "local".to_string();
+        }
+        // Resolve against the transaction, not a potentially stale writer cache:
+        // an old/new watcher spelling must not split an existing history.
+        // Always reload here: a create followed by an external delete can restore
+        // the old signature while leaving our locally updated cache populated.
+        self.get_stored_buckets(conn)?;
+        match crate::bucket_resolution::resolve_bucket(
+            self.buckets_cache.values(),
+            &bucket.id,
+            Some(&bucket.device_id),
+        ) {
+            Ok(existing) => {
+                // A successful legacy POST acknowledges the same target that
+                // subsequent unscoped event writes will use, never a scoped
+                // alias hidden by a peer's exact name.
+                let global = if self.device_scope.is_some() {
+                    existing.clone()
+                } else {
+                    self.get_bucket_unscoped(&bucket.id)?
+                };
+                if global.bid != existing.bid {
+                    return Err(DatastoreError::AmbiguousBucket(
+                        bucket.id.clone(),
+                        vec![
+                            (existing.device_id, existing.id),
+                            (global.device_id, global.id),
+                        ],
+                    ));
+                }
+                return Err(DatastoreError::BucketAlreadyExists(existing.id));
+            }
+            Err(DatastoreError::NoSuchBucket(_)) => {}
+            Err(err) => return Err(err),
+        }
+        // While callers still address names globally, an exact peer name must
+        // not take over a spelling that already resolves to another history.
+        match self.get_bucket_unscoped(&bucket.id) {
+            Ok(existing) if existing.id != bucket.id => {
+                return Err(DatastoreError::AmbiguousBucket(
+                    bucket.id.clone(),
+                    vec![(existing.device_id, existing.id)],
+                ));
+            }
+            Err(DatastoreError::AmbiguousBucket(name, candidates))
+                if self.device_scope.is_none()
+                    || candidates.iter().any(|(_, id)| id != &bucket.id) =>
+            {
+                return Err(DatastoreError::AmbiguousBucket(name, candidates));
+            }
+            _ => {}
+        }
+        // Only an explicitly scoped caller may introduce an equal peer name.
+        // Keep legacy creation fail-closed so its later unscoped writes cannot
+        // silently acquire a different target. The SQL check stays atomic.
         let mut stmt = match conn.prepare_cached(
             "
-                INSERT INTO buckets (name, type, client, hostname, created, data)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM buckets WHERE name = ?1
+                    AND (?8 IS NULL OR device_id = ?2))",
         ) {
             Ok(buckets) => buckets,
             Err(err) => {
@@ -773,16 +989,28 @@ impl DatastoreInstance {
             }
         };
         let data = serde_json::to_string(&bucket.data).unwrap();
-        let res = stmt.execute([
-            &bucket.id,
-            &bucket._type,
-            &bucket.client,
-            &bucket.hostname,
-            &bucket.created as &dyn ToSql,
-            &data,
+        let res = stmt.execute(params![
+            bucket.id,
+            bucket.device_id,
+            bucket._type,
+            bucket.client,
+            bucket.hostname,
+            bucket.created,
+            data,
+            self.device_scope,
         ]);
 
         match res {
+            // The cache may be stale when another connection created this name.
+            // Checking in the INSERT makes rejection atomic across writers;
+            // a skipped insert must not reuse last_insert_rowid or update the cache.
+            Ok(0) => {
+                let existing = self.get_bucket_unscoped(&bucket.id)?;
+                Err(DatastoreError::AmbiguousBucket(
+                    bucket.id.clone(),
+                    vec![(existing.device_id, existing.id)],
+                ))
+            }
             Ok(_) => {
                 info!("Created bucket {}", bucket.id);
                 // Get and set rowid
@@ -792,7 +1020,7 @@ impl DatastoreInstance {
                 let events = bucket.events;
                 bucket.events = None;
                 // Cache bucket
-                self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
+                self.cache_bucket(bucket.clone());
                 // Insert events
                 if let Some(events) = events {
                     self.insert_events(conn, &bucket.id, events.take_inner())?;
@@ -825,7 +1053,9 @@ impl DatastoreInstance {
         // Delete bucket itself
         match conn.execute("DELETE FROM buckets WHERE id = ?1", [&bucket.bid]) {
             Ok(_) => {
-                self.buckets_cache.remove(bucket_id);
+                self.buckets_cache
+                    .remove(&(bucket.device_id.clone(), bucket.id.clone()));
+                self.refresh_name_index(&bucket.id);
                 Ok(())
             }
             Err(err) => match err {
@@ -841,15 +1071,101 @@ impl DatastoreInstance {
     }
 
     pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        let cached_bucket = self.buckets_cache.get(bucket_id);
-        match cached_bucket {
-            Some(bucket) => Ok(bucket.clone()),
-            None => Err(DatastoreError::NoSuchBucket(bucket_id.to_string())),
+        if let Some(device) = &self.device_scope {
+            return self.get_bucket_for_device(device, bucket_id);
+        }
+        self.get_bucket_unscoped(bucket_id)
+    }
+
+    fn get_bucket_unscoped(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
+        // Keep ordinary unique-name watcher reads O(1).
+        if let Some(key) = self.bucket_names.get(bucket_id) {
+            return Ok(self.buckets_cache[key].clone());
+        }
+        crate::bucket_resolution::resolve_bucket(self.buckets_cache.values(), bucket_id, None)
+    }
+
+    /// Resolve within one device without falling back to any peer.
+    pub fn get_bucket_for_device(
+        &self,
+        device_id: &str,
+        bucket_id: &str,
+    ) -> Result<Bucket, DatastoreError> {
+        if let Some(bucket) = self
+            .buckets_cache
+            .get(&(device_id.to_owned(), bucket_id.to_owned()))
+        {
+            return Ok(bucket.clone());
+        }
+        crate::bucket_resolution::resolve_bucket(
+            self.buckets_cache.values(),
+            bucket_id,
+            Some(device_id),
+        )
+    }
+
+    fn cache_bucket(&mut self, bucket: Bucket) {
+        let name = bucket.id.clone();
+        let key = (bucket.device_id.clone(), name.clone());
+        let added = self.buckets_cache.insert(key, bucket).is_none();
+        if added {
+            self.refresh_name_index(&name);
         }
     }
 
-    pub fn get_buckets(&self) -> HashMap<String, Bucket> {
-        self.buckets_cache.clone()
+    fn refresh_name_index(&mut self, name: &str) {
+        let mut matching = self.buckets_cache.keys().filter(|(_, id)| id == name);
+        let unique = matching
+            .next()
+            .cloned()
+            .filter(|_| matching.next().is_none());
+        self.bucket_names.remove(name);
+        if let Some(key) = unique {
+            self.bucket_names.insert(name.to_owned(), key);
+        }
+    }
+
+    /// Lossless metadata view: bucket names are unique only within a device.
+    pub fn get_device_buckets(&self) -> HashMap<String, HashMap<String, Bucket>> {
+        let mut devices: HashMap<String, HashMap<String, Bucket>> = HashMap::new();
+        for bucket in self.buckets_cache.values().filter(|bucket| {
+            self.device_scope
+                .as_ref()
+                .is_none_or(|device| bucket.device_id == *device)
+        }) {
+            devices
+                .entry(bucket.device_id.clone())
+                .or_default()
+                .insert(bucket.id.clone(), bucket.clone());
+        }
+        devices
+    }
+
+    /// A legacy flat catalogue cannot represent equal names on different devices.
+    /// Reject it before serialization rather than silently retaining one device.
+    pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
+        let mut buckets = HashMap::new();
+        for bucket in self.buckets_cache.values().filter(|bucket| {
+            self.device_scope
+                .as_ref()
+                .is_none_or(|device| bucket.device_id == *device)
+        }) {
+            if buckets.contains_key(&bucket.id) {
+                let mut candidates: Vec<_> = self
+                    .buckets_cache
+                    .keys()
+                    .filter(|(_, id)| id == &bucket.id)
+                    .cloned()
+                    .collect();
+                candidates.sort();
+                return Err(DatastoreError::AmbiguousBucket(
+                    bucket.id.clone(),
+                    candidates,
+                ));
+            }
+            buckets.insert(bucket.id.clone(), bucket.clone());
+        }
+        Ok(buckets)
     }
 
     /// Serialize an export one event at a time using the caller's connection.
@@ -860,17 +1176,20 @@ impl DatastoreInstance {
         bucket_id: Option<&str>,
         writer: impl std::io::Write,
     ) -> Result<Option<String>, DatastoreError> {
-        crate::export::write_export(
-            conn,
-            self.db_version,
-            &self.buckets_cache,
-            bucket_id,
-            writer,
-        )?;
-        Ok(bucket_id.map(str::to_owned).or_else(|| {
-            (self.buckets_cache.len() == 1)
-                .then(|| self.buckets_cache.keys().next().unwrap().clone())
-        }))
+        // A selected export need not flatten unrelated device buckets.
+        let (selected, buckets) = match bucket_id {
+            Some(id) => {
+                let bucket = self.get_bucket(id)?;
+                (
+                    Some(bucket.id.clone()),
+                    HashMap::from([(bucket.id.clone(), bucket)]),
+                )
+            }
+            None => (None, self.get_buckets()?),
+        };
+        crate::export::write_export(conn, self.db_version, &buckets, selected.as_deref(), writer)?;
+        Ok(selected
+            .or_else(|| (buckets.len() == 1).then(|| buckets.values().next().unwrap().id.clone())))
     }
 
     /// Stream one bucket's events as RFC-4180 CSV, one row at a time.
@@ -885,11 +1204,12 @@ impl DatastoreInstance {
         limit: Option<u64>,
         writer: impl std::io::Write,
     ) -> Result<(), DatastoreError> {
+        let bucket = self.get_bucket(bucket_id)?;
         crate::export::write_events_csv(
             conn,
             self.db_version,
-            &self.buckets_cache,
-            bucket_id,
+            &HashMap::from([(bucket.id.clone(), bucket.clone())]),
+            &bucket.id,
             start,
             end,
             limit,
@@ -904,6 +1224,23 @@ impl DatastoreInstance {
         mut events: Vec<Event>,
     ) -> Result<Vec<Event>, DatastoreError> {
         let mut bucket = self.get_bucket(bucket_id)?;
+
+        // The worker holds BEGIN IMMEDIATE across validation and insertion.
+        // Validate the whole batch before mutating: a rejected later ID must
+        // not leave an accepted prefix behind in the worker's transaction.
+        for event in &events {
+            if let Some(id) = event.id {
+                let owner: Option<i64> = conn
+                    .query_row("SELECT bucketrow FROM events WHERE id = ?1", [id], |row| {
+                        row.get(0)
+                    })
+                    .optional()
+                    .map_err(|err| DatastoreError::InternalError(err.to_string()))?;
+                if owner.is_some_and(|owner| Some(owner) != bucket.bid) {
+                    return Err(DatastoreError::EventIdConflict(id));
+                }
+            }
+        }
 
         let mut stmt = match conn.prepare_cached(
             "
@@ -1021,7 +1358,7 @@ impl DatastoreInstance {
         };
         bucket.metadata.start = start_ns.map(_datetime_from_nanos);
         bucket.metadata.end = end_ns.map(_datetime_from_nanos);
-        self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
+        self.cache_bucket(bucket.clone());
         Ok(())
     }
 
@@ -1058,7 +1395,7 @@ impl DatastoreInstance {
         }
         /* Update buchets_cache if start or end has been updated */
         if update {
-            self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
+            self.cache_bucket(bucket.clone());
         }
     }
 
@@ -1125,13 +1462,28 @@ impl DatastoreInstance {
         bucket_id: &str,
         heartbeat: Event,
         pulsetime: f64,
-        last_heartbeat: &mut HashMap<String, Option<Event>>,
+        last_heartbeat: &mut HashMap<(String, String), Option<Event>>,
     ) -> Result<Event, DatastoreError> {
-        self.get_bucket(bucket_id)?;
-        if !last_heartbeat.contains_key(bucket_id) {
-            last_heartbeat.insert(bucket_id.to_string(), None);
-        }
-        let last_event = match last_heartbeat.remove(bucket_id).unwrap() {
+        let bucket = self.get_bucket(bucket_id)?;
+        // A unique legacy alias can resolve a stored name shared by devices.
+        // Retain that authority while nested reads/writes use the canonical name.
+        let previous = self.device_scope.replace(bucket.device_id.clone());
+        let result = self.heartbeat_in_device(conn, &bucket, heartbeat, pulsetime, last_heartbeat);
+        self.device_scope = previous;
+        result
+    }
+
+    fn heartbeat_in_device(
+        &mut self,
+        conn: &Connection,
+        bucket: &Bucket,
+        heartbeat: Event,
+        pulsetime: f64,
+        last_heartbeat: &mut HashMap<(String, String), Option<Event>>,
+    ) -> Result<Event, DatastoreError> {
+        let bucket_id = bucket.id.as_str();
+        let key = (bucket.device_id.clone(), bucket.id.clone());
+        let last_event = match last_heartbeat.remove(&key).flatten() {
             // last heartbeat is in cache
             Some(last_event) => last_event,
             None => {
@@ -1168,7 +1520,7 @@ impl DatastoreInstance {
                 inserted.pop().unwrap()
             }
         };
-        last_heartbeat.insert(bucket_id.to_string(), Some(inserted_heartbeat.clone()));
+        last_heartbeat.insert(key, Some(inserted_heartbeat.clone()));
         Ok(inserted_heartbeat)
     }
 
@@ -1543,24 +1895,74 @@ impl DatastoreInstance {
         old_id: &str,
         new_id: &str,
     ) -> Result<(), DatastoreError> {
-        if !self.buckets_cache.contains_key(old_id) {
-            return Err(DatastoreError::NoSuchBucket(old_id.to_string()));
+        if self.buckets_changed(conn)? {
+            self.get_stored_buckets(conn)?;
         }
-        if self.buckets_cache.contains_key(new_id) {
-            return Err(DatastoreError::BucketAlreadyExists(new_id.to_string()));
+        let source = self.get_bucket(old_id)?;
+        let old_id = source.id.as_str();
+        let destination = match &self.device_scope {
+            Some(device) => self.get_bucket_for_device(device, new_id),
+            None => self.get_bucket_unscoped(new_id),
+        };
+        match destination {
+            Ok(existing) if existing.bid != source.bid => {
+                return Err(DatastoreError::BucketAlreadyExists(existing.id));
+            }
+            Err(DatastoreError::AmbiguousBucket(name, candidates)) => {
+                return Err(DatastoreError::AmbiguousBucket(name, candidates));
+            }
+            _ => {}
         }
-
+        // Equal exact peer names are allowed, but introducing an exact name
+        // must not steal a spelling that already resolves to a peer alias.
+        match self.get_bucket_unscoped(new_id) {
+            Ok(existing) if existing.id != new_id && existing.bid != source.bid => {
+                return Err(DatastoreError::BucketAlreadyExists(existing.id));
+            }
+            Err(DatastoreError::AmbiguousBucket(name, candidates))
+                if candidates.iter().any(|(_, id)| id != new_id) =>
+            {
+                return Err(DatastoreError::AmbiguousBucket(name, candidates));
+            }
+            _ => {}
+        }
+        // The destination check lives in the UPDATE too: a scoped rename may
+        // share a peer name, but must never overwrite a same-device history.
         match conn.execute(
-            "UPDATE buckets SET name = ?1 WHERE name = ?2",
-            [new_id, old_id],
+            "UPDATE buckets SET name = ?1 WHERE id = ?2
+             AND NOT EXISTS (SELECT 1 FROM buckets WHERE name = ?1
+                             AND (?3 IS NULL OR device_id = ?3))",
+            params![new_id, source.bid, self.device_scope],
         ) {
-            Ok(0) => Err(DatastoreError::NoSuchBucket(old_id.to_string())),
+            Ok(0) => {
+                let old_exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM buckets WHERE id = ?1)",
+                        [source.bid],
+                        |row| row.get(0),
+                    )
+                    .map_err(|err| {
+                        DatastoreError::InternalError(format!(
+                            "Failed to rename bucket '{}' to '{}': {err}",
+                            old_id, new_id
+                        ))
+                    })?;
+                if old_exists {
+                    Err(DatastoreError::BucketAlreadyExists(new_id.to_string()))
+                } else {
+                    Err(DatastoreError::NoSuchBucket(old_id.to_string()))
+                }
+            }
             Ok(_) => {
                 info!("Renamed bucket '{}' to '{}'", old_id, new_id);
                 // Update the in-memory cache: remove the old entry and re-insert under the new id.
-                if let Some(mut bucket) = self.buckets_cache.remove(old_id) {
+                if let Some(mut bucket) = self
+                    .buckets_cache
+                    .remove(&(source.device_id.clone(), old_id.to_owned()))
+                {
+                    self.refresh_name_index(old_id);
                     bucket.id = new_id.to_string();
-                    self.buckets_cache.insert(new_id.to_string(), bucket);
+                    self.cache_bucket(bucket);
                 }
                 Ok(())
             }
@@ -1571,7 +1973,8 @@ impl DatastoreInstance {
         }
     }
 
-    /// Migrates all buckets whose hostname is "unknown" or "Unknown" to `new_hostname`.
+    /// Migrates buckets in the selected scope whose hostname is "unknown" or
+    /// "Unknown" to `new_hostname`. An unscoped handle repairs all devices.
     /// Events are left untouched; only the bucket metadata is updated.
     /// Returns the number of buckets that were updated.
     pub fn migrate_hostname(
@@ -1585,8 +1988,10 @@ impl DatastoreInstance {
         );
 
         let updated = match conn.execute(
-            "UPDATE buckets SET hostname = ?1 WHERE hostname = 'unknown' OR hostname = 'Unknown'",
-            [new_hostname],
+            "UPDATE buckets SET hostname = ?1
+             WHERE (hostname = 'unknown' OR hostname = 'Unknown')
+             AND (?2 IS NULL OR device_id = ?2)",
+            params![new_hostname, self.device_scope],
         ) {
             Ok(n) => n,
             Err(err) => {
@@ -1624,24 +2029,32 @@ impl DatastoreInstance {
         const NEW_PREFIX: &str = "aw-watcher-android";
 
         info!("Migrating '{OLD_PREFIX}' bucket names to '{NEW_PREFIX}'");
-        let legacy_ids: Vec<String> = self
+        // Preflight against the current transaction, not a writer cache that
+        // may predate another connection's destination bucket. The worker holds
+        // its immediate transaction across this refresh and all mutations.
+        self.get_stored_buckets(conn)?;
+        let legacy: Vec<Bucket> = self
             .buckets_cache
-            .keys()
-            .filter(|id| id.starts_with(OLD_PREFIX))
+            .values()
+            .filter(|bucket| {
+                bucket.id.starts_with(OLD_PREFIX)
+                    && self
+                        .device_scope
+                        .as_ref()
+                        .is_none_or(|device| bucket.device_id == *device)
+            })
             .cloned()
             .collect();
+        // Only the exact destination pair is a merge target. A peer's equal
+        // name is independent and never prevents a device's own migration.
         let mut migrated = 0;
         let mut cache_dirty = false;
 
-        for old_id in legacy_ids {
+        for old_bucket in legacy {
+            let old_id = old_bucket.id.clone();
             let new_id = old_id.replacen(OLD_PREFIX, NEW_PREFIX, 1);
-            if let Some(new_bucket) = self.buckets_cache.get(&new_id).cloned() {
-                let old_bucket = self
-                    .buckets_cache
-                    .get(&old_id)
-                    .cloned()
-                    .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
-
+            let new_key = (old_bucket.device_id.clone(), new_id.clone());
+            if let Some(new_bucket) = self.buckets_cache.get(&new_key).cloned() {
                 // Move only events that do not overlap the destination or another
                 // legacy event. A single overlapping cutover heartbeat must not strand
                 // years of disjoint history in the legacy bucket (ActivityWatch/aw-android#243).
@@ -1697,8 +2110,8 @@ impl DatastoreInstance {
                 }
             } else {
                 conn.execute(
-                    "UPDATE buckets SET name = ?1 WHERE name = ?2",
-                    [&new_id, &old_id],
+                    "UPDATE buckets SET name = ?1 WHERE id = ?2",
+                    params![new_id, old_bucket.bid],
                 )
                 .map_err(|err| {
                     DatastoreError::InternalError(format!(
@@ -1720,8 +2133,367 @@ impl DatastoreInstance {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn same_name_worker_fixture(conn: &Connection) -> DatastoreInstance {
+        let mut ds = DatastoreInstance::new(conn, true).unwrap();
+        // Seed exact pair-keyed rows independently of the creation path.
+        for device in ["local", "peer"] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES ('window', ?1, 'test', 'test', ?1, '2026-01-01T00:00:00Z', '{}')",
+                [device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "window", "device_id": device, "type": "test",
+                "client": "test", "hostname": device
+            }))
+            .unwrap();
+            ds.cache_bucket(Bucket {
+                bid: Some(conn.last_insert_rowid()),
+                ..bucket
+            });
+        }
+        ds.buckets_signature = ds.read_buckets_signature(conn).unwrap();
+        ds
+    }
+
+    #[test]
+    fn heartbeat_cache_separates_same_named_device_buckets() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        // Seed exact pair-keyed rows to exercise heartbeat cache isolation.
+        for device in ["local", "peer"] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES ('window', ?1, 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')",
+                [device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "window", "device_id": device, "type": "test",
+                "client": "test", "hostname": "host"
+            }))
+            .unwrap();
+            ds.cache_bucket(Bucket {
+                bid: Some(conn.last_insert_rowid()),
+                ..bucket
+            });
+        }
+        let mut cache = HashMap::new();
+        let mut ids = Vec::new();
+        for device in ["local", "peer", "local", "peer"] {
+            ds.device_scope = Some(device.to_owned());
+            for second in [0, 1] {
+                let event: Event = serde_json::from_value(serde_json::json!({
+                    "timestamp": format!("2026-01-01T00:00:0{second}Z"),
+                    "duration": 0, "data": {"title": "same"}
+                }))
+                .unwrap();
+                let result = ds
+                    .heartbeat(&conn, "window", event, 10.0, &mut cache)
+                    .unwrap();
+                if second == 1 {
+                    ids.push(result.id.unwrap());
+                }
+            }
+            assert_eq!(
+                ds.get_events(&conn, "window", None, None, None)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(ids[0], ids[2]);
+        assert_eq!(ids[1], ids[3]);
+    }
+
+    #[test]
+    fn unscoped_heartbeat_alias_keeps_the_resolved_device_for_nested_writes() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        // Seed same-name rows to isolate nested heartbeat authority.
+        for device in ["local", "peer"] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES ('window', ?1, 'test', 'test', ?1, '2026-01-01T00:00:00Z', '{}')",
+                [device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "window", "device_id": device, "type": "test",
+                "client": "test", "hostname": device
+            }))
+            .unwrap();
+            ds.cache_bucket(Bucket {
+                bid: Some(conn.last_insert_rowid()),
+                ..bucket
+            });
+        }
+        let mut cache = HashMap::new();
+        for second in [0, 1, 2] {
+            for device in ["local", "peer"] {
+                let event: Event = serde_json::from_value(serde_json::json!({
+                    "timestamp": format!("2026-01-01T00:00:0{second}Z"),
+                    "duration": 0, "data": {"device": device}
+                }))
+                .unwrap();
+                ds.heartbeat(&conn, &format!("window_{device}"), event, 10.0, &mut cache)
+                    .unwrap();
+                assert!(ds.device_scope.is_none(), "heartbeat leaked resolved scope");
+            }
+        }
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
+        for device in ["local", "peer"] {
+            let events = ds
+                .get_events(&conn, &format!("window_{device}"), None, None, None)
+                .unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data["device"], device);
+            assert_eq!(events[0].duration, chrono::Duration::seconds(2));
+        }
+        let event = Event::default();
+        assert!(ds
+            .heartbeat(&conn, "missing", event, 10.0, &mut cache)
+            .is_err());
+        assert!(ds.device_scope.is_none());
+        conn.execute_batch(
+            "CREATE TRIGGER reject_heartbeat BEFORE INSERT ON events
+             BEGIN SELECT RAISE(FAIL, 'injected heartbeat failure'); END;",
+        )
+        .unwrap();
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": "2026-01-01T00:01:00Z", "duration": 0,
+            "data": {"different": true}
+        }))
+        .unwrap();
+        assert!(ds
+            .heartbeat(&conn, "window_peer", event, 10.0, &mut cache)
+            .is_err());
+        assert!(
+            ds.device_scope.is_none(),
+            "nested failure leaked peer scope"
+        );
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::AmbiguousBucket(..))
+        ));
+    }
+
+    #[test]
+    fn scoped_rename_changes_only_the_resolved_bucket_row() {
+        for selected in ["local", "peer"] {
+            let conn = Connection::open_in_memory().unwrap();
+            let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+            // Seed same-name rows to isolate row-addressed rename behavior.
+            for device in ["local", "peer"] {
+                conn.execute(
+                    "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                     VALUES ('window', ?1, 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')",
+                    [device],
+                )
+                .unwrap();
+                let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                    "id": "window", "device_id": device, "type": "test",
+                    "client": "test", "hostname": "host"
+                }))
+                .unwrap();
+                ds.cache_bucket(Bucket {
+                    bid: Some(conn.last_insert_rowid()),
+                    ..bucket
+                });
+            }
+            ds.buckets_signature = ds.read_buckets_signature(&conn).unwrap();
+            ds.device_scope = Some(selected.to_owned());
+            let source_bid = ds.get_bucket("window").unwrap().bid;
+            ds.rename_bucket(&conn, "window", "renamed").unwrap();
+            for device in ["local", "peer"] {
+                let expected = if device == selected {
+                    "renamed"
+                } else {
+                    "window"
+                };
+                let stored: String = conn
+                    .query_row(
+                        "SELECT name FROM buckets WHERE device_id = ?1",
+                        [device],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(stored, expected, "rename crossed device ownership");
+                assert_eq!(
+                    ds.get_bucket_for_device(device, expected).unwrap().id,
+                    expected
+                );
+            }
+            assert_eq!(ds.get_bucket("renamed").unwrap().bid, source_bid);
+        }
+    }
+
+    #[test]
+    fn flat_catalogue_and_exports_reject_same_named_devices() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        // Seed pair-keyed rows to isolate flat/grouped serialization behavior.
+        for (name, device) in [("window", "local"), ("window", "peer"), ("unique", "third")] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES (?1, ?2, 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')",
+                [name, device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": name, "device_id": device, "type": "test",
+                "client": "test", "hostname": "host"
+            }))
+            .unwrap();
+            let bid = conn.last_insert_rowid();
+            ds.cache_bucket(Bucket {
+                bid: Some(bid),
+                ..bucket
+            });
+            conn.execute(
+                "INSERT INTO events (bucketrow, starttime, endtime, data) VALUES (?1, 0, 1000000000, ?2)",
+                rusqlite::params![bid, format!("{{\"device\":\"{device}\"}}")],
+            )
+            .unwrap();
+        }
+        let mut output = Vec::new();
+        assert!(matches!(
+            ds.write_export(&conn, None, &mut output),
+            Err(DatastoreError::AmbiguousBucket(id, candidates))
+                if id == "window" && candidates.len() == 2
+        ));
+        assert!(
+            output.is_empty(),
+            "ambiguous export must fail before writing bytes"
+        );
+        assert!(matches!(
+            ds.get_buckets(),
+            Err(DatastoreError::AmbiguousBucket(_, _))
+        ));
+        assert!(ds.write_export(&conn, Some("window"), &mut output).is_err());
+        ds.write_export(&conn, Some("unique"), &mut output).unwrap();
+        let export: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(export["buckets"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            export["buckets"]["unique"]["events"][0]["data"]["device"],
+            "third"
+        );
+        for device in ["local", "peer"] {
+            ds.device_scope = Some(device.to_owned());
+            output.clear();
+            ds.write_export(&conn, None, &mut output).unwrap();
+            let export: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(export["buckets"]["window"]["device_id"], device);
+            assert_eq!(
+                export["buckets"]["window"]["events"][0]["data"]["device"],
+                device
+            );
+            let mut csv = Vec::new();
+            ds.write_events_csv(&conn, "window", None, None, None, &mut csv)
+                .unwrap();
+            assert!(String::from_utf8(csv).unwrap().contains(device));
+        }
+        ds.device_scope = None;
+        output.clear();
+        crate::export::write_device_export(
+            &conn,
+            ds.db_version,
+            &ds.get_device_buckets(),
+            &mut output,
+        )
+        .unwrap();
+        let export: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        for device in ["local", "peer"] {
+            assert_eq!(
+                export["devices"][device]["buckets"]["window"]["events"][0]["data"]["device"],
+                device
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_name_index_never_selects_one_of_same_named_devices() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        // Seed three devices to exercise unique-name index transitions.
+        for device in ["local", "peer", "third"] {
+            conn.execute(
+                "INSERT INTO buckets (name, device_id, type, client, hostname, created, data)
+                 VALUES ('window', ?1, 'test', 'test', 'host', '2026-01-01T00:00:00Z', '{}')",
+                [device],
+            )
+            .unwrap();
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "window", "device_id": device, "type": "test",
+                "client": "test", "hostname": "host"
+            }))
+            .unwrap();
+            ds.cache_bucket(Bucket {
+                bid: Some(conn.last_insert_rowid()),
+                ..bucket
+            });
+        }
+        ds.buckets_signature = ds.read_buckets_signature(&conn).unwrap();
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::AmbiguousBucket(_, candidates)) if candidates.len() == 3
+        ));
+        ds.device_scope = Some("third".to_owned());
+        ds.rename_bucket(&conn, "window", "renamed").unwrap();
+        ds.device_scope = None;
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::AmbiguousBucket(_, candidates)) if candidates.len() == 2
+        ));
+        assert_eq!(ds.get_bucket("renamed").unwrap().device_id, "third");
+        ds.device_scope = Some("peer".to_owned());
+        ds.delete_bucket(&conn, "window").unwrap();
+        ds.device_scope = None;
+        assert_eq!(ds.get_bucket("window").unwrap().device_id, "local");
+        assert!(ds.bucket_names.contains_key("window"));
+        ds.delete_bucket(&conn, "window").unwrap();
+        assert!(matches!(
+            ds.get_bucket("window"),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        assert!(!ds.bucket_names.contains_key("window"));
+    }
+
+    #[test]
+    fn bucket_signature_detects_device_ownership_repair() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "window", "device_id": "local", "type": "test",
+            "client": "test", "hostname": "host"
+        }))
+        .unwrap();
+        ds.create_bucket(&conn, bucket).unwrap();
+        ds.reload_buckets(&conn).unwrap();
+        assert!(!ds.buckets_changed(&conn).unwrap());
+        conn.execute(
+            "UPDATE buckets SET device_id = 'peer' WHERE name = 'window'",
+            [],
+        )
+        .unwrap();
+        assert!(ds.buckets_changed(&conn).unwrap());
+        ds.reload_buckets(&conn).unwrap();
+        assert!(ds.get_bucket_for_device("local", "window").is_err());
+        assert_eq!(
+            ds.get_bucket_for_device("peer", "window")
+                .unwrap()
+                .device_id,
+            "peer"
+        );
+    }
 
     #[test]
     fn strict_event_read_propagates_sqlite_step_errors() {
@@ -1729,6 +2501,7 @@ mod tests {
         let mut ds = DatastoreInstance::new(&conn, true).unwrap();
         let bucket = Bucket {
             id: "test".to_owned(),
+            device_id: "local".to_owned(),
             _type: "test".to_owned(),
             client: "test".to_owned(),
             hostname: "test".to_owned(),
@@ -1757,6 +2530,248 @@ mod tests {
             matches!(&err, DatastoreError::InternalError(message) if message.contains("integer overflow")),
             "SQLite execution errors must not be deferred as corrupt content: {err:?}"
         );
+    }
+
+    #[test]
+    fn failed_v7_migration_restores_foreign_keys_and_rolls_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        _migrate_v0_to_v1(&conn);
+        _migrate_v1_to_v2(&conn);
+        _migrate_v2_to_v3(&conn);
+        _migrate_v3_to_v4(&conn);
+        _migrate_v4_to_v5(&conn);
+        _migrate_v5_to_v6(&conn);
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        // Force failure after the replacement table is created, before COMMIT.
+        conn.execute_batch("ALTER TABLE buckets RENAME COLUMN data TO missing_data;")
+            .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            _migrate_v6_to_v7(&conn);
+        }));
+        assert!(result.is_err());
+        assert!(conn.is_autocommit(), "failed migration must roll back");
+        let foreign_keys: bool = conn
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .unwrap();
+        assert!(
+            foreign_keys,
+            "failure must not leave FK enforcement disabled"
+        );
+        assert_eq!(_get_db_version(&conn), 6);
+        let replacements: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'buckets_v7'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(replacements, 0);
+        assert!(conn
+            .execute(
+                "INSERT INTO events (bucketrow, starttime, endtime, data) VALUES (999, 0, 1, '{}')",
+                [],
+            )
+            .is_err());
+        // The same borrowed connection can retry once the cause is repaired.
+        conn.execute_batch("ALTER TABLE buckets RENAME COLUMN missing_data TO data;")
+            .unwrap();
+        _migrate_v6_to_v7(&conn);
+        assert_eq!(_get_db_version(&conn), 7);
+    }
+
+    fn v6_connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        _migrate_v0_to_v1(&conn);
+        _migrate_v1_to_v2(&conn);
+        _migrate_v2_to_v3(&conn);
+        _migrate_v3_to_v4(&conn);
+        _migrate_v4_to_v5(&conn);
+        _migrate_v5_to_v6(&conn);
+        conn
+    }
+
+    fn insert_v6_bucket(conn: &Connection, name: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO buckets (name, type, client, hostname, created, data)
+             VALUES (?1, 't', 'c', 'h', '2026-01-01T00:00:00+00:00', '{}')",
+            [name],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn v7_migration_preserves_archival_and_current_data_separately() {
+        let conn = v6_connection();
+        for (name, archived) in [("archived", Some("broken legacy bytes")), ("null", None)] {
+            insert_v6_bucket(&conn, name);
+            conn.execute(
+                "UPDATE buckets SET data = '{\"current\":true}', data_deprecated = ?1 WHERE name = ?2",
+                params![archived, name],
+            )
+            .unwrap();
+        }
+        _migrate_v6_to_v7(&conn);
+        for (name, archived) in [("archived", Some("broken legacy bytes")), ("null", None)] {
+            let (data, deprecated): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT data, data_deprecated FROM buckets WHERE name = ?1",
+                    [name],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(data, r#"{"current":true}"#);
+            assert_eq!(deprecated.as_deref(), archived);
+        }
+    }
+
+    #[test]
+    fn v7_migration_preserves_exact_rows_and_event_ownership() {
+        let conn = v6_connection();
+        let names = ["window_host_with_underscores", "window-synced-from-peer"];
+        for (index, name) in names.iter().enumerate() {
+            let bid = insert_v6_bucket(&conn, name);
+            conn.execute(
+                "UPDATE buckets SET data = ?1, data_deprecated = ?2 WHERE id = ?3",
+                params![
+                    r#"{ "nested": {"raw":true} }"#,
+                    vec![0_u8, 255, index as u8],
+                    bid
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO events (bucketrow, starttime, endtime, data) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    bid,
+                    -1_000_000_001_i64 + index as i64,
+                    123_456_789_i64,
+                    r#"{ "title":"preserved" }"#
+                ],
+            )
+            .unwrap();
+        }
+        let bucket_rows = |conn: &Connection| -> Vec<(i64, String, String, Vec<u8>)> {
+            conn.prepare("SELECT id, name, data, data_deprecated FROM buckets ORDER BY id")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let event_rows = |conn: &Connection| -> Vec<(i64, i64, i64, i64, String)> {
+            conn.prepare("SELECT id, bucketrow, starttime, endtime, data FROM events ORDER BY id")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before_buckets = bucket_rows(&conn);
+        let before_events = event_rows(&conn);
+        _migrate_v6_to_v7(&conn);
+        assert_eq!(bucket_rows(&conn), before_buckets);
+        assert_eq!(event_rows(&conn), before_events);
+        let foreign_key_errors: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_errors, 0);
+        let mut ds = DatastoreInstance::new(&conn, false).unwrap();
+        for name in names {
+            let bucket = ds.get_bucket_for_device("local", name).unwrap();
+            assert_eq!(bucket.id, name);
+            assert_eq!(bucket.device_id, "local");
+            assert_eq!(
+                ds.get_events_unclipped(&conn, name, None, None, None)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn v7_migration_keeps_autoincrement_high_water_mark() {
+        let conn = v6_connection();
+        insert_v6_bucket(&conn, "a");
+        let deleted = insert_v6_bucket(&conn, "b");
+        conn.execute("DELETE FROM buckets WHERE id = ?1", [deleted])
+            .unwrap();
+        _migrate_v6_to_v7(&conn);
+        let next = conn
+            .execute(
+                "INSERT INTO buckets (name, type, client, hostname, created) VALUES ('c', 't', 'c', 'h', 'now')",
+                [],
+            )
+            .map(|_| conn.last_insert_rowid())
+            .unwrap();
+        assert_eq!(next, deleted + 1, "deleted bucket ids must not be reused");
+    }
+
+    #[test]
+    fn v7_migration_keeps_sequence_when_table_is_empty() {
+        let conn = v6_connection();
+        let only = insert_v6_bucket(&conn, "a");
+        conn.execute("DELETE FROM buckets", []).unwrap();
+        _migrate_v6_to_v7(&conn);
+        let next = conn
+            .execute(
+                "INSERT INTO buckets (name, type, client, hostname, created) VALUES ('c', 't', 'c', 'h', 'now')",
+                [],
+            )
+            .map(|_| conn.last_insert_rowid())
+            .unwrap();
+        assert_eq!(next, only + 1);
+    }
+
+    #[test]
+    fn v7_migration_rechecks_version_after_taking_the_lock() {
+        let conn = v6_connection();
+        insert_v6_bucket(&conn, "a");
+        _migrate_v6_to_v7(&conn);
+        conn.execute("UPDATE buckets SET device_id = 'peer-abc'", [])
+            .unwrap();
+        // A second opener read v6 before the first finished; once it holds the
+        // lock the migration must be a no-op, not rebuild with 'local'.
+        _migrate_v6_to_v7(&conn);
+        let device: String = conn
+            .query_row("SELECT device_id FROM buckets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(device, "peer-abc");
+        assert_eq!(_get_db_version(&conn), 7);
+    }
+
+    /// A concurrent opener that read v5 (or earlier) may reach its pre-v7
+    /// migration step after the first opener finished v7. Each step takes the
+    /// exclusive lock before writing, so it must recheck the version under the
+    /// lock and never regress it — a regression to 6 would re-run the v7
+    /// rebuild and overwrite stored device IDs with 'local'.
+    #[test]
+    fn pre_v7_migrations_recheck_version_after_taking_the_lock() {
+        let conn = v6_connection();
+        insert_v6_bucket(&conn, "a");
+        _migrate_v6_to_v7(&conn);
+        conn.execute("UPDATE buckets SET device_id = 'peer-abc'", [])
+            .unwrap();
+        _migrate_v4_to_v5(&conn);
+        _migrate_v5_to_v6(&conn);
+        let device: String = conn
+            .query_row("SELECT device_id FROM buckets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(device, "peer-abc");
+        assert_eq!(_get_db_version(&conn), 7);
     }
 
     /// Minimal legacy (Python aw-server/peewee) sqlite db fixture: one
@@ -1798,6 +2813,64 @@ mod tests {
     }
 
     #[test]
+    fn legacy_import_uses_local_alias_without_selecting_peer_exact_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy_path = tmp.path().join("legacy.db");
+        write_fixture_legacy_db(&legacy_path);
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        for (name, device, host) in [
+            ("aw-watcher-afk_testhost", "peer", "other"),
+            ("aw-watcher-afk", "local", "testhost"),
+        ] {
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": name, "device_id": device, "hostname": host,
+                "type": "afkstatus", "client": "test"
+            }))
+            .unwrap();
+            ds.create_bucket(&conn, bucket).unwrap();
+        }
+        // Migration has explicit local authority, unlike an unscoped watcher.
+        for _ in 0..2 {
+            assert!(crate::legacy_import::legacy_import(
+                &mut ds,
+                &conn,
+                Some(legacy_path.to_str().unwrap())
+            )
+            .unwrap());
+            assert!(ds.device_scope.is_none(), "import leaked local scope");
+            ds.device_scope = Some("local".into());
+            let events = ds
+                .get_events_unclipped(&conn, "aw-watcher-afk", None, None, None)
+                .unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].duration, Duration::seconds(5));
+            ds.device_scope = Some("peer".into());
+            assert_eq!(
+                ds.get_event_count(&conn, "aw-watcher-afk_testhost", None, None)
+                    .unwrap(),
+                0
+            );
+            ds.device_scope = None;
+        }
+        assert_eq!(
+            ds.get_bucket("aw-watcher-afk_testhost").unwrap().device_id,
+            "peer"
+        );
+        // An error must restore the caller's scope as well.
+        ds.device_scope = Some("peer".into());
+        let broken = tmp.path().join("broken.db");
+        Connection::open(&broken).unwrap();
+        assert!(crate::legacy_import::legacy_import(
+            &mut ds,
+            &conn,
+            Some(broken.to_str().unwrap())
+        )
+        .is_err());
+        assert_eq!(ds.device_scope.as_deref(), Some("peer"));
+    }
+
+    #[test]
     fn ensure_legacy_import_skips_after_first_init_unless_forced() {
         let tmp = tempfile::tempdir().unwrap();
         let legacy_path = tmp.path().join("legacy.db");
@@ -1811,7 +2884,7 @@ mod tests {
         assert!(ds
             .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), false)
             .unwrap());
-        assert_eq!(ds.get_buckets().len(), 1);
+        assert_eq!(ds.get_buckets().unwrap().len(), 1);
 
         // Second call without force: first_init is now false (this is
         // exactly ActivityWatch/aw-server-rust#546 — a restart of an
@@ -1826,7 +2899,7 @@ mod tests {
         assert!(ds
             .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), true)
             .unwrap());
-        let bucket_id = ds.get_buckets().keys().next().unwrap().clone();
+        let bucket_id = ds.get_buckets().unwrap().keys().next().unwrap().clone();
         let events = ds.get_events(&conn, &bucket_id, None, None, None).unwrap();
         assert_eq!(
             events.len(),

@@ -45,6 +45,7 @@ pub enum QueryError {
     InvalidFunctionParameters(String),
     TimeIntervalError(String),
     BucketNotFound(String),
+    AmbiguousBucket(String),
     BucketQueryError(String),
     RegexCompileError(String),
     /// The caller's time budget ran out before the program finished; the

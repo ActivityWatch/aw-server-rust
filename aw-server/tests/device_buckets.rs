@@ -1,0 +1,958 @@
+use aw_datastore::Datastore;
+use aw_models::Bucket;
+use aw_server::{
+    config::AWConfig,
+    endpoints::{self, AssetResolver, ServerState},
+};
+use rocket::{
+    http::{ContentType, Header, Status},
+    local::blocking::Client,
+};
+use serde_json::{json, Value};
+
+fn client() -> Client {
+    Client::untracked(endpoints::build_rocket(
+        ServerState::new(
+            Datastore::new_in_memory(false),
+            AssetResolver::new(None),
+            "server-uuid".into(),
+        ),
+        AWConfig::default(),
+    ))
+    .unwrap()
+}
+
+fn request(
+    client: &Client,
+    method: rocket::http::Method,
+    path: &str,
+    body: Option<Value>,
+) -> (Status, String) {
+    let mut request = client
+        .req(method, path)
+        .header(Header::new("Host", "127.0.0.1:5600"));
+    if let Some(body) = body {
+        request = request.header(ContentType::JSON).body(body.to_string());
+    }
+    let response = request.dispatch();
+    (
+        response.status(),
+        response.into_string().unwrap_or_default(),
+    )
+}
+
+#[test]
+fn device_bucket_routes_preserve_scope_through_crud_events_and_streamed_exports() {
+    use rocket::http::Method::{Delete, Get, Post};
+    let client = client();
+    for (device, id, hostname) in [
+        ("local", "window_host", "host"),
+        ("peer", "window_other", "other"),
+    ] {
+        let path = format!("/api/0/devices/{device}/buckets/{id}");
+        let (status, body) = request(
+            &client,
+            Post,
+            &path,
+            Some(
+                json!({"id": "ignored", "hostname": hostname, "device_id": "forged", "type": "test", "client": "test"}),
+            ),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        let (status, body) = request(&client, Get, &path, None);
+        assert_eq!(status, Status::Ok, "{body}");
+        let stored: Bucket = serde_json::from_str(&body).unwrap();
+        assert_eq!(stored.id, id);
+        assert_eq!(stored.device_id, device);
+    }
+    // The alias is globally ambiguous but unambiguous inside each device.
+    assert_eq!(
+        request(&client, Get, "/api/0/buckets/window", None).0,
+        Status::Conflict
+    );
+    for (device, duration) in [("server-uuid", 1), ("peer", 2)] {
+        let base = format!("/api/0/devices/{device}/buckets/window");
+        let (status, body) = request(
+            &client,
+            Post,
+            &format!("{base}/events"),
+            Some(
+                json!([{"timestamp": "2026-01-01T00:00:00Z", "duration": duration, "data": {"source": device}}]),
+            ),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        let events: Value = serde_json::from_str(&body).unwrap();
+        let id = events[0]["id"].as_i64().unwrap();
+        assert_eq!(
+            request(&client, Get, &format!("{base}/events/count"), None),
+            (Status::Ok, "1".into())
+        );
+        let (status, body) = request(&client, Get, &format!("{base}/events/{id}"), None);
+        assert_eq!(status, Status::Ok);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["duration"].as_f64(),
+            Some(f64::from(duration))
+        );
+        let (status, body) = request(&client, Get, &format!("{base}/events"), None);
+        assert_eq!(status, Status::Ok);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        for suffix in ["export", "export/csv"] {
+            let (status, body) = request(&client, Get, &format!("{base}/{suffix}"), None);
+            assert_eq!(status, Status::Ok, "{body}");
+            assert!(body.contains(device), "{body}");
+            assert!(
+                !body.contains(if device == "peer" {
+                    "server-uuid"
+                } else {
+                    "peer"
+                }),
+                "{body}"
+            );
+        }
+        for suffix in ["buckets/", "export"] {
+            let (status, body) = request(
+                &client,
+                Get,
+                &format!("/api/0/devices/{device}/{suffix}"),
+                None,
+            );
+            assert_eq!(status, Status::Ok, "{body}");
+            let value: Value = serde_json::from_str(&body).unwrap();
+            let buckets = if suffix == "export" {
+                &value["buckets"]
+            } else {
+                &value
+            };
+            assert_eq!(buckets.as_object().unwrap().len(), 1);
+            assert!(buckets
+                .get(if device == "peer" {
+                    "window_other"
+                } else {
+                    "window_host"
+                })
+                .is_some());
+        }
+        let heartbeat = json!({"timestamp": "2026-01-01T00:00:10Z", "duration": 0, "data": {"heartbeat": device}});
+        assert_eq!(
+            request(
+                &client,
+                Post,
+                &format!("{base}/heartbeat?pulsetime=5"),
+                Some(heartbeat)
+            )
+            .0,
+            Status::Ok
+        );
+        assert_eq!(
+            request(&client, Delete, &format!("{base}/events/{id}"), None).0,
+            Status::Ok
+        );
+        let (_, body) = request(&client, Get, &format!("{base}/events"), None);
+        let events: Value = serde_json::from_str(&body).unwrap();
+        let remaining = events[0]["id"].as_i64().unwrap();
+        assert_eq!(
+            request(
+                &client,
+                Post,
+                &format!("{base}/events/delete"),
+                Some(json!({"ids": [remaining, remaining]}))
+            ),
+            (Status::Ok, "1".into())
+        );
+    }
+    assert_eq!(
+        request(&client, Get, "/api/0/devices/absent/buckets/window", None).0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/local/buckets/window_other/events",
+            None
+        )
+        .0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(
+            &client,
+            Delete,
+            "/api/0/devices/server-uuid/buckets/window",
+            None
+        )
+        .0,
+        Status::Ok
+    );
+    assert_eq!(
+        request(&client, Get, "/api/0/devices/local/buckets/window", None).0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(&client, Get, "/api/0/devices/peer/buckets/window", None).0,
+        Status::Ok
+    );
+}
+
+#[test]
+fn scoped_writes_invalidate_queries_and_validation_cannot_touch_another_device() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    for (device, id) in [("local", "window_host"), ("peer", "window_other")] {
+        assert_eq!(request(&client, Post, &format!("/api/0/devices/{device}/buckets/{id}"), Some(json!({"hostname": if device == "local" {"host"} else {"other"}, "type": "test", "client": "test"}))).0, Status::Ok);
+    }
+    let query = json!({"query": ["return sum_durations(query_bucket(\"window\"));"], "timeperiods": ["2026-01-01T00:00:00Z/2026-01-02T00:00:00Z"]});
+    let read_total = |device: &str| {
+        let (status, body) = request(
+            &client,
+            Post,
+            &format!("/api/0/devices/{device}/query"),
+            Some(query.clone()),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        serde_json::from_str::<Value>(&body).unwrap()[0]
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!(read_total("local"), 0.0);
+    assert_eq!(read_total("peer"), 0.0);
+    let event = json!({"timestamp": "2026-01-01T00:00:00Z", "duration": 3, "data": {}});
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/server-uuid/buckets/window/events",
+            Some(json!([event.clone()]))
+        )
+        .0,
+        Status::Ok
+    );
+    assert_eq!(read_total("local"), 3.0);
+    assert_eq!(read_total("peer"), 0.0);
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/peer/buckets/window/heartbeat?pulsetime=-1",
+            Some(event)
+        )
+        .0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/peer/buckets/window/events",
+            Some(json!([{"timestamp": "2026-01-01T00:00:00Z", "duration": -1, "data": {}}]))
+        )
+        .0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/peer/buckets/window/events?start=invalid",
+            None
+        )
+        .0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/peer/buckets/window/events/delete",
+            Some(json!({"ids": vec![1; 10_001]}))
+        )
+        .0,
+        Status::PayloadTooLarge
+    );
+    assert_eq!(read_total("local"), 3.0);
+    assert_eq!(read_total("peer"), 0.0);
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/server-uuid/buckets/window",
+            Some(json!({"hostname": "host", "type": "test", "client": "test"}))
+        )
+        .0,
+        Status::NotModified
+    );
+    let (status, body) = request(&client, Get, "/api/0/devices/local/buckets", None);
+    assert_eq!(status, Status::Ok);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn device_and_bucket_url_components_are_decoded_without_composite_keys() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let path = "/api/0/devices/peer%3Aone/buckets/window%3Ahost%20space";
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            path,
+            Some(json!({"hostname": "host", "type": "test", "client": "test"}))
+        )
+        .0,
+        Status::Ok
+    );
+    let (status, body) = request(&client, Get, path, None);
+    assert_eq!(status, Status::Ok, "{body}");
+    let bucket: Bucket = serde_json::from_str(&body).unwrap();
+    assert_eq!(bucket.device_id, "peer:one");
+    assert_eq!(bucket.id, "window:host space");
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/peer/buckets/one%3Awindow%3Ahost%20space",
+            None
+        )
+        .0,
+        Status::NotFound
+    );
+}
+
+#[test]
+fn local_hostname_sentinel_cannot_forge_peer_metadata() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let bucket = json!({"hostname": "!local", "type": "test", "client": "test"});
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/peer/buckets/sentinel",
+            Some(bucket.clone())
+        )
+        .0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(&client, Get, "/api/0/devices/peer/buckets/sentinel", None).0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/server-uuid/buckets/sentinel",
+            Some(bucket)
+        )
+        .0,
+        Status::Ok
+    );
+    let (_, body) = request(&client, Get, "/api/0/devices/local/buckets/sentinel", None);
+    let stored: Bucket = serde_json::from_str(&body).unwrap();
+    assert_eq!(stored.device_id, "local");
+    assert_eq!(stored.data["device_id"], "server-uuid");
+}
+
+#[test]
+fn legacy_import_normalizes_server_uuid_before_alias_resolution_and_merge() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let import = json!({"buckets": {"window_host": {"id": "window_host", "hostname": "host", "device_id": "server-uuid", "type": "test", "client": "test", "events": [{"id": 42, "timestamp": "2026-01-01T00:00:00Z", "duration": 2, "data": {"app": "test"}}]}}});
+    for _ in 0..2 {
+        let (status, body) = request(&client, Post, "/api/0/import", Some(import.clone()));
+        assert_eq!(status, Status::Ok, "{body}");
+        let (status, body) = request(
+            &client,
+            Get,
+            "/api/0/devices/server-uuid/buckets/window",
+            None,
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        let stored: Bucket = serde_json::from_str(&body).unwrap();
+        assert_eq!(stored.device_id, "local");
+        assert_eq!(stored.id, "window_host");
+        assert_eq!(
+            request(
+                &client,
+                Get,
+                "/api/0/devices/local/buckets/window/events/count",
+                None
+            ),
+            (Status::Ok, "1".into())
+        );
+    }
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/buckets/window",
+            Some(json!({"hostname": "host", "type": "test", "client": "test"}))
+        )
+        .0,
+        Status::NotModified
+    );
+}
+
+#[test]
+fn scoped_import_binds_route_identity_and_roundtrips_peer_history() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    // A source's local sentinel is relative to its enclosing export/import device.
+    let import = json!({"buckets": {"window_host": {"id": "window_host", "hostname": "host", "device_id": "local", "type": "test", "client": "test", "events": [{"id": 1, "timestamp": "2026-01-01T00:00:00Z", "duration": 2, "data": {"source": "peer"}}]}}});
+    let mut export = Value::Null;
+    for _ in 0..2 {
+        let (status, body) = request(
+            &client,
+            Post,
+            "/api/0/devices/peer/import",
+            Some(import.clone()),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        let (status, body) = request(&client, Get, "/api/0/devices/peer/export", None);
+        assert_eq!(status, Status::Ok, "{body}");
+        export = serde_json::from_str(&body).unwrap();
+        assert_eq!(export["buckets"]["window_host"]["device_id"], "peer");
+        assert_eq!(
+            export["buckets"]["window_host"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            request(
+                &client,
+                Get,
+                "/api/0/devices/local/buckets/window_host",
+                None
+            )
+            .0,
+            Status::NotFound
+        );
+    }
+    let restored = self::client();
+    assert_eq!(
+        request(&restored, Post, "/api/0/devices/peer/import", Some(export)).0,
+        Status::Ok
+    );
+    assert_eq!(
+        request(
+            &restored,
+            Get,
+            "/api/0/devices/peer/buckets/window/events/count",
+            None
+        ),
+        (Status::Ok, "1".into())
+    );
+    let mut forged = import;
+    forged["buckets"]["window_host"]["device_id"] = json!("other-peer");
+    assert_eq!(
+        request(&client, Post, "/api/0/devices/peer/import", Some(forged)).0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/peer/buckets/window/events/count",
+            None
+        ),
+        (Status::Ok, "1".into())
+    );
+}
+
+#[test]
+fn scoped_import_preflights_the_entire_envelope_before_mutating_history() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let bucket = json!({"id": "valid", "hostname": "host", "type": "test", "client": "test", "device_id": "peer"});
+    let mut invalid = bucket.clone();
+    invalid["id"] = json!("not-the-map-key");
+    let body = json!({"buckets": {"valid": bucket, "invalid": invalid}});
+    assert_eq!(
+        request(&client, Post, "/api/0/devices/peer/import", Some(body)).0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(&client, Get, "/api/0/devices/peer/buckets", None),
+        (Status::Ok, "{}".into())
+    );
+    let local = json!({"buckets": {"local-bucket": {"id": "local-bucket", "hostname": "host", "type": "test", "client": "test", "device_id": "server-uuid"}}});
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/server-uuid/import",
+            Some(local)
+        )
+        .0,
+        Status::Ok
+    );
+    let (_, body) = request(
+        &client,
+        Get,
+        "/api/0/devices/local/buckets/local-bucket",
+        None,
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["device_id"],
+        "local"
+    );
+}
+
+#[test]
+fn scoped_import_keeps_same_name_peer_history_separate() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/buckets/window_host",
+            Some(json!({"hostname": "host", "type": "test", "client": "test"}))
+        )
+        .0,
+        Status::Ok
+    );
+    let body = json!({"buckets": {"window_host": {"id": "window_host", "hostname": "host", "device_id": "peer", "type": "test", "client": "test"}}});
+    let (status, body) = request(&client, Post, "/api/0/devices/peer/import", Some(body));
+    assert_eq!(status, Status::Ok, "{body}");
+    let (status, body) = request(
+        &client,
+        Get,
+        "/api/0/devices/peer/buckets/window_host",
+        None,
+    );
+    assert_eq!(status, Status::Ok, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["device_id"],
+        "peer"
+    );
+    assert_eq!(
+        request(&client, Get, "/api/0/buckets/window_host", None).0,
+        Status::Conflict
+    );
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/local/buckets/window_host",
+            None
+        )
+        .0,
+        Status::Ok
+    );
+}
+
+#[test]
+fn scoped_http_writes_refresh_a_real_wal_query_reader_and_survive_reopen() {
+    use rocket::http::Method::{Delete, Get, Post};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("device-reader.sqlite")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let writer = Datastore::new(path.clone(), false);
+    writer.get_buckets().unwrap();
+    let mut state = ServerState::new(
+        writer.clone(),
+        AssetResolver::new(None),
+        "server-uuid".into(),
+    );
+    state.reader = Some(Datastore::open_reader(path.clone()).unwrap());
+    state.query_cache.register_reader();
+    let client = Client::untracked(endpoints::build_rocket(state, AWConfig::default())).unwrap();
+    let query = json!({"query": ["return sum_durations(query_bucket(\"window\"));"], "timeperiods": ["2026-01-01T00:00:00Z/2026-01-02T00:00:00Z"]});
+    for (device, id, host, duration) in [
+        ("local", "window_host", "host", 1.0),
+        ("peer", "window_other", "other", 2.0),
+    ] {
+        assert_eq!(
+            request(
+                &client,
+                Post,
+                &format!("/api/0/devices/{device}/buckets/{id}"),
+                Some(json!({"hostname": host, "type": "test", "client": "test"}))
+            )
+            .0,
+            Status::Ok
+        );
+        assert_eq!(
+            request(
+                &client,
+                Post,
+                &format!("/api/0/devices/{device}/buckets/window/events"),
+                Some(
+                    json!([{"timestamp": "2026-01-01T00:00:00Z", "duration": duration, "data": {}}])
+                )
+            )
+            .0,
+            Status::Ok
+        );
+        for _ in 0..2 {
+            let (status, body) = request(
+                &client,
+                Post,
+                &format!("/api/0/devices/{device}/query"),
+                Some(query.clone()),
+            );
+            assert_eq!(status, Status::Ok, "{body}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).unwrap(),
+                json!([duration])
+            );
+        }
+    }
+    assert_eq!(
+        request(
+            &client,
+            Delete,
+            "/api/0/devices/server-uuid/buckets/window",
+            None
+        )
+        .0,
+        Status::Ok
+    );
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/local/query",
+            Some(query.clone())
+        )
+        .0,
+        Status::BadRequest
+    );
+    let (status, body) = request(&client, Post, "/api/0/devices/peer/query", Some(query));
+    assert_eq!(status, Status::Ok, "{body}");
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), json!([2.0]));
+    writer.force_commit().unwrap();
+    drop(client);
+    drop(writer);
+    let reopened = Datastore::new(path, false);
+    let state = ServerState::new(reopened, AssetResolver::new(None), "server-uuid".into());
+    let client = Client::untracked(endpoints::build_rocket(state, AWConfig::default())).unwrap();
+    assert_eq!(
+        request(&client, Get, "/api/0/devices/local/buckets/window", None).0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(
+            &client,
+            Get,
+            "/api/0/devices/peer/buckets/window/events/count",
+            None
+        ),
+        (Status::Ok, "1".into())
+    );
+}
+
+#[test]
+fn complete_device_catalogue_and_grouped_lists() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let (status, body) = request(&client, Get, "/api/0/devices", None);
+    assert_eq!(status, Status::Ok, "{body}");
+    let devices: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(devices.as_array().unwrap().len(), 1);
+    assert_eq!(devices[0]["id"], "server-uuid");
+    for (device, id, hostname) in [
+        ("local", "local_bucket", "historic-local-name"),
+        ("peer", "peer_bucket", "peer-host"),
+    ] {
+        let (status, body) = request(
+            &client,
+            Post,
+            &format!("/api/0/devices/{device}/buckets/{id}"),
+            Some(json!({"type":"test", "client":"test", "hostname":hostname})),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+    }
+    let (status, body) = request(&client, Get, "/api/0/devices", None);
+    assert_eq!(status, Status::Ok, "{body}");
+    let devices: Value = serde_json::from_str(&body).unwrap();
+    let devices = devices.as_array().unwrap();
+    assert_eq!(devices.len(), 2);
+    assert!(devices
+        .iter()
+        .any(|d| d["id"] == "peer" && d["hostname"] == "peer-host"));
+    assert!(!devices
+        .iter()
+        .any(|d| d["id"] == "historic-local-name" || d["id"] == "local"));
+    let (status, body) = request(&client, Get, "/api/0/devices/buckets", None);
+    assert_eq!(status, Status::Ok, "{body}");
+    let grouped: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(grouped["devices"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        grouped["devices"]["server-uuid"]["buckets"]["local_bucket"]["device_id"],
+        "server-uuid"
+    );
+    assert_eq!(
+        grouped["devices"]["peer"]["buckets"]["peer_bucket"]["device_id"],
+        "peer"
+    );
+    assert!(grouped["devices"]["peer"]["buckets"]
+        .get("local_bucket")
+        .is_none());
+}
+
+#[test]
+fn grouped_export_import_preserves_source_ownership_and_events() {
+    use rocket::http::Method::{Get, Post};
+    let source = client();
+    for (device, id) in [("local", "one"), ("peer", "two")] {
+        assert_eq!(
+            request(
+                &source,
+                Post,
+                &format!("/api/0/devices/{device}/buckets/{id}"),
+                Some(json!({"type":"test","client":"test","hostname":device}))
+            )
+            .0,
+            Status::Ok
+        );
+        assert_eq!(request(&source, Post, &format!("/api/0/devices/{device}/buckets/{id}/events"), Some(json!([{"timestamp":"2026-01-01T00:00:00Z","duration":3,"data":{"source":device}}]))).0, Status::Ok);
+    }
+    let (status, body) = request(&source, Get, "/api/0/devices/export", None);
+    assert_eq!(status, Status::Ok, "{body}");
+    let data: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        data["devices"]["server-uuid"]["buckets"]["one"]["device_id"],
+        "server-uuid"
+    );
+    assert_eq!(
+        data["devices"]["peer"]["buckets"]["two"]["events"][0]["data"]["source"],
+        "peer"
+    );
+    let destination = Client::untracked(endpoints::build_rocket(
+        ServerState::new(
+            Datastore::new_in_memory(false),
+            AssetResolver::new(None),
+            "destination".into(),
+        ),
+        AWConfig::default(),
+    ))
+    .unwrap();
+    for _ in 0..2 {
+        let (status, body) = request(
+            &destination,
+            Post,
+            "/api/0/devices/import",
+            Some(data.clone()),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+    }
+    for (device, id) in [("server-uuid", "one"), ("peer", "two")] {
+        assert_eq!(
+            request(
+                &destination,
+                Get,
+                &format!("/api/0/devices/{device}/buckets/{id}/events/count"),
+                None
+            ),
+            (Status::Ok, "1".into())
+        );
+        assert_eq!(
+            request(
+                &destination,
+                Get,
+                &format!("/api/0/devices/local/buckets/{id}"),
+                None
+            )
+            .0,
+            Status::NotFound
+        );
+    }
+    // Validate every enclosing identity before any group is written.
+    let invalid = json!({"devices":{"valid":{"buckets":{"untouched":{"id":"untouched","type":"test","client":"test","hostname":"h","device_id":"valid"}}},"wrong":{"buckets":{"bad":{"id":"bad","type":"test","client":"test","hostname":"h","device_id":"forged"}}}}});
+    assert_eq!(
+        request(&destination, Post, "/api/0/devices/import", Some(invalid)).0,
+        Status::BadRequest
+    );
+    assert_eq!(
+        request(
+            &destination,
+            Get,
+            "/api/0/devices/valid/buckets/untouched",
+            None
+        )
+        .0,
+        Status::NotFound
+    );
+    assert_eq!(
+        request(
+            &destination,
+            Post,
+            "/api/0/devices/import",
+            Some(json!({"devices":{"local":{"buckets":{}}}}))
+        )
+        .0,
+        Status::BadRequest
+    );
+}
+
+#[test]
+fn grouped_device_routes_retain_api_key_protection() {
+    use rocket::http::Method::{Get, Post};
+    let mut config = AWConfig::default();
+    config.auth.api_key = Some("test-key".into());
+    let client = Client::untracked(endpoints::build_rocket(
+        ServerState::new(
+            Datastore::new_in_memory(false),
+            AssetResolver::new(None),
+            "server-uuid".into(),
+        ),
+        config,
+    ))
+    .unwrap();
+    for (method, path, body) in [
+        (Get, "/api/0/devices", None),
+        (Get, "/api/0/devices/buckets", None),
+        (Get, "/api/0/devices/export", None),
+        (Post, "/api/0/devices/import", Some(json!({"devices":{}}))),
+    ] {
+        assert_eq!(
+            request(&client, method, path, body.clone()).0,
+            Status::Unauthorized
+        );
+        let mut req = client
+            .req(method, path)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .header(Header::new("Authorization", "Bearer test-key"));
+        if let Some(body) = body {
+            req = req.header(ContentType::JSON).body(body.to_string());
+        }
+        assert_eq!(req.dispatch().status(), Status::Ok);
+    }
+}
+
+#[test]
+fn scoped_event_ids_cannot_replace_another_devices_history() {
+    use rocket::http::Method::{Get, Post};
+    for suffix in ["events", "heartbeat?pulsetime=5"] {
+        let client = client();
+        for (device, bid) in [("local", "source"), ("peer", "target")] {
+            let (status, body) = request(
+                &client,
+                Post,
+                &format!("/api/0/devices/{device}/buckets/{bid}"),
+                Some(json!({"hostname": "host", "type": "test", "client": "test"})),
+            );
+            assert_eq!(status, Status::Ok, "{body}");
+        }
+        let event = json!({"timestamp": "2026-01-01T00:00:00Z", "duration": 1, "data": {"owner": "source"}});
+        let (status, body) = request(
+            &client,
+            Post,
+            "/api/0/devices/local/buckets/source/events",
+            Some(json!([event])),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        let original: Value = serde_json::from_str(&body).unwrap();
+        let stolen_id = original[0]["id"].as_i64().unwrap();
+        let forged = json!({"id": stolen_id, "timestamp": "2026-01-01T00:00:00Z", "duration": 2, "data": {"owner": "peer"}});
+        let payload = if suffix == "events" {
+            // A rejected batch must not retain its valid prefix, either.
+            json!([{"timestamp": "2026-01-01T00:00:05Z", "duration": 1, "data": {}}, forged])
+        } else {
+            forged
+        };
+        let (status, body) = request(
+            &client,
+            Post,
+            &format!("/api/0/devices/peer/buckets/target/{suffix}"),
+            Some(payload),
+        );
+        assert_eq!(status, Status::Conflict, "{suffix}: {body}");
+        let (status, body) = request(
+            &client,
+            Get,
+            "/api/0/devices/local/buckets/source/events",
+            None,
+        );
+        assert_eq!(status, Status::Ok);
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), original);
+        assert_eq!(
+            request(
+                &client,
+                Get,
+                "/api/0/devices/peer/buckets/target/events/count",
+                None
+            ),
+            (Status::Ok, "0".into())
+        );
+        // Updating an existing event in its own bucket remains supported.
+        let own = json!({"id": stolen_id, "timestamp": "2026-01-01T00:00:00Z", "duration": 3, "data": {"owner": "source"}});
+        let (status, body) = request(
+            &client,
+            Post,
+            "/api/0/devices/local/buckets/source/events",
+            Some(json!([own])),
+        );
+        assert_eq!(status, Status::Ok, "{body}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()[0]["id"],
+            stolen_id
+        );
+    }
+}
+
+#[test]
+fn scoped_cross_device_creation_is_distinct_and_local_uuid_is_idempotent() {
+    use rocket::http::Method::{Get, Post};
+    let client = client();
+    let metadata = json!({"hostname": "host", "type": "test", "client": "test"});
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/local/buckets/window",
+            Some(metadata.clone())
+        )
+        .0,
+        Status::Ok
+    );
+    let (status, body) = request(
+        &client,
+        Post,
+        "/api/0/devices/peer/buckets/window",
+        Some(metadata.clone()),
+    );
+    assert_eq!(status, Status::Ok, "{body}");
+    let (status, body) = request(&client, Get, "/api/0/devices/peer/buckets/window", None);
+    assert_eq!(status, Status::Ok, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["device_id"],
+        "peer"
+    );
+    assert_eq!(
+        request(&client, Get, "/api/0/buckets/window", None).0,
+        Status::Conflict
+    );
+    assert_eq!(
+        request(
+            &client,
+            Post,
+            "/api/0/devices/server-uuid/buckets/window",
+            Some(metadata)
+        )
+        .0,
+        Status::NotModified
+    );
+}

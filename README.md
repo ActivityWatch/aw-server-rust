@@ -42,6 +42,35 @@ cargo run --bin aw-server
 
 *NOTE:* This will start aw-server-rust in testing mode (on port 5666 instead of port 5600).
 
+### Device-addressed API (draft)
+
+Device-scoped bucket/event/query operations live under
+`/api/0/devices/{device_id}/...`. `local` and this server's `/info.device_id`
+select the same local history. Legacy name-only routes remain supported.
+
+- `GET /api/0/devices` lists the local UUID even when empty, plus stored peer
+  identities. A peer hostname is a deterministic representative of its bucket
+  metadata, not a latest-hostname registry.
+- `GET /api/0/devices/buckets` returns metadata as
+  `{"devices": {"<source-device-id>": {"buckets": {"<bucket-id>": {}}}}}`.
+- `GET /api/0/devices/export` uses the same grouping with event arrays. The local
+  sentinel is exported as the source server UUID. Events stream to a private
+  tempfile in one datastore transaction before a successful response begins.
+- `POST /api/0/devices/import` accepts that grouped JSON. Every bucket ID and
+  ownership field must match its enclosing keys. Empty and `local` source IDs
+  are rejected before writes. Runtime errors may leave earlier groups imported;
+  retry uses existing event deduplication. Importing another server's export does
+  not turn its local history into this server's local history.
+
+Explicitly scoped creation supports equal bucket names on different devices;
+reload, rename and legacy Android-name migration retain their separate histories.
+Legacy name-only lookup, flat listing and export fail with a conflict when names
+are ambiguous. Globally unique compatibility aliases still resolve their device;
+creating or renaming an exact name cannot take over an active peer alias. Legacy
+unscoped creation retains its cross-device name guard. These endpoints do not
+enable watcher rollout or V2 segment import. All routes retain the normal host,
+CORS and configured API-key checks.
+
 ### Docker
 
 A multi-stage `scripts/Dockerfile` is included. It builds the web UI and the

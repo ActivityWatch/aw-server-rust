@@ -132,6 +132,23 @@ impl ServerState {
         }
     }
 
+    /// Canonical storage identity for a device selected at the HTTP boundary.
+    /// The server UUID and reserved local alias must never create two owners.
+    pub fn normalize_device<'a>(&self, device_id: &'a str) -> &'a str {
+        if device_id == "local" || device_id == self.device_id {
+            "local"
+        } else {
+            device_id
+        }
+    }
+
+    pub fn bucket_datastore(&self, device: Option<&str>) -> Datastore {
+        match device {
+            Some(device) => self.datastore.for_device(self.normalize_device(device)),
+            None => self.datastore.clone(),
+        }
+    }
+
     /// The datastore queries read from: the reader when there is one.
     pub fn query_datastore(&self) -> &Datastore {
         self.reader.as_ref().unwrap_or(&self.datastore)
@@ -154,6 +171,8 @@ mod util;
 mod apikey;
 mod bucket;
 mod cors;
+mod device;
+mod device_bucket;
 mod export;
 mod extension_cors;
 mod hostcheck;
@@ -291,6 +310,31 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             ],
         )
         .mount("/api/0/query", routes![query::query])
+        .mount(
+            "/api/0/devices",
+            routes![
+                device::devices_get,
+                device::buckets_get,
+                device::export,
+                import::devices_import_json,
+                query::device_query,
+                import::device_import_json,
+                device_bucket::buckets_get,
+                device_bucket::bucket_get,
+                device_bucket::bucket_new,
+                device_bucket::bucket_delete,
+                device_bucket::events_get,
+                device_bucket::event_get,
+                device_bucket::events_create,
+                device_bucket::heartbeat,
+                device_bucket::event_count,
+                device_bucket::event_delete,
+                device_bucket::events_delete_many,
+                device_bucket::bucket_export,
+                device_bucket::buckets_export,
+                device_bucket::events_csv,
+            ],
+        )
         .mount(
             "/api/0/import",
             routes![import::bucket_import_json, import::bucket_import_form],

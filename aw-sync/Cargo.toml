@@ -30,7 +30,7 @@ rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 
 # sync-v2 dependencies (optional)
 zstd = { version = "0.14", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 
 aw-server = { path = "../aw-server" }
 aw-models = { path = "../aw-models" }

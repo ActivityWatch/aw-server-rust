@@ -46,7 +46,7 @@ aw-datastore = { path = "../aw-datastore", default-features = false }
 aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
-sha2 = "0.10"
+sha2 = "0.11"
 # Same version as aw-datastore; dirs.rs reads databases for content-based selection.
 rusqlite = "0.37"
 

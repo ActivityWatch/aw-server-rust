@@ -40,6 +40,42 @@ jobs:
           ${{ runner.os }}-${{ env.cache-name }}-${{ steps.toolchain.outputs.cachekey }}-
     - name: Build
       run: cargo build --workspace --verbose
+    # Code-signing services require product name/version metadata on each exe.
+    - name: Check Windows version resources
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $metadataJson = cargo metadata --no-deps --format-version 1
+        if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
+        $packages = ($metadataJson | ConvertFrom-Json).packages
+        function Assert-VersionResources([string]$ProductVersion = '') {
+          foreach ($exe in 'aw-server', 'aw-sync') {
+            $crateVersion = ($packages | Where-Object name -eq $exe).version
+            if (-not $crateVersion) { throw "missing crate version for $exe" }
+            $expectedProduct = if ($ProductVersion) { $ProductVersion } else { $crateVersion }
+            $info = (Get-Item "target/debug/$exe.exe").VersionInfo
+            "${exe}: $($info.ProductName) $($info.ProductVersion) (file $($info.FileVersion))"
+            if ($info.ProductName -ne 'ActivityWatch' -or $info.OriginalFilename -ne "$exe.exe" -or
+                $info.FileVersion -ne $crateVersion -or $info.ProductVersion -ne $expectedProduct) {
+              throw "$exe.exe: expected ActivityWatch, $exe.exe, FileVersion=$crateVersion, ProductVersion=$expectedProduct"
+            }
+          }
+        }
+        # Check the initial build's crate-version fallback, then prove changing
+        # AW_VERSION alone rebuilds both resources without changing FileVersion.
+        Assert-VersionResources
+        try {
+          $env:AW_VERSION = 'v9.8.7'
+          cargo build -p aw-server -p aw-sync --verbose
+          if ($LASTEXITCODE -ne 0) { throw 'AW_VERSION override build failed' }
+          Assert-VersionResources -ProductVersion '9.8.7'
+        } finally {
+          Remove-Item Env:AW_VERSION -ErrorAction SilentlyContinue
+        }
+        # Do not upload binaries carrying the synthetic test product version.
+        cargo build -p aw-server -p aw-sync --verbose
+        if ($LASTEXITCODE -ne 0) { throw 'crate-version fallback rebuild failed' }
+        Assert-VersionResources
     # Known Folder APIs ignore env-var overrides, so the recovery matrix needs a
     # disposable native profile. This proves that seam before any fixture work.
     # It runs before the test suite on purpose: the existing tests already create

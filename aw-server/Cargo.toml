@@ -23,6 +23,9 @@ encryption = ["aw-datastore/encryption"]
 # Enable SQLCipher encryption with vendored OpenSSL (fully self-contained)
 encryption-vendored = ["aw-datastore/encryption-vendored"]
 
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 rocket = { version = "0.5.0", features = ["json"] }
 rocket_cors = { version = "0.6.0" }

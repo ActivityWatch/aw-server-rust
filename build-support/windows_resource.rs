@@ -62,7 +62,7 @@ END
     let rc_path = out_dir.join(format!("{bin}-version.rc"));
     std::fs::write(&rc_path, rc).expect("failed to write version resource script");
     embed_resource::compile_for(&rc_path, [bin], embed_resource::NONE)
-        .manifest_optional()
+        .manifest_required()
         .expect("failed to compile Windows version resource");
 }
 

@@ -40,6 +40,18 @@ jobs:
           ${{ runner.os }}-${{ env.cache-name }}-${{ steps.toolchain.outputs.cachekey }}-
     - name: Build
       run: cargo build --workspace --verbose
+    # Code-signing services require product name/version metadata on each exe.
+    - name: Check Windows version resources
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        foreach ($exe in 'aw-server', 'aw-sync') {
+          $info = (Get-Item "target/debug/$exe.exe").VersionInfo
+          "${exe}: $($info.ProductName) $($info.ProductVersion) (file $($info.FileVersion))"
+          if ($info.ProductName -ne 'ActivityWatch' -or $info.OriginalFilename -ne "$exe.exe") {
+            throw "$exe.exe has no ActivityWatch version resource"
+          }
+        }
     # Known Folder APIs ignore env-var overrides, so the recovery matrix needs a
     # disposable native profile. This proves that seam before any fixture work.
     # It runs before the test suite on purpose: the existing tests already create

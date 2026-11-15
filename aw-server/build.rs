@@ -1,5 +1,7 @@
 use std::error::Error;
 
+include!("../build-support/windows_resource.rs");
+
 fn main() -> Result<(), Box<dyn Error>> {
     let webui_var = std::env::var("AW_WEBUI_DIR");
     let path = if let Ok(var_path) = &webui_var {
@@ -25,6 +27,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Ok(dir) = webui_var {
         println!("cargo:rerun-if-changed={dir}");
     }
+
+    embed_windows_version_resource("aw-server", "ActivityWatch server");
 
     Ok(())
 }

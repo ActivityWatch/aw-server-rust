@@ -13,6 +13,9 @@ crate-type = ["cdylib", "rlib"]
 name = "aw-sync"
 path = "src/main.rs"
 
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 log = "0.4"
 toml = "0.9"

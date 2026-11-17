@@ -149,6 +149,20 @@ function Wait-ProfileInitTask {
     throw "profile-init task timed out after $TimeoutSeconds seconds"
 }
 
+function Wait-ServerHttpReady {
+    param($Process, [int]$Port, [int]$TimeoutSeconds = 120)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($Process.HasExited) { break }
+        try {
+            $null = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/0/info" -TimeoutSec 3
+            return
+        }
+        catch { Start-Sleep -Milliseconds 500 }
+    }
+    throw "server HTTP API did not become ready on port $Port (exited: $($Process.HasExited))"
+}
+
 function Get-ProfileTail {
     param([string]$Dir)
     if (-not (Test-Path -LiteralPath $Dir)) {
@@ -459,6 +473,10 @@ try {
     Write-Host "  runner profile untouched: $runnerActivityWatch absent"
 
     if ($ScenarioPath) {
+        # A SQLite header precedes Rocket startup. Never write fixtures until
+        # the server accepts HTTP, even when native-root isolation is proven.
+        Wait-ServerHttpReady -Process $serverProcess -Port $port -TimeoutSeconds $TimeoutSeconds
+        $evidence['scenario_http_ready'] = $true
         # Scenario context: $exe $User $credential $disposableProfile $serverProcess
         # $port $runId $evidence. The scenario owns every process it starts.
         Write-Host "Running recovery scenario: $ScenarioPath"

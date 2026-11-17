@@ -84,7 +84,9 @@ jobs:
     - name: Test isolation refusal and readiness guards
       if: runner.os == 'Windows'
       shell: pwsh
-      run: ./scripts/test-windows-disposable-profile-guards.ps1
+      run: |
+        ./scripts/test-windows-disposable-profile-guards.ps1
+        ./scripts/test-windows-recovery-guards.ps1
     - name: Prove disposable-profile isolation, recovery row 1 (Local older, Roaming newer)
       if: runner.os == 'Windows'
       shell: pwsh

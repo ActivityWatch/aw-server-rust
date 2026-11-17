@@ -60,11 +60,21 @@ try {
     Stop-ScenarioServer $server
     $server = $null
 
-    # 5. Original Roaming history must still exist somewhere under Roaming.
-    $preserved = @(Get-ChildItem -LiteralPath (Join-Path $disposableProfile 'AppData\Roaming\activitywatch') `
-        -Recurse -File -Filter 'sqlite*.db' -ErrorAction SilentlyContinue)
-    $scenario['preserved_roaming_databases'] = @($preserved | ForEach-Object { $_.FullName.Substring($disposableProfile.Length) })
-    Assert-True ($preserved.Count -ge 1) 'original Roaming database is not retained under Roaming'
+    Assert-NoRecoveryWork -Port ($port + 3) -AllowSkipped
+
+    # 5. Both original trees must survive under their migration backup names,
+    #    not merely as the active, unioned Local database.
+    foreach ($source in @(
+        @{ Name = 'local'; App = $localApp; Pattern = 'aw-server-rust.pre-migration-*' },
+        @{ Name = 'roaming'; App = $roamApp; Pattern = 'aw-server-rust.migrated-*' }
+    )) {
+        $trees = @(Get-ChildItem -LiteralPath (Split-Path -Parent $source.App) `
+            -Directory -Filter $source.Pattern -ErrorAction SilentlyContinue)
+        $preserved = @($trees | ForEach-Object { Join-Path $_.FullName 'sqlite.db' } |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+        $scenario["preserved_$($source.Name)_databases"] = @($preserved | ForEach-Object { $_.Substring($disposableProfile.Length) })
+        Assert-True ($preserved.Count -ge 1) "original $($source.Name) database is not retained in $($source.Pattern)"
+    }
     $scenario['result'] = 'pass'
 }
 catch {

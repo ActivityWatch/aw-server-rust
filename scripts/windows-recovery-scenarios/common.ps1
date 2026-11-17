@@ -44,7 +44,10 @@ function Start-ScenarioServer {
         catch { Start-Sleep -Milliseconds 500 }
     }
     $tail = if (Test-Path -LiteralPath $log) { (Get-Content -LiteralPath $log -Tail 30) -join "`n" } else { '(no log)' }
-    throw "scenario server '$Name' did not become ready on port $Port (exited: $($proc.HasExited)).`n$tail"
+    $exited = $proc.HasExited
+    # The caller has no handle yet: retain diagnostics and clean up here.
+    Stop-ScenarioServer ([pscustomobject]@{ Process = $proc; Log = $log; Cmd = $cmd; Port = $Port })
+    throw "scenario server '$Name' did not become ready on port $Port (exited: $exited).`n$tail"
 }
 
 function Stop-ScenarioServer {
@@ -54,6 +57,20 @@ function Stop-ScenarioServer {
     $null = $Server.Process.WaitForExit(15000)
     $scenario["log_$($Server.Port)"] = @(Get-Content -LiteralPath $Server.Log -ErrorAction SilentlyContinue)
     Remove-Item -LiteralPath $Server.Log, $Server.Cmd -Force -ErrorAction SilentlyContinue
+}
+
+function Assert-NoRecoveryWork {
+    # Require actual recovery summaries, not just unchanged event contents.
+    # Row 1 promises zero inserts; row 2 also promises zero duplicate scans.
+    param([int]$Port, [switch]$AllowSkipped)
+    $counts = @($scenario["log_$Port"] | Select-String -Pattern 'History recovery from .*: (\d+) buckets created, (\d+) events inserted, (\d+) duplicates skipped')
+    Assert-True ($counts.Count -gt 0) "restart on port $Port has no recovery summaries"
+    foreach ($count in $counts) {
+        Assert-True ([long]$count.Matches[0].Groups[2].Value -eq 0) "restart on port $Port inserted events again"
+        if (-not $AllowSkipped) {
+            Assert-True ([long]$count.Matches[0].Groups[3].Value -eq 0) "restart on port $Port scanned duplicate events again"
+        }
+    }
 }
 
 function Add-FixtureEvents {

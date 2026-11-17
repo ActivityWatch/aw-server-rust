@@ -71,6 +71,7 @@ try {
             "testing start ${n}: expected $($expectedTesting -join ',') but found $($got -join ',')"
         Stop-ScenarioServer $server
         $server = $null
+        if ($n -eq 2) { Assert-NoRecoveryWork -Port ($port + 3 + $n) }
     }
 
     # 6. Default history unchanged after the testing recovery.

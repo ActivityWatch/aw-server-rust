@@ -19,13 +19,186 @@ mod api_tests {
     use rocket::local::blocking::Client;
 
     fn setup_testserver() -> rocket::Rocket<rocket::Build> {
-        let state = endpoints::ServerState {
-            datastore: aw_datastore::Datastore::new_in_memory(false),
-            asset_resolver: endpoints::AssetResolver::new(None),
-            device_id: "test_id".to_string(),
-        };
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
         let aw_config = config::AWConfig::default();
         endpoints::build_rocket(state, aw_config)
+    }
+
+    #[test]
+    fn export_includes_pending_writes_and_preserves_headers_and_missing_bucket_errors() {
+        let server = setup_testserver();
+        let datastore = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "live", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        datastore.create_bucket(&bucket).unwrap();
+        let event = aw_models::Event::default();
+        let inserted = datastore.insert_events("live", &[event]).unwrap();
+        // No force_commit: exports must see writes acknowledged by the worker.
+        let client = Client::untracked(server).unwrap();
+        for path in ["/api/0/export", "/api/0/buckets/live/export"] {
+            let response = client
+                .get(path)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .dispatch();
+            assert_eq!(response.status(), Status::Ok);
+            assert_eq!(response.content_type(), Some(ContentType::JSON));
+            assert_eq!(
+                response.headers().get_one("Content-Disposition"),
+                Some("attachment; filename=\"aw-bucket-export_live.json\"")
+            );
+            let body: Value = serde_json::from_str(&response.into_string().unwrap()).unwrap();
+            assert_eq!(
+                body["buckets"]["live"]["events"],
+                serde_json::to_value(&inserted).unwrap()
+            );
+        }
+        let response = client
+            .get("/api/0/buckets/missing/export")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(response.status(), Status::NotFound);
+        let body: Value = serde_json::from_str(&response.into_string().unwrap()).unwrap();
+        assert!(body["message"].as_str().unwrap().contains("does not exist"));
+    }
+
+    #[test]
+    fn export_all_empty_uses_plural_filename_and_opens_before_body() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).unwrap();
+        let response = client
+            .get("/api/0/export")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(response.content_type(), Some(ContentType::JSON));
+        assert_eq!(
+            response.headers().get_one("Content-Disposition"),
+            Some("attachment; filename=\"aw-buckets-export.json\"")
+        );
+        let body: Value = serde_json::from_str(&response.into_string().unwrap()).unwrap();
+        assert_eq!(body["buckets"], json!({}));
+    }
+
+    #[test]
+    fn unread_export_body_does_not_block_datastore() {
+        let server = setup_testserver();
+        let datastore = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "big", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        datastore.create_bucket(&bucket).unwrap();
+        let mut event = aw_models::Event::default();
+        event
+            .data
+            .insert("blob".into(), json!("x".repeat(128 * 1024)));
+        datastore.insert_events("big", &[event]).unwrap();
+
+        let client = Client::untracked(server).unwrap();
+        let response = client
+            .get("/api/0/buckets/big/export")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+
+        // Let Command::Export start. A client-paced pipe would fill here and
+        // stall the worker; staging to a tempfile must not.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ds = datastore.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(ds.get_buckets());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(3))
+            .expect("datastore worker blocked by unread export body")
+            .unwrap();
+
+        let body: Value = serde_json::from_str(&response.into_string().unwrap()).unwrap();
+        assert_eq!(
+            body["buckets"]["big"]["events"][0]["data"]["blob"]
+                .as_str()
+                .unwrap()
+                .len(),
+            128 * 1024
+        );
+    }
+
+    #[test]
+    fn csv_export_returns_csv_with_correct_headers_and_missing_bucket_errors() {
+        let server = setup_testserver();
+        let datastore = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "testbucket", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        datastore.create_bucket(&bucket).unwrap();
+        let mut event = aw_models::Event {
+            duration: chrono::Duration::nanoseconds(1_500_000),
+            ..Default::default()
+        };
+        event.data.insert("app".into(), json!("firefox"));
+        event
+            .data
+            .insert("title".into(), json!("A \"quoted\" title"));
+        event.data.insert("formula".into(), json!("=cmd|calc"));
+        let inserted = datastore.insert_events("testbucket", &[event]).unwrap();
+
+        let client = Client::untracked(server).unwrap();
+        let response = client
+            .get("/api/0/buckets/testbucket/export/csv")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(
+            response.content_type(),
+            Some(ContentType::new("text", "csv"))
+        );
+        assert_eq!(
+            response.headers().get_one("Content-Disposition"),
+            Some("attachment; filename=\"aw-events-export-testbucket.csv\"")
+        );
+        let body = response.into_string().unwrap();
+        // Header row
+        assert!(body.starts_with("id,timestamp,duration,"), "header: {body}");
+        // Quoted field for title with embedded double-quote
+        assert!(
+            body.contains("\"A \"\"quoted\"\" title\""),
+            "quoting: {body}"
+        );
+        // Sub-millisecond duration is not truncated to 0.001000000
+        assert!(body.contains("0.001500000"), "duration: {body}");
+        // Spreadsheet formula prefixes are neutralized
+        assert!(body.contains("'=cmd|calc"), "formula: {body}");
+        // Event id present
+        let event_id = inserted[0].id.unwrap().to_string();
+        assert!(body.contains(&event_id), "id in body: {body}");
+
+        // Missing bucket → 404 with JSON body
+        let response = client
+            .get("/api/0/buckets/nosuchbucket/export/csv")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(response.status(), Status::NotFound);
+        let body: Value = serde_json::from_str(&response.into_string().unwrap()).unwrap();
+        assert!(body["message"].as_str().unwrap().contains("does not exist"));
     }
 
     #[test]
@@ -244,6 +417,82 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
     }
     #[test]
+    fn test_bulk_delete_events() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        let res = client
+            .post("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"id":"id","type":"type","client":"client","hostname":"hostname"}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Five non-mergeable events, ids 1..=5
+        let events: Vec<String> = (1..=5)
+            .map(|i| {
+                format!(
+                    r#"{{"timestamp":"2018-01-01T01:01:0{i}Z","duration":0.5,"data":{{"n":{i}}}}}"#
+                )
+            })
+            .collect();
+        let res = client
+            .post("/api/0/buckets/id/events")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(format!("[{}]", events.join(",")))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Mixed known, unknown and duplicate ids: only the 3 distinct existing ones count
+        let res = client
+            .post("/api/0/buckets/id/events/delete")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"ids":[1,3,3,5,999]}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.into_string().unwrap(), "3");
+
+        let res = client
+            .get("/api/0/buckets/id/events/count")
+            .header(host.clone())
+            .dispatch();
+        assert_eq!(res.into_string().unwrap(), "2");
+
+        // Empty list is a no-op
+        let res = client
+            .post("/api/0/buckets/id/events/delete")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"ids":[]}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(res.into_string().unwrap(), "0");
+
+        // Unknown bucket is a 404
+        let res = client
+            .post("/api/0/buckets/nope/events/delete")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"ids":[1]}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+
+        // Oversized id lists are rejected before any work is done
+        let huge: Vec<String> = (0..10_001).map(|i| i.to_string()).collect();
+        let res = client
+            .post("/api/0/buckets/id/events/delete")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(format!(r#"{{"ids":[{}]}}"#, huge.join(",")))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::PayloadTooLarge);
+    }
+
+    #[test]
     fn test_events() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");
@@ -333,6 +582,13 @@ mod api_tests {
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
 
+        // Get deleted event
+        let res = client
+            .get("/api/0/buckets/id/events/1")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+
         // Get eventcount
         let res = client
             .get("/api/0/buckets/id/events/count")
@@ -342,6 +598,32 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
         assert_eq!(res.into_string().unwrap(), "0");
 
+        // Get eventcount with an invalid time filter
+        let res = client
+            .get("/api/0/buckets/id/events/count?start=not-a-date")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+
+        // Out-of-range dates are rejected rather than reaching the datastore
+        for path in [
+            "/api/0/buckets/id/events/count?start=9999-01-01T00:00:00Z",
+            "/api/0/buckets/id/events?end=1000-01-01T00:00:00Z",
+        ] {
+            let res = client
+                .get(path)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .dispatch();
+            assert_eq!(res.status(), rocket::http::Status::BadRequest, "{path}");
+        }
+
+        // The datastore still answers afterwards
+        let res = client
+            .get("/api/0/buckets/id/events/count")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
         // Delete bucket
         let res = client
             .delete("/api/0/buckets/id")
@@ -349,6 +631,443 @@ mod api_tests {
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
+
+    #[test]
+    fn test_negative_duration_rejected() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+
+        // Create bucket
+        client
+            .post("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"id":"id","type":"test","client":"test","hostname":"127.0.0.1"}"#)
+            .dispatch();
+
+        // Insert event with negative duration — must be rejected with 400
+        let res = client
+            .post("/api/0/buckets/id/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"[{"timestamp":"2018-01-01T01:01:01Z","duration":-5.0,"data":{}}]"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+        // Confirm the rejected event was NOT stored
+        let count_res = client
+            .get("/api/0/buckets/id/events/count")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(count_res.into_string().unwrap(), "0");
+
+        // Zero duration is allowed
+        let res = client
+            .post("/api/0/buckets/id/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"[{"timestamp":"2018-01-01T01:01:01Z","duration":0.0,"data":{}}]"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Heartbeat with negative pulsetime — must be rejected with 400
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=-1")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+        // Confirm the rejected heartbeat did not alter stored events
+        let count_res = client
+            .get("/api/0/buckets/id/events/count")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(count_res.into_string().unwrap(), "1");
+
+        // Heartbeat with zero pulsetime is allowed
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=0")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
+
+    #[test]
+    fn test_out_of_range_timestamp_rejected() {
+        // Events are stored as nanoseconds since the epoch (1677-2262). An event
+        // outside that range used to panic the datastore worker, after which
+        // every request failed until the server was restarted.
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = || Header::new("Host", "127.0.0.1:5600");
+        let count = |client: &Client| {
+            client
+                .get("/api/0/buckets/id/events/count")
+                .header(host())
+                .dispatch()
+                .into_string()
+                .unwrap()
+        };
+
+        client
+            .post("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"id":"id","type":"test","client":"test","hostname":"127.0.0.1"}"#)
+            .dispatch();
+
+        // A start past 2262, and a valid start whose end is past 2262. The
+        // batch also holds a valid event: nothing in it may be stored.
+        for body in [
+            r#"[{"timestamp":"2018-01-01T00:00:00Z","duration":1.0,"data":{}},
+                {"timestamp":"3000-01-01T00:00:00Z","duration":1.0,"data":{}}]"#,
+            r#"[{"timestamp":"2262-04-01T00:00:00Z","duration":3000000.0,"data":{}}]"#,
+        ] {
+            let res = client
+                .post("/api/0/buckets/id/events")
+                .header(ContentType::JSON)
+                .header(host())
+                .body(body)
+                .dispatch();
+            assert_eq!(res.status(), rocket::http::Status::BadRequest, "{body}");
+        }
+        assert_eq!(count(&client), "0");
+
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=10")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"timestamp":"3000-01-01T00:00:00Z","duration":0.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+
+        // Importing a new bucket with such an event fails without creating it.
+        let res = client
+            .post("/api/0/import")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(
+                r#"{"buckets": {"imported": {"id": "imported", "type": "t", "client": "c",
+                    "hostname": "h", "events": [
+                        {"timestamp": "3000-01-01T00:00:00Z", "duration": 1.0, "data": {}}
+                    ]}}}"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+        let res = client
+            .get("/api/0/buckets/imported")
+            .header(host())
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::NotFound);
+
+        // The datastore is still alive and accepts valid events.
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=10")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"timestamp":"2018-01-01T00:00:00Z","duration":0.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(count(&client), "1");
+    }
+
+    #[test]
+    fn test_import_does_not_overwrite_events_with_the_same_id() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        // An existing bucket whose first event gets id 1
+        let res = client
+            .post("/api/0/buckets/existing")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"id":"existing","type":"type","client":"client","hostname":"hostname"}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        let res = client
+            .post("/api/0/buckets/existing/events")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"[{"timestamp":"2000-01-01T00:00:00Z","duration":1.0,"data":{"keep":"me"}}]"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        // Import a bucket exported elsewhere whose event also has id 1, both into a new
+        // bucket and merged into an existing one
+        for bucket in ["imported", "existing"] {
+            let res = client
+                .post("/api/0/import")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(format!(
+                    r#"{{"buckets": {{"{bucket}": {{"id": "{bucket}", "type": "type",
+                        "client": "client", "hostname": "hostname",
+                        "events": [{{"id": 1, "timestamp": "2001-01-01T00:00:00Z",
+                            "duration": 2.0, "data": {{"from": "export"}}}}]}}}}}}"#
+                ))
+                .dispatch();
+            assert_eq!(
+                res.status(),
+                rocket::http::Status::Ok,
+                "import into {bucket}"
+            );
+        }
+
+        let events = |bucket: &str| -> Vec<serde_json::Value> {
+            let res = client
+                .get(format!("/api/0/buckets/{bucket}/events"))
+                .header(host.clone())
+                .dispatch();
+            serde_json::from_str(&res.into_string().unwrap()).unwrap()
+        };
+        // The original event survived, and the existing bucket gained the merged one
+        let existing = events("existing");
+        assert_eq!(existing.len(), 2, "{existing:?}");
+        assert!(
+            existing.iter().any(|e| e["data"]["keep"] == "me"),
+            "{existing:?}"
+        );
+        // The new bucket got the imported event under a fresh id
+        let imported = events("imported");
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0]["data"]["from"], "export");
+        assert_ne!(imported[0]["id"], 1);
+    }
+
+    #[test]
+    fn test_reimport_updated_export_replaces_event_in_place() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        let import = |duration: f64, id: &str, data: &str| {
+            let res = client
+                .post("/api/0/import")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(format!(
+                    r#"{{"buckets": {{"b": {{"id": "b", "type": "type", "client": "client",
+                        "hostname": "hostname", "events": [{{"id": {id},
+                        "timestamp": "2001-01-01T00:00:00Z", "duration": {duration},
+                        "data": {{{data}}}}}]}}}}}}"#
+                ))
+                .dispatch();
+            assert_eq!(res.status(), rocket::http::Status::Ok);
+        };
+        let events = || -> Vec<serde_json::Value> {
+            let res = client
+                .get("/api/0/buckets/b/events")
+                .header(host.clone())
+                .dispatch();
+            serde_json::from_str(&res.into_string().unwrap()).unwrap()
+        };
+
+        import(1.0, "1", r#""a": "b""#);
+        let first = events();
+        assert_eq!(first.len(), 1);
+        let id = first[0]["id"].to_string();
+
+        // Same export re-imported: idempotent
+        import(1.0, &id, r#""a": "b""#);
+        assert_eq!(events().len(), 1);
+
+        // Updated export (event extended): replaces the event instead of overlapping it
+        import(5.0, &id, r#""a": "b""#);
+        let updated = events();
+        assert_eq!(updated.len(), 1, "{updated:?}");
+        assert_eq!(updated[0]["duration"], 5.0);
+        assert_eq!(updated[0]["id"].to_string(), id);
+
+        // Older export of the same event must not shrink the longer local one
+        import(1.0, &id, r#""a": "b""#);
+        let after_old = events();
+        assert_eq!(after_old.len(), 1, "{after_old:?}");
+        assert_eq!(after_old[0]["duration"], 5.0);
+        assert_eq!(after_old[0]["id"].to_string(), id);
+
+        // Correction: same id+start, shorter duration, different data must replace
+        import(2.0, &id, r#""a": "corrected""#);
+        let corrected = events();
+        assert_eq!(corrected.len(), 1, "{corrected:?}");
+        assert_eq!(corrected[0]["duration"], 2.0);
+        assert_eq!(corrected[0]["data"]["a"], "corrected");
+        assert_eq!(corrected[0]["id"].to_string(), id);
+    }
+
+    #[test]
+    fn test_import_new_bucket_applies_privacy_filters() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        let rules = json!([{
+            "enabled": true,
+            "field": "title",
+            "pattern": "(?i)secret",
+            "action": "drop"
+        }]);
+        assert_eq!(
+            set_setting_request(&client, "privacy_filters", &rules),
+            rocket::http::Status::Created
+        );
+
+        let res = client
+            .post("/api/0/import")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(
+                r#"{"buckets":{"aw-watcher-window_test":{
+                    "id":"aw-watcher-window_test","type":"currentwindow",
+                    "client":"aw-watcher-window","hostname":"test",
+                    "events":[
+                        {"timestamp":"2001-01-01T00:00:00Z","duration":1.0,
+                         "data":{"title":"my secret file","app":"Firefox"}},
+                        {"timestamp":"2001-01-01T00:00:01Z","duration":1.0,
+                         "data":{"title":"readme.md","app":"Firefox"}}
+                    ]
+                }}}"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        let res = client
+            .get("/api/0/buckets/aw-watcher-window_test/events")
+            .header(host)
+            .dispatch();
+        let events: Vec<serde_json::Value> =
+            serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["data"]["title"], "readme.md");
+    }
+
+    /// Stored events are redacted, so dedup must compare the filtered form of the
+    /// incoming raw event, or every re-import appends a copy (aw-server-rust#767).
+    #[test]
+    fn test_reimport_with_redact_rule_is_idempotent() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        let rules = json!([{
+            "enabled": true,
+            "field": "title",
+            "pattern": "(?i)secret",
+            "action": "redact",
+            "replacement": "[redacted]"
+        }]);
+        assert_eq!(
+            set_setting_request(&client, "privacy_filters", &rules),
+            rocket::http::Status::Created
+        );
+
+        let import = || {
+            let res = client
+                .post("/api/0/import")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(
+                    r#"{"buckets":{"redact-b":{
+                        "id":"redact-b","type":"currentwindow",
+                        "client":"aw-watcher-window","hostname":"test",
+                        "events":[
+                            {"id":42,"timestamp":"2001-01-01T00:00:00Z","duration":1.0,
+                             "data":{"title":"my secret file","app":"Firefox"}},
+                            {"id":43,"timestamp":"2001-01-01T00:00:01Z","duration":1.0,
+                             "data":{"title":"readme.md","app":"Firefox"}}
+                        ]
+                    }}}"#,
+                )
+                .dispatch();
+            assert_eq!(res.status(), rocket::http::Status::Ok);
+        };
+        let events = || -> Vec<serde_json::Value> {
+            let res = client
+                .get("/api/0/buckets/redact-b/events")
+                .header(host.clone())
+                .dispatch();
+            serde_json::from_str(&res.into_string().unwrap()).unwrap()
+        };
+
+        // New bucket, then two merge-path re-imports of the same raw export
+        import();
+        assert_eq!(events().len(), 2);
+        import();
+        import();
+        let after = events();
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(after.iter().any(|e| e["data"]["title"] == "[redacted]"));
+    }
+
+    /// A rule enabled *after* events were stored leaves those rows unredacted, so
+    /// the incoming raw event's filtered form no longer matches them. Dedup must
+    /// still recognize the raw identity as a duplicate, or a re-import appends a
+    /// copy the pre-rule raw comparison used to skip.
+    #[test]
+    fn test_reimport_after_rule_enabled_is_idempotent() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        let import = |duration: &str, id: &str| {
+            let res = client
+                .post("/api/0/import")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(format!(
+                    r#"{{"buckets":{{"stale-b":{{
+                        "id":"stale-b","type":"currentwindow",
+                        "client":"aw-watcher-window","hostname":"test",
+                        "events":[
+                            {{"id":{id},"timestamp":"2001-01-01T00:00:00Z","duration":{duration},
+                             "data":{{"title":"my secret file","app":"Firefox"}}}}
+                        ]
+                    }}}}}}"#
+                ))
+                .dispatch();
+            assert_eq!(res.status(), rocket::http::Status::Ok);
+        };
+        let events = || -> Vec<serde_json::Value> {
+            let res = client
+                .get("/api/0/buckets/stale-b/events")
+                .header(host.clone())
+                .dispatch();
+            serde_json::from_str(&res.into_string().unwrap()).unwrap()
+        };
+
+        // Store raw (5.0s), then enable the rule: the stored row stays unredacted.
+        import("5.0", "null");
+        let stored = events();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0]["duration"], 5.0);
+
+        let rules = json!([{
+            "enabled": true,
+            "field": "title",
+            "pattern": "(?i)secret",
+            "action": "redact",
+            "replacement": "[redacted]"
+        }]);
+        assert_eq!(
+            set_setting_request(&client, "privacy_filters", &rules),
+            rocket::http::Status::Created
+        );
+
+        // Same raw export re-imported: the raw identity must still match.
+        import("5.0", "null");
+        let after = events();
+        assert_eq!(after.len(), 1, "{after:?}");
+
+        // Older/shorter export of the same id+start with the same raw data must
+        // not shrink the longer unredacted local row (the filtered form differs).
+        import("1.0", "1");
+        let after_stale = events();
+        assert_eq!(after_stale.len(), 1, "{after_stale:?}");
+        assert_eq!(after_stale[0]["duration"], 5.0, "{after_stale:?}");
+        assert_eq!(after_stale[0]["data"]["title"], "my secret file");
     }
 
     #[test]
@@ -556,6 +1275,120 @@ mod api_tests {
         assert_eq!(buckets.len(), 0);
     }
 
+    /// File-backed server with the read-only query handle, as `main` builds it.
+    fn setup_file_testserver(path: &str) -> rocket::Rocket<rocket::Build> {
+        let datastore = aw_datastore::Datastore::new(path.to_string(), false);
+        datastore.get_buckets().unwrap();
+        let reader = aw_datastore::Datastore::open_reader(path.to_string()).unwrap();
+        let state = endpoints::ServerState {
+            reader: Some(reader),
+            ..endpoints::ServerState::new(
+                datastore,
+                endpoints::AssetResolver::new(None),
+                "test_id".to_string(),
+            )
+        };
+        // Mirror main.rs: without this, the query cache does not track pending
+        // writes and the reader serves stale data.
+        state.query_cache.register_reader();
+        endpoints::build_rocket(state, config::AWConfig::default())
+    }
+
+    #[test]
+    fn query_reader_sees_new_buckets_and_fresh_heartbeats() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_str = dir
+            .path()
+            .join("reader.sqlite")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let server = setup_file_testserver(&path_str);
+        let client = Client::untracked(server).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+
+        // Bucket created through the API after the reader opened.
+        let res = client
+            .post("/api/0/buckets/readerbucket")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"id":"readerbucket","type":"type","client":"client","hostname":"hostname"}"#)
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+
+        // A heartbeat just now is in the writer's uncommitted batch; a query
+        // over a period reaching into the present must still see it.
+        let now = chrono::Utc::now();
+        let res = client
+            .post("/api/0/buckets/readerbucket/heartbeat?pulsetime=5")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(format!(
+                r#"{{"timestamp":"{}","duration":1,"data":{{"k":"v"}}}}"#,
+                now.to_rfc3339()
+            ))
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+
+        let period = format!(
+            "{}/{}",
+            (now - chrono::Duration::minutes(1)).to_rfc3339(),
+            (now + chrono::Duration::minutes(1)).to_rfc3339()
+        );
+        let res = client
+            .post("/api/0/query?cache=false")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(format!(
+                r#"{{"timeperiods":["{period}"],"query":["RETURN = query_bucket(\"readerbucket\");"]}}"#
+            ))
+            .dispatch();
+        let status = res.status();
+        let text = res.into_string().unwrap();
+        assert_eq!(status, Status::Ok, "{text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body[0].as_array().map(|a| a.len()), Some(1), "{body}");
+        assert_eq!(body[0][0]["data"]["k"], "v");
+
+        // An insert into the past is acknowledged before the writer commits;
+        // a query over that period must flush first instead of reading (and
+        // caching) the old state through the reader.
+        let res = client
+            .post("/api/0/buckets/readerbucket/events")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"[{"timestamp":"2000-01-01T12:00:00Z","duration":1,"data":{"k":"old"}}]"#)
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+        let res = client
+            .post("/api/0/query")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"timeperiods":["2000-01-01T00:00:00Z/2000-01-02T00:00:00Z"],"query":["RETURN = query_bucket(\"readerbucket\");"]}"#)
+            .dispatch();
+        let status = res.status();
+        let text = res.into_string().unwrap();
+        assert_eq!(status, Status::Ok, "{text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body[0][0]["data"]["k"], "old", "{body}");
+
+        // Deleted bucket: the reader must not keep resolving it.
+        let res = client
+            .delete("/api/0/buckets/readerbucket")
+            .header(host.clone())
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+        let res = client
+            .post("/api/0/query?cache=false")
+            .header(ContentType::JSON)
+            .header(host)
+            .body(format!(
+                r#"{{"timeperiods":["{period}"],"query":["RETURN = query_bucket(\"readerbucket\");"]}}"#
+            ))
+            .dispatch();
+        assert_eq!(res.status(), Status::BadRequest);
+    }
+
     #[test]
     fn test_query() {
         let server = setup_testserver();
@@ -622,7 +1455,26 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
         assert_eq!(
             res.into_string().unwrap(),
-            r#"[[{"data":{},"duration":1.0,"id":1,"timestamp":"2018-01-01T01:01:01Z"}]]"#
+            r#"[[{"id":1,"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}]]"#
+        );
+
+        // Dict keys are serialized in sorted order, not HashMap order, so the
+        // response body is deterministic.
+        let res = client
+            .post("/api/0/query")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(
+                r#"{
+                "timeperiods": ["2000-01-01T00:00:00Z/2020-01-01T00:00:00Z"],
+                "query": ["return {\"d\": 4, \"b\": 2, \"a\": {\"z\": 1, \"y\": 2}, \"c\": 3};"]
+            }"#,
+            )
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+        assert_eq!(
+            res.into_string().unwrap(),
+            r#"[{"a":{"y":2.0,"z":1.0},"b":2.0,"c":3.0,"d":4.0}]"#
         );
 
         // Test error
@@ -650,6 +1502,56 @@ mod api_tests {
             .body(body)
             .dispatch();
         res.status()
+    }
+
+    #[test]
+    fn test_api_errors_are_json_with_reason() {
+        let server = setup_testserver();
+        let client = Client::untracked(server).unwrap();
+
+        // Malformed event body -> 422 JSON carrying the serde error
+        let res = client
+            .post("/api/0/buckets/b1/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body("{\"duration\": 0}")
+            .dispatch();
+        assert_eq!(res.status(), Status::UnprocessableEntity);
+        assert_eq!(res.content_type(), Some(ContentType::JSON));
+        let body: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        let msg = body["message"].as_str().unwrap();
+        assert!(msg.starts_with("Unprocessable Entity: "), "{msg}");
+        assert!(msg.contains("line 1"), "{msg}");
+
+        // Syntactically invalid JSON -> JSON too
+        let res = client
+            .post("/api/0/buckets/b1/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body("{not json")
+            .dispatch();
+        assert_eq!(res.status(), Status::UnprocessableEntity);
+        assert_eq!(res.content_type(), Some(ContentType::JSON));
+
+        // Unknown API route -> 404 JSON
+        let res = client
+            .get("/api/0/nope")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::NotFound);
+        assert_eq!(res.content_type(), Some(ContentType::JSON));
+        let body: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(body["message"], "Not Found");
+
+        // Rocket-generated 400 (invalid request URI) -> JSON from the 400 catcher
+        let res = client
+            .get("/api/0/bad path")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(res.status(), Status::BadRequest);
+        assert_eq!(res.content_type(), Some(ContentType::JSON));
+        let body: Value = serde_json::from_str(&res.into_string().unwrap()).unwrap();
+        assert_eq!(body["message"], "Bad Request");
     }
 
     #[test]
@@ -867,5 +1769,106 @@ mod api_tests {
             .header(Header::new("Host", "127.0.0.1:5600"))
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
+    /// End-to-end check of the finished-period query cache: a past period is
+    /// served from cache, and a write overlapping it invalidates the entry.
+    #[test]
+    fn query_cache_serves_finished_periods_and_invalidates_on_overlap() {
+        use chrono::{Duration, Utc};
+        use std::sync::Arc;
+
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
+        let cache: Arc<endpoints::query_cache::QueryCache> = Arc::clone(&state.query_cache);
+        let server = endpoints::build_rocket(state, config::AWConfig::default());
+        let datastore = server
+            .state::<endpoints::ServerState>()
+            .unwrap()
+            .datastore
+            .clone();
+
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "cached", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        datastore.create_bucket(&bucket).unwrap();
+
+        // An event two days ago, so the period is well past the 10-minute margin.
+        let start = Utc::now() - Duration::days(2);
+        let event = aw_models::Event {
+            timestamp: start,
+            duration: Duration::hours(1),
+            ..Default::default()
+        };
+        datastore.insert_events("cached", &[event]).unwrap();
+
+        let period = format!(
+            "{}/{}",
+            (start - Duration::hours(1)).to_rfc3339(),
+            (start + Duration::hours(2)).to_rfc3339()
+        );
+        let body = json!({
+            "timeperiods": [period],
+            "query": ["events = query_bucket(\"cached\");\nRETURN = events;"]
+        })
+        .to_string();
+
+        let client = Client::untracked(server).expect("valid instance");
+        let post_query = |body: &str| {
+            client
+                .post("/api/0/query")
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(body)
+                .dispatch()
+        };
+
+        let first = post_query(&body);
+        assert_eq!(first.status(), Status::Ok);
+        assert_eq!(first.content_type(), Some(ContentType::JSON));
+        let first_body = first.into_string().unwrap();
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().entries, 1);
+
+        // Identical request is served from the cache.
+        let second = post_query(&body);
+        assert_eq!(second.status(), Status::Ok);
+        assert_eq!(second.into_string().unwrap(), first_body);
+        assert_eq!(cache.stats().hits, 1);
+
+        // A write overlapping the cached period drops the entry.
+        let overlapping = aw_models::Event {
+            timestamp: start + Duration::minutes(30),
+            duration: Duration::minutes(5),
+            ..Default::default()
+        };
+        let write = client
+            .post("/api/0/buckets/cached/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(json!([overlapping]).to_string())
+            .dispatch();
+        assert_eq!(write.status(), Status::Ok);
+        assert_eq!(cache.stats().entries, 0);
+
+        // The next query recomputes (and now sees the new event).
+        let third = post_query(&body);
+        assert_eq!(third.status(), Status::Ok);
+        assert_eq!(cache.stats().misses, 2);
+        let events = serde_json::from_str::<Value>(&third.into_string().unwrap()).unwrap();
+        assert_eq!(events[0].as_array().unwrap().len(), 2);
+
+        // Opting out per request bypasses the cache entirely.
+        let bypass = client
+            .post("/api/0/query?cache=false")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(&body)
+            .dispatch();
+        assert_eq!(bypass.status(), Status::Ok);
+        assert_eq!(cache.stats().hits, 1);
     }
 }

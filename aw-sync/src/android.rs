@@ -1,9 +1,11 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic;
+use std::path::Path;
 use std::sync::Once;
 
 use aw_client_rust::blocking::AwClient;
+use aw_server::panic_guard::catch_panic;
 use jni::objects::{JClass, JString};
 use jni::sys::{jint, jstring, JNI_VERSION_1_6};
 use jni::JNIEnv;
@@ -100,21 +102,162 @@ fn init_android_logging() {
 /// so panics are diagnosable even if a JNI entry point is never reached.
 #[no_mangle]
 pub extern "system" fn JNI_OnLoad(_vm: *mut jni::sys::JavaVM, _reserved: *mut c_void) -> jint {
-    init_android_logging();
+    // Guarded like the other entry points: this is the one that runs before any
+    // logging exists, so an unwind out of it would abort the app during
+    // `System.loadLibrary("aw_sync")` with nothing in logcat at all.
+    let _ = catch_panic("JNI_OnLoad", init_android_logging);
     JNI_VERSION_1_6
 }
 
-/// Helper function to convert Rust string to Java string
+/// Helper function to convert Rust string to Java string.
+///
+/// Must not panic: it is also used on the guard's error path, where a second
+/// unwind would reach the `extern "C"` frame and abort after all. A null return
+/// surfaces in Kotlin as a `NullPointerException` at the call site, which
+/// `SyncInterface.performSyncAsync` already catches — recoverable, unlike
+/// `SIGABRT`.
 fn rust_string_to_jstring(env: &JNIEnv, s: String) -> jstring {
-    let output = env.new_string(s).expect("Couldn't create java string!");
-    output.into_raw()
+    match env.new_string(s) {
+        Ok(output) => output.into_raw(),
+        Err(e) => {
+            error!("Couldn't create java string: {}", e);
+            std::ptr::null_mut()
+        }
+    }
 }
 
-/// Helper function to get AwClient from port
+/// The response shape `SyncInterface.performSyncAsync` parses: it reads
+/// `success` and then either `message` or `error`.
+fn sync_error_json(msg: &str) -> String {
+    json!({
+        "success": false,
+        "error": msg
+    })
+    .to_string()
+}
+
+/// Run a `jstring`-returning JNI entry point with panics caught.
+///
+/// A panic that unwinds out of an `extern "C"` function aborts the process
+/// (Rust >= 1.81), which is how a plain `unwrap()` on the sync path takes the
+/// whole app down — see ActivityWatch/aw-android#220 and #267. Catching it here
+/// turns that abort into the ordinary `{"success": false, "error": ...}` object
+/// the Kotlin caller already handles.
+///
+/// The panic hook installed by `init_android_logging` still runs first, so the
+/// message and backtrace reach logcat before the unwind is stopped.
+fn jni_guard<F>(env: &mut JNIEnv, name: &str, f: F) -> jstring
+where
+    F: FnOnce(&mut JNIEnv) -> jstring,
+{
+    match catch_panic(name, || {
+        init_android_logging();
+        f(&mut *env)
+    }) {
+        Ok(result) => result,
+        Err(msg) => {
+            error!("{}", msg);
+            android_log_fatal(&msg);
+            // A panic in the middle of a JNI call can leave a pending Java
+            // exception, which would make the following NewStringUTF fail.
+            let _ = env.exception_clear();
+            rust_string_to_jstring(env, sync_error_json(&msg))
+        }
+    }
+}
+
+/// Run a `void` JNI entry point with panics caught. There is no return value to
+/// carry an error, so the panic is logged and swallowed.
+fn jni_guard_void<F>(name: &str, f: F)
+where
+    F: FnOnce(),
+{
+    if let Err(msg) = catch_panic(name, || {
+        init_android_logging();
+        f();
+    }) {
+        error!("{}", msg);
+        android_log_fatal(&msg);
+    }
+}
+
+/// Point this library's `ANDROID_DATA_DIR` at the app filesDir.
+///
+/// `libaw_sync.so` and `libaw_server.so` are separate cdylibs, so
+/// `RustInterface.setDataDir` does not update the copy compiled into this
+/// `.so`. SyncInterface.kt already sets `XDG_DATA_HOME=$filesDir/data`, which
+/// is the path that works for debug (`applicationIdSuffix ".debug"`) and
+/// work-profile installs — the hardcoded default is only the release user-0
+/// path.
+fn apply_android_data_dir_from_env() {
+    let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") else {
+        return;
+    };
+    let Some(files_dir) = crate::dirs::files_dir_from_xdg_data_home(Path::new(&xdg_data)) else {
+        warn!(
+            "XDG_DATA_HOME={} is not $filesDir/data; leaving android data dir unchanged",
+            xdg_data
+        );
+        return;
+    };
+    let path = files_dir.to_string_lossy();
+    info!("android data dir from XDG_DATA_HOME: {}", path);
+    aw_server::dirs::set_android_data_dir(&path);
+}
+
+/// Mirror of `RustInterface.setDataDir`. Prefer this explicit path; the XDG
+/// fallback in `get_client` covers current Kotlin that does not call it.
+#[no_mangle]
+pub extern "C" fn Java_net_activitywatch_android_SyncInterface_setDataDir(
+    mut env: JNIEnv,
+    _class: JClass,
+    java_dir: JString,
+) {
+    jni_guard_void("setDataDir", || match env.get_string(&java_dir) {
+        Ok(s) => {
+            let path: String = s.into();
+            info!("Setting android data dir as {}", path);
+            aw_server::dirs::set_android_data_dir(&path);
+        }
+        Err(e) => {
+            error!("setDataDir: failed to read path: {}", e);
+        }
+    });
+}
+
+/// Helper function to get AwClient from port.
+///
+/// Android enables API-key auth whenever `config.toml` has `[auth].api_key`.
+/// The desktop CLI path (`main.rs`) already forwards that key; this JNI path
+/// used `AwClient::new()` and 401'd on `GET /api/0/buckets` (aw-android#247).
 fn get_client(port: i32) -> Result<AwClient, String> {
+    apply_android_data_dir_from_env();
     let host = "127.0.0.1";
-    AwClient::new(host, port as u16, "aw-sync-android")
+    let api_key = match crate::util::get_server_config(false, None) {
+        Ok(cfg) => {
+            if cfg.api_key.is_some() {
+                info!("using API key from config.toml for local client");
+            }
+            cfg.api_key
+        }
+        Err(e) => {
+            warn!("failed to read server config for API key: {}", e);
+            None
+        }
+    };
+    AwClient::new_with_api_key(host, port as u16, "aw-sync-android", api_key)
         .map_err(|e| format!("Failed to create client: {}", e))
+}
+
+/// Render a sync result as the JSON object the Kotlin side parses.
+fn sync_result_to_jstring(env: &JNIEnv, name: &str, result: Result<String, String>) -> jstring {
+    match result {
+        Ok(msg) => rust_string_to_jstring(env, msg),
+        Err(e) => {
+            error!("{} error: {}", name, e);
+            rust_string_to_jstring(env, sync_error_json(&e))
+        }
+    }
 }
 
 /// Pull sync data from all hosts in the sync directory
@@ -123,48 +266,20 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPullAll(
     mut env: JNIEnv,
     _class: JClass,
     port: i32,
-    hostname: JString,
+    // syncPullAll iterates every host found in the sync directory, so the
+    // hostname the Kotlin side passes is unused. Kept for signature parity with
+    // the other SyncInterface natives.
+    _hostname: JString,
 ) -> jstring {
-    init_android_logging();
-    let hostname_str: String = match env.get_string(&hostname) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            let error_msg = format!("Failed to get hostname: {}", e);
-            error!("syncPullAll: {}", error_msg);
-            return rust_string_to_jstring(
-                &env,
-                json!({
-                    "success": false,
-                    "error": error_msg
-                })
-                .to_string(),
-            );
-        }
-    };
-
-    let result: Result<String, String> = (|| {
-        let client = get_client(port)?;
-        pull_all(&client).map_err(|e| format!("Sync pull failed: {}", e))?;
-        Ok(json!({
-            "success": true,
-            "message": "Successfully pulled from all hosts"
-        })
-        .to_string())
-    })();
-
-    match result {
-        Ok(msg) => rust_string_to_jstring(&env, msg),
-        Err(e) => {
-            error!("syncPullAll error: {}", e);
-            let error_msg: &str = &e;
-            let error_json = json!({
-                "success": false,
-                "error": error_msg
-            })
-            .to_string();
-            rust_string_to_jstring(&env, error_json)
-        }
-    }
+    jni_guard(&mut env, "syncPullAll", |env| {
+        let result: Result<String, String> = (|| {
+            let client = get_client(port)?;
+            let report = pull_all(&client).map_err(|e| format!("Sync pull failed: {}", e))?;
+            crate::report::persist_last_report_warn(&report);
+            Ok(report.to_jni_json())
+        })();
+        sync_result_to_jstring(env, "syncPullAll", result)
+    })
 }
 
 /// Pull sync data from a specific host
@@ -175,36 +290,21 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPull(
     port: i32,
     hostname: JString,
 ) -> jstring {
-    init_android_logging();
-    let result: Result<String, String> = (|| {
-        let client = get_client(port)?;
-        let hostname_str: String = env
-            .get_string(&hostname)
-            .map_err(|e| format!("Failed to get hostname string: {}", e))?
-            .into();
+    jni_guard(&mut env, "syncPull", |env| {
+        let result: Result<String, String> = (|| {
+            let client = get_client(port)?;
+            let hostname_str: String = env
+                .get_string(&hostname)
+                .map_err(|e| format!("Failed to get hostname string: {}", e))?
+                .into();
 
-        pull(&hostname_str, &client).map_err(|e| format!("Sync pull failed: {}", e))?;
-
-        Ok(json!({
-            "success": true,
-            "message": format!("Successfully pulled from host: {}", hostname_str)
-        })
-        .to_string())
-    })();
-
-    match result {
-        Ok(msg) => rust_string_to_jstring(&env, msg),
-        Err(e) => {
-            error!("syncPull error: {}", e);
-            let error_msg: &str = &e;
-            let error_json = json!({
-                "success": false,
-                "error": error_msg
-            })
-            .to_string();
-            rust_string_to_jstring(&env, error_json)
-        }
-    }
+            let report =
+                pull(&hostname_str, &client).map_err(|e| format!("Sync pull failed: {}", e))?;
+            crate::report::persist_last_report_warn(&report);
+            Ok(report.to_jni_json())
+        })();
+        sync_result_to_jstring(env, "syncPull", result)
+    })
 }
 
 /// Push local sync data to the sync directory
@@ -215,47 +315,20 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncPush(
     port: i32,
     hostname: JString,
 ) -> jstring {
-    init_android_logging();
-    let hostname_str: String = match env.get_string(&hostname) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            let error_msg = format!("Failed to get hostname: {}", e);
-            error!("syncPush: {}", error_msg);
-            return rust_string_to_jstring(
-                &env,
-                json!({
-                    "success": false,
-                    "error": error_msg
-                })
-                .to_string(),
-            );
-        }
-    };
-
-    let result: Result<String, String> = (|| {
-        let client = get_client(port)?;
-        push_with_hostname(&client, &hostname_str)
-            .map_err(|e| format!("Sync push failed: {}", e))?;
-        Ok(json!({
-            "success": true,
-            "message": "Successfully pushed local data"
-        })
-        .to_string())
-    })();
-
-    match result {
-        Ok(msg) => rust_string_to_jstring(&env, msg),
-        Err(e) => {
-            error!("syncPush error: {}", e);
-            let error_msg: &str = &e;
-            let error_json = json!({
-                "success": false,
-                "error": error_msg
-            })
-            .to_string();
-            rust_string_to_jstring(&env, error_json)
-        }
-    }
+    jni_guard(&mut env, "syncPush", |env| {
+        let result: Result<String, String> = (|| {
+            let hostname_str: String = env
+                .get_string(&hostname)
+                .map_err(|e| format!("Failed to get hostname: {}", e))?
+                .into();
+            let client = get_client(port)?;
+            let report = push_with_hostname(&client, &hostname_str)
+                .map_err(|e| format!("Sync push failed: {}", e))?;
+            crate::report::persist_last_report_warn(&report);
+            Ok(report.to_jni_json())
+        })();
+        sync_result_to_jstring(env, "syncPush", result)
+    })
 }
 
 /// Perform full sync (pull from all hosts, then push local data)
@@ -266,79 +339,104 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
     port: i32,
     hostname: JString,
 ) -> jstring {
-    init_android_logging();
-    let hostname_str: String = match env.get_string(&hostname) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            let error_msg = format!("Failed to get hostname: {}", e);
-            error!("syncBoth: {}", error_msg);
-            return rust_string_to_jstring(
-                &env,
-                json!({
-                    "success": false,
-                    "error": error_msg
-                })
-                .to_string(),
+    jni_guard(&mut env, "syncBoth", |env| {
+        let result: Result<String, String> = (|| {
+            let hostname_str: String = env
+                .get_string(&hostname)
+                .map_err(|e| format!("Failed to get hostname: {}", e))?
+                .into();
+            let client = get_client(port)?;
+
+            let mut report = pull_all(&client).map_err(|e| format!("Pull phase failed: {}", e))?;
+
+            // Persist the pull result even if push fails, so the report on
+            // disk reflects the work the pass actually did.
+            match push_with_hostname(&client, &hostname_str) {
+                Ok(push_report) => report.merge(push_report),
+                Err(e) => {
+                    report.record_push_failure(&e);
+                    report.finish();
+                    crate::report::persist_last_report_warn(&report);
+                    return Err(format!("Push phase failed: {}", e));
+                }
+            }
+            report.finish();
+            crate::report::persist_last_report_warn(&report);
+            Ok(report.to_jni_json())
+        })();
+        sync_result_to_jstring(env, "syncBoth", result)
+    })
+}
+
+/// Delete this device's own push staging db so the next push re-stages it from
+/// the local datastore (ActivityWatch/aw-android#296).
+///
+/// Resolves `{sync_dir}/{hostname}/{device_id}` the same way a push does, with
+/// the device id read from the server's data dir, and refuses any path outside
+/// the sync dir. The caller must not run this concurrently with a push.
+#[no_mangle]
+pub extern "C" fn Java_net_activitywatch_android_SyncInterface_resetStaging(
+    mut env: JNIEnv,
+    _class: JClass,
+    hostname: JString,
+) -> jstring {
+    jni_guard(&mut env, "resetStaging", |env| {
+        let result: Result<String, String> = (|| {
+            let hostname_str: String = env
+                .get_string(&hostname)
+                .map_err(|e| format!("Failed to get hostname: {}", e))?
+                .into();
+            apply_android_data_dir_from_env();
+            let data_dir = aw_server::dirs::get_data_dir()
+                .map_err(|_| "Failed to get data dir".to_string())?;
+            let device_id = crate::staging::read_device_id(&data_dir)?;
+            let sync_root = crate::dirs::get_sync_dir()
+                .map_err(|e| format!("Failed to get sync dir: {}", e))?;
+            let removed = crate::staging::reset_own_staging(&sync_root, &hostname_str, &device_id)?;
+            info!(
+                "resetStaging removed {} file(s): {:?}",
+                removed.len(),
+                removed
             );
-        }
-    };
-
-    let result: Result<String, String> = (|| {
-        let client = get_client(port)?;
-
-        pull_all(&client).map_err(|e| format!("Pull phase failed: {}", e))?;
-
-        push_with_hostname(&client, &hostname_str)
-            .map_err(|e| format!("Push phase failed: {}", e))?;
-
-        Ok(json!({
-            "success": true,
-            "message": "Successfully completed full sync"
-        })
-        .to_string())
-    })();
-
-    match result {
-        Ok(msg) => rust_string_to_jstring(&env, msg),
-        Err(e) => {
-            error!("syncBoth error: {}", e);
-            let error_msg: &str = &e;
-            let error_json = json!({
-                "success": false,
-                "error": error_msg
+            let removed: Vec<String> = removed
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            Ok(json!({
+                "success": true,
+                "message": format!("Removed {} staging file(s)", removed.len()),
+                "removed": removed,
             })
-            .to_string();
-            rust_string_to_jstring(&env, error_json)
-        }
-    }
+            .to_string())
+        })();
+        sync_result_to_jstring(env, "resetStaging", result)
+    })
 }
 
 /// Get the sync directory path
 #[no_mangle]
 pub extern "C" fn Java_net_activitywatch_android_SyncInterface_getSyncDir(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    init_android_logging();
-    let result = crate::dirs::get_sync_dir();
-
-    match result {
-        Ok(path) => {
-            let path_str = path.to_string_lossy().to_string();
-            let response = json!({
-                "success": true,
-                "path": path_str
-            })
-            .to_string();
-            rust_string_to_jstring(&env, response)
-        }
-        Err(e) => {
-            let error_json = json!({
-                "success": false,
-                "error": format!("Failed to get sync dir: {}", e)
-            })
-            .to_string();
-            rust_string_to_jstring(&env, error_json)
-        }
-    }
+    jni_guard(
+        &mut env,
+        "getSyncDir",
+        |env| match crate::dirs::get_sync_dir() {
+            Ok(path) => {
+                let path_str = path.to_string_lossy().to_string();
+                let response = json!({
+                    "success": true,
+                    "path": path_str
+                })
+                .to_string();
+                rust_string_to_jstring(env, response)
+            }
+            Err(e) => {
+                let msg = format!("Failed to get sync dir: {}", e);
+                error!("getSyncDir error: {}", msg);
+                rust_string_to_jstring(env, sync_error_json(&msg))
+            }
+        },
+    )
 }

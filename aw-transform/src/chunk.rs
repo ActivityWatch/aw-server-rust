@@ -2,6 +2,12 @@ use aw_models::Event;
 
 /// Chunks together events with the same key
 ///
+/// Deprecated, and will be removed (ActivityWatch/activitywatch#1466). Nothing
+/// first-party uses it, and it never supported the `subevents` that aw-core's
+/// version produces. There is no drop-in replacement: merge_events_by_keys
+/// merges all events with the same value, also across gaps, instead of
+/// adjacent runs. The behavior is unchanged until removal.
+///
 /// NOTE: In most cases you should use merge_events_by_keys instead, this
 /// transform is mostly just for backwards compatibility with older versions
 /// of aw-webui
@@ -19,6 +25,9 @@ use aw_models::Event;
 ///   { duration: 2.0, data: { "a": 1 } }
 ///   { duration: 1.0, data: { "a": 2 } }
 /// ```
+#[deprecated(
+    note = "will be removed (ActivityWatch/activitywatch#1466); merge_events_by_keys is the closest alternative but also merges across gaps"
+)]
 pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
     let mut chunked_events: Vec<Event> = Vec::new();
     for event in events {
@@ -47,6 +56,7 @@ pub fn chunk_events_by_key(events: Vec<Event>, key: &str) -> Vec<Event> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::str::FromStr;
 

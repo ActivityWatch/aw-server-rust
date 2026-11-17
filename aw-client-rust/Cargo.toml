@@ -12,16 +12,28 @@ phf = { version = "0.11", features = ["macros"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 aw-models = { path = "../aw-models" }
-tokio = { version = "1.28.2", features = ["rt"] }
+aw-transform = { path = "../aw-transform" }
+tokio = { version = "1.28.2", features = ["rt", "net", "time"] }
 log = "0.4"
 libc = "0.2"
-thiserror = "1.0"
+thiserror = "2.0"
 dirs = "6.0"
 fs4 = { version = "0.13", features = ["sync"] }
+toml = "0.9"
+clap = { version = "4.1", features = ["derive", "env"], optional = true }
 
 [dev-dependencies]
 aw-datastore = { path = "../aw-datastore" }
 aw-server = { path = "../aw-server", default-features = false, features=[] }
 rocket = "0.5.0-rc.1"
 tokio-test = "*"
-toml = "0.8"
+tokio = { version = "1.28.2", features = ["io-util", "macros"] }
+
+[features]
+# The `aw-client` command-line tool (src/bin/aw-client.rs).
+cli = ["dep:clap"]
+
+[[bin]]
+name = "aw-client"
+path = "src/bin/aw-client.rs"
+required-features = ["cli"]

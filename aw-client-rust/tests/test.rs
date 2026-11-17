@@ -45,9 +45,14 @@ mod test {
 
     fn get_server_config_dir() -> Option<PathBuf> {
         Some(
-            dirs::config_dir()?
-                .join("activitywatch")
-                .join("aw-server-rust"),
+            // %LOCALAPPDATA% on Windows, like aw_server::dirs::user_config_root.
+            (if cfg!(windows) {
+                dirs::data_local_dir()
+            } else {
+                dirs::config_dir()
+            })?
+            .join("activitywatch")
+            .join("aw-server-rust"),
         )
     }
 
@@ -114,13 +119,14 @@ mod test {
         use aw_server::endpoints::AssetResolver;
         use aw_server::endpoints::ServerState;
 
-        let state = ServerState {
-            datastore: aw_datastore::Datastore::new_in_memory(false),
-            asset_resolver: AssetResolver::new(None),
-            device_id: "test_id".to_string(),
-        };
+        let state = ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            AssetResolver::new(None),
+            "test_id".to_string(),
+        );
         let aw_config = aw_server::config::AWConfig {
             port,
+            testing: true,
             auth: aw_server::config::AWAuthConfig {
                 api_key: api_key.map(str::to_owned),
             },
@@ -201,6 +207,15 @@ mod test {
         let info = client.get_info().unwrap();
         assert!(info.testing);
 
+        let setting_value = serde_json::json!({"enabled": true, "items": [1, 2]});
+        client
+            .set_setting("aw-client-rust-test", &setting_value)
+            .unwrap();
+        assert_eq!(
+            client.get_setting("aw-client-rust-test").unwrap(),
+            setting_value
+        );
+
         let bucketname = format!("aw-client-rust-test_{}", client.hostname);
         let buckettype = "test-type";
         client
@@ -215,7 +230,7 @@ mod test {
         println!("Buckets: {buckets:?}");
         let mut event = Event {
             id: None,
-            timestamp: DateTime::from_utc(
+            timestamp: DateTime::<Utc>::from_naive_utc_and_offset(
                 DateTime::parse_from_rfc3339("2017-12-30T01:00:00+00:00")
                     .unwrap()
                     .naive_utc(),
@@ -227,7 +242,7 @@ mod test {
         println!("{event:?}");
         client.insert_event(&bucketname, &event).unwrap();
         // Ugly way to create a UTC from timestamp, see https://github.com/chronotope/chrono/issues/263
-        event.timestamp = DateTime::from_utc(
+        event.timestamp = DateTime::<Utc>::from_naive_utc_and_offset(
             DateTime::parse_from_rfc3339("2017-12-30T01:00:01+00:00")
                 .unwrap()
                 .naive_utc(),
@@ -254,15 +269,87 @@ RETURN = events;",
         let timeperiods = (start, end);
         let query_result = client.query(&query, vec![timeperiods]).unwrap();
         println!("Query result: {query_result:?}");
-
-        client
-            .delete_event(&bucketname, events[0].id.unwrap())
+        let cached_result = client
+            .query_cached(&query, vec![timeperiods], "aw-client-rust-test-query")
             .unwrap();
+        assert_eq!(cached_result, query_result);
 
-        let count = client.get_event_count(&bucketname).unwrap();
+        let before: DateTime<Utc> = DateTime::parse_from_rfc3339("2017-12-30T00:00:00+00:00")
+            .unwrap()
+            .into();
+        let after: DateTime<Utc> = DateTime::parse_from_rfc3339("2018-01-01T00:00:00+00:00")
+            .unwrap()
+            .into();
+        assert_eq!(client.get_event_count(&bucketname, None, None).unwrap(), 1);
+        assert_eq!(
+            client
+                .get_event_count(&bucketname, Some(before), Some(after))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            client
+                .get_event_count(&bucketname, Some(after), None)
+                .unwrap(),
+            0
+        );
+
+        let event_id = events[0].id.unwrap();
+        let fetched = client.get_event(&bucketname, event_id).unwrap().unwrap();
+        assert_eq!(fetched.id, Some(event_id));
+        assert_eq!(fetched.duration, Duration::seconds(1));
+
+        client.delete_event(&bucketname, event_id).unwrap();
+        assert!(client.get_event(&bucketname, event_id).unwrap().is_none());
+
+        let count = client.get_event_count(&bucketname, None, None).unwrap();
         assert_eq!(count, 0);
 
+        // Export, delete, and re-import the bucket
+        let mut export_data = Map::new();
+        export_data.insert("app".to_string(), serde_json::json!("firefox"));
+        export_data.insert("title".to_string(), serde_json::json!("ActivityWatch"));
+        let event = Event {
+            id: None,
+            timestamp: event.timestamp,
+            duration: Duration::seconds(42),
+            data: export_data,
+        };
+        client.insert_event(&bucketname, &event).unwrap();
+        let all = client.export_all().unwrap();
+        assert!(all.buckets.contains_key(&bucketname));
+        let export = client.export_bucket(&bucketname).unwrap();
+        let exported = export.buckets[&bucketname].clone();
+        assert_eq!(exported.events.clone().unwrap().take_inner().len(), 1);
+
         client.delete_bucket(&bucketname).unwrap();
+        client.import_bucket(&exported).unwrap();
+        let reimported = client.get_events(&bucketname, None, None, None).unwrap();
+        assert_eq!(reimported.len(), 1);
+        assert_eq!(reimported[0].timestamp, event.timestamp);
+        assert_eq!(reimported[0].duration, event.duration);
+        assert_eq!(reimported[0].data, event.data);
+
+        client.delete_bucket(&bucketname).unwrap();
+
+        // IDs with reserved URL characters must reach the server as the same ID
+        let odd_bucket = format!("aw-client-rust-test/a#b?c_{}", client.hostname);
+        client
+            .create_bucket_simple(&odd_bucket, buckettype)
+            .unwrap();
+        assert_eq!(client.get_bucket(&odd_bucket).unwrap().id, odd_bucket);
+        assert!(client.get_buckets().unwrap().contains_key(&odd_bucket));
+        client.insert_event(&odd_bucket, &event).unwrap();
+        let odd_events = client.get_events(&odd_bucket, None, None, None).unwrap();
+        assert_eq!(odd_events.len(), 1);
+        assert_eq!(client.get_event_count(&odd_bucket, None, None).unwrap(), 1);
+        client.heartbeat(&odd_bucket, &event, 10.0).unwrap();
+        client
+            .delete_event(&odd_bucket, odd_events[0].id.unwrap())
+            .unwrap();
+        assert_eq!(client.get_event_count(&odd_bucket, None, None).unwrap(), 0);
+        client.delete_bucket(&odd_bucket).unwrap();
+        assert!(!client.get_buckets().unwrap().contains_key(&odd_bucket));
 
         shutdown_handler.notify();
     }
@@ -298,5 +385,35 @@ RETURN = events;",
 
             shutdown_handler.notify();
         });
+    }
+
+    // XDG_CONFIG_HOME is only respected by dirs::config_dir() on Linux.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_from_config_reads_aw_client_toml() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let config_home = std::env::temp_dir().join(format!(
+            "aw-client-rust-client-config-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let config_dir = config_home.join("activitywatch").join("aw-client");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("aw-client.toml"),
+            "[server]\nport = \"5701\"\n[server-testing]\nhostname = \"localhost\"\nport = 5702\n",
+        )
+        .unwrap();
+
+        let (prod, testing) = with_config_home(&config_home, || {
+            let prod = AwClient::from_config("aw-client-rust-config-test", false, None).unwrap();
+            let testing = AwClient::from_config("aw-client-rust-config-test", true, None).unwrap();
+            (prod.baseurl.to_string(), testing.baseurl.to_string())
+        });
+        assert_eq!(prod, "http://127.0.0.1:5701/");
+        assert_eq!(testing, "http://localhost:5702/");
     }
 }

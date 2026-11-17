@@ -6,7 +6,13 @@ use aw_models::Event;
 ///
 /// Doesn't care about if events are neighbouring or not, this transform merges
 /// all events with the same key.
-/// The timestamp will be the timestamp of the first event with a specific key value
+/// Each merged event keeps the timestamp and the whole data of the first event
+/// with those key values, and the durations are summed. Events missing any of
+/// the keys are dropped, and an empty key list returns no events. The merged
+/// events come out in the order their first event appeared in the input, so
+/// the result is deterministic. That is not necessarily timestamp order: sort
+/// by timestamp before passing the result to union_no_overlap, which expects
+/// chronological input.
 ///
 /// # Example 1
 /// A simple example only using one key
@@ -22,7 +28,6 @@ use aw_models::Event;
 /// output:
 ///   { duration: 3.0, data: { "a": 1 } }
 ///   { duration: 1.0, data: { "a": 2 } }
-///   { duration: 1.0, data: { "b": 1 } }
 /// ```
 ///
 /// # Example 2
@@ -39,13 +44,15 @@ use aw_models::Event;
 ///   { duration: 1.0, data: { "a": 2, "b": 2 } }
 ///   { duration: 1.0, data: { "a": 1, "b": 2 } }
 /// ```
-#[allow(clippy::map_entry)]
 pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event> {
     if keys.is_empty() {
         return vec![];
     }
-    let mut merged_events_map: HashMap<String, Event> = HashMap::new();
-    'event: for event in events {
+    // Index into `merged` by key, so the output keeps first-seen order
+    // instead of HashMap iteration order, which differs between runs.
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut merged: Vec<Event> = Vec::new();
+    'event: for mut event in events {
         let mut key_values = Vec::new();
         for key in &keys {
             match event.data.get(key) {
@@ -54,28 +61,18 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
             }
         }
         let summed_key = key_values.join(".");
-        if merged_events_map.contains_key(&summed_key) {
-            let merged_event = merged_events_map.get_mut(&summed_key).unwrap();
-            merged_event.duration += event.duration;
-        } else {
-            let mut data = HashMap::new();
-            for key in &keys {
-                data.insert(key.clone(), event.data.get(key).unwrap());
+        match index.entry(summed_key) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                merged[*entry.get()].duration += event.duration;
             }
-            let merged_event = Event {
-                id: None,
-                timestamp: event.timestamp,
-                duration: event.duration,
-                data: event.data.clone(),
-            };
-            merged_events_map.insert(summed_key, merged_event);
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                event.id = None;
+                entry.insert(merged.len());
+                merged.push(event);
+            }
         }
     }
-    let mut merged_events_list = Vec::new();
-    for (_key, event) in merged_events_map.drain() {
-        merged_events_list.push(event);
-    }
-    merged_events_list
+    merged
 }
 
 #[cfg(test)]
@@ -91,6 +88,30 @@ mod tests {
     use crate::sort_by_timestamp;
 
     use super::merge_events_by_keys;
+
+    #[test]
+    fn merge_preserves_first_payload_and_clears_id() {
+        let first = Event {
+            id: Some(42),
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(2),
+            data: json_map! {"app": json!("browser"), "title": json!("page"), "extra": json!({"nested": [1, 2]})},
+        };
+        let mut second = first.clone();
+        second.timestamp += Duration::seconds(10);
+        second.data.insert("extra".into(), json!("different"));
+        let mut missing = first.clone();
+        missing.data.remove("title");
+        let result = merge_events_by_keys(
+            vec![first.clone(), second, missing],
+            vec!["app".into(), "title".into()],
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, None);
+        assert_eq!(result[0].timestamp, first.timestamp);
+        assert_eq!(result[0].data, first.data);
+        assert_eq!(result[0].duration, Duration::seconds(4));
+    }
 
     #[test]
     fn test_merge_events_by_key() {
@@ -137,5 +158,33 @@ mod tests {
             },
         ];
         assert_eq!(&res2, &expected);
+    }
+
+    #[test]
+    fn merge_keeps_first_seen_order() {
+        // HashMap iteration order would vary between runs; the output must
+        // follow the order in which each group first appears.
+        let mk = |secs: &str, app: &str| Event {
+            id: None,
+            timestamp: DateTime::from_str(secs).unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"app": json!(app)},
+        };
+        let apps = ["m", "c", "x", "a", "q", "b", "z", "d", "k", "e"];
+        let mut events = Vec::new();
+        for (i, app) in apps.iter().enumerate() {
+            events.push(mk(&format!("2000-01-01T00:00:{:02}Z", i), app));
+        }
+        // Repeats merge into the first occurrence without reordering
+        events.push(mk("2000-01-01T00:00:30Z", "a"));
+        events.push(mk("2000-01-01T00:00:31Z", "m"));
+        let res = merge_events_by_keys(events, vec!["app".to_string()]);
+        let order: Vec<&str> = res
+            .iter()
+            .map(|e| e.data.get("app").unwrap().as_str().unwrap())
+            .collect();
+        assert_eq!(order, apps);
+        assert_eq!(res[0].duration, Duration::seconds(2));
+        assert_eq!(res[3].duration, Duration::seconds(2));
     }
 }

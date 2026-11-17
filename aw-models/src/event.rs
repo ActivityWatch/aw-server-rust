@@ -82,3 +82,20 @@ fn test_event() {
     };
     debug!("event: {:?}", e);
 }
+
+#[test]
+fn test_event_default_duration() {
+    // Watchers may omit duration when posting an event, in which case it
+    // defaults to zero rather than failing to deserialize.
+    let e: Event =
+        serde_json::from_str(r#"{"timestamp": "2000-01-01T00:00:00Z", "data": {"test": 1}}"#)
+            .unwrap();
+    assert_eq!(e.duration, Duration::seconds(0));
+
+    // An explicit duration is still honoured.
+    let e: Event = serde_json::from_str(
+        r#"{"timestamp": "2000-01-01T00:00:00Z", "duration": 1.5, "data": {}}"#,
+    )
+    .unwrap();
+    assert_eq!(e.duration, Duration::milliseconds(1500));
+}

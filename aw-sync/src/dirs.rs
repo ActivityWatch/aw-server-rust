@@ -1,30 +1,182 @@
 use dirs::home_dir;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 
-// TODO: This could be refactored to share logic with aw-server/src/dirs.rs
-// TODO: add proper config support
-#[cfg(not(target_os = "android"))]
-#[allow(dead_code)]
-pub fn get_config_dir() -> Result<PathBuf, Box<dyn Error>> {
-    let dir = dirs::config_dir()
-        .ok_or("Unable to read user config dir")?
-        .join("activitywatch")
-        .join("aw-sync");
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
+/// Resolve the instance profile.
+/// `--profile` wins, then `AW_PROFILE`, then `--testing` → `"testing"`, else `"default"`.
+#[allow(dead_code)] // used by the aw-sync binary; the lib copy is unused
+pub fn resolve_profile(
+    cli_profile: Option<&str>,
+    testing: bool,
+    env_profile: Option<&str>,
+) -> String {
+    if let Some(p) = cli_profile {
+        if !p.is_empty() {
+            return p.to_string();
+        }
+    }
+    if let Some(p) = env_profile {
+        if !p.is_empty() {
+            return p.to_string();
+        }
+    }
+    if testing {
+        "testing".to_string()
+    } else {
+        "default".to_string()
+    }
 }
 
+/// aw-sync's own config dir: `{appname}/aw-sync`.
+///
+/// Uses the same profile appname as aw-server so a named profile (e.g.
+/// `research`) does not share prod's sync config. `testing` follows the
+/// same new-root-plus-legacy-fallback rule as aw-server.
+///
+/// For the daemon, which is about to write `config.toml` there: creates the
+/// dir and, on Windows, migrates what v0.14.0 wrote under Roaming
+/// `%APPDATA%` (or keeps using it there if that fails), via the same
+/// resolver as aw-server (`aw_server::dirs::module_dir`).
+#[allow(dead_code)] // used by the aw-sync binary; the lib copy is unused (status.rs uses config_dir_path)
 #[cfg(not(target_os = "android"))]
+pub fn get_config_dir() -> Result<PathBuf, Box<dyn Error>> {
+    let root = aw_server::dirs::user_config_root().ok_or("Unable to read user config dir")?;
+    Ok(aw_server::dirs::module_dir(
+        root,
+        &aw_server::dirs::appname(),
+        "aw-sync",
+    ))
+}
+
+/// Path to aw-sync's own config dir — resolution only, does not create or
+/// migrate anything. For read-only callers (e.g. `status`) that must never
+/// mutate the filesystem just to look at it. Resolves with the same rule as
+/// [`get_config_dir`] (`aw_server::dirs::module_dir_readonly`), so `status`
+/// reports the file the daemon actually uses, also when a v0.14.0 Roaming
+/// dir has not been (or could not be) migrated.
+#[cfg(not(target_os = "android"))]
+pub fn config_dir_path() -> Result<PathBuf, Box<dyn Error>> {
+    let root = aw_server::dirs::user_config_root().ok_or("Unable to read user config dir")?;
+    Ok(aw_server::dirs::module_dir_readonly(
+        root,
+        &aw_server::dirs::appname(),
+        "aw-sync",
+    ))
+}
+
+/// `[daemon]` settings — namespaced (rather than top-level) so future
+/// aw-sync settings that apply elsewhere (e.g. to the one-shot `sync`
+/// command) have their own section instead of colliding with this one
+/// (per-module convention: cf. aw-server's `[auth]` in `aw-server/src/config.rs`).
+///
+/// `pull` controls whether the **daemon** imports peers on each pass —
+/// desktop only; Android stays push-only by design
+/// (ActivityWatch/aw-android#291). The one-shot `aw-sync sync` command
+/// always pulls+pushes regardless of this file, and an explicit `--mode`
+/// on the daemon always wins over it (ActivityWatch/aw-server-rust#714).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    #[serde(default)]
+    pub pull: bool,
+}
+
+/// aw-sync's own settings, read from `{config_dir}/config.toml`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncConfig {
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+}
+
+const DEFAULT_SYNC_CONFIG_TOML: &str = "\
+# aw-sync config
+[daemon]
+pull = false   # default; set true to import peers from the sync folder every pass
+";
+
+/// Load `config.toml` from `dir`, writing the commented default if it does
+/// not exist yet (so users find the switch on first daemon start). Returns
+/// the parsed config and the path it was read from.
+// dirs.rs is compiled by both lib.rs and main.rs (dual-include); the lib
+// does not call this directly (status.rs uses read_sync_config), but the
+// daemon binary does via its own mod dirs copy.
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(not(target_os = "android"))]
+pub fn load_or_create_sync_config(dir: &Path) -> Result<(SyncConfig, PathBuf), Box<dyn Error>> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join("config.toml");
+    if !path.is_file() {
+        fs::write(&path, DEFAULT_SYNC_CONFIG_TOML)?;
+    }
+    let content = fs::read_to_string(&path)?;
+    let config: SyncConfig = toml::from_str(&content)?;
+    Ok((config, path))
+}
+
+/// Read-only variant for `status`: returns `(None, path)` when the file is
+/// absent rather than writing the default. The daemon's `load_or_create`
+/// writes on first start; the doctor should never create files.
+#[cfg(not(target_os = "android"))]
+pub fn read_sync_config(dir: &Path) -> Result<(Option<SyncConfig>, PathBuf), Box<dyn Error>> {
+    let path = dir.join("config.toml");
+    if !path.is_file() {
+        return Ok((None, path));
+    }
+    let content = fs::read_to_string(&path)?;
+    let config: SyncConfig = toml::from_str(&content)?;
+    Ok((Some(config), path))
+}
+
+/// Which `SyncMode` a daemon pass should use: an explicit `--mode` always
+/// wins; otherwise the config's `pull` flag picks push-only vs both.
+pub fn effective_daemon_mode(
+    cli_mode: Option<crate::report::SyncMode>,
+    pull: bool,
+) -> crate::report::SyncMode {
+    cli_mode.unwrap_or(if pull {
+        crate::report::SyncMode::Both
+    } else {
+        crate::report::SyncMode::Push
+    })
+}
+
+/// Path to the embedded/local aw-server config. On Android this is
+/// `filesDir/config.toml` (same file ConfigManager and the server use).
 #[allow(dead_code)]
 pub fn get_server_config_path(testing: bool) -> Result<PathBuf, ()> {
-    let dir = aw_server::dirs::get_config_dir()?;
-    Ok(dir.join(if testing {
-        "config-testing.toml"
+    let profile = aw_server::config::get_profile();
+    // If set_profile hasn't run yet, honour the legacy testing bool so
+    // `--testing` still finds the testing config (legacy or new root).
+    let effective = if profile == "default" && testing {
+        "testing"
     } else {
-        "config.toml"
-    }))
+        profile
+    };
+    let filename = aw_server::config::config_filename(effective);
+    // Desktop: honour profile isolation (`activitywatch-<profile>/aw-server-rust`).
+    // Android: stay on filesDir — sibling XDG roots do not exist there, and
+    // master already reads this path for the embedded server's api_key (#666).
+    #[cfg(not(target_os = "android"))]
+    {
+        // Same resolver as the server's own get_config_dir, read-only: on
+        // Windows this is the v0.14.0 Roaming dir while that still holds the
+        // server's data (before the server migrated it, or if migration
+        // failed and the server keeps using it), so both read the same file.
+        // aw-sync never moves the server's files.
+        let dir = aw_server::dirs::module_dir_readonly(
+            aw_server::dirs::user_config_root().ok_or(())?,
+            &aw_server::dirs::appname_for(effective),
+            "aw-server-rust",
+        );
+        Ok(dir.join(filename))
+    }
+    #[cfg(target_os = "android")]
+    {
+        let dir = aw_server::dirs::get_config_dir()?;
+        Ok(dir.join(filename))
+    }
 }
 
 pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
@@ -34,4 +186,229 @@ pub fn get_sync_dir() -> Result<PathBuf, Box<dyn Error>> {
     }
     let home_dir = home_dir().ok_or("Unable to read home_dir")?;
     Ok(home_dir.join("ActivityWatchSync"))
+}
+
+/// SyncInterface.kt sets `XDG_DATA_HOME=$filesDir/data` before `loadLibrary`.
+/// `libaw_sync.so` is a separate cdylib from `libaw_server.so`, so
+/// `RustInterface.setDataDir` does not update this library's `ANDROID_DATA_DIR`.
+/// Parent of that env var is the app filesDir (release, `.debug`, work profile).
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn files_dir_from_xdg_data_home(xdg_data_home: &Path) -> Option<PathBuf> {
+    if xdg_data_home.file_name() != Some(std::ffi::OsStr::new("data")) {
+        return None;
+    }
+    let parent = xdg_data_home.parent()?;
+    if parent.as_os_str().is_empty() || parent == Path::new("/") {
+        return None;
+    }
+    Some(parent.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_profile_cli_wins_over_env_and_testing() {
+        assert_eq!(
+            resolve_profile(Some("research"), true, Some("testing")),
+            "research"
+        );
+    }
+
+    #[test]
+    fn resolve_profile_env_wins_over_testing() {
+        assert_eq!(resolve_profile(None, true, Some("research")), "research");
+    }
+
+    #[test]
+    fn resolve_profile_testing_alias_and_default() {
+        assert_eq!(resolve_profile(None, true, None), "testing");
+        assert_eq!(resolve_profile(None, false, None), "default");
+        assert_eq!(resolve_profile(Some(""), false, Some("")), "default");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn sync_config_dir_is_isolated_per_named_profile() {
+        use aw_server::dirs::appname_for_in;
+        use std::fs;
+        let root = std::env::temp_dir().join(format!(
+            "aw-sync-profile-tests-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        let data = root.join("data");
+        let config = root.join("config");
+        let cache = root.join("cache");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+
+        let default_app = appname_for_in("default", &data, &config, &cache);
+        let testing_app = appname_for_in("testing", &data, &config, &cache);
+        let research_app = appname_for_in("research", &data, &config, &cache);
+
+        assert_eq!(default_app, "activitywatch");
+        // Fresh setup: testing is a sibling root, not the shared one.
+        assert_eq!(testing_app, "activitywatch-testing");
+        assert_eq!(research_app, "activitywatch-research");
+        assert_ne!(testing_app, default_app);
+        assert_ne!(research_app, default_app);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// aw-sync's config sits next to aw-server's, whose location is pinned
+    /// per platform in aw-server's `test_default_paths_are_pinned`.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn sync_config_dir_is_sibling_of_pinned_server_config_dir() {
+        let server = aw_server::dirs::get_config_dir().unwrap();
+        assert_eq!(
+            config_dir_path().unwrap(),
+            server.parent().unwrap().join("aw-sync")
+        );
+        assert_eq!(
+            get_server_config_path(false).unwrap(),
+            server.join("config.toml")
+        );
+    }
+
+    /// `status` (read-only) must report the same config dir the daemon uses.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn status_and_daemon_resolve_the_same_sync_config_dir() {
+        // Daemon first: on Windows it may migrate a v0.14.0 Roaming dir,
+        // after which status must see the migrated location. Migration
+        // states themselves are covered with temp dirs in aw-server's dirs.rs.
+        let daemon = get_config_dir().unwrap();
+        assert_eq!(config_dir_path().unwrap(), daemon);
+    }
+
+    #[test]
+    fn server_config_filename_default_and_research_are_bare() {
+        // Isolated roots use config.toml. Suffixed config-testing.toml is
+        // only for the legacy shared-root layout (dirs.rs tests).
+        assert_eq!(aw_server::config::config_filename("default"), "config.toml");
+        assert_eq!(
+            aw_server::config::config_filename("research"),
+            "config.toml"
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn server_config_path_default_is_config_toml() {
+        let production = get_server_config_path(false).unwrap();
+        assert!(
+            production.ends_with("config.toml"),
+            "default should read config.toml, got {production:?}"
+        );
+    }
+
+    #[test]
+    fn xdg_data_home_parent_is_files_dir() {
+        let debug = Path::new("/data/user/0/net.activitywatch.android.debug/files/data");
+        assert_eq!(
+            files_dir_from_xdg_data_home(debug).as_deref(),
+            Some(Path::new(
+                "/data/user/0/net.activitywatch.android.debug/files"
+            ))
+        );
+
+        let work_profile = Path::new("/data/user/10/net.activitywatch.android/files/data");
+        assert_eq!(
+            files_dir_from_xdg_data_home(work_profile).as_deref(),
+            Some(Path::new("/data/user/10/net.activitywatch.android/files"))
+        );
+    }
+
+    #[test]
+    fn rejects_non_data_leaf_and_root() {
+        assert!(files_dir_from_xdg_data_home(Path::new("/data")).is_none());
+        assert!(files_dir_from_xdg_data_home(Path::new("/")).is_none());
+        assert!(files_dir_from_xdg_data_home(Path::new("data")).is_none());
+        assert!(files_dir_from_xdg_data_home(Path::new("/tmp/config")).is_none());
+    }
+
+    // ActivityWatch/aw-server-rust#714: daemon pull is opt-in.
+    #[test]
+    fn effective_daemon_mode_explicit_cli_always_wins() {
+        use crate::report::SyncMode;
+        assert_eq!(
+            effective_daemon_mode(Some(SyncMode::Pull), false),
+            SyncMode::Pull
+        );
+        assert_eq!(
+            effective_daemon_mode(Some(SyncMode::Pull), true),
+            SyncMode::Pull
+        );
+        assert_eq!(
+            effective_daemon_mode(Some(SyncMode::Both), false),
+            SyncMode::Both
+        );
+    }
+
+    #[test]
+    fn effective_daemon_mode_no_cli_follows_config_pull_flag() {
+        use crate::report::SyncMode;
+        // No config.toml (or pull = false): push-only by default.
+        assert_eq!(effective_daemon_mode(None, false), SyncMode::Push);
+        // pull = true: daemon imports too.
+        assert_eq!(effective_daemon_mode(None, true), SyncMode::Both);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn temp_sync_config_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "aw-sync-config-tests-{label}-{}",
+            crate::util::unique_test_suffix(),
+        ))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn load_or_create_sync_config_writes_commented_default_when_missing() {
+        let dir = temp_sync_config_dir("missing");
+        let (config, path) = load_or_create_sync_config(&dir).unwrap();
+        assert!(!config.daemon.pull, "default config must be pull = false");
+        assert!(path.is_file());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("[daemon]") && content.contains("pull = false"),
+            "commented default should be namespaced under [daemon] and mention pull = false, got: {content}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn load_or_create_sync_config_respects_existing_pull_true() {
+        let dir = temp_sync_config_dir("pull-true");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), "[daemon]\npull = true\n").unwrap();
+        let (config, _path) = load_or_create_sync_config(&dir).unwrap();
+        assert!(config.daemon.pull);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn read_sync_config_returns_none_when_missing_and_does_not_create_file() {
+        let dir = temp_sync_config_dir("read-missing");
+        let (config, path) = read_sync_config(&dir).unwrap();
+        assert!(config.is_none(), "should return None when file is absent");
+        assert!(!path.exists(), "read_sync_config must not create the file");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn read_sync_config_reads_existing_config() {
+        let dir = temp_sync_config_dir("read-existing");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), "[daemon]\npull = true\n").unwrap();
+        let (config, _path) = read_sync_config(&dir).unwrap();
+        assert!(config.unwrap().daemon.pull, "should read pull = true");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

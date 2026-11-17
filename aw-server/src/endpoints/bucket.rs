@@ -1,21 +1,22 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use gethostname::gethostname;
 use rocket::serde::json::Json;
 
 use chrono::DateTime;
+use chrono::Duration;
 use chrono::Utc;
 
 use aw_datastore::DatastoreError;
 use aw_models::Bucket;
-use aw_models::BucketsExport;
 use aw_models::Event;
-use aw_models::TryVec;
 
 use rocket::http::Status;
 use rocket::State;
 
-use crate::endpoints::util::BucketsExportRocket;
+use crate::endpoints::query_cache::event_range;
+use crate::endpoints::util::{ApiJson, BucketEventsCsvRocket, BucketsExportRocket};
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[get("/")]
@@ -48,7 +49,7 @@ pub fn bucket_get(
 #[post("/<bucket_id>", data = "<message>", format = "application/json")]
 pub fn bucket_new(
     bucket_id: &str,
-    message: Json<Bucket>,
+    message: ApiJson<Bucket>,
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
     let mut bucket = message.into_inner();
@@ -95,8 +96,39 @@ pub fn bucket_new(
     let datastore = &state.datastore;
     let ret = datastore.create_bucket(&bucket);
     match ret {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // A new bucket changes what the bucket list resolves to, and a
+            // re-created bucket may have gained events.
+            state.bucket_list_changed();
+            Ok(())
+        }
         Err(err) => Err(err.into()),
+    }
+}
+
+/// Parse an optional RFC 3339 query parameter, answering 400 when it doesn't parse.
+fn parse_time_param(
+    name: &str,
+    value: Option<String>,
+) -> Result<Option<DateTime<Utc>>, HttpErrorJson> {
+    match value {
+        Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
+            // Event times are stored as nanoseconds since the epoch, which only covers
+            // 1677-2262; reject anything outside that instead of passing it on.
+            Ok(dt) if dt.timestamp_nanos_opt().is_none() => {
+                let err_msg = format!("{name} {dt_str} is outside the supported range (1677-2262)");
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::BadRequest, err_msg))
+            }
+            Ok(dt) => Ok(Some(dt.with_timezone(&Utc))),
+            Err(e) => {
+                let err_msg =
+                    format!("Failed to parse {name}, datetime needs to be in rfc3339 format: {e}");
+                warn!("{}", err_msg);
+                Err(HttpErrorJson::new(Status::BadRequest, err_msg))
+            }
+        },
+        None => Ok(None),
     }
 }
 
@@ -108,6 +140,258 @@ pub fn bucket_events_get(
     limit: Option<u64>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
+    let starttime = parse_time_param("starttime", start)?;
+    let endtime = parse_time_param("endtime", end)?;
+    let datastore = &state.datastore;
+    let res = datastore.get_events(bucket_id, starttime, endtime, limit);
+    match res {
+        Ok(events) => Ok(Json(events)),
+        Err(err) => Err(err.into()),
+    }
+}
+
+// Ranked below bucket_event_count so that `/events/count` isn't parsed as an event id;
+// both routes take query parameters, so they would otherwise collide.
+// See: https://api.rocket.rs/master/rocket/struct.Route.html#resolving-collisions
+#[get("/<bucket_id>/events/<event_id>?<_unused..>", rank = 1)]
+pub fn bucket_events_get_single(
+    bucket_id: &str,
+    event_id: i64,
+    _unused: Option<u64>,
+    state: &State<ServerState>,
+) -> Result<Json<Event>, HttpErrorJson> {
+    let datastore = &state.datastore;
+    let res = datastore.get_event(bucket_id, event_id);
+    match res {
+        Ok(events) => Ok(Json(events)),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[post("/<bucket_id>/events", data = "<events>", format = "application/json")]
+pub fn bucket_events_create(
+    bucket_id: &str,
+    events: ApiJson<Vec<Event>>,
+    state: &State<ServerState>,
+) -> Result<Json<Vec<Event>>, HttpErrorJson> {
+    // Hold the write lock across (read old ranges + write + invalidate) so a
+    // concurrent replacement cannot move an event to a range we never record.
+    let _guard = state.write_lock.lock().unwrap();
+    // Reject events with negative duration; they cannot represent a valid time span
+    // and silently corrupt totals in the Activity view (#602, #239).
+    for event in events.iter() {
+        if event.duration < Duration::zero() {
+            let err_msg = format!(
+                "Invalid event: duration must be non-negative, got {}s",
+                event.duration.num_milliseconds() as f64 / 1000.0
+            );
+            warn!("{}", err_msg);
+            return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
+        }
+    }
+    let datastore = &state.datastore;
+    // Every inserted event changes its own extent; an event with an ID replaces
+    // a stored one, whose range changes too.
+    let mut affected: Vec<_> = events.iter().map(event_range).collect();
+    for event in events.iter() {
+        if let Some(id) = event.id {
+            if let Ok(old) = datastore.get_event(bucket_id, id) {
+                affected.push(event_range(&old));
+            }
+        }
+    }
+    let res = datastore.insert_events(bucket_id, &events);
+    match res {
+        Ok(events) => {
+            state.query_cache.invalidate(affected);
+            Ok(Json(events))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[post(
+    "/<bucket_id>/heartbeat?<pulsetime>",
+    data = "<heartbeat_json>",
+    format = "application/json"
+)]
+pub fn bucket_events_heartbeat(
+    bucket_id: &str,
+    heartbeat_json: ApiJson<Event>,
+    pulsetime: f64,
+    state: &State<ServerState>,
+) -> Result<Json<Event>, HttpErrorJson> {
+    let _guard = state.write_lock.lock().unwrap();
+    // Reject negative pulsetime; it has no meaningful interpretation and is
+    // almost always a client bug (negated constant, sign-flip on subtraction).
+    if pulsetime < 0.0 {
+        let err_msg = format!("Invalid pulsetime: must be non-negative, got {pulsetime}");
+        warn!("{}", err_msg);
+        return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
+    }
+    let heartbeat = heartbeat_json.into_inner();
+    // The returned event spans every merged/replaced event, so invalidating its
+    // extent covers the stored previous event even if it had a different range.
+    let heartbeat_range = event_range(&heartbeat);
+    let datastore = &state.datastore;
+    match datastore.heartbeat(bucket_id, heartbeat, pulsetime) {
+        Ok(e) => {
+            state
+                .query_cache
+                .invalidate(vec![event_range(&e), heartbeat_range]);
+            Ok(Json(e))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Upper bound on the number of ids accepted by the bulk-delete endpoint.
+///
+/// Each id costs one datastore round-trip while the write lock is held, so an
+/// unbounded list would let a single request stall all event writes. Clients
+/// deleting more than this should issue several requests.
+const MAX_BULK_DELETE_IDS: usize = 10_000;
+
+#[derive(serde::Deserialize)]
+pub struct BulkDeleteRequest {
+    pub ids: Vec<i64>,
+}
+
+#[get("/<bucket_id>/events/count?<start>&<end>")]
+pub fn bucket_event_count(
+    bucket_id: &str,
+    start: Option<String>,
+    end: Option<String>,
+    state: &State<ServerState>,
+) -> Result<Json<u64>, HttpErrorJson> {
+    let starttime = parse_time_param("starttime", start)?;
+    let endtime = parse_time_param("endtime", end)?;
+    let datastore = &state.datastore;
+    let res = datastore.get_event_count(bucket_id, starttime, endtime);
+    match res {
+        Ok(eventcount) => Ok(Json(eventcount as u64)),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[delete("/<bucket_id>/events/<event_id>")]
+pub fn bucket_events_delete_by_id(
+    bucket_id: &str,
+    event_id: i64,
+    state: &State<ServerState>,
+) -> Result<(), HttpErrorJson> {
+    let _guard = state.write_lock.lock().unwrap();
+    let datastore = &state.datastore;
+    let old = datastore.get_event(bucket_id, event_id).ok();
+    match datastore.delete_events_by_id(bucket_id, vec![event_id]) {
+        Ok(_) => {
+            if let Some(event) = old {
+                state.query_cache.invalidate(vec![event_range(&event)]);
+            }
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Delete many events from one bucket in a single request.
+///
+/// Body: `{"ids": [1, 2, 3]}`. Unknown ids are ignored; the response is the
+/// number of events that actually existed and were deleted.
+#[post(
+    "/<bucket_id>/events/delete",
+    data = "<body>",
+    format = "application/json"
+)]
+pub fn bucket_events_delete_many(
+    bucket_id: &str,
+    body: Json<BulkDeleteRequest>,
+    state: &State<ServerState>,
+) -> Result<Json<u64>, HttpErrorJson> {
+    // Reject oversized requests before taking the lock: the cap bounds the
+    // lock-held work, so it must be checked outside the critical section.
+    if body.ids.len() > MAX_BULK_DELETE_IDS {
+        return Err(HttpErrorJson::new(
+            Status::PayloadTooLarge,
+            format!(
+                "Too many ids in bulk delete request: {} (max {MAX_BULK_DELETE_IDS})",
+                body.ids.len()
+            ),
+        ));
+    }
+
+    // Hold the write lock across (read old ranges + delete + invalidate), as
+    // bucket_events_create and bucket_events_delete_by_id do. If the read ran
+    // outside the lock, a concurrent insert/heartbeat could replace an event
+    // with one of the same id at a different range; the delete would remove
+    // that new event while only the stale range was invalidated, and the
+    // returned count could include ids another request had already deleted.
+    let _guard = state.write_lock.lock().unwrap();
+    let datastore = &state.datastore;
+
+    // Validate bucket exists before iterating (handles empty-ids case too).
+    datastore
+        .get_bucket(bucket_id)
+        .map_err(HttpErrorJson::from)?;
+
+    // Collect the events that exist. Duplicate ids collapse to one entry.
+    let mut existing: Vec<Event> = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    for id in body.ids.iter() {
+        if !seen.insert(*id) {
+            continue;
+        }
+        match datastore.get_event(bucket_id, *id) {
+            Ok(event) => existing.push(event),
+            Err(DatastoreError::NoSuchEvent(_, _)) => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let ids: Vec<i64> = existing.iter().filter_map(|e| e.id).collect();
+    if ids.is_empty() {
+        return Ok(Json(0));
+    }
+
+    // Ranges are collected under the same lock that deletes, so they describe
+    // exactly the events that the delete removes.
+    let ranges: Vec<_> = existing.iter().map(event_range).collect();
+    match datastore.delete_events_by_id(bucket_id, ids.clone()) {
+        Ok(_) => {
+            state.query_cache.invalidate(ranges);
+            Ok(Json(ids.len() as u64))
+        }
+        Err(err) => {
+            // Invalidate cache even on failure: some events may have been
+            // deleted by the datastore worker before the error was returned.
+            state.query_cache.invalidate(ranges);
+            Err(err.into())
+        }
+    }
+}
+
+#[get("/<bucket_id>/export")]
+pub fn bucket_export(
+    bucket_id: &str,
+    state: &State<ServerState>,
+) -> Result<BucketsExportRocket, HttpErrorJson> {
+    BucketsExportRocket::new(&state.datastore, Some(bucket_id))
+}
+
+/// Stream events for a single bucket as a CSV file.
+///
+/// Mirrors `GET /<bucket_id>/export` (JSON) but returns `text/csv`.
+/// Sends HTTP headers before serialization begins so large buckets don't
+/// look like a hung connection on Android WebView or slow networks.
+/// Accepts the same `start`, `end`, and `limit` query params as the JSON
+/// events endpoint.
+#[get("/<bucket_id>/export/csv?<start>&<end>&<limit>")]
+pub fn bucket_events_get_csv(
+    bucket_id: &str,
+    start: Option<String>,
+    end: Option<String>,
+    limit: Option<u64>,
+    state: &State<ServerState>,
+) -> Result<BucketEventsCsvRocket, HttpErrorJson> {
     let starttime: Option<DateTime<Utc>> = match start {
         Some(dt_str) => match DateTime::parse_from_rfc3339(&dt_str) {
             Ok(dt) => Some(dt.with_timezone(&Utc)),
@@ -133,115 +417,18 @@ pub fn bucket_events_get(
         },
         None => None,
     };
-    let datastore = &state.datastore;
-    let res = datastore.get_events(bucket_id, starttime, endtime, limit);
-    match res {
-        Ok(events) => Ok(Json(events)),
-        Err(err) => Err(err.into()),
-    }
-}
-
-// Needs unused parameter, otherwise there'll be a route collision
-// See: https://api.rocket.rs/master/rocket/struct.Route.html#resolving-collisions
-#[get("/<bucket_id>/events/<event_id>?<_unused..>")]
-pub fn bucket_events_get_single(
-    bucket_id: &str,
-    event_id: i64,
-    _unused: Option<u64>,
-    state: &State<ServerState>,
-) -> Result<Json<Event>, HttpErrorJson> {
-    let datastore = &state.datastore;
-    let res = datastore.get_event(bucket_id, event_id);
-    match res {
-        Ok(events) => Ok(Json(events)),
-        Err(err) => Err(err.into()),
-    }
-}
-
-#[post("/<bucket_id>/events", data = "<events>", format = "application/json")]
-pub fn bucket_events_create(
-    bucket_id: &str,
-    events: Json<Vec<Event>>,
-    state: &State<ServerState>,
-) -> Result<Json<Vec<Event>>, HttpErrorJson> {
-    let datastore = &state.datastore;
-    let res = datastore.insert_events(bucket_id, &events);
-    match res {
-        Ok(events) => Ok(Json(events)),
-        Err(err) => Err(err.into()),
-    }
-}
-
-#[post(
-    "/<bucket_id>/heartbeat?<pulsetime>",
-    data = "<heartbeat_json>",
-    format = "application/json"
-)]
-pub fn bucket_events_heartbeat(
-    bucket_id: &str,
-    heartbeat_json: Json<Event>,
-    pulsetime: f64,
-    state: &State<ServerState>,
-) -> Result<Json<Event>, HttpErrorJson> {
-    let heartbeat = heartbeat_json.into_inner();
-    let datastore = &state.datastore;
-    match datastore.heartbeat(bucket_id, heartbeat, pulsetime) {
-        Ok(e) => Ok(Json(e)),
-        Err(err) => Err(err.into()),
-    }
-}
-
-#[get("/<bucket_id>/events/count")]
-pub fn bucket_event_count(
-    bucket_id: &str,
-    state: &State<ServerState>,
-) -> Result<Json<u64>, HttpErrorJson> {
-    let datastore = &state.datastore;
-    let res = datastore.get_event_count(bucket_id, None, None);
-    match res {
-        Ok(eventcount) => Ok(Json(eventcount as u64)),
-        Err(err) => Err(err.into()),
-    }
-}
-
-#[delete("/<bucket_id>/events/<event_id>")]
-pub fn bucket_events_delete_by_id(
-    bucket_id: &str,
-    event_id: i64,
-    state: &State<ServerState>,
-) -> Result<(), HttpErrorJson> {
-    let datastore = &state.datastore;
-    match datastore.delete_events_by_id(bucket_id, vec![event_id]) {
-        Ok(_) => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-#[get("/<bucket_id>/export")]
-pub fn bucket_export(
-    bucket_id: &str,
-    state: &State<ServerState>,
-) -> Result<BucketsExportRocket, HttpErrorJson> {
-    let datastore = &state.datastore;
-    let mut export = BucketsExport {
-        buckets: HashMap::new(),
-    };
-    let mut bucket = datastore.get_bucket(bucket_id)?;
-    /* TODO: Replace expect with http error */
-    let events = datastore
-        .get_events(bucket_id, None, None, None)
-        .expect("Failed to get events for bucket");
-    bucket.events = Some(TryVec::new(events));
-    export.buckets.insert(bucket_id.into(), bucket);
-
-    Ok(export.into())
+    BucketEventsCsvRocket::new(&state.datastore, bucket_id, starttime, endtime, limit)
 }
 
 #[delete("/<bucket_id>")]
 pub fn bucket_delete(bucket_id: &str, state: &State<ServerState>) -> Result<(), HttpErrorJson> {
     let datastore = &state.datastore;
     match datastore.delete_bucket(bucket_id) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // Removing a bucket changes what the bucket list resolves to.
+            state.bucket_list_changed();
+            Ok(())
+        }
         Err(err) => Err(err.into()),
     }
 }

@@ -2,9 +2,9 @@ use rust_embed::RustEmbed;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use gethostname::gethostname;
 use rocket::fs::FileServer;
-use rocket::http::ContentType;
+use rocket::http::{ContentType, Status};
+use rocket::request::Request;
 use rocket::serde::json::Json;
 use rocket::State;
 
@@ -35,6 +35,54 @@ impl AssetResolver {
         }
         Some(EmbeddedAssets::get(file_path)?.data.to_vec())
     }
+
+    /// Whether `index.html` resolves, from `--webpath` or the embedded bundle.
+    pub fn has_index(&self) -> bool {
+        self.resolve("index.html").is_some()
+    }
+
+    /// The web UI entry point, or an explanatory page (503) when this build
+    /// has no web UI assets, instead of Rocket's bare 404.
+    fn index_or_placeholder(&self) -> (Status, ContentType, Vec<u8>) {
+        match self.resolve("index.html") {
+            Some(data) => (Status::Ok, ContentType::HTML, data),
+            None => {
+                let checked = self
+                    .asset_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(none; --webpath not set)".to_string());
+                let html = missing_index_html(&checked);
+                (
+                    Status::ServiceUnavailable,
+                    ContentType::HTML,
+                    html.into_bytes(),
+                )
+            }
+        }
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn missing_index_html(checked_path: &str) -> String {
+    let escaped = html_escape(checked_path);
+    format!(
+        "<!DOCTYPE html><html><head><title>ActivityWatch: web UI missing</title></head>\
+<body><h1>The web UI is not installed</h1>\
+<p>aw-server is running, but this build has no <code>index.html</code>, \
+neither embedded nor in the <code>--webpath</code> directory that was checked: \
+<code>{escaped}</code>.</p>\
+<p>The API still works: <a href=\"/api/0/info\">/api/0/info</a>. \
+Build with <code>AW_WEBUI_DIR</code> pointing at a built aw-webui, or pass \
+<code>--webpath</code>. See the <a href=\"https://docs.activitywatch.net/\">docs</a>.</p>\
+</body></html>"
+    )
 }
 
 // The Datastore is just a cheap handle to the DB worker thread (a crossbeam
@@ -43,8 +91,62 @@ impl AssetResolver {
 // a slow query block every heartbeat.
 pub struct ServerState {
     pub datastore: Datastore,
+    /// Read-only handle on the same database for `/api/0/query`, so query
+    /// reads never queue behind heartbeats on the writer's worker (#805).
+    /// `None` for in-memory or encrypted databases; queries then use
+    /// `datastore`. See `query_datastore`.
+    pub reader: Option<Datastore>,
     pub asset_resolver: AssetResolver,
     pub device_id: String,
+    /// Cache of query results for finished past periods (see `query_cache`).
+    pub query_cache: std::sync::Arc<query_cache::QueryCache>,
+    /// Set to false via config (`query_cache = false`) to bypass the cache.
+    pub query_cache_enabled: bool,
+    /// Time budget for one query request (`query_timeout_secs` in the config);
+    /// `None` means unlimited.
+    pub query_timeout: Option<std::time::Duration>,
+    /// Serializes the read-modify-invalidate sequence in the event write
+    /// handlers. Without it, two concurrent replacements of the same event
+    /// could each invalidate only their own view of the old range and leave an
+    /// intermediate period cached (see `bucket_events_create`).
+    pub write_lock: std::sync::Mutex<()>,
+    /// Serializes "any pending write overlaps this query? then flush the
+    /// writer" in the query endpoint, so a second query cannot slip between a
+    /// first one's check and its commit and read the old WAL snapshot.
+    pub flush_lock: std::sync::Mutex<()>,
+}
+
+impl ServerState {
+    /// Build a state with the default (enabled) query cache.
+    pub fn new(datastore: Datastore, asset_resolver: AssetResolver, device_id: String) -> Self {
+        Self {
+            datastore,
+            reader: None,
+            asset_resolver,
+            device_id,
+            query_cache: std::sync::Arc::new(query_cache::QueryCache::new()),
+            query_cache_enabled: true,
+            query_timeout: Some(std::time::Duration::from_secs(300)),
+            write_lock: std::sync::Mutex::new(()),
+            flush_lock: std::sync::Mutex::new(()),
+        }
+    }
+
+    /// The datastore queries read from: the reader when there is one.
+    pub fn query_datastore(&self) -> &Datastore {
+        self.reader.as_ref().unwrap_or(&self.datastore)
+    }
+
+    /// Call after anything that creates, deletes, renames or imports buckets:
+    /// drops cached query results (the bucket list changed what queries
+    /// resolve to). The reader's bucket cache is refreshed lazily on the next
+    /// read via the `buckets_changed()` auto-reload in `handle_request`; an
+    /// explicit synchronous `reader.reload_buckets()` here would block the
+    /// endpoint handler thread waiting for the reader worker, which may be
+    /// processing a long-running query.
+    pub fn bucket_list_changed(&self) {
+        self.query_cache.clear();
+    }
 }
 
 #[macro_use]
@@ -57,6 +159,7 @@ mod extension_cors;
 mod hostcheck;
 mod import;
 mod query;
+pub mod query_cache;
 mod settings;
 
 #[cfg(target_os = "android")]
@@ -64,8 +167,9 @@ pub(crate) use settings::settings_datastore_key;
 pub use util::HttpErrorJson;
 
 #[get("/")]
-fn root_index(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
-    get_file("index.html".into(), state)
+fn root_index(state: &State<ServerState>) -> (Status, (ContentType, Vec<u8>)) {
+    let (status, content_type, body) = state.asset_resolver.index_or_placeholder();
+    (status, (content_type, body))
 }
 
 #[get("/css/<file..>")]
@@ -110,13 +214,11 @@ fn root_manifest(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
 
 #[get("/")]
 fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Info> {
-    #[allow(clippy::or_fun_call)]
-    let hostname = gethostname().into_string().unwrap_or("unknown".to_string());
-
     Json(Info {
-        hostname,
+        hostname: crate::hostname::hostname_string(),
         version: crate::version::version_string(),
         testing: config.testing,
+        profile: crate::config::get_profile().to_string(),
         device_id: state.device_id.clone(),
     })
 }
@@ -178,11 +280,13 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 bucket::buckets_get,
                 bucket::bucket_get,
                 bucket::bucket_events_get,
+                bucket::bucket_events_get_csv,
                 bucket::bucket_events_create,
                 bucket::bucket_events_heartbeat,
                 bucket::bucket_event_count,
                 bucket::bucket_events_get_single,
                 bucket::bucket_events_delete_by_id,
+                bucket::bucket_events_delete_many,
                 bucket::bucket_export
             ],
         )
@@ -201,7 +305,11 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 settings::settings_get,
             ],
         )
-        .mount("/", rocket_cors::catch_all_options_routes());
+        .mount("/", rocket_cors::catch_all_options_routes())
+        .register(
+            "/api",
+            catchers![api_bad_request, api_not_found, api_unprocessable],
+        );
 
     // for each custom static directory, mount it at the given name
     for (name, dir) in custom_static {
@@ -212,6 +320,21 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
         rocket = rocket.mount(&format!("/pages/{name}"), FileServer::from(dir));
     }
     rocket
+}
+
+#[catch(400)]
+fn api_bad_request(req: &Request) -> util::HttpErrorJson {
+    util::api_error_json(Status::BadRequest, req)
+}
+
+#[catch(404)]
+fn api_not_found(req: &Request) -> util::HttpErrorJson {
+    util::api_error_json(Status::NotFound, req)
+}
+
+#[catch(422)]
+fn api_unprocessable(req: &Request) -> util::HttpErrorJson {
+    util::api_error_json(Status::UnprocessableEntity, req)
 }
 
 mod tests {
@@ -225,11 +348,40 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_index_html_content() {
+        // Test the placeholder HTML generation directly — independent of whether
+        // this build has embedded assets.
+        let html = super::missing_index_html("/nonexistent-webpath");
+        assert!(html.contains("/nonexistent-webpath"));
+        assert!(html.contains("/api/0/info"));
+    }
+
+    #[test]
+    fn test_missing_index_html_escapes_path() {
+        let html = super::missing_index_html("/path/<evil>&\"chars\"");
+        assert!(!html.contains("<evil>"));
+        assert!(html.contains("&lt;evil&gt;"));
+        assert!(html.contains("&amp;"));
+        assert!(html.contains("&quot;"));
+    }
+
+    #[test]
     fn test_resolver_without_asset() {
         let resolver = super::AssetResolver::new(Some(".".into()));
 
         let content = resolver.resolve("Cargo.json");
 
         assert!(content.is_none());
+    }
+
+    #[test]
+    fn test_has_index_matches_placeholder() {
+        let resolver = super::AssetResolver::new(Some("/nonexistent-webpath".into()));
+        let (status, _, _) = resolver.index_or_placeholder();
+        assert_eq!(
+            resolver.has_index(),
+            status == rocket::http::Status::Ok,
+            "has_index() must agree with what / serves"
+        );
     }
 }

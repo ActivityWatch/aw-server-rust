@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use super::functions;
 use super::QueryError;
 use aw_models::Event;
-use aw_transform::classify::{RegexRule, Rule};
+use aw_transform::classify::{CategoryRule, RegexRule, Rule};
 
 use serde::{Serialize, Serializer};
 use serde_json::value::Value;
@@ -14,6 +14,7 @@ use serde_json::Number;
 
 #[derive(Clone, Serialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum DataType {
     None(),
     Bool(bool),
@@ -21,17 +22,30 @@ pub enum DataType {
     String(String),
     Event(Event),
     List(Vec<DataType>),
+    #[serde(serialize_with = "serialize_dict_sorted")]
     Dict(HashMap<String, DataType>),
     #[serde(serialize_with = "serialize_function")]
     Function(String, functions::QueryFn),
+    #[serde(serialize_with = "serialize_function")]
+    ReadOnlyFunction(String, functions::ReadOnlyQueryFn),
+}
+
+// Query results are serialized straight to the response body, so HashMap
+// iteration order would leak into the output. Sort keys to keep responses
+// deterministic (and identical to the previous serde_json::Value round-trip).
+fn serialize_dict_sorted<S>(
+    dict: &HashMap<String, DataType>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let sorted: BTreeMap<&String, &DataType> = dict.iter().collect();
+    sorted.serialize(serializer)
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn serialize_function<S>(
-    _element: &str,
-    _fun: &functions::QueryFn,
-    _serializer: S,
-) -> Result<S::Ok, S::Error>
+fn serialize_function<S, F>(_element: &str, _fun: &F, _serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -53,6 +67,7 @@ impl fmt::Debug for DataType {
             DataType::List(l) => write!(f, "List({l:?})"),
             DataType::Dict(d) => write!(f, "Dict({d:?})"),
             DataType::Function(name, _fun) => write!(f, "Function({name})"),
+            DataType::ReadOnlyFunction(name, _fun) => write!(f, "Function({name})"),
         }
     }
 }
@@ -63,7 +78,8 @@ impl DataType {
     pub fn query_eq(&self, other: &DataType) -> Result<bool, QueryError> {
         match (self, other) {
             // TODO: Comparisons of bool == num, bool == str
-            (DataType::None(), DataType::None()) => Ok(false),
+            // None is equal to itself, matching the PartialEq impl below.
+            (DataType::None(), DataType::None()) => Ok(true),
             (DataType::Bool(b1), DataType::Bool(b2)) => Ok(b1 == b2),
             (DataType::Number(n1), DataType::Number(n2)) => Ok(n1 == n2),
             (DataType::String(s1), DataType::String(s2)) => Ok(s1 == s2),
@@ -224,18 +240,48 @@ impl TryFrom<DataType> for Vec<(String, Rule)> {
     }
 }
 
-impl TryFrom<&DataType> for Vec<(Vec<String>, Rule)> {
+impl TryFrom<&DataType> for Vec<CategoryRule> {
     type Error = QueryError;
     fn try_from(value: &DataType) -> Result<Self, Self::Error> {
         value.clone().try_into()
     }
 }
 
-impl TryFrom<DataType> for Vec<(Vec<String>, Rule)> {
+fn parse_optional_priority(rule: &DataType) -> Result<Option<i64>, QueryError> {
+    let obj = match rule {
+        DataType::Dict(dict) => dict,
+        _ => return Ok(None),
+    };
+    let val = match obj.get("priority").or_else(|| obj.get("weight")) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    match val {
+        DataType::Number(n) => {
+            if !n.is_finite() {
+                return Err(QueryError::InvalidFunctionParameters(
+                    "priority/weight must be a finite integer".to_string(),
+                ));
+            }
+            let as_int = *n as i64;
+            if (as_int as f64) != *n {
+                return Err(QueryError::InvalidFunctionParameters(
+                    "priority/weight must be an integer".to_string(),
+                ));
+            }
+            Ok(Some(as_int))
+        }
+        _ => Err(QueryError::InvalidFunctionParameters(
+            "priority/weight must be an integer".to_string(),
+        )),
+    }
+}
+
+impl TryFrom<DataType> for Vec<CategoryRule> {
     type Error = QueryError;
     fn try_from(value: DataType) -> Result<Self, Self::Error> {
         let tagged_lists: Vec<DataType> = value.try_into()?;
-        let mut lists: Vec<(Vec<String>, Rule)> = Vec::with_capacity(tagged_lists.len());
+        let mut lists: Vec<CategoryRule> = Vec::with_capacity(tagged_lists.len());
         for list in tagged_lists {
             match list {
                 DataType::List(ref l) => {
@@ -244,12 +290,18 @@ impl TryFrom<DataType> for Vec<(Vec<String>, Rule)> {
                         None => return Err(QueryError::InvalidFunctionParameters(
                             format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
                     };
-                    let rule: Rule = match l.get(1) {
-                        Some(rule) => rule.try_into()?,
+                    let rule_data = match l.get(1) {
+                        Some(rule) => rule,
                         None => return Err(QueryError::InvalidFunctionParameters(
                             format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
                     };
-                    lists.push((category, rule));
+                    let priority = parse_optional_priority(rule_data)?;
+                    let rule: Rule = rule_data.try_into()?;
+                    lists.push(CategoryRule {
+                        category,
+                        rule,
+                        priority,
+                    });
                 }
                 ref invalid_type => {
                     return Err(QueryError::InvalidFunctionParameters(format!(

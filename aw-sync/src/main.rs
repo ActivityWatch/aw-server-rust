@@ -25,7 +25,11 @@ use std::time::Duration;
 use aw_client_rust::blocking::AwClient;
 
 mod accessmethod;
+mod dedupe;
 mod dirs;
+mod legacy_clean;
+mod report;
+mod status;
 mod sync;
 mod sync_wrapper;
 mod util;
@@ -48,7 +52,14 @@ struct Opts {
     #[clap(short = 'c', long = "config")]
     config: Option<PathBuf>,
 
+    /// Named instance profile (e.g. "default", "testing", "research").
+    /// `--testing` is an alias for `--profile testing`. Also reads AW_PROFILE,
+    /// which aw-qt exports for the modules it spawns.
+    #[clap(long)]
+    profile: Option<String>,
+
     /// Convenience option for using the default testing host and port.
+    /// Alias for `--profile testing`.
     #[clap(long)]
     testing: bool,
 
@@ -79,9 +90,10 @@ enum Commands {
         buckets: Option<Vec<String>>,
 
         /// Mode to sync in. Can be "push", "pull", or "both".
-        /// Defaults to "both".
-        #[clap(long, default_value = "both")]
-        mode: sync::SyncMode,
+        /// If not given, follows aw-sync's own config.toml: push-only unless
+        /// `pull = true` is set there (ActivityWatch/aw-server-rust#714).
+        #[clap(long)]
+        mode: Option<sync::SyncMode>,
 
         /// Full path to sync db file
         /// Useful for syncing buckets from a specific db file in the sync directory.
@@ -125,6 +137,51 @@ enum Commands {
     },
     /// List buckets and their sync status.
     List {},
+    /// Doctor: classify every entry in the sync folder and say why pull is empty.
+    ///
+    /// 3-level peers come from the same `RemoteDb` walker `pull_all` uses;
+    /// 2-level leftovers and unrecognised entries sit on top of that list.
+    /// Also prints the last persisted `SyncReport` (what the previous pass did).
+    /// Does not create staging files.
+    Status {
+        /// After the report, delete re-exported `-synced-from-` buckets from
+        /// this device's own staging databases (leftovers from before #648;
+        /// every reader already ignores them). Peers' files are never touched.
+        /// The deletion replicates to every device sharing the sync folder.
+        #[clap(long)]
+        clean_legacy: bool,
+
+        /// With --clean-legacy: list what would be pruned, change nothing.
+        #[clap(long, requires = "clean_legacy")]
+        dry_run: bool,
+    },
+    /// One-off cleanup: collapse exact-duplicate events in `-synced-from-`
+    /// buckets (accumulated by pre-#713 pull passes that re-imported the
+    /// resume-boundary event on every run).
+    ///
+    /// Only ever touches buckets carrying the `-synced-from-` marker; a
+    /// host's own first-hand buckets are never candidates. Duplicates are
+    /// exact matches on (timestamp, duration, data); the lowest-id (first
+    /// imported) copy of each group is kept.
+    ///
+    /// `-synced-from-` is an ID convention, not a bucket type bucket creation
+    /// reserves (#649 tracks moving provenance to metadata instead), so
+    /// deleting from every matching bucket unattended is refused: without
+    /// `--dry-run`, `--bucket` is required, naming buckets you reviewed.
+    ///
+    /// Note: each duplicate is removed with an individual HTTP call, so
+    /// cleaning up tens of thousands of duplicates can take a long time.
+    Dedupe {
+        /// Restrict to specific bucket id(s), comma separated. Every
+        /// `-synced-from-` bucket is checked with `--dry-run`; deleting
+        /// requires naming buckets here explicitly.
+        #[clap(long, value_parser=parse_list)]
+        bucket: Option<Vec<String>>,
+
+        /// Report duplicate counts without deleting anything.
+        #[clap(long)]
+        dry_run: bool,
+    },
 }
 
 fn parse_start_date(arg: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
@@ -153,7 +210,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Started aw-sync...");
 
-    aw_server::logging::setup_logger("aw-sync", opts.testing, verbose)?;
+    let env_profile = std::env::var("AW_PROFILE").ok();
+    let profile = dirs::resolve_profile(
+        opts.profile.as_deref(),
+        opts.testing,
+        env_profile.as_deref(),
+    );
+    aw_server::dirs::validate_profile(&profile)
+        .unwrap_or_else(|e| panic!("Invalid profile name: {e}"));
+    aw_server::config::set_profile(profile.clone());
+
+    aw_server::logging::setup_logger("aw-sync", &profile, verbose)?;
+
+    if opts.testing && opts.profile.as_deref().is_some_and(|p| p != "testing") {
+        warn!("--testing and --profile {profile} both given; --profile wins, using '{profile}'");
+    }
+    if profile != "default" {
+        info!("Running aw-sync with profile '{profile}'");
+    }
 
     // if sync_dir, set env var
     if let Some(sync_dir) = opts.sync_dir {
@@ -161,14 +235,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             Err("Sync dir must be absolute")?
         }
 
-        info!("Using sync dir: {}", &sync_dir.display());
+        info!("Using sync dir: {}", sync_dir.display());
         std::env::set_var("AW_SYNC_DIR", sync_dir);
     }
 
+    // Named profiles (and `--profile testing` without `--testing`) must use the
+    // profile's own server config / port default, not the CLI testing bool.
+    let testing = profile == "testing";
     let server_config = if util::is_loopback_host(&opts.host) {
-        util::get_server_config(opts.testing, opts.config.as_deref())?
+        util::get_server_config(testing, opts.config.as_deref())?
     } else {
-        util::ServerConfig::default_for(opts.testing)
+        util::ServerConfig::default_for(testing)
     };
     let port = opts.port.unwrap_or(server_config.port);
 
@@ -183,7 +260,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     match opts.command.unwrap_or(Commands::Daemon {
         start_date: None,
         buckets: None,
-        mode: sync::SyncMode::Both,
+        mode: None,
         sync_db: None,
     }) {
         // Start daemon
@@ -197,7 +274,36 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let effective_buckets = buckets;
 
-            daemon(&client, start_date, effective_buckets, sync_db, mode)?;
+            // An explicit --mode always wins and must not depend on config.toml
+            // being readable/writable — only touch the config file when no CLI
+            // mode was given.
+            let effective_mode = if let Some(explicit_mode) = mode {
+                info!(
+                    "aw-sync: explicit --mode {} overrides config",
+                    explicit_mode.as_str()
+                );
+                explicit_mode
+            } else {
+                let sync_config_dir = dirs::get_config_dir()?;
+                let (sync_config, sync_config_path) =
+                    dirs::load_or_create_sync_config(&sync_config_dir)?;
+                let effective_mode = dirs::effective_daemon_mode(None, sync_config.daemon.pull);
+                info!(
+                    "aw-sync config: {} (pull={}) -> daemon mode: {}",
+                    sync_config_path.display(),
+                    sync_config.daemon.pull,
+                    effective_mode.as_str()
+                );
+                effective_mode
+            };
+
+            daemon(
+                &client,
+                start_date,
+                effective_buckets,
+                sync_db,
+                effective_mode,
+            )?;
         }
         // Perform sync
         Commands::Sync {
@@ -217,7 +323,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             {
                 let sync_dir = dirs::get_sync_dir()?;
                 if let Some(db_path) = &sync_db {
-                    info!("Using sync db: {}", &db_path.display());
+                    info!("Using sync db: {}", db_path.display());
 
                     if !db_path.is_absolute() {
                         Err("Sync db path must be absolute")?
@@ -234,31 +340,72 @@ fn main() -> Result<(), Box<dyn Error>> {
                     start: start_date,
                 };
 
-                sync::sync_run(&client, &sync_spec, mode.unwrap_or(sync::SyncMode::Both))?
+                let report =
+                    sync::sync_run(&client, &sync_spec, mode.unwrap_or(sync::SyncMode::Both))?;
+                info!("{}", report.summary_message());
+                aw_sync_persist(&report);
             } else {
                 // Simple host-based sync mode (backwards compatibility)
+                let mut report = sync::SyncReport::new(sync::SyncMode::Both);
                 // Pull
                 match host {
                     Some(hosts) => {
                         for host in hosts.iter() {
                             info!("Pulling from host: {}", host);
-                            sync_wrapper::pull(host, &client)?;
+                            // A later host's `?` must not drop earlier hosts
+                            // from last-sync-report.json. Same contract as the
+                            // push-failure path below: persist the aggregate,
+                            // then propagate.
+                            match sync_wrapper::pull(host, &client) {
+                                Ok(one) => report.merge(one),
+                                Err(e) => {
+                                    report.record_pull_failure(host, &e);
+                                    report.finish();
+                                    info!("{}", report.summary_message());
+                                    aw_sync_persist(&report);
+                                    return Err(e);
+                                }
+                            }
                         }
                     }
                     None => {
                         info!("Pulling from all hosts");
-                        sync_wrapper::pull_all(&client)?;
+                        report.merge(sync_wrapper::pull_all(&client)?);
                     }
                 }
 
-                // Push
+                // Push. On failure the pull phase already did real work:
+                // persist what was pulled before propagating, so
+                // `aw-sync status` shows the pull, not just the push.
                 info!("Pushing local data");
-                sync_wrapper::push(&client)?
+                match sync_wrapper::push(&client) {
+                    Ok(push_report) => report.merge(push_report),
+                    Err(e) => {
+                        report.record_push_failure(&e);
+                        report.finish();
+                        info!("{}", report.summary_message());
+                        aw_sync_persist(&report);
+                        return Err(e);
+                    }
+                }
+                report.finish();
+                info!("{}", report.summary_message());
+                aw_sync_persist(&report);
             }
         }
 
         // List all buckets
         Commands::List {} => sync::list_buckets(&client)?,
+        Commands::Status {
+            clean_legacy,
+            dry_run,
+        } => {
+            status::run_status(&client, &opts.host, port, &profile)?;
+            if clean_legacy {
+                legacy_clean::run_clean_legacy(&client, dry_run)?;
+            }
+        }
+        Commands::Dedupe { bucket, dry_run } => dedupe::run_dedupe(&client, bucket, dry_run)?,
     }
 
     // Needed to give the datastores some time to commit before program is shut down.
@@ -284,7 +431,7 @@ fn daemon(
 
     let sync_dir = dirs::get_sync_dir()?;
     if let Some(db_path) = &sync_db {
-        info!("Using sync db: {}", &db_path.display());
+        info!("Using sync db: {}", db_path.display());
 
         if !db_path.is_absolute() {
             Err("Sync db path must be absolute")?
@@ -302,9 +449,17 @@ fn daemon(
     };
 
     loop {
-        if let Err(e) = sync::sync_run(client, &sync_spec, mode) {
-            error!("Error during sync cycle: {}", e);
-            return Err(e);
+        match sync::sync_run(client, &sync_spec, mode) {
+            Ok(report) => {
+                info!("{}", report.summary_message());
+                aw_sync_persist(&report);
+            }
+            Err(e) => {
+                // A failed cycle (server not yet listening at login, sync folder
+                // briefly unavailable) is retried on the next tick. Exiting here
+                // made aw-qt restart the daemon until it gave up with a dialog.
+                error!("Error during sync cycle, retrying in 5 minutes: {}", e);
+            }
         }
 
         info!("Sync pass done, sleeping for 5 minutes");
@@ -321,4 +476,8 @@ fn daemon(
     }
 
     Ok(())
+}
+
+fn aw_sync_persist(report: &sync::SyncReport) {
+    crate::report::persist_last_report_warn(report);
 }

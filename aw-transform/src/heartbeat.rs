@@ -44,9 +44,17 @@ pub fn heartbeat(last_event: &Event, heartbeat: &Event, pulsetime: f64) -> Optio
     };
 
     let duration = endtime.signed_duration_since(*starttime);
-    if duration.num_nanoseconds().unwrap() < 0 {
-        debug!("Merging heartbeats would result in a negative duration, refusing to merge!");
-        return None;
+    match duration.num_nanoseconds() {
+        Some(nanos) if nanos < 0 => {
+            debug!("Merging heartbeats would result in a negative duration, refusing to merge!");
+            return None;
+        }
+        // Events store their duration in nanoseconds (about 292 years at most).
+        None => {
+            debug!("Merging heartbeats would overflow the duration, refusing to merge!");
+            return None;
+        }
+        Some(_) => {}
     }
 
     // Success, return successful heartbeat last_event
@@ -179,5 +187,25 @@ mod tests {
         // Order shouldn't matter, should merge anyway
         let res_merge = heartbeat(&heartbeat_same_data, &event, 1.0).unwrap();
         assert_eq!(Duration::seconds(1), res_merge.duration);
+    }
+
+    #[test]
+    fn test_heartbeat_refuses_merge_that_overflows_duration() {
+        // Each event's duration fits in i64 nanoseconds, but the merged one
+        // doesn't: refuse to merge instead of panicking.
+        let start = Utc::now();
+        let event = Event {
+            id: None,
+            timestamp: start,
+            duration: Duration::seconds(0),
+            data: json_map! {"test": json!(1)},
+        };
+        let heartbeat_long = Event {
+            id: None,
+            timestamp: start + Duration::seconds(1),
+            duration: Duration::nanoseconds(i64::MAX),
+            data: json_map! {"test": json!(1)},
+        };
+        assert!(heartbeat(&event, &heartbeat_long, 10.0).is_none());
     }
 }

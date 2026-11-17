@@ -1,0 +1,720 @@
+//! In-memory cache for query results over finished (past) timeperiods.
+//!
+//! Port of `aw_server/query_cache.py` from ActivityWatch/aw-server#174.
+//!
+//! Clients such as aw-webui split long views (Year, All time) into one request
+//! per day, and every page load recomputes all of them. Past days rarely
+//! change, so we keep their results, keyed by (query text, timeperiod).
+//!
+//! Correctness rests on invalidation, not on "the past never changes":
+//!
+//! - Queries only read data through the bucket list and period-bounded event
+//!   reads, which return events whose extent overlaps the period.
+//! - Every write goes through the endpoint handlers in `bucket.rs` /
+//!   `import.rs`. After each write we record the time range it affected (the
+//!   full extent of every inserted, replaced, merged or deleted event) and drop
+//!   cached entries whose period overlaps it. Bucket create/delete/import
+//!   clears the cache, since they can change what the bucket list resolves to.
+//! - Race: a query that started before an overlapping write finished may have
+//!   read old data. Each computation records the write generation it started
+//!   at, and `put` refuses to store if any overlapping write happened since (or
+//!   if the write log no longer reaches back that far).
+//!
+//! Only periods that ended at least `margin` ago are cached, so the current
+//! hour and today are always computed fresh. The cache is in-memory only: a
+//! restart starts empty, which also covers any write that bypassed the API
+//! (e.g. editing the database file directly while the server was stopped).
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+
+use chrono::{DateTime, Duration, Utc};
+use sha2::{Digest, Sha256};
+
+use aw_models::Event;
+
+/// A closed time range `(start, end)`, both in UTC.
+pub type TimeRange = (DateTime<Utc>, DateTime<Utc>);
+
+/// Full extent of an event, as the datastore's overlap check sees it.
+pub fn event_range(event: &Event) -> TimeRange {
+    (event.timestamp, event.calculate_endtime())
+}
+
+/// Inclusive on both ends: conservative (may invalidate a touching period).
+fn overlaps(a: &TimeRange, b: &TimeRange) -> bool {
+    a.0 <= b.1 && b.0 <= a.1
+}
+
+/// Merge overlapping/touching ranges. Past `max_ranges`, fall back to one
+/// bounding range: over-invalidating after a big import is fine, scanning the
+/// cache once per imported event is not.
+pub fn coalesce(mut ranges: Vec<TimeRange>, max_ranges: usize) -> Vec<TimeRange> {
+    ranges.sort();
+    let mut merged: Vec<TimeRange> = Vec::new();
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => {
+                if end > last.1 {
+                    last.1 = end;
+                }
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+    if merged.len() > max_ranges {
+        let start = merged[0].0;
+        let end = merged.iter().map(|r| r.1).max().unwrap();
+        return vec![(start, end)];
+    }
+    merged
+}
+
+/// Cache identity: a fixed-size query identity plus the requested period.
+///
+/// Whitespace inside the query can be significant (string literals), so
+/// identity uses the full text — hashed to a 32-byte SHA-256. The hash is
+/// collision-resistant, so equality on it stands in for equality on the text
+/// while the key never owns the ~38 KB query the webui sends (3,417 daily
+/// entries of owned text would blow the 128 MB budget before a single
+/// All-time load completes).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct CacheKey {
+    query_id: [u8; 32],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+impl CacheKey {
+    pub fn new(query: &str, period: TimeRange) -> Self {
+        Self {
+            query_id: Sha256::digest(query.as_bytes()).into(),
+            start: period.0,
+            end: period.1,
+        }
+    }
+
+    /// Fixed overhead of the key (identity + timestamps). The query text is
+    /// not charged: the same ~38 KB webui query repeats for every day in long
+    /// views and would exhaust the 128 MB budget before a single All-time
+    /// load completes. This matches `aw_server/query_cache.py`, which counts
+    /// only `len(json.dumps(result))`.
+    fn weight(&self) -> usize {
+        std::mem::size_of::<[u8; 32]>() + 2 * std::mem::size_of::<DateTime<Utc>>()
+    }
+}
+
+struct Entry {
+    period: TimeRange,
+    /// The result, already serialized to JSON: it is produced once and reused
+    /// for both the size accounting and the response body.
+    body: Arc<str>,
+    size: usize,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct Inner {
+    entries: HashMap<CacheKey, Entry>,
+    bytes: usize,
+    /// Incremented once per write call, however many events it touched.
+    generation: u64,
+    /// Monotonic tick used for LRU ordering.
+    clock: u64,
+    /// `(generation, affected ranges)` of recent writes, oldest first.
+    writes: VecDeque<(u64, Vec<TimeRange>)>,
+    hits: u64,
+    misses: u64,
+    /// `(generation, ranges)` of writes not yet known to be committed, for
+    /// the read-only query handle: writes are acknowledged before the
+    /// writer's batch commits, so a query over an affected period must flush
+    /// first (ActivityWatch/aw-server-rust#807). Entries are removed by
+    /// `clear_pending_through` once a flush that started after them
+    /// succeeded, never before, so a concurrent query cannot see them
+    /// vanish while the commit is still in progress.
+    ///
+    /// Bounded to `write_log_size` entries. When it would grow beyond that,
+    /// `pending_flush_overflow` is set and the vec is cleared so memory stays
+    /// O(write_log_size) (ActivityWatch/aw-server-rust#808).
+    pending_flush: Vec<(u64, Vec<TimeRange>)>,
+    /// Set when `pending_flush` was truncated due to overflow. Causes
+    /// `pending_overlapping` to conservatively return `Some(generation)` for
+    /// any period until `clear_pending_through` is called with a generation
+    /// that covers `pending_flush_overflow_gen`.
+    pending_flush_overflow: bool,
+    /// Generation at which the latest overflow was detected; used by
+    /// `clear_pending_through` to know when the overflow has been resolved.
+    pending_flush_overflow_gen: u64,
+    /// True once `register_reader` has been called. When false, `invalidate`
+    /// skips `pending_flush` entirely since nothing reads it, so servers
+    /// without a reader (Android, encrypted, in-memory) never allocate it.
+    has_reader: bool,
+}
+
+/// Bounded cache of query results for finished past periods.
+///
+/// Thread-safe: all state sits behind a `Mutex`, so the cache can live in
+/// `ServerState` and be shared by every request.
+pub struct QueryCache {
+    max_entries: usize,
+    max_bytes: usize,
+    margin: Duration,
+    write_log_size: usize,
+    inner: Mutex<Inner>,
+}
+
+impl Default for QueryCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QueryCache {
+    pub fn new() -> Self {
+        Self::with_limits(10_000, 128 * 1024 * 1024, Duration::minutes(10), 10_000)
+    }
+
+    pub fn with_limits(
+        max_entries: usize,
+        max_bytes: usize,
+        margin: Duration,
+        write_log_size: usize,
+    ) -> Self {
+        Self {
+            max_entries,
+            max_bytes,
+            margin,
+            write_log_size: write_log_size.max(1),
+            inner: Mutex::new(Inner::default()),
+        }
+    }
+
+    /// Whether a period ended long enough ago to be cached. The current hour
+    /// and today are always computed fresh.
+    pub fn cacheable(&self, period: TimeRange) -> bool {
+        self.cacheable_at(period, Utc::now())
+    }
+
+    pub fn cacheable_at(&self, period: TimeRange, now: DateTime<Utc>) -> bool {
+        period.1 <= now - self.margin
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.inner.lock().unwrap().generation
+    }
+
+    /// Mark that a read-only query reader has been registered. After this
+    /// call `invalidate` will populate `pending_flush` so that
+    /// `pending_overlapping` can detect write–read races. Idempotent.
+    /// Call once, after opening the reader handle in `main.rs`.
+    pub fn register_reader(&self) {
+        self.inner.lock().unwrap().has_reader = true;
+    }
+
+    /// Return the cached result, serialized. It is shared, not copied.
+    pub fn get(&self, key: &CacheKey) -> Option<Arc<str>> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.clock += 1;
+        let clock = inner.clock;
+        let body = match inner.entries.get_mut(key) {
+            Some(entry) => {
+                entry.last_used = clock;
+                Some(Arc::clone(&entry.body))
+            }
+            None => None,
+        };
+        if body.is_some() {
+            inner.hits += 1;
+        } else {
+            inner.misses += 1;
+        }
+        body
+    }
+
+    /// Store `serialized` unless a write overlapping `period` happened after
+    /// `started_generation`. Returns whether the entry was stored.
+    pub fn put(
+        &self,
+        key: CacheKey,
+        period: TimeRange,
+        serialized: Arc<str>,
+        started_generation: u64,
+    ) -> bool {
+        let size = serialized.len().saturating_add(key.weight());
+        if size > self.max_bytes {
+            return false;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation != started_generation {
+            let oldest_logged = inner
+                .writes
+                .front()
+                .map(|(gen, _)| *gen)
+                .unwrap_or(inner.generation + 1);
+            if oldest_logged > started_generation + 1 {
+                // write log doesn't reach back far enough to tell
+                return false;
+            }
+            for (gen, affected) in inner.writes.iter() {
+                if *gen > started_generation && affected.iter().any(|r| overlaps(r, &period)) {
+                    return false;
+                }
+            }
+        }
+        inner.clock += 1;
+        let clock = inner.clock;
+        if let Some(old) = inner.entries.remove(&key) {
+            inner.bytes -= old.size;
+        }
+        inner.bytes += size;
+        inner.entries.insert(
+            key,
+            Entry {
+                period,
+                body: serialized,
+                size,
+                last_used: clock,
+            },
+        );
+        inner.evict(self.max_entries, self.max_bytes);
+        true
+    }
+
+    /// Record writes affecting `ranges` and drop overlapping entries. Call
+    /// after the write.
+    pub fn invalidate(&self, ranges: Vec<TimeRange>) {
+        let ranges = coalesce(ranges, 64);
+        if ranges.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.generation += 1;
+        let generation = inner.generation;
+        if inner.writes.len() == self.write_log_size {
+            inner.writes.pop_front();
+        }
+        inner.writes.push_back((generation, ranges.clone()));
+        if inner.has_reader {
+            inner.pending_flush.push((generation, ranges.clone()));
+            // Bound pending_flush to write_log_size entries. On overflow,
+            // clear it and set the overflow flag so pending_overlapping()
+            // conservatively requires a flush for every period until the
+            // overflow generation is cleared.
+            if inner.pending_flush.len() > self.write_log_size {
+                inner.pending_flush.clear();
+                inner.pending_flush_overflow = true;
+                // Every overflow discards ranges, including writes newer than
+                // an in-flight flush. Advance the watermark each time.
+                inner.pending_flush_overflow_gen = generation;
+            }
+        }
+        let stale: Vec<CacheKey> = inner
+            .entries
+            .iter()
+            .filter(|(_, entry)| ranges.iter().any(|r| overlaps(r, &entry.period)))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            if let Some(entry) = inner.entries.remove(&key) {
+                inner.bytes -= entry.size;
+            }
+        }
+    }
+
+    /// Drop everything (bucket list changed). Also blocks in-flight stores.
+    /// If a write not yet flushed touched one of `periods`, the current write
+    /// generation: commit the writer, then pass it to `clear_pending_through`.
+    pub fn pending_overlapping(&self, periods: &[TimeRange]) -> Option<u64> {
+        let inner = self.inner.lock().unwrap();
+        // Overflow means we lost track of some affected ranges; conservatively
+        // report a flush is needed for every period.
+        if inner.pending_flush_overflow {
+            return Some(inner.generation);
+        }
+        let hit = inner.pending_flush.iter().any(|(_, ranges)| {
+            ranges
+                .iter()
+                .any(|w| periods.iter().any(|p| overlaps(w, p)))
+        });
+        hit.then_some(inner.generation)
+    }
+
+    /// Forget pending writes recorded at or before `generation`: a flush that
+    /// started after them has succeeded. Later writes stay pending.
+    pub fn clear_pending_through(&self, generation: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.pending_flush.retain(|(g, _)| *g > generation);
+        if inner.pending_flush_overflow && generation >= inner.pending_flush_overflow_gen {
+            inner.pending_flush_overflow = false;
+            inner.pending_flush_overflow_gen = 0;
+        }
+    }
+
+    pub fn clear(&self) {
+        self.invalidate(vec![(DateTime::<Utc>::MIN_UTC, DateTime::<Utc>::MAX_UTC)]);
+        let mut inner = self.inner.lock().unwrap();
+        inner.entries.clear();
+        inner.bytes = 0;
+    }
+
+    pub fn stats(&self) -> QueryCacheStats {
+        let inner = self.inner.lock().unwrap();
+        QueryCacheStats {
+            entries: inner.entries.len(),
+            bytes: inner.bytes,
+            hits: inner.hits,
+            misses: inner.misses,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryCacheStats {
+    pub entries: usize,
+    pub bytes: usize,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+impl Inner {
+    fn evict(&mut self, max_entries: usize, max_bytes: usize) {
+        while (self.entries.len() > max_entries || self.bytes > max_bytes)
+            && !self.entries.is_empty()
+        {
+            let victim = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            match victim {
+                Some(key) => {
+                    if let Some(entry) = self.entries.remove(&key) {
+                        self.bytes -= entry.size;
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn dt(day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 9, day, hour, minute, 0).unwrap()
+    }
+
+    fn period(day: u32) -> TimeRange {
+        (dt(day, 0, 0), dt(day + 1, 0, 0))
+    }
+
+    fn result(value: f64) -> Arc<str> {
+        Arc::from(
+            serde_json::to_string(&aw_query::DataType::Number(value))
+                .unwrap()
+                .as_str(),
+        )
+    }
+
+    #[test]
+    fn only_periods_past_the_margin_are_cacheable() {
+        let cache = QueryCache::new();
+        let now = dt(10, 12, 0);
+        // ended 2h ago -> cacheable
+        assert!(cache.cacheable_at((dt(10, 8, 0), dt(10, 10, 0)), now));
+        // current hour -> never cached
+        assert!(!cache.cacheable_at((dt(10, 11, 0), dt(10, 12, 30)), now));
+        // ended 5 min ago -> inside the margin, not cached
+        assert!(!cache.cacheable_at((dt(10, 10, 0), dt(10, 11, 55)), now));
+    }
+
+    #[test]
+    fn put_then_get_roundtrips() {
+        let cache = QueryCache::new();
+        let key = CacheKey::new("RETURN = 1;", period(1));
+        let gen = cache.generation();
+        assert!(cache.put(key.clone(), period(1), result(1.0), gen));
+        let hit = cache.get(&key).expect("cached");
+        assert_eq!(&*hit, "1.0");
+        assert_eq!(cache.stats().hits, 1);
+    }
+
+    #[test]
+    fn overlapping_write_invalidates_entry() {
+        let cache = QueryCache::new();
+        let key = CacheKey::new("RETURN = 1;", period(1));
+        let gen = cache.generation();
+        cache.put(key.clone(), period(1), result(1.0), gen);
+        // a write well past the cached day does not overlap it
+        cache.invalidate(vec![(dt(5, 0, 0), dt(5, 1, 0))]);
+        assert!(cache.get(&key).is_some());
+        // write that overlaps day 1 drops it
+        cache.invalidate(vec![(dt(1, 10, 0), dt(1, 12, 0))]);
+        assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn store_is_refused_when_an_overlapping_write_raced_it() {
+        let cache = QueryCache::new();
+        let started = cache.generation();
+        cache.invalidate(vec![(dt(1, 10, 0), dt(1, 12, 0))]);
+        let key = CacheKey::new("RETURN = 1;", period(1));
+        assert!(!cache.put(key, period(1), result(1.0), started));
+    }
+
+    #[test]
+    fn store_succeeds_when_the_racing_write_does_not_overlap() {
+        let cache = QueryCache::new();
+        let started = cache.generation();
+        cache.invalidate(vec![(dt(5, 0, 0), dt(5, 1, 0))]);
+        let key = CacheKey::new("RETURN = 1;", period(1));
+        assert!(cache.put(key, period(1), result(1.0), started));
+    }
+
+    #[test]
+    fn explicit_clear_drops_everything() {
+        let cache = QueryCache::new();
+        let key = CacheKey::new("RETURN = 1;", period(1));
+        let gen = cache.generation();
+        cache.put(key.clone(), period(1), result(1.0), gen);
+        cache.clear();
+        assert!(cache.get(&key).is_none());
+        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().bytes, 0);
+    }
+
+    #[test]
+    fn entry_limit_evicts_least_recently_used() {
+        let cache = QueryCache::with_limits(2, 128 * 1024 * 1024, Duration::minutes(10), 100);
+        let key_a = CacheKey::new("a", period(1));
+        let key_b = CacheKey::new("b", period(1));
+        let key_c = CacheKey::new("c", period(1));
+        let gen = cache.generation();
+        cache.put(key_a.clone(), period(1), result(1.0), gen);
+        cache.put(key_b.clone(), period(1), result(2.0), gen);
+        // touch a so b becomes the LRU victim
+        assert!(cache.get(&key_a).is_some());
+        cache.put(key_c.clone(), period(1), result(3.0), gen);
+        assert_eq!(cache.stats().entries, 2);
+        assert!(cache.get(&key_b).is_none());
+        assert!(cache.get(&key_a).is_some());
+        assert!(cache.get(&key_c).is_some());
+    }
+
+    #[test]
+    fn byte_limit_is_enforced_by_result_size_not_query_text() {
+        // Room for entries of a couple of bytes plus the ~32-byte key timestamp overhead.
+        let cache = QueryCache::with_limits(100, 64, Duration::minutes(10), 100);
+        let gen = cache.generation();
+        cache.put(CacheKey::new("a", period(1)), period(1), result(1.0), gen);
+        cache.put(CacheKey::new("b", period(1)), period(1), result(2.0), gen);
+        assert!(cache.stats().bytes <= 64);
+
+        // A large query text does NOT count against the budget; only result size does.
+        // This is the fix for the All-time view getting 0% cache hits: the 38 KB webui
+        // query was charging ~130 MB for 3,417 days, exceeding the 128 MB max_bytes.
+        let large_query = CacheKey::new(&"x".repeat(4096), period(3));
+        assert!(cache.put(large_query, period(3), result(1.0), gen));
+
+        // But a large *result* that exceeds max_bytes on its own is still rejected.
+        let large_result: Arc<str> = Arc::from("x".repeat(65).as_str());
+        let big = CacheKey::new("q", period(4));
+        assert!(!cache.put(big, period(4), large_result, gen));
+    }
+
+    #[test]
+    fn all_time_view_fits_budget_with_large_query_text() {
+        // Regression for #784: 3,417 daily entries × 38 KB query > 128 MB key budget → 0% hits.
+        // After the fix, key weight charges only timestamps (~32 B), so 3,417 small results fit.
+        let cache = QueryCache::new(); // 128 MB budget
+        let base = dt(1, 0, 0);
+        let query = "x".repeat(38 * 1024); // ~38 KB webui fullDesktopQuery
+        let gen = cache.generation();
+        let mut stored = 0usize;
+        for i in 0..3417u64 {
+            let start = base + Duration::days(i as i64);
+            let end = start + Duration::days(1);
+            let key = CacheKey::new(&query, (start, end));
+            // result is tiny: a JSON number, ~5 bytes
+            if cache.put(key, (start, end), result(1.0), gen) {
+                stored += 1;
+            }
+        }
+        assert_eq!(
+            stored, 3417,
+            "All 3,417 daily entries must fit the 128 MB budget"
+        );
+        assert_eq!(cache.stats().entries, 3417);
+    }
+
+    #[test]
+    fn key_footprint_is_fixed_size_and_accounted() {
+        // The key must never own the query text: a 1 MB query's stored
+        // footprint equals a tiny query's (32-byte identity + 2 timestamps),
+        // and put() accounts for exactly the result body plus that footprint.
+        let tiny = CacheKey::new("a", period(1));
+        let huge = CacheKey::new(&"x".repeat(1024 * 1024), period(1));
+        assert_eq!(tiny.weight(), huge.weight());
+
+        let cache = QueryCache::new();
+        let gen = cache.generation();
+        let body = result(1.0);
+        assert!(cache.put(huge, period(1), body.clone(), gen));
+        let stats = cache.stats();
+        assert_eq!(
+            stats.entries, 1,
+            "the 1 MB-query entry must itself be resident"
+        );
+        assert_eq!(
+            stats.bytes,
+            body.len() + tiny.weight(),
+            "accounted bytes must track the stored key footprint"
+        );
+    }
+
+    #[test]
+    fn coalesce_merges_touching_and_bounds_the_result() {
+        let merged = coalesce(
+            vec![
+                (dt(1, 0, 0), dt(1, 1, 0)),
+                (dt(1, 1, 0), dt(1, 2, 0)),
+                (dt(1, 4, 0), dt(1, 5, 0)),
+            ],
+            64,
+        );
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0], (dt(1, 0, 0), dt(1, 2, 0)));
+
+        let folded = coalesce(
+            vec![
+                (dt(1, 0, 0), dt(1, 1, 0)),
+                (dt(2, 0, 0), dt(2, 1, 0)),
+                (dt(3, 0, 0), dt(3, 1, 0)),
+            ],
+            2,
+        );
+        assert_eq!(folded, vec![(dt(1, 0, 0), dt(3, 1, 0))]);
+    }
+
+    #[test]
+    fn pending_writes_are_cleared_only_through_the_flushed_generation() {
+        let cache = QueryCache::new();
+        cache.register_reader();
+        let t = |h: i64| Utc.with_ymd_and_hms(2000, 1, 1, h as u32, 0, 0).unwrap();
+        let period = (t(0), t(2));
+        assert_eq!(cache.pending_overlapping(&[period]), None);
+
+        cache.invalidate(vec![(t(1), t(1))]);
+        let gen1 = cache
+            .pending_overlapping(&[period])
+            .expect("write overlaps");
+        // A write acknowledged after the flush started must survive the clear.
+        cache.invalidate(vec![(t(1), t(1))]);
+        cache.clear_pending_through(gen1);
+        assert!(cache.pending_overlapping(&[period]).is_some());
+        let gen2 = cache.pending_overlapping(&[period]).unwrap();
+        cache.clear_pending_through(gen2);
+        assert_eq!(cache.pending_overlapping(&[period]), None);
+        // Non-overlapping periods never trigger a flush.
+        cache.invalidate(vec![(t(5), t(6))]);
+        assert_eq!(cache.pending_overlapping(&[period]), None);
+    }
+
+    #[test]
+    fn pending_flush_does_not_grow_without_reader() {
+        // Without register_reader(), invalidate() must never push to pending_flush.
+        let cache = QueryCache::with_limits(100, 128 * 1024 * 1024, Duration::minutes(10), 2);
+        // Use day() helper (period() covers one whole day each).
+        let far_future = (dt(20, 0, 0), dt(21, 0, 0));
+
+        // Many invalidations — no reader registered.
+        for d in 1u32..=28 {
+            cache.invalidate(vec![period(d)]);
+        }
+        // pending_flush never populated → no flush required.
+        assert_eq!(cache.pending_overlapping(&[far_future]), None);
+    }
+
+    #[test]
+    fn pending_flush_is_bounded_and_overflow_conservatively_triggers_flush() {
+        // write_log_size=2: pushing a 3rd entry triggers overflow.
+        let cache = QueryCache::with_limits(100, 128 * 1024 * 1024, Duration::minutes(10), 2);
+        cache.register_reader();
+
+        cache.invalidate(vec![period(1)]);
+        cache.invalidate(vec![period(2)]);
+        // Two entries: no overflow yet.
+        assert!(cache.pending_overlapping(&[period(1)]).is_some());
+
+        // Third invalidation triggers overflow.
+        cache.invalidate(vec![period(3)]);
+        // Overflow → conservatively flush even for a non-overlapping period (day 28).
+        let far = period(28);
+        assert!(
+            cache.pending_overlapping(&[far]).is_some(),
+            "overflow must trigger a conservative flush"
+        );
+
+        // Clearing through the overflow generation resolves it.
+        let gen = cache.pending_overlapping(&[far]).unwrap();
+        cache.clear_pending_through(gen);
+        assert_eq!(cache.pending_overlapping(&[far]), None);
+    }
+
+    #[test]
+    fn repeated_overflow_survives_an_older_flush() {
+        let cache = QueryCache::with_limits(100, 128 * 1024 * 1024, Duration::minutes(10), 1);
+        cache.register_reader();
+
+        cache.invalidate(vec![period(1)]);
+        cache.invalidate(vec![period(2)]);
+        let first_flush = cache.pending_overlapping(&[period(28)]).unwrap();
+
+        // Another overflow occurs after the first flush captured its generation.
+        cache.invalidate(vec![period(3)]);
+        cache.invalidate(vec![period(4)]);
+        cache.clear_pending_through(first_flush);
+        assert_eq!(
+            cache.pending_overlapping(&[period(4)]),
+            Some(4),
+            "an older flush must not forget writes discarded by a newer overflow"
+        );
+        assert_eq!(cache.pending_overlapping(&[period(28)]), Some(4));
+
+        cache.clear_pending_through(4);
+        assert_eq!(cache.pending_overlapping(&[period(4)]), None);
+        assert_eq!(cache.pending_overlapping(&[period(28)]), None);
+    }
+
+    #[test]
+    fn overflow_cleared_only_when_generation_covers_it() {
+        // write_log_size=1: 2nd entry immediately overflows.
+        let cache = QueryCache::with_limits(100, 128 * 1024 * 1024, Duration::minutes(10), 1);
+        cache.register_reader();
+
+        cache.invalidate(vec![period(1)]); // gen=1, pending=[gen1]
+        cache.invalidate(vec![period(2)]); // gen=2, overflow at gen=2, pending=[]
+
+        // Add another write after overflow.
+        cache.invalidate(vec![period(3)]); // gen=3, pending=[gen3]
+
+        let far = period(28);
+
+        // Clear through gen=1 (before overflow_gen=2): overflow must survive.
+        cache.clear_pending_through(1);
+        assert!(
+            cache.pending_overlapping(&[far]).is_some(),
+            "overflow should persist after clear_pending_through(1)"
+        );
+
+        // Clear through gen=2 (== overflow_gen): overflow is resolved.
+        cache.clear_pending_through(2);
+        // gen=3 write is still pending but non-overlapping with day 28.
+        assert_eq!(cache.pending_overlapping(&[far]), None);
+        // gen=3 write still overlaps day 3.
+        assert!(cache.pending_overlapping(&[period(3)]).is_some());
+    }
+}

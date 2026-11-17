@@ -96,6 +96,713 @@ mod sync_tests {
             .collect()
     }
 
+    /// A datastore failure must not panic.
+    ///
+    /// On Android the sync step runs inside a JNI `extern "C"` frame, where an
+    /// unwinding panic aborts the whole app process rather than surfacing as an
+    /// exception — the SIGABRT in ActivityWatch/aw-android#220. `sync_datastores`
+    /// used to `unwrap()` every datastore call, so any failure here was fatal.
+    ///
+    /// Since the per-bucket non-fatal change (#692), a broken *sibling* does
+    /// not abort the whole pass. A pass where every bucket fails is still Err
+    /// so callers can tell it from success. No panic is the key invariant.
+    #[test]
+    fn test_unusable_datastore_does_not_panic() {
+        let state = init_teststate();
+        create_bucket(&state.ds_src, 0);
+
+        // A datastore whose database file cannot be opened: its worker is gone,
+        // so every request fails.
+        let ds_broken = create_datastore(Path::new(
+            "/nonexistent-directory-for-aw-sync-tests/test.db",
+        ))
+        .expect("path is valid UTF-8");
+
+        // Previously this panicked (unwrap on datastore failure). Per-bucket
+        // skip makes a *partial* failure non-fatal, but every bucket failing
+        // (destination down) must still be Err so callers can tell it from
+        // success. The key property: it must not panic.
+        let result = aw_sync::sync_datastores(
+            &state.ds_src,
+            &ds_broken,
+            true,
+            Some("device-0"),
+            &SyncSpec::default(),
+        );
+        let err =
+            result.expect_err("total bucket failure must return Err, not Ok(()); must not panic");
+        assert!(
+            err.contains("all 1 buckets failed"),
+            "error should report total failure, got: {err}"
+        );
+    }
+
+    /// Pulling a peer whose bucket hostname contains whitespace must not fail with
+    /// a 400: aw-server-rust rejects new buckets with whitespace hostnames (#658).
+    /// `get_or_create_sync_bucket` must sanitize the hostname (and derived ID)
+    /// before creating, while still re-using any legacy unsanitized bucket that
+    /// was imported before the sanitization was added.
+    #[test]
+    fn test_whitespace_hostname_pull_creates_sanitized_bucket() {
+        let state = init_teststate();
+
+        // Source bucket whose hostname contains a space, as produced by Android
+        // devices that were named before aw-android added hostname sanitization
+        // (ActivityWatch/aw-android#272).
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        // In-memory datastore does not enforce the server-side whitespace check,
+        // so the sync completes without 400.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+
+        // Must match aw-android's sanitizeDeviceHostname, not a whitespace-only
+        // replace ("POCO_F8_Ultra" would fork when Android migrates).
+        let sanitized_id = "aw-watcher-android-synced-from-poco_f8_ultra";
+        assert!(
+            dest_buckets.contains_key(sanitized_id),
+            "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        // No whitespace bucket must have been created.
+        let whitespace_id = "aw-watcher-android-synced-from-POCO F8 Ultra";
+        assert!(
+            !dest_buckets.contains_key(whitespace_id),
+            "whitespace bucket id '{whitespace_id}' must not be created"
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-android-synced-from-POCO_F8_Ultra"),
+            "whitespace-only replace must not be used; got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+
+        // The hostname field on the destination bucket must also be sanitized.
+        let dest_bucket = dest_buckets.get(sanitized_id).unwrap();
+        assert_eq!(
+            dest_bucket.hostname, "poco_f8_ultra",
+            "destination hostname must match Android's sanitizer"
+        );
+        // $aw.sync.origin keeps the raw hostname so the pre-migration phone
+        // identity is still recoverable.
+        assert_eq!(
+            dest_bucket
+                .data
+                .get("$aw.sync.origin")
+                .and_then(|v| v.as_str()),
+            Some("POCO F8 Ultra")
+        );
+    }
+
+    /// If a legacy unsanitized bucket already exists in the destination (imported
+    /// before the sanitization was added), re-use it instead of creating a new
+    /// sanitized one.  Creating a sanitized copy forks the destination and causes
+    /// a full re-import (ActivityWatch/activitywatch#1373).
+    #[test]
+    fn test_whitespace_hostname_pull_reuses_legacy_unsanitized_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        // Simulate a pre-existing legacy destination bucket with unsanitized ID.
+        let legacy_id = "aw-watcher-android-synced-from-POCO F8 Ultra";
+        let legacy_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": legacy_id,
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&legacy_bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+
+        // The legacy bucket must be present and re-used — not replaced.
+        assert!(
+            dest_buckets.contains_key(legacy_id),
+            "legacy unsanitized bucket must be preserved"
+        );
+        // No new sanitized duplicate must have been created.
+        let sanitized_id = "aw-watcher-android-synced-from-poco_f8_ultra";
+        assert!(
+            !dest_buckets.contains_key(sanitized_id),
+            "a sanitized fork must not be created when legacy bucket exists, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// A desktop that imported the peer **before** ActivityWatch/aw-server-rust#697
+    /// landed holds `…-synced-from-POCO F8 Ultra` (raw, with `$aw.sync.origin` set
+    /// to the raw value by #697's import stamp).  After ActivityWatch/aw-android#273
+    /// migrates the phone's hostname to `poco_f8_ultra`, first-hand buckets carry no
+    /// `$aw.sync.origin`, so the two direct lookups miss.  The pre-#697 fallback scan
+    /// must find the legacy bucket and resume from it rather than creating a new one
+    /// that triggers a full re-import.
+    #[test]
+    fn test_pre697_origin_scan_resumes_legacy_bucket() {
+        let state = init_teststate();
+
+        // Post-migration phone bucket: sanitized hostname, no $aw.sync.origin.
+        let src_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "poco_f8_ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&src_bucket).unwrap();
+
+        // Pre-#697 destination bucket: raw ID + $aw.sync.origin stamped by #697.
+        let legacy_id = "aw-watcher-android-synced-from-POCO F8 Ultra";
+        let legacy_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": legacy_id,
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android",
+            "data": {"$aw.sync.origin": "POCO F8 Ultra"}
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&legacy_bucket).unwrap();
+
+        // Seed the legacy destination bucket with one event at T0 — simulating
+        // previously-imported history.  This establishes the resume cursor.
+        let t0 = Utc::now();
+        let existing_event: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": t0.to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "existing"}
+        }))
+        .unwrap();
+        state
+            .ds_dest
+            .insert_events(legacy_id, &[existing_event])
+            .unwrap();
+        state.ds_dest.force_commit().unwrap();
+
+        // Two source events: one before T0 (already covered) and one after T0 (new).
+        // The sync must read the cursor from the reused bucket and import only the
+        // post-T0 event — not re-import everything from scratch.
+        let before_t0: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": (t0 - Duration::hours(1)).to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "old"}
+        }))
+        .unwrap();
+        let after_t0: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": (t0 + Duration::hours(1)).to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "new"}
+        }))
+        .unwrap();
+        state
+            .ds_src
+            .insert_events("aw-watcher-android", &[before_t0, after_t0])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+
+        // The legacy bucket must be reused, not replaced.
+        assert!(
+            dest_buckets.contains_key(legacy_id),
+            "legacy bucket must be preserved"
+        );
+        // No new sanitized fork must appear.
+        let forked_id = "aw-watcher-android-synced-from-poco_f8_ultra";
+        assert!(
+            !dest_buckets.contains_key(forked_id),
+            "a sanitized fork must not be created; got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        // Exactly 2 events: the pre-existing one at T0 plus the new T0+1h event.
+        // A count of 3 would mean the cursor was NOT read (full re-import from scratch).
+        let event_count = state
+            .ds_dest
+            .get_event_count(legacy_id, None, None)
+            .unwrap();
+        assert_eq!(
+            event_count, 2,
+            "legacy bucket must have exactly 2 events (existing + new); \
+             3 would mean the cursor was ignored and history was re-imported"
+        );
+    }
+
+    /// Two distinct pre-#697 buckets for the same base ID whose `$aw.sync.origin`
+    /// values sanitize to the same target must trigger an error rather than a
+    /// silent merge (ActivityWatch/aw-server-rust#697 :368).
+    #[test]
+    fn test_pre697_origin_scan_refuses_ambiguous_candidates() {
+        let state = init_teststate();
+
+        // Ambiguous source bucket: two pre-#697 destination buckets share the same
+        // sanitized origin — sync_one must skip this bucket with a warning, not abort.
+        let src_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "poco_f8_ultra",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&src_bucket).unwrap();
+
+        // A second, healthy source bucket that must sync successfully even while the
+        // ambiguous bucket is being skipped — one unresolvable bucket must not abort
+        // the whole peer sync.
+        let healthy_id = "aw-watcher-window";
+        let healthy_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": healthy_id,
+            "type": "currentwindow",
+            "hostname": "poco_f8_ultra",
+            "client": "aw-qt"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&healthy_bucket).unwrap();
+
+        let ts = Utc::now();
+        let ev: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "test"}
+        }))
+        .unwrap();
+        state.ds_src.insert_events(healthy_id, &[ev]).unwrap();
+
+        // The ambiguous bucket must ALSO carry an event. Otherwise a regression that
+        // silently reused one of the two legacy candidates would copy nothing, both
+        // legacy buckets would still read 0 events, and the refusal assertions below
+        // would pass vacuously. With a real event present, only an actual skip keeps
+        // them at 0.
+        let ev_ambiguous: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 1,
+            "data": {"app": "ambiguous"}
+        }))
+        .unwrap();
+        state
+            .ds_src
+            .insert_events(&src_bucket.id, &[ev_ambiguous])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // Premise guard: the refusal assertions below are only meaningful if the
+        // ambiguous source bucket actually has something to copy.
+        assert_eq!(
+            state
+                .ds_src
+                .get_event_count(&src_bucket.id, None, None)
+                .unwrap(),
+            1,
+            "premise: the ambiguous source bucket must carry one event"
+        );
+
+        // Two legacy destination buckets whose origins both sanitize to "poco_f8_ultra".
+        for (legacy_id, raw_origin) in [
+            (
+                "aw-watcher-android-synced-from-POCO F8 Ultra",
+                "POCO F8 Ultra",
+            ),
+            (
+                "aw-watcher-android-synced-from-Poco F8 Ultra",
+                "Poco F8 Ultra",
+            ),
+        ] {
+            let b: Bucket = serde_json::from_value(serde_json::json!({
+                "id": legacy_id,
+                "type": "currentwindow",
+                "hostname": raw_origin,
+                "client": "aw-android",
+                "data": {"$aw.sync.origin": raw_origin}
+            }))
+            .unwrap();
+            state.ds_dest.create_bucket(&b).unwrap();
+        }
+
+        // The ambiguous android bucket is skipped (warn+continue); the healthy window
+        // bucket syncs normally.  sync_datastores must return Ok overall.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+
+        // The healthy bucket was synced — it has a destination and received events.
+        let healthy_dest_id = "aw-watcher-window-synced-from-poco_f8_ultra";
+        assert!(
+            dest_buckets.contains_key(healthy_dest_id),
+            "healthy bucket must be synced even when another bucket is ambiguous; got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        let healthy_count = state
+            .ds_dest
+            .get_event_count(healthy_dest_id, None, None)
+            .unwrap();
+        assert!(healthy_count > 0, "healthy bucket must have events synced");
+
+        // The two ambiguous legacy buckets were not written to — the conflict was
+        // skipped, not merged.  The source bucket holds an event (premise guard
+        // above), so a silent pick-one-candidate regression would make one of these
+        // counts 1 and fail here.
+        for legacy_id in [
+            "aw-watcher-android-synced-from-POCO F8 Ultra",
+            "aw-watcher-android-synced-from-Poco F8 Ultra",
+        ] {
+            let count = state
+                .ds_dest
+                .get_event_count(legacy_id, None, None)
+                .unwrap();
+            assert_eq!(
+                count, 0,
+                "ambiguous legacy bucket '{legacy_id}' must not have received events"
+            );
+        }
+    }
+
+    /// Case-only hostnames (`PIXEL8`) have no whitespace, so a whitespace-only
+    /// guard would leave the destination as `…-synced-from-PIXEL8`. Android's
+    /// later hostname migration produces `pixel8` and forks the history.
+    #[test]
+    fn test_case_only_hostname_pull_creates_sanitized_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "PIXEL8",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        let sanitized_id = "aw-watcher-android-synced-from-pixel8";
+        assert!(
+            dest_buckets.contains_key(sanitized_id),
+            "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-android-synced-from-PIXEL8"),
+            "case-only fork must not be created, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(dest_buckets.get(sanitized_id).unwrap().hostname, "pixel8");
+    }
+
+    /// Dotted desktop hostnames (`erb-m2.localdomain`) sanitize punctuation to
+    /// `_` for *new* imports. Existing raw IDs are still found via the raw lookup.
+    #[test]
+    fn test_dotted_hostname_pull_creates_sanitized_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-window",
+            "type": "currentwindow",
+            "hostname": "erb-m2.localdomain",
+            "client": "aw-watcher-window"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        let sanitized_id = "aw-watcher-window-synced-from-erb-m2_localdomain";
+        assert!(
+            dest_buckets.contains_key(sanitized_id),
+            "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-window-synced-from-erb-m2.localdomain"),
+            "dotted raw id must not be created for new imports, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// If a legacy case-only bucket already exists, re-use it rather than
+    /// creating `…-synced-from-pixel8` beside `…-synced-from-PIXEL8`.
+    #[test]
+    fn test_case_only_hostname_pull_reuses_legacy_bucket() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "PIXEL8",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        let legacy_id = "aw-watcher-android-synced-from-PIXEL8";
+        let legacy_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": legacy_id,
+            "type": "currentwindow",
+            "hostname": "PIXEL8",
+            "client": "aw-android"
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&legacy_bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        assert!(
+            dest_buckets.contains_key(legacy_id),
+            "legacy case-only bucket must be preserved"
+        );
+        assert!(
+            !dest_buckets.contains_key("aw-watcher-android-synced-from-pixel8"),
+            "a sanitized fork must not be created when legacy bucket exists, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// If `$aw.sync.origin` is already clean while `bucket.hostname` still has
+    /// whitespace, the sanitizer must still run: otherwise `create_bucket` 400s
+    /// on the hostname field even though the derived ID is legal.
+    #[test]
+    fn test_whitespace_hostname_sanitizes_even_when_id_is_clean() {
+        let state = init_teststate();
+
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "aw-watcher-android",
+            "type": "currentwindow",
+            "hostname": "POCO F8 Ultra",
+            "client": "aw-android",
+            "data": {"$aw.sync.origin": "poco_f8_ultra"}
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        let sanitized_id = "aw-watcher-android-synced-from-poco_f8_ultra";
+        let dest_bucket = dest_buckets.get(sanitized_id).unwrap_or_else(|| {
+            panic!(
+                "expected sanitized bucket id '{sanitized_id}', got: {:?}",
+                dest_buckets.keys().collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(dest_bucket.hostname, "poco_f8_ultra");
+    }
+
+    /// A hostname that contains whitespace but sanitizes to the "unknown"
+    /// sentinel (e.g. `" * "`) must not create `-synced-from-unknown` on pull —
+    /// that ID is shared by every such remote and would mix events. The bucket
+    /// is skipped; a healthy sibling still syncs (per-bucket non-fatal).
+    #[test]
+    fn test_whitespace_hostname_that_sanitizes_to_unknown_is_skipped_on_pull() {
+        let state = init_teststate();
+
+        let junk: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-junk",
+            "type": "test",
+            "hostname": " * ",
+            "client": "test"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&junk).unwrap();
+
+        let healthy: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-healthy",
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test"
+        }))
+        .unwrap();
+        state.ds_src.create_bucket(&healthy).unwrap();
+
+        let result = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        );
+        assert!(
+            result.is_ok(),
+            "junk hostname must skip that bucket, not abort the pass; got {result:?}"
+        );
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        assert!(
+            !dest_buckets
+                .keys()
+                .any(|k| k.contains("bucket-junk") || k.ends_with("-synced-from-unknown")),
+            "must not create -synced-from-unknown, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            dest_buckets.contains_key("bucket-healthy-synced-from-device-0"),
+            "healthy sibling must still sync, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Bucket metadata of an unexpected shape must not panic:
+    /// `$aw.sync.origin` is read from data written by another host, so it is not
+    /// under this host's control.
+    ///
+    /// With the per-bucket non-fatal change (#692), a malformed bucket is now
+    /// skipped (warn + continue) rather than aborting the whole sync pass.
+    #[test]
+    fn test_non_string_sync_origin_does_not_panic() {
+        let state = init_teststate();
+        let bucket: Bucket = serde_json::from_str(
+            r#"{
+            "id": "bucket-weird",
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test",
+            "data": {"$aw.sync.origin": 42}
+        }"#,
+        )
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        // Previously this panicked. A single malformed bucket is a total
+        // failure of the pass, so it must return Err (not Ok after skip).
+        // No panic is still the key invariant.
+        let result = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull: this is the path that reads $aw.sync.origin
+            None,
+            &SyncSpec::default(),
+        );
+        let err = result.expect_err("total failure of a one-bucket pass must be Err");
+        assert!(
+            err.contains("all 1 buckets failed"),
+            "error should report total failure, got: {err}"
+        );
+        // The malformed bucket must have been skipped, not imported.
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        assert!(
+            dest_buckets.is_empty(),
+            "skipped bucket must not appear in destination, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// A pulled bucket whose hostname is the "unknown" sentinel has no provenance,
+    /// and pull passes no source device ID to substitute. Continuing would map
+    /// every such bucket from every remote onto one `-synced-from-unknown`
+    /// destination, mixing events from unrelated devices — so refuse the sync.
+    /// (The old code unwrapped the `None` here, i.e. aborted the app on Android.)
+    #[test]
+    fn test_unknown_hostname_on_pull_returns_error() {
+        let state = init_teststate();
+        let bucket: Bucket = serde_json::from_str(
+            r#"{
+            "id": "bucket-unknown-host",
+            "type": "test",
+            "hostname": "unknown",
+            "client": "test"
+        }"#,
+        )
+        .unwrap();
+        state.ds_src.create_bucket(&bucket).unwrap();
+
+        let result = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull: no source device ID is passed
+            None,
+            &SyncSpec::default(),
+        );
+        let err = result.expect_err("an unknown hostname on pull must return Err");
+        assert!(
+            err.contains("bucket-unknown-host"),
+            "error should name the bucket, got: {err}"
+        );
+
+        // On push the source device ID is known, so the same bucket syncs fine.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            true,
+            Some("device-0"),
+            &SyncSpec::default(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_buckets_created() {
         // TODO: Split up this test
@@ -108,11 +815,45 @@ mod sync_tests {
             false,
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let buckets_src: HashMap<String, Bucket> = state.ds_src.get_buckets().unwrap();
         let buckets_dest: HashMap<String, Bucket> = state.ds_dest.get_buckets().unwrap();
         assert!(buckets_src.len() == buckets_dest.len());
+    }
+
+    #[test]
+    fn test_sync_datastores_returns_new_event_counts() {
+        let state = init_teststate();
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        create_events(&state.ds_src, &bucket_id, 3);
+
+        let reports = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].events_new, 3);
+        assert!(
+            reports[0].bucket_id.contains("-synced-from-"),
+            "pull destination id should carry provenance, got {}",
+            reports[0].bucket_id
+        );
+
+        let second = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(second[0].events_new, 0, "second pull must be a no-op");
     }
 
     /// On pull (is_push=false), the destination bucket should have $aw.sync.origin set to
@@ -130,7 +871,8 @@ mod sync_tests {
             true, // is_push
             Some("device-0"),
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let push_buckets = state.ds_dest.get_buckets().unwrap();
         let push_bucket = push_buckets.get(&bucket_id).expect("push bucket not found");
@@ -148,7 +890,8 @@ mod sync_tests {
             false, // is_push (pull)
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let pull_buckets = ds_pull_dest.get_buckets().unwrap();
         let pull_bucket_id = format!("{bucket_id}-synced-from-device-0");
@@ -192,7 +935,8 @@ mod sync_tests {
             true, // is_push
             Some("device-0"),
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let push_buckets = state.ds_dest.get_buckets().unwrap();
         let push_bucket = push_buckets.get(&bucket_id).expect("push bucket not found");
@@ -237,7 +981,8 @@ mod sync_tests {
             false,
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let all_datastores: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
         let all_buckets_map = get_all_buckets_map(all_datastores);
@@ -256,7 +1001,8 @@ mod sync_tests {
             false,
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);
@@ -275,7 +1021,8 @@ mod sync_tests {
             false,
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let all_datastores: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
         let all_buckets_map = get_all_buckets_map(all_datastores);
@@ -291,7 +1038,8 @@ mod sync_tests {
             false,
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         // Check again that new events were indeed synced
         check_synced_buckets_equal_to_src(&all_buckets_map);
@@ -313,7 +1061,8 @@ mod sync_tests {
             false,
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let all_datastores_1: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
         check_synced_buckets_equal_to_src(&get_all_buckets_map(all_datastores_1));
@@ -326,7 +1075,8 @@ mod sync_tests {
             false,
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let all_datastores_2: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
         check_synced_buckets_equal_to_src(&get_all_buckets_map(all_datastores_2));
@@ -350,7 +1100,8 @@ mod sync_tests {
             false,
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let all_datastores_1: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
         check_synced_buckets_equal_to_src(&get_all_buckets_map(all_datastores_1));
@@ -364,18 +1115,20 @@ mod sync_tests {
             false,
             None,
             &SyncSpec::default(),
-        );
+        )
+        .unwrap();
 
         let all_datastores_2: Vec<&Datastore> = [&state.ds_src, &state.ds_dest].to_vec();
         check_synced_buckets_equal_to_src(&get_all_buckets_map(all_datastores_2));
     }
 
     // TODO: Find a way to reuse this (previously used in an integration test)
+    #[allow(dead_code)]
     fn setup_test(sync_directory: &Path) -> std::io::Result<Vec<Datastore>> {
         let mut datastores: Vec<Datastore> = Vec::new();
         for n in 0..2 {
             let dspath = sync_directory.join(format!("test-remote-{n}.db"));
-            let ds_ = create_datastore(&dspath);
+            let ds_ = create_datastore(&dspath).expect("test db path is valid UTF-8");
             let ds = &ds_ as &dyn AccessMethod;
 
             // Create a bucket
@@ -422,5 +1175,356 @@ mod sync_tests {
             datastores.push(ds_);
         }
         Ok(datastores)
+    }
+
+    /// Regression test for ActivityWatch/aw-server-rust#711 — Symptom 1.
+    ///
+    /// When the newest destination event has duration=0, `resume_sync_at` equals
+    /// its own timestamp. The inclusive source fetch re-imports that event on every
+    /// subsequent pass, growing the destination by 1 on each run. After a no-op
+    /// second sync (no new source events) the destination count must not grow.
+    #[test]
+    fn test_sync_no_duplicate_on_zero_duration_boundary() {
+        let state = init_teststate();
+
+        // create_event always sets duration=0; this is the boundary case.
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+        create_events(&state.ds_src, bucket_id.as_str(), 3);
+
+        // First sync — imports all 3 events.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            3,
+            "first sync must import all 3 events"
+        );
+
+        // Second sync — no new source events; must not re-import the boundary event.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            3,
+            "second sync with no new source events must not create a duplicate"
+        );
+    }
+
+    /// Regression test for ActivityWatch/aw-server-rust#711 — Symptom 2.
+    ///
+    /// Two source events share the exact same timestamp (e.g. a stopwatch
+    /// `running:true` with duration=0 and a `running:false` with duration>0).
+    /// `get_events(limit=1)` may return the duration=0 event, setting
+    /// `resume_sync_at = T`, causing the non-duplicate event to be re-inserted on
+    /// every subsequent pass. After both events are synced, further passes must
+    /// import 0 new events.
+    #[test]
+    fn test_sync_no_duplicate_with_timestamp_ties() {
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+
+        // Two events at the exact same timestamp — the tie that triggers the bug.
+        let ts: DateTime<Utc> = Utc::now();
+        let e_running: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 0,
+            "data": {"label": "Testing", "running": true}
+        }))
+        .unwrap();
+        let e_finished: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 182.0,
+            "data": {"label": "Testing", "running": false}
+        }))
+        .unwrap();
+
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &[e_running, e_finished])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // First sync — both events must be imported.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "first sync must import both tied-timestamp events"
+        );
+
+        // Second sync — no new source events; neither tied event must be duplicated.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "second sync must not duplicate tied-timestamp boundary events"
+        );
+
+        // Third sync — stability check.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "third sync must not introduce further duplicates"
+        );
+    }
+
+    /// Regression test for the "Clipping Defeats Boundary Dedup" review finding on
+    /// ActivityWatch/aw-server-rust#713.
+    ///
+    /// When the newest destination event has a *positive* duration (not just the
+    /// duration=0 case from #711 Symptom 1), `resume_sync_at` is set to that event's
+    /// end time. The resumed source query then re-fetches the same event clipped to
+    /// the query start, i.e. with the event's original (timestamp, duration) replaced
+    /// by (resume_sync_at, 0). A dedup fingerprint keyed on (start, duration) cannot
+    /// match this clipped copy against the unclipped destination event, so the fix
+    /// must dedup on something invariant under start-clipping (end time), not on
+    /// start+duration.
+    #[test]
+    fn test_sync_no_duplicate_on_positive_duration_boundary() {
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+        let base_ts: DateTime<Utc> = Utc::now();
+
+        // A single event with a positive duration — the only (and therefore boundary)
+        // event in the bucket. Its end (base_ts + 182.639s) becomes resume_sync_at.
+        let boundary: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": base_ts.to_rfc3339(),
+            "duration": 182.639,
+            "data": {"label": "Testing"}
+        }))
+        .unwrap();
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &[boundary])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // First sync — imports the one boundary event.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            1,
+            "first sync must import the positive-duration boundary event"
+        );
+
+        // Add more new events than the test BATCH_SIZE (5) so the follow-up sync spans
+        // multiple pages. This matters: a single-page sync routes the oldest event
+        // through heartbeat() (see sync_one), whose delta=0.0 adjacency merge happens
+        // to absorb the clipped boundary duplicate and would mask this bug. A
+        // multi-page sync routes the last page through insert_events() instead, which
+        // exposes the duplicate directly if the dedup fingerprint fails to match.
+        // Timestamps are placed well after the boundary's end so they aren't
+        // themselves clipped or excluded by the resume-boundary query.
+        let new_events: Vec<Event> = (0..6)
+            .map(|i| {
+                let ts = base_ts + Duration::seconds(200 + i * 10);
+                serde_json::from_value(serde_json::json!({
+                    "timestamp": ts.to_rfc3339(),
+                    "duration": 0,
+                    "data": {"label": format!("new-{i}")}
+                }))
+                .unwrap()
+            })
+            .collect();
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &new_events)
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // Second sync — the clipped re-fetch of the boundary event must be recognized
+        // as a duplicate and skipped, not inserted as a spurious zero-duration copy
+        // alongside the 6 genuinely new events.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            7,
+            "second sync must import the 6 new events without re-duplicating \
+             the positive-duration boundary event"
+        );
+    }
+
+    /// Regression test for the HTTP/peewee boundary-dedup gap.
+    ///
+    /// When the destination is the Python aw-server over HTTP, `get_events(start=T)`
+    /// excludes duration=0 events AT T (peewee: `endtime >= start` with endtime==T
+    /// evaluates false for dur=0). The fingerprint set then lacks the dur=0 shape and
+    /// the event is re-imported on every subsequent pass.
+    ///
+    /// Fix: build fingerprints with `start = T - 1ms` (same overlap window as the
+    /// source fetch). Exact-match fingerprints make the wider window harmless for
+    /// events before T.
+    ///
+    /// This in-process test verifies the dedup logic is correct for both the
+    /// dur=0 and dur>0 shapes when the destination is pre-populated (production
+    /// state: the bucket already contains all boundary events from a prior sync).
+    #[test]
+    fn test_sync_no_duplicate_with_prepopulated_boundary() {
+        let state = init_teststate();
+
+        let bucket_id = create_bucket(&state.ds_src, 0);
+        let synced_id = format!("{bucket_id}-synced-from-device-0");
+
+        // Two events at the exact same timestamp — the production shape that triggers
+        // the bug: a dur=0 "running:true" and a dur>0 "running:false".
+        let ts: DateTime<Utc> = Utc::now();
+        let e_running: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 0,
+            "data": {"label": "Testing", "running": true}
+        }))
+        .unwrap();
+        let e_finished: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": ts.to_rfc3339(),
+            "duration": 182.0,
+            "data": {"label": "Testing", "running": false}
+        }))
+        .unwrap();
+
+        state
+            .ds_src
+            .insert_events(bucket_id.as_str(), &[e_running.clone(), e_finished.clone()])
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        // Pre-populate the destination directly — simulating a prior completed sync.
+        // Both event shapes are already present in the dest bucket before we call sync.
+        let dest_bucket_id = synced_id.clone();
+        let dest_bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": dest_bucket_id,
+            "type": "test",
+            "hostname": "device-0",
+            "client": "test"
+        }))
+        .unwrap();
+        state.ds_dest.create_bucket(&dest_bucket).unwrap();
+        state
+            .ds_dest
+            .insert_events(dest_bucket_id.as_str(), &[e_running, e_finished])
+            .unwrap();
+        state.ds_dest.force_commit().unwrap();
+
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "pre-populated destination must have 2 events before sync"
+        );
+
+        // Sync — destination already has all source events; must import 0.
+        // This exercises the fingerprint window: with the old start=T query the
+        // dur=0 event at T is excluded by HTTP/peewee semantics, leaving it
+        // un-fingerprinted and causing a re-import. With start=T-1ms both shapes
+        // are fingerprinted and 0 events are imported.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "sync against pre-populated destination must import 0 events (no boundary duplicates)"
+        );
+
+        // Second pass — stability.
+        aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .ds_dest
+                .get_event_count(synced_id.as_str(), None, None)
+                .unwrap(),
+            2,
+            "second pass must remain stable at 2 events"
+        );
     }
 }

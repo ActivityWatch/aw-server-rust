@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use rocket::config::Config;
 use rocket::data::{Limits, ToByteUnit};
@@ -9,15 +10,46 @@ use serde::{Deserialize, Serialize};
 
 use crate::dirs;
 
-// Far from an optimal way to solve it, but works and is simple
-static mut TESTING: bool = true;
-pub fn set_testing(testing: bool) {
-    unsafe {
-        TESTING = testing;
+static PROFILE: OnceLock<String> = OnceLock::new();
+
+/// Return the current profile name (default: "default").
+pub fn get_profile() -> &'static str {
+    PROFILE.get().map(|s| s.as_str()).unwrap_or("default")
+}
+
+/// Set the profile. Idempotent for the same value; panics if called with
+/// a conflicting value (would silently redirect to a different datastore).
+pub fn set_profile(profile: String) {
+    // Use the atomic OnceLock::set result to avoid a TOCTOU race: two callers
+    // with different values could both see get()==None before either sets it,
+    // causing the loser to silently proceed under the wrong profile.
+    match PROFILE.set(profile.clone()) {
+        Ok(()) => {} // we set it atomically, done
+        Err(_) => {
+            // Already set — verify no conflict (duplicate or concurrent same-value call is fine)
+            let existing = PROFILE
+                .get()
+                .expect("set returned Err but get returned None");
+            if existing != &profile {
+                panic!(
+                    "set_profile called with conflicting value: existing={existing:?}, new={profile:?}"
+                );
+            }
+            // same value — idempotent, no action needed
+        }
     }
 }
+
+/// True when running in the legacy "testing" profile or in debug builds.
 pub fn is_testing() -> bool {
-    unsafe { TESTING }
+    get_profile() == "testing"
+}
+
+/// Backwards-compat shim: callers that still use set_testing(bool) convert
+/// true → profile "testing" and false → profile "default".
+pub fn set_testing(testing: bool) {
+    let profile = if testing { "testing" } else { "default" };
+    set_profile(profile.to_string());
 }
 
 /// Authentication configuration, serialised as `[auth]` in config.toml.
@@ -56,6 +88,34 @@ pub struct AWConfig {
     // custom visualizations are located.
     #[serde(default = "default_custom_static")]
     pub custom_static: std::collections::HashMap<String, String>,
+
+    /// Cache query results for finished past periods in memory.
+    /// See `endpoints::query_cache`. Set to false to disable.
+    #[serde(default = "default_true")]
+    pub query_cache: bool,
+
+    /// Time budget for one `/api/0/query` request, in seconds; 0 disables it.
+    /// Rocket does not stop a handler when the client disconnects, so without
+    /// a budget a query the client already gave up on (web UI timeout, user
+    /// navigated away) runs to completion and the retry stacks on top of it
+    /// (ActivityWatch/aw-server-rust#805). The budget is checked between
+    /// query statements, so one statement always finishes.
+    #[serde(default = "default_query_timeout_secs")]
+    pub query_timeout_secs: u64,
+}
+
+fn default_query_timeout_secs() -> u64 {
+    300
+}
+
+impl AWConfig {
+    /// `query_timeout_secs` as a duration; `None` when disabled (0).
+    pub fn query_timeout(&self) -> Option<std::time::Duration> {
+        match self.query_timeout_secs {
+            0 => None,
+            secs => Some(std::time::Duration::from_secs(secs)),
+        }
+    }
 }
 
 impl Default for AWConfig {
@@ -68,6 +128,8 @@ impl Default for AWConfig {
             cors: default_cors(),
             cors_regex: default_cors(),
             custom_static: default_custom_static(),
+            query_cache: true,
+            query_timeout_secs: default_query_timeout_secs(),
         }
     }
 }
@@ -119,24 +181,33 @@ fn default_custom_static() -> std::collections::HashMap<String, String> {
     std::collections::HashMap::new()
 }
 
-fn get_config_path(testing: bool, config_override: Option<&Path>) -> PathBuf {
+fn default_true() -> bool {
+    true
+}
+
+/// Config filename for a profile.
+///
+/// Isolated profile roots (including new-style `activitywatch-testing/`) use
+/// bare `config.toml` — the directory already isolates. Suffixed
+/// `config-testing.toml` remains only in the legacy shared-root layout so
+/// existing testing config is not orphaned.
+pub fn config_filename(profile: &str) -> String {
+    crate::dirs::config_filename(profile)
+}
+
+fn get_config_path(profile: &str, config_override: Option<&Path>) -> PathBuf {
     if let Some(config_path) = config_override {
         return config_path.to_path_buf();
     }
 
     let mut config_path = dirs::get_config_dir().unwrap();
-    if !testing {
-        config_path.push("config.toml")
-    } else {
-        config_path.push("config-testing.toml")
-    }
-
+    config_path.push(config_filename(profile));
     config_path
 }
 
-pub fn create_config(testing: bool, config_override: Option<&Path>) -> AWConfig {
-    set_testing(testing);
-    let config_path = get_config_path(testing, config_override);
+pub fn create_config(profile: &str, config_override: Option<&Path>) -> AWConfig {
+    set_profile(profile.to_string());
+    let config_path = get_config_path(profile, config_override);
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).expect("Unable to create config dir");
     }
@@ -204,14 +275,24 @@ mod tests {
     }
 
     #[test]
+    fn config_filename_isolated_named_profiles_are_bare() {
+        // default and named isolated roots are always config.toml. Suffixed
+        // config-testing.toml is filesystem-dependent (legacy shared root) and
+        // covered in dirs.rs against fake roots.
+        assert_eq!(super::config_filename("default"), "config.toml");
+        assert_eq!(super::config_filename("research"), "config.toml");
+        assert_eq!(super::config_filename("my-profile"), "config.toml");
+    }
+
+    #[test]
     fn create_config_uses_override_path() {
-        // create_config mutates the TESTING global, so these tests must not overlap.
+        // create_config sets the PROFILE OnceLock, so these tests must not overlap.
         let _lock = TEST_LOCK.lock().unwrap();
         let paths = TestConfigPath::new("override");
         fs::create_dir_all(paths.config_path.parent().unwrap()).unwrap();
         fs::write(&paths.config_path, "address = \"0.0.0.0\"\nport = 5611\n").unwrap();
 
-        let config = create_config(false, Some(paths.config_path.as_path()));
+        let config = create_config("default", Some(paths.config_path.as_path()));
 
         assert_eq!(config.address, "0.0.0.0");
         assert_eq!(config.port, 5611);
@@ -222,7 +303,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap();
         let paths = TestConfigPath::new("missing");
 
-        let config = create_config(false, Some(paths.config_path.as_path()));
+        let config = create_config("default", Some(paths.config_path.as_path()));
 
         assert!(paths.config_path.is_file());
         assert_eq!(config.address, "127.0.0.1");

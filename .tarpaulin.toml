@@ -1,0 +1,6 @@
+[coverage]
+# Disable LLVM-based instrumentation which can cause SIGILL on some CI runners
+# Use the simpler ptrace-based coverage instead
+engine = "Ptrace"
+timeout = 300
+out = ["Xml"]

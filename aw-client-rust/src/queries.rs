@@ -366,13 +366,59 @@ pub fn full_desktop_query(params: &DesktopQueryParams) -> String {
     query
 }
 
-fn escape_doublequote(s: &str) -> String {
+/// Escape double quotes so `s` can be embedded in a double-quoted query string literal,
+/// e.g. a bucket ID in `query_bucket("...")`.
+pub fn escape_doublequote(s: &str) -> String {
     s.replace('\"', "\\\"")
+}
+
+/// Trim every line of a query and drop blank lines, e.g. to log or compare generated queries.
+pub fn pretty_query(query: &str) -> String {
+    query
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Split a query into its `;`-terminated statements, dropping empty ones.
+pub fn querystr_to_array(querystr: &str) -> Vec<String> {
+    querystr
+        .split(';')
+        .filter(|statement| !statement.is_empty())
+        .map(|statement| format!("{statement};"))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_escape_doublequote() {
+        assert_eq!(escape_doublequote(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(escape_doublequote("plain"), "plain");
+    }
+
+    #[test]
+    fn test_pretty_query() {
+        let query = "\n    events = query_bucket(\"x\");  \n\n\t RETURN = events;\n   \n";
+        assert_eq!(
+            pretty_query(query),
+            "events = query_bucket(\"x\");\nRETURN = events;"
+        );
+        assert_eq!(pretty_query("  \n \n"), "");
+    }
+
+    #[test]
+    fn test_querystr_to_array() {
+        assert_eq!(
+            querystr_to_array("a = 1; b = 2;RETURN = a;"),
+            vec!["a = 1;", " b = 2;", "RETURN = a;"]
+        );
+        assert!(querystr_to_array("").is_empty());
+    }
 
     #[test]
     fn test_desktop_query_generation() {

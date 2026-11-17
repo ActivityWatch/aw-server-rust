@@ -3,12 +3,11 @@ use std::cmp::{max, min};
 use std::fmt;
 
 use serde::de::{self, Deserialize, Deserializer, Visitor};
+use serde::{Serialize, Serializer};
 
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
-
-// TODO: Implement serialize
 
 #[derive(Clone, Debug)]
 pub struct TimeInterval {
@@ -137,6 +136,40 @@ impl<'de> Deserialize<'de> for TimeInterval {
         D: Deserializer<'de>,
     {
         deserializer.deserialize_str(TimeIntervalVisitor)
+    }
+}
+
+impl Serialize for TimeInterval {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+#[test]
+fn test_timeinterval_serialization() {
+    for (input, expected) in [
+        (
+            "2000-01-01T00:00:00Z/2000-01-02T00:00:00Z",
+            "2000-01-01T00:00:00+00:00/2000-01-02T00:00:00+00:00",
+        ),
+        (
+            "2000-01-01T03:00:00.123456789+03:00/2000-01-01T01:00:00.987654321-02:00",
+            "2000-01-01T00:00:00.123456789+00:00/2000-01-01T03:00:00.987654321+00:00",
+        ),
+        (
+            "2000-01-01T00:00:00Z/2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00+00:00/2000-01-01T00:00:00+00:00",
+        ),
+    ] {
+        let interval = TimeInterval::new_from_string(input).unwrap();
+        let encoded = serde_json::to_value(&interval).unwrap();
+        assert_eq!(encoded, serde_json::json!(expected));
+        let decoded: TimeInterval = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.start(), interval.start());
+        assert_eq!(decoded.end(), interval.end());
     }
 }
 

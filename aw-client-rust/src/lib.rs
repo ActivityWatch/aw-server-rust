@@ -7,7 +7,9 @@ extern crate tokio;
 
 pub mod blocking;
 pub mod classes;
+pub mod config;
 pub mod queries;
+pub mod queue;
 pub mod single_instance;
 
 use std::{collections::HashMap, error::Error};
@@ -16,10 +18,9 @@ use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::{json, Map};
 use single_instance::SingleInstance;
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub use aw_models::{Bucket, BucketMetadata, Event};
+pub use aw_models::{Bucket, BucketMetadata, BucketsExport, Event};
 
 pub struct AwClient {
     client: reqwest::Client,
@@ -54,6 +55,20 @@ fn build_client(api_key: Option<String>) -> Result<reqwest::Client, Box<dyn Erro
         .build()?)
 }
 
+/// Build the name used for the single-instance lock.
+///
+/// `localhost` is normalized to `127.0.0.1` so that a client given either spelling
+/// takes the same lock, and so the name matches aw-client-python, which defaults
+/// its server hostname to `127.0.0.1`.
+fn single_instance_name(name: &str, host: &str, port: u16) -> String {
+    let host = if host.eq_ignore_ascii_case("localhost") {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    format!("{}-at-{}-on-{}", name, host, port)
+}
+
 impl AwClient {
     async fn send_success(
         request: reqwest::RequestBuilder,
@@ -61,8 +76,32 @@ impl AwClient {
         request.send().await?.error_for_status()
     }
 
+    /// Build an API URL from path segments, percent-encoding each one so bucket IDs
+    /// and setting keys containing `/`, `?` or `#` stay a single segment.
+    fn api_url(&self, segments: &[&str]) -> reqwest::Url {
+        let mut url = self.baseurl.clone();
+        // A base URL without path segments (e.g. `data:`) is never http(s), so leave it
+        // as is and let reqwest reject it when the request is sent.
+        if let Ok(mut path) = url.path_segments_mut() {
+            path.pop_if_empty().extend(["api", "0"]).extend(segments);
+        }
+        url
+    }
+
     pub fn new(host: &str, port: u16, name: &str) -> Result<AwClient, Box<dyn Error>> {
         Self::new_with_api_key(host, port, name, None)
+    }
+
+    /// Connect to the server set in `aw-client.toml` (see [`config`]), the file the Python
+    /// client reads. `testing` selects the `[server-testing]` section, whose default port
+    /// is 5666.
+    pub fn from_config(
+        name: &str,
+        testing: bool,
+        api_key: Option<String>,
+    ) -> Result<AwClient, Box<dyn Error>> {
+        let config = config::load_config(testing);
+        Self::new_with_api_key(&config.hostname, config.port, name, api_key)
     }
 
     pub fn new_with_api_key(
@@ -71,12 +110,29 @@ impl AwClient {
         name: &str,
         api_key: Option<String>,
     ) -> Result<AwClient, Box<dyn Error>> {
-        let baseurl = reqwest::Url::parse(&format!("http://{}:{}", host, port))?;
+        Self::new_with_protocol("http", host, port, name, api_key)
+    }
+
+    /// Like [`new_with_api_key`](Self::new_with_api_key), but with the URL scheme
+    /// (`"http"` or `"https"`) given explicitly, e.g. for a server behind a TLS proxy.
+    pub fn new_with_protocol(
+        protocol: &str,
+        host: &str,
+        port: u16,
+        name: &str,
+        api_key: Option<String>,
+    ) -> Result<AwClient, Box<dyn Error>> {
+        if protocol != "http" && protocol != "https" {
+            return Err(format!(
+                "Unsupported protocol {protocol:?}, expected \"http\" or \"https\""
+            )
+            .into());
+        }
+        let baseurl = reqwest::Url::parse(&format!("{}://{}:{}", protocol, host, port))?;
         let hostname = get_hostname();
         let client = build_client(api_key)?;
-        //TODO: change localhost string to 127.0.0.1 for feature parity
-        let single_instance_name = format!("{}-at-{}-on-{}", name, host, port);
-        let single_instance = single_instance::SingleInstance::new(single_instance_name.as_str())?;
+        let instance_name = single_instance_name(name, host, port);
+        let single_instance = single_instance::SingleInstance::new(instance_name.as_str())?;
 
         Ok(AwClient {
             client,
@@ -87,8 +143,41 @@ impl AwClient {
         })
     }
 
+    /// Start an offline request queue (see [`queue`]) backed by the default queue file for
+    /// this client name, `testing` selecting a separate file, like `queued=True` in the
+    /// Python client.
+    pub fn request_queue(&self, testing: bool) -> std::io::Result<queue::RequestQueue> {
+        let path = queue::default_queue_path(&self.name, testing).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no data directory for the request queue",
+            )
+        })?;
+        let queue = self.request_queue_at(path)?;
+        if testing {
+            queue.set_commit_interval(queue::DEFAULT_COMMIT_INTERVAL_TESTING);
+        }
+        Ok(queue)
+    }
+
+    /// Like [`request_queue`](Self::request_queue), with an explicit queue file.
+    pub fn request_queue_at(
+        &self,
+        path: std::path::PathBuf,
+    ) -> std::io::Result<queue::RequestQueue> {
+        queue::RequestQueue::start(
+            queue::Transport {
+                client: self.client.clone(),
+                baseurl: self.baseurl.clone(),
+                name: self.name.clone(),
+                hostname: self.hostname.clone(),
+            },
+            path,
+        )
+    }
+
     pub async fn get_bucket(&self, bucketname: &str) -> Result<Bucket, reqwest::Error> {
-        let url = format!("{}api/0/buckets/{}", self.baseurl, bucketname);
+        let url = self.api_url(&["buckets", bucketname]);
         let bucket = Self::send_success(self.client.get(url))
             .await?
             .json()
@@ -97,12 +186,12 @@ impl AwClient {
     }
 
     pub async fn get_buckets(&self) -> Result<HashMap<String, Bucket>, reqwest::Error> {
-        let url = format!("{}api/0/buckets/", self.baseurl);
+        let url = self.api_url(&["buckets", ""]);
         Self::send_success(self.client.get(url)).await?.json().await
     }
 
     pub async fn create_bucket(&self, bucket: &Bucket) -> Result<(), reqwest::Error> {
-        let url = format!("{}api/0/buckets/{}", self.baseurl, bucket.id);
+        let url = self.api_url(&["buckets", &bucket.id]);
         Self::send_success(self.client.post(url).json(bucket)).await?;
         Ok(())
     }
@@ -128,8 +217,30 @@ impl AwClient {
     }
 
     pub async fn delete_bucket(&self, bucketname: &str) -> Result<(), reqwest::Error> {
-        let url = format!("{}api/0/buckets/{}", self.baseurl, bucketname);
+        let url = self.api_url(&["buckets", bucketname]);
         Self::send_success(self.client.delete(url)).await?;
+        Ok(())
+    }
+
+    /// Export every bucket, including its events.
+    pub async fn export_all(&self) -> Result<BucketsExport, reqwest::Error> {
+        let url = self.api_url(&["export"]);
+        Self::send_success(self.client.get(url)).await?.json().await
+    }
+
+    /// Export one bucket, including its events.
+    pub async fn export_bucket(&self, bucketname: &str) -> Result<BucketsExport, reqwest::Error> {
+        let url = self.api_url(&["buckets", bucketname, "export"]);
+        Self::send_success(self.client.get(url)).await?.json().await
+    }
+
+    /// Import one bucket (as returned in an export) into the server.
+    pub async fn import_bucket(&self, bucket: &Bucket) -> Result<(), reqwest::Error> {
+        let url = self.api_url(&["import"]);
+        Self::send_success(self.client.post(url).json(&json!({
+            "buckets": { bucket.id.as_str(): bucket },
+        })))
+        .await?;
         Ok(())
     }
 
@@ -138,7 +249,34 @@ impl AwClient {
         query: &str,
         timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> Result<Vec<serde_json::Value>, reqwest::Error> {
-        let url = reqwest::Url::parse(format!("{}api/0/query", self.baseurl).as_str()).unwrap();
+        self.query_inner(query, timeperiods, None).await
+    }
+
+    /// Like [`query`](Self::query), but sends `?name=<name>&cache=1` to ask the server to
+    /// cache the result under `name`, matching `query(..., name=, cache=True)` in the
+    /// Python client. Neither aw-server-rust nor aw-server-python caches results yet, so
+    /// today this returns the same result as `query`.
+    pub async fn query_cached(
+        &self,
+        query: &str,
+        timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+        name: &str,
+    ) -> Result<Vec<serde_json::Value>, reqwest::Error> {
+        self.query_inner(query, timeperiods, Some(name)).await
+    }
+
+    async fn query_inner(
+        &self,
+        query: &str,
+        timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+        cache_name: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, reqwest::Error> {
+        let mut url = self.api_url(&["query"]);
+        if let Some(name) = cache_name {
+            url.query_pairs_mut()
+                .append_pair("name", name)
+                .append_pair("cache", "1");
+        }
 
         // Format timeperiods as ISO8601 strings, separated by /
         let timeperiods_str: Vec<String> = timeperiods
@@ -164,10 +302,7 @@ impl AwClient {
         stop: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, reqwest::Error> {
-        let mut url = reqwest::Url::parse(
-            format!("{}api/0/buckets/{}/events", self.baseurl, bucketname).as_str(),
-        )
-        .unwrap();
+        let mut url = self.api_url(&["buckets", bucketname, "events"]);
 
         // Must be a better way to build URLs
         if let Some(s) = start {
@@ -185,12 +320,27 @@ impl AwClient {
         Self::send_success(self.client.get(url)).await?.json().await
     }
 
+    /// Fetch a single event by id. Returns `Ok(None)` when the server responds 404.
+    pub async fn get_event(
+        &self,
+        bucketname: &str,
+        event_id: i64,
+    ) -> Result<Option<Event>, reqwest::Error> {
+        let event_id = event_id.to_string();
+        let url = self.api_url(&["buckets", bucketname, "events", &event_id]);
+        let response = self.client.get(url).send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(response.error_for_status()?.json().await?))
+    }
+
     pub async fn insert_event(
         &self,
         bucketname: &str,
         event: &Event,
     ) -> Result<(), reqwest::Error> {
-        let url = format!("{}api/0/buckets/{}/events", self.baseurl, bucketname);
+        let url = self.api_url(&["buckets", bucketname, "events"]);
         let eventlist = vec![event.clone()];
         Self::send_success(self.client.post(url).json(&eventlist)).await?;
         Ok(())
@@ -201,7 +351,7 @@ impl AwClient {
         bucketname: &str,
         events: Vec<Event>,
     ) -> Result<(), reqwest::Error> {
-        let url = format!("{}api/0/buckets/{}/events", self.baseurl, bucketname);
+        let url = self.api_url(&["buckets", bucketname, "events"]);
         Self::send_success(self.client.post(url).json(&events)).await?;
         Ok(())
     }
@@ -212,10 +362,9 @@ impl AwClient {
         event: &Event,
         pulsetime: f64,
     ) -> Result<(), reqwest::Error> {
-        let url = format!(
-            "{}api/0/buckets/{}/heartbeat?pulsetime={}",
-            self.baseurl, bucketname, pulsetime
-        );
+        let mut url = self.api_url(&["buckets", bucketname, "heartbeat"]);
+        url.query_pairs_mut()
+            .append_pair("pulsetime", &pulsetime.to_string());
         Self::send_success(self.client.post(url).json(&event)).await?;
         Ok(())
     }
@@ -225,73 +374,468 @@ impl AwClient {
         bucketname: &str,
         event_id: i64,
     ) -> Result<(), reqwest::Error> {
-        let url = format!(
-            "{}api/0/buckets/{}/events/{}",
-            self.baseurl, bucketname, event_id
-        );
+        let event_id = event_id.to_string();
+        let url = self.api_url(&["buckets", bucketname, "events", &event_id]);
         Self::send_success(self.client.delete(url)).await?;
         Ok(())
     }
 
-    pub async fn get_event_count(&self, bucketname: &str) -> Result<i64, reqwest::Error> {
-        let url = format!("{}api/0/buckets/{}/events/count", self.baseurl, bucketname);
+    /// Delete many events in one request; returns how many existed and were deleted.
+    pub async fn delete_events(
+        &self,
+        bucketname: &str,
+        event_ids: &[i64],
+    ) -> Result<u64, reqwest::Error> {
+        let url = self.api_url(&["buckets", bucketname, "events", "delete"]);
+        let body = serde_json::json!({ "ids": event_ids });
+        let resp = Self::send_success(self.client.post(url).json(&body)).await?;
+        resp.json::<u64>().await
+    }
+
+    /// Count events in a bucket, optionally only those between `start` and `stop`.
+    pub async fn get_event_count(
+        &self,
+        bucketname: &str,
+        start: Option<DateTime<Utc>>,
+        stop: Option<DateTime<Utc>>,
+    ) -> Result<i64, reqwest::Error> {
+        let mut url = self.api_url(&["buckets", bucketname, "events", "count"]);
+        if let Some(s) = start {
+            url.query_pairs_mut()
+                .append_pair("start", s.to_rfc3339().as_str());
+        };
+        if let Some(s) = stop {
+            url.query_pairs_mut()
+                .append_pair("end", s.to_rfc3339().as_str());
+        };
         let res = Self::send_success(self.client.get(url))
             .await?
-            .text()
+            // The count is a bare JSON number; a body that isn't one becomes a decode error.
+            .json()
             .await?;
-        let count: i64 = match res.trim().parse() {
-            Ok(count) => count,
-            Err(err) => panic!("could not parse get_event_count response: {err:?}"),
-        };
-        Ok(count)
+        Ok(res)
     }
 
     pub async fn get_info(&self) -> Result<aw_models::Info, reqwest::Error> {
-        let url = format!("{}api/0/info", self.baseurl);
+        let url = self.api_url(&["info"]);
         Self::send_success(self.client.get(url)).await?.json().await
     }
 
     pub async fn get_setting(&self, setting: &str) -> Result<serde_json::Value, reqwest::Error> {
-        let url = format!("{}api/0/settings/{}", self.baseurl, setting);
+        let url = self.api_url(&["settings", setting]);
         Self::send_success(self.client.get(url)).await?.json().await
+    }
+
+    /// Store `value` as JSON under the settings key `setting`.
+    pub async fn set_setting(
+        &self,
+        setting: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), reqwest::Error> {
+        let url = self.api_url(&["settings", setting]);
+        Self::send_success(self.client.post(url).json(value)).await?;
+        Ok(())
+    }
+
+    /// Categorization classes from the server's `classes` setting, like `get_classes()` in
+    /// the Python client. Falls back to [`classes::default_classes`] when the request fails
+    /// or the setting is unset, empty or invalid.
+    pub async fn get_classes(&self) -> Vec<(classes::CategoryId, classes::CategorySpec)> {
+        match self.get_setting("classes").await {
+            Ok(value) => classes::classes_from_settings_json(&value),
+            Err(err) => {
+                log::warn!("Failed to get classes from server, using default classes: {err}");
+                classes::default_classes()
+            }
+        }
     }
 
     pub async fn get_settings(&self) -> Result<aw_models::Settings, reqwest::Error> {
-        let url = format!("{}api/0/settings", self.baseurl);
+        let url = self.api_url(&["settings"]);
         Self::send_success(self.client.get(url)).await?.json().await
     }
 
-    // TODO: make async
-    pub fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
-        let socket_addrs = self.baseurl.socket_addrs(|| None)?;
-        let socket_addr = socket_addrs
-            .first()
-            .ok_or("Unable to resolve baseurl into socket address")?;
+    /// Wait up to ten seconds for the server to answer `GET /api/0/info` with its server info.
+    ///
+    /// Refused, dropped or unanswered connections are retried until the deadline. An HTTP
+    /// error status, or a successful response that isn't ActivityWatch server info (another
+    /// program on the port), is returned immediately. `/api/0/info` doesn't require the API
+    /// key, so a wrong key is only reported by the first authenticated request.
+    /// Requires a Tokio runtime with networking and time enabled.
+    pub async fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
+        wait_for_server(
+            &self.client,
+            self.api_url(&["info"]),
+            Duration::from_secs(10),
+        )
+        .await
+    }
+}
 
-        // Check if server is running with exponential backoff
+async fn wait_for_server(
+    client: &reqwest::Client,
+    info_url: reqwest::Url,
+    max_wait: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let attempts = async {
         let mut retry_delay = Duration::from_millis(100);
-        let max_wait = Duration::from_secs(10);
-        let mut total_wait = Duration::from_secs(0);
-
-        while total_wait < max_wait {
-            match TcpStream::connect_timeout(socket_addr, retry_delay) {
-                Ok(_) => break,
-                Err(_) => {
-                    std::thread::sleep(retry_delay);
-                    total_wait += retry_delay;
-                    retry_delay *= 2;
+        loop {
+            // Bound each attempt, so a server that accepts connections but doesn't
+            // answer yet is retried rather than waited on for the client's full timeout.
+            let attempt = client
+                .get(info_url.clone())
+                .timeout(retry_delay.max(Duration::from_millis(500)))
+                .send()
+                .await;
+            match attempt {
+                Ok(response) => {
+                    // A body cut short or stalled past the attempt timeout while the server
+                    // is starting fails `bytes()`; that falls through to a retry.
+                    if let Ok(body) = response.error_for_status()?.bytes().await {
+                        // Decoding checks that it's an ActivityWatch server answering.
+                        serde_json::from_slice::<aw_models::Info>(&body)?;
+                        return Ok(());
+                    }
                 }
+                // Refused, closed before responding (is_request), or unanswered: the server
+                // may still be starting, so retry.
+                Err(err) if err.is_connect() || err.is_request() || err.is_timeout() => {}
+                Err(err) => return Err(err.into()),
+            }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(1));
+        }
+    };
+    tokio::time::timeout(max_wait, attempts)
+        .await
+        .map_err(|_| -> Box<dyn Error> {
+            format!(
+                "Server at {} not responding after {} seconds of retrying",
+                info_url.origin().ascii_serialization(),
+                max_wait.as_secs_f64()
+            )
+            .into()
+        })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::single_instance_name;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn info_url(addr: std::net::SocketAddr) -> reqwest::Url {
+        reqwest::Url::parse(&format!("http://{addr}/api/0/info")).unwrap()
+    }
+
+    const INFO_BODY: &str =
+        r#"{"hostname":"host","version":"v0.0.0","testing":true,"device_id":"device"}"#;
+
+    /// Read one request's headers, or `None` if the connection closes first.
+    async fn read_request(
+        mut stream: tokio::net::TcpStream,
+    ) -> Option<(tokio::net::TcpStream, Vec<u8>)> {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buf).await {
+                Ok(n) if n > 0 => request.extend_from_slice(&buf[..n]),
+                _ => return None,
             }
         }
+        Some((stream, request))
+    }
 
-        if total_wait >= max_wait {
-            return Err(format!(
-                "Local server {} not running after 10 seconds of retrying",
-                socket_addr
-            )
-            .into());
+    /// How long the mock waits for a live request before giving up.
+    ///
+    /// Above every client deadline the tests pass to `wait_for_server`, so a client
+    /// that gave up first fails the test instead of leaving the mock (and therefore
+    /// `tokio::join!`) waiting forever.
+    const REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Answer the first connection that sends a request with `status_line` and `body`.
+    ///
+    /// Connections are read concurrently, so ones that close or never send anything
+    /// don't delay the others. On Windows a connect to a port that isn't listening yet
+    /// can hang instead of being refused, so attempts the client already abandoned may
+    /// be accepted ahead of the live one, closed or half-open. Reading them one at a time
+    /// let enough of them queue up that the live attempt timed out before it was reached,
+    /// on every retry. The wait is bounded by `REPLY_DEADLINE`.
+    async fn answer_once(listener: &tokio::net::TcpListener, status_line: &str, body: &str) {
+        let mut readers = tokio::task::JoinSet::new();
+        let (mut stream, request) = tokio::time::timeout(REPLY_DEADLINE, async {
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        readers.spawn(read_request(accepted.unwrap().0));
+                    }
+                    Some(read) = readers.join_next() => {
+                        if let Some(answered) = read.unwrap() {
+                            break answered;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("answer_once: no request arrived before the mock's reply deadline");
+        assert!(request.starts_with(b"GET /api/0/info "));
+        let response = format!(
+            "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    #[test]
+    fn test_answer_once_skips_silent_connections() {
+        // Connections that never send anything (like attempts abandoned mid-handshake on
+        // Windows) must not delay the mock from answering the next one, however many are
+        // queued ahead of it.
+        runtime().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            // Enough silent connections that a serial mock (which skips one at a time,
+            // 200 ms each) cannot clear them within the client's deadline: 16 x 200 ms
+            // is well past 2 s, while the concurrent mock answers the live one at once.
+            // The deadline stays generous so a loaded runner still has retry margin.
+            let mut silent = Vec::new();
+            for _ in 0..16 {
+                silent.push(tokio::net::TcpStream::connect(addr).await.unwrap());
+            }
+            let url = info_url(addr);
+            let server = async { answer_once(&listener, "200 OK", INFO_BODY).await };
+            let client = reqwest::Client::new();
+            let wait = super::wait_for_server(&client, url, std::time::Duration::from_secs(2));
+            let (_, result) = tokio::join!(server, wait);
+            result.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_wait_for_start_success() {
+        runtime().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = info_url(listener.local_addr().unwrap());
+            let server = async { answer_once(&listener, "200 OK", INFO_BODY).await };
+            let client = reqwest::Client::new();
+            let wait = super::wait_for_server(&client, url, std::time::Duration::from_secs(2));
+            let (_, result) = tokio::join!(server, wait);
+            result.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_wait_for_start_retries_without_blocking_executor() {
+        runtime().block_on(async {
+            // Keep the socket listening, but close the first complete request without
+            // responding. Only a retry can receive the successful response below.
+            // On this single-threaded executor the server task must get a turn on
+            // both attempts, so this also verifies that wait_for_server yields.
+            //
+            // Previously this used a pre-bound TcpSocket that only called
+            // socket.listen() after the sleep. On Windows, connecting to a port
+            // with a bound-but-not-listening socket triggers the TCP
+            // SYN-retransmission timeout (several seconds per attempt) rather
+            // than an immediate ECONNREFUSED, causing intermittent 10 s timeouts
+            // on slower CI runners (#812).
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = info_url(listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (stream, request) = read_request(stream).await.unwrap();
+                assert!(request.starts_with(b"GET /api/0/info "));
+                drop(stream);
+                // This must read a second complete request before answering; finishing
+                // the server task proves that the client actually retried.
+                answer_once(&listener, "200 OK", INFO_BODY).await;
+            });
+            let client = reqwest::Client::new();
+            super::wait_for_server(&client, url, std::time::Duration::from_secs(10))
+                .await
+                .unwrap();
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_wait_for_start_retries_accepted_but_unanswered_connection() {
+        runtime().block_on(async {
+            // A listener that accepts (via the backlog) but never answers, like a server
+            // that has bound its port but isn't serving HTTP yet.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = info_url(listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (_silent, _) = listener.accept().await.unwrap();
+                answer_once(&listener, "200 OK", INFO_BODY).await;
+            });
+            let client = reqwest::Client::new();
+            super::wait_for_server(&client, url, std::time::Duration::from_secs(3))
+                .await
+                .unwrap();
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_wait_for_start_retries_connection_closed_before_response() {
+        runtime().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = info_url(listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                // Read the request, then hang up without answering.
+                let (mut closed, _) = listener.accept().await.unwrap();
+                let mut buf = [0_u8; 1024];
+                let _ = closed.read(&mut buf).await.unwrap();
+                drop(closed);
+                answer_once(&listener, "200 OK", INFO_BODY).await;
+            });
+            let client = reqwest::Client::new();
+            super::wait_for_server(&client, url, std::time::Duration::from_secs(3))
+                .await
+                .unwrap();
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_wait_for_start_retries_truncated_body() {
+        runtime().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = info_url(listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                // Send the headers and half of the body, then hang up.
+                let (mut truncated, _) = listener.accept().await.unwrap();
+                let mut buf = [0_u8; 1024];
+                let _ = truncated.read(&mut buf).await.unwrap();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n",
+                    INFO_BODY.len()
+                );
+                truncated.write_all(head.as_bytes()).await.unwrap();
+                truncated
+                    .write_all(&INFO_BODY.as_bytes()[..INFO_BODY.len() / 2])
+                    .await
+                    .unwrap();
+                drop(truncated);
+                answer_once(&listener, "200 OK", INFO_BODY).await;
+            });
+            let client = reqwest::Client::new();
+            super::wait_for_server(&client, url, std::time::Duration::from_secs(3))
+                .await
+                .unwrap();
+            server.await.unwrap();
+        });
+    }
+
+    async fn assert_fails_immediately(status_line: &str, body: &str) -> Box<dyn std::error::Error> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = info_url(listener.local_addr().unwrap());
+        let server = async { answer_once(&listener, status_line, body).await };
+        let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        let wait = super::wait_for_server(&client, url, std::time::Duration::from_secs(5));
+        let (_, result) = tokio::join!(server, wait);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        result.unwrap_err()
+    }
+
+    #[test]
+    fn test_wait_for_start_returns_http_errors_immediately() {
+        runtime().block_on(async {
+            let error = assert_fails_immediately("500 Internal Server Error", "{}").await;
+            let error = error.downcast_ref::<reqwest::Error>().unwrap();
+            assert_eq!(
+                error.status(),
+                Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+            );
+        });
+    }
+
+    #[test]
+    fn test_wait_for_start_rejects_other_services() {
+        runtime().block_on(async {
+            let error = assert_fails_immediately("200 OK", r#"{"status":"ok"}"#).await;
+            assert!(
+                error.downcast_ref::<serde_json::Error>().is_some(),
+                "expected a JSON decode error, got {error:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_wait_for_start_deadline() {
+        runtime().block_on(async {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let url = info_url(socket.local_addr().unwrap());
+            let client = reqwest::Client::new();
+            let started = std::time::Instant::now();
+            let budget = std::time::Duration::from_millis(150);
+            let error = super::wait_for_server(&client, url, budget)
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("not responding after 0.15 seconds"));
+            assert!(started.elapsed() >= budget);
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        });
+    }
+
+    #[test]
+    fn test_single_instance_name_normalizes_localhost() {
+        // Both spellings must take the same lock, otherwise two instances of the
+        // same watcher can run against the same server.
+        assert_eq!(
+            single_instance_name("aw-watcher-afk", "localhost", 5600),
+            single_instance_name("aw-watcher-afk", "127.0.0.1", 5600),
+        );
+        assert_eq!(
+            single_instance_name("aw-watcher-afk", "localhost", 5600),
+            "aw-watcher-afk-at-127.0.0.1-on-5600",
+        );
+
+        // Hostnames are case-insensitive, so case variants must take the same
+        // lock rather than each getting one of their own.
+        for variant in ["LOCALHOST", "LocalHost", "localHost"] {
+            assert_eq!(
+                single_instance_name("aw-watcher-afk", variant, 5600),
+                "aw-watcher-afk-at-127.0.0.1-on-5600",
+                "host spelling {variant:?} should normalize"
+            );
         }
+    }
 
-        Ok(())
+    #[test]
+    fn test_single_instance_name_keeps_other_hosts() {
+        assert_eq!(
+            single_instance_name("aw-watcher-afk", "192.168.1.2", 5600),
+            "aw-watcher-afk-at-192.168.1.2-on-5600",
+        );
+    }
+
+    #[test]
+    fn test_new_with_protocol() {
+        let client =
+            super::AwClient::new_with_protocol("https", "example.com", 443, "test-https", None)
+                .unwrap();
+        assert_eq!(client.baseurl.as_str(), "https://example.com/");
+
+        let client =
+            super::AwClient::new_with_protocol("http", "127.0.0.1", 5666, "test-http", None)
+                .unwrap();
+        assert_eq!(client.baseurl.as_str(), "http://127.0.0.1:5666/");
+
+        let err = super::AwClient::new_with_protocol("ftp", "127.0.0.1", 5600, "test-ftp", None)
+            .unwrap_err();
+        assert!(err.to_string().contains("Unsupported protocol"));
     }
 }

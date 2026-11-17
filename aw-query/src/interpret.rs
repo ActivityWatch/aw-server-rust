@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::time::Instant;
+use std::{borrow::Cow, collections::HashMap};
 
 use crate::functions;
 
@@ -22,10 +23,13 @@ pub fn interpret_prog(
     p: Program,
     ti: &TimeInterval,
     ds: &Datastore,
+    deadline: Option<Instant>,
 ) -> Result<DataType, QueryError> {
     let mut env = init_env(ti);
-    for expr in p.stmts {
-        interpret_expr(&mut env, ds, expr)?;
+    let total = p.stmts.len();
+    for (i, expr) in p.stmts.into_iter().enumerate() {
+        check_deadline(deadline, &format!("statement {} of {total}", i + 1))?;
+        interpret_expr(&mut env, ds, expr, deadline)?;
     }
     match env.remove("RETURN") {
         Some(ret) => Ok(ret),
@@ -33,16 +37,32 @@ pub fn interpret_prog(
     }
 }
 
+/// Fail if `deadline` has passed. Called before every statement, at the top
+/// level and inside `if` blocks, so a budget overrun stops at the next
+/// statement boundary wherever it happens.
+fn check_deadline(deadline: Option<Instant>, what: &str) -> Result<(), QueryError> {
+    match deadline {
+        Some(deadline) if Instant::now() >= deadline => {
+            Err(QueryError::TimeBudgetExceeded(format!(
+                "query stopped before {what}: time budget exceeded \
+                 (split the query into shorter timeperiods, or raise query_timeout_secs)"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn interpret_expr(
     env: &mut HashMap<String, DataType>,
     ds: &Datastore,
     expr: Expr,
+    deadline: Option<Instant>,
 ) -> Result<DataType, QueryError> {
     use crate::ast::Expr_::*;
     match expr.node {
         Add(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let res = match a_res {
                 DataType::Number(n1) => match b_res {
                     DataType::Number(n2) => DataType::Number(n1 + n2),
@@ -86,8 +106,8 @@ fn interpret_expr(
             Ok(res)
         }
         Sub(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -107,8 +127,8 @@ fn interpret_expr(
             Ok(DataType::Number(a_num - b_num))
         }
         Mul(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -128,8 +148,8 @@ fn interpret_expr(
             Ok(DataType::Number(a_num * b_num))
         }
         Div(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -154,8 +174,8 @@ fn interpret_expr(
             Ok(DataType::Number(a_num / b_num))
         }
         Mod(a, b) => {
-            let a_res = interpret_expr(env, ds, *a)?;
-            let b_res = interpret_expr(env, ds, *b)?;
+            let a_res = interpret_expr(env, ds, *a, deadline)?;
+            let b_res = interpret_expr(env, ds, *b, deadline)?;
             let a_num = match a_res {
                 DataType::Number(n) => n,
                 _ => {
@@ -175,12 +195,12 @@ fn interpret_expr(
             Ok(DataType::Number(a_num % b_num))
         }
         Equal(lhs, rhs) => {
-            let lhs_res = interpret_expr(env, ds, *lhs)?;
-            let rhs_res = interpret_expr(env, ds, *rhs)?;
+            let lhs_res = interpret_expr(env, ds, *lhs, deadline)?;
+            let rhs_res = interpret_expr(env, ds, *rhs, deadline)?;
             Ok(DataType::Bool(lhs_res.query_eq(&rhs_res)?))
         }
         Assign(var, b) => {
-            let val = interpret_expr(env, ds, *b)?;
+            let val = interpret_expr(env, ds, *b, deadline)?;
             env.insert(var, val);
             Ok(DataType::None())
         }
@@ -195,17 +215,18 @@ fn interpret_expr(
         Number(lit) => Ok(DataType::Number(lit)),
         String(litstr) => Ok(DataType::String(litstr)),
         Return(e) => {
-            let val = interpret_expr(env, ds, *e)?;
+            let val = interpret_expr(env, ds, *e, deadline)?;
             // TODO: Once RETURN is deprecated we can fix this
             env.insert("RETURN".to_string(), val);
             Ok(DataType::None())
         }
         If(ifs) => {
             for (cond, block) in ifs {
-                let c = interpret_expr(env, ds, *cond)?;
+                let c = interpret_expr(env, ds, *cond, deadline)?;
                 if c.query_eq(&DataType::Bool(true))? {
                     for expr in block {
-                        interpret_expr(env, ds, expr)?;
+                        check_deadline(deadline, "the next statement of an if block")?;
+                        interpret_expr(env, ds, expr, deadline)?;
                     }
                     break;
                 }
@@ -213,7 +234,42 @@ fn interpret_expr(
             Ok(DataType::None())
         }
         Function(fname, e) => {
-            let args = match interpret_expr(env, ds, *e)? {
+            // Borrow variables only when every argument is an atom. Evaluating
+            // arbitrary arguments may assign to the environment, including the
+            // function binding itself, so those retain the owned evaluation path.
+            if let Expr_::List(exprs) = &e.node {
+                if exprs.iter().all(|expr| {
+                    matches!(
+                        expr.node,
+                        Expr_::Var(_) | Expr_::Bool(_) | Expr_::Number(_) | Expr_::String(_)
+                    )
+                }) {
+                    if let Some(DataType::ReadOnlyFunction(_, fun)) = env.get(&fname) {
+                        let args: Result<Vec<Cow<'_, DataType>>, QueryError> = exprs
+                            .iter()
+                            .map(|expr| {
+                                Ok(match &expr.node {
+                                    Expr_::Var(name) => {
+                                        Cow::Borrowed(env.get(name).ok_or_else(|| {
+                                            QueryError::VariableNotDefined(name.clone())
+                                        })?)
+                                    }
+                                    Expr_::Bool(value) => Cow::Owned(DataType::Bool(*value)),
+                                    Expr_::Number(value) => Cow::Owned(DataType::Number(*value)),
+                                    Expr_::String(value) => {
+                                        Cow::Owned(DataType::String(value.clone()))
+                                    }
+                                    _ => unreachable!(),
+                                })
+                            })
+                            .collect();
+                        let args = args?;
+                        let refs: Vec<_> = args.iter().map(|arg| arg.as_ref()).collect();
+                        return fun(&refs, env, ds);
+                    }
+                }
+            }
+            let args = match interpret_expr(env, ds, *e, deadline)? {
                 DataType::List(l) => l,
                 _ => unreachable!(),
             };
@@ -221,16 +277,19 @@ fn interpret_expr(
                 Some(v) => v,
                 None => return Err(QueryError::VariableNotDefined(fname.clone())),
             };
-            let (_name, fun) = match var {
-                DataType::Function(name, fun) => (name, fun),
-                _data => return Err(QueryError::InvalidType(fname.to_string())),
-            };
-            fun(args, env, ds)
+            match var {
+                DataType::Function(_, fun) => fun(args, env, ds),
+                DataType::ReadOnlyFunction(_, fun) => {
+                    let refs: Vec<_> = args.iter().collect();
+                    fun(&refs, env, ds)
+                }
+                _ => Err(QueryError::InvalidType(fname.to_string())),
+            }
         }
         List(list) => {
             let mut l = Vec::new();
             for entry in list {
-                let res = interpret_expr(env, ds, entry)?;
+                let res = interpret_expr(env, ds, entry, deadline)?;
                 l.push(res);
             }
             Ok(DataType::List(l))
@@ -238,10 +297,161 @@ fn interpret_expr(
         Dict(d) => {
             let mut dict = HashMap::new();
             for (key, val_uninterpreted) in d {
-                let val = interpret_expr(env, ds, val_uninterpreted)?;
+                let val = interpret_expr(env, ds, val_uninterpreted, deadline)?;
                 dict.insert(key, val);
             }
             Ok(DataType::Dict(dict))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expired_deadline_stops_before_the_next_statement() {
+        let ds = Datastore::new_in_memory(false);
+        let ti =
+            TimeInterval::new_from_string("2000-01-01T00:00:00Z/2000-01-02T00:00:00Z").unwrap();
+        let program = crate::parser::parse(crate::lexer::Lexer::new("RETURN = 1;")).unwrap();
+        let expired = Instant::now() - std::time::Duration::from_secs(1);
+        match interpret_prog(program, &ti, &ds, Some(expired)) {
+            Err(QueryError::TimeBudgetExceeded(msg)) => {
+                assert!(msg.contains("statement 1 of 1"), "{msg}")
+            }
+            other => panic!("expected TimeBudgetExceeded, got {other:?}"),
+        }
+        // Statements inside an if block are checked too: run the parsed `if`
+        // expression directly, bypassing the top-level check.
+        let mut program =
+            crate::parser::parse(crate::lexer::Lexer::new("if True { RETURN = 1; }")).unwrap();
+        let if_expr = program.stmts.remove(0);
+        let mut env = init_env(&ti);
+        match interpret_expr(&mut env, &ds, if_expr, Some(expired)) {
+            Err(QueryError::TimeBudgetExceeded(msg)) => {
+                assert!(msg.contains("if block"), "{msg}")
+            }
+            other => panic!("expected TimeBudgetExceeded, got {other:?}"),
+        }
+        assert!(!env.contains_key("RETURN"), "block body must not have run");
+
+        // No deadline, or one in the future, runs the program as before.
+        let program = crate::parser::parse(crate::lexer::Lexer::new("RETURN = 1;")).unwrap();
+        let far = Instant::now() + std::time::Duration::from_secs(60);
+        assert!(interpret_prog(program, &ti, &ds, Some(far)).is_ok());
+    }
+
+    fn run(code: &str, env: &mut VarEnv, ds: &Datastore) -> DataType {
+        let program = crate::parser::parse(crate::lexer::Lexer::new(code)).unwrap();
+        for expr in program.stmts {
+            interpret_expr(env, ds, expr, None).unwrap();
+        }
+        env.remove("RETURN").unwrap_or(DataType::None())
+    }
+
+    #[test]
+    fn read_only_arguments_borrow_the_original_value_and_support_aliases() {
+        fn check(args: &[&DataType], env: &VarEnv, _: &Datastore) -> Result<DataType, QueryError> {
+            assert!(std::ptr::eq(args[0], env.get("events").unwrap()));
+            Ok(DataType::Bool(true))
+        }
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        env.insert(
+            "check".into(),
+            DataType::ReadOnlyFunction("check".into(), check),
+        );
+        env.insert(
+            "events".into(),
+            DataType::List(vec![DataType::Event(aw_models::Event::default())]),
+        );
+        assert_eq!(
+            run("alias = check; return alias(events);", &mut env, &ds),
+            DataType::Bool(true)
+        );
+        assert!(env.contains_key("events"));
+    }
+
+    #[test]
+    fn side_effecting_arguments_keep_snapshots_and_resolve_the_function_after_evaluation() {
+        fn check(args: &[&DataType], env: &VarEnv, _: &Datastore) -> Result<DataType, QueryError> {
+            assert_eq!(args[0], &DataType::List(vec![DataType::Number(1.0)]));
+            assert_eq!(env["items"], DataType::List(vec![DataType::Number(2.0)]));
+            Ok(DataType::Bool(true))
+        }
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        env.insert(
+            "check".into(),
+            DataType::ReadOnlyFunction("check".into(), check),
+        );
+        // Assignment nodes are supported by the interpreter, although the
+        // current parser only emits them at statement level.
+        let expr = |node| Expr {
+            span: crate::lexer::Span {
+                lo: 0,
+                hi: 0,
+                line: 1,
+            },
+            node,
+        };
+        for rebind in [false, true] {
+            env.insert("items".into(), DataType::List(vec![DataType::Number(1.0)]));
+            env.insert(
+                "f".into(),
+                if rebind {
+                    DataType::Number(0.0)
+                } else {
+                    env["check"].clone()
+                },
+            );
+            let mut args = vec![
+                expr(Expr_::Var("items".into())),
+                expr(Expr_::Assign(
+                    "items".into(),
+                    Box::new(expr(Expr_::List(vec![expr(Expr_::Number(2.0))]))),
+                )),
+            ];
+            if rebind {
+                args.push(expr(Expr_::Assign(
+                    "f".into(),
+                    Box::new(expr(Expr_::Var("check".into()))),
+                )));
+            }
+            let call = expr(Expr_::Function(
+                "f".into(),
+                Box::new(expr(Expr_::List(args))),
+            ));
+            assert_eq!(
+                interpret_expr(&mut env, &ds, call, None).unwrap(),
+                DataType::Bool(true)
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_builtins_keep_values_available_and_accept_computed_arguments() {
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
+        let mut event = aw_models::Event::default();
+        event.duration = chrono::Duration::seconds(3);
+        env.insert(
+            "events".into(),
+            DataType::List(vec![DataType::Event(event)]),
+        );
+        assert_eq!(run("total = sum_durations; a = total(events); b = total(events + events); return a + b;", &mut env, &ds), DataType::Number(9.0));
+        assert_eq!(
+            run(
+                "values = [1, 2]; f = contains; a = f(values, 2); return [a, values];",
+                &mut env,
+                &ds
+            ),
+            DataType::List(vec![
+                DataType::Bool(true),
+                DataType::List(vec![DataType::Number(1.0), DataType::Number(2.0)])
+            ])
+        );
     }
 }

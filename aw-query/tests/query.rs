@@ -96,6 +96,56 @@ mod query_tests {
     }
 
     #[test]
+    fn test_android_schemeless_domain_aggregation() {
+        let ds = setup_datastore_with_bucket();
+        for (index, url) in [
+            "example.com/path",
+            "https://example.com/path",
+            "http://example.com/other",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let event: Event = serde_json::from_value(json!({
+                "timestamp": format!("2026-11-02T00:00:{}Z", index * 10),
+                "duration": 10,
+                "data": {"url": url}
+            }))
+            .unwrap();
+            ds.insert_events(BUCKET_ID, &[event]).unwrap();
+        }
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+        let code = format!(
+            r#"
+            events = split_url_events(query_bucket("{BUCKET_ID}"));
+            events = merge_events_by_keys(events, ["$domain"]);
+            return sum_durations(filter_keyvals(events, "$domain", ["example.com"]));
+        "#
+        );
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 30.0),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sum_durations_precision() {
+        // Repro from ActivityWatch/aw-server-rust#745: sum_durations came out 1 ms low
+        let ds = setup_datastore_with_bucket();
+        let event: Event = serde_json::from_str(
+            r#"{"timestamp": "2026-01-01T10:00:00Z", "duration": 515.968, "data": {}}"#,
+        )
+        .unwrap();
+        ds.insert_events(BUCKET_ID, &[event]).unwrap();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+        let code = format!(r#"return sum_durations(query_bucket("{BUCKET_ID}"));"#);
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            DataType::Number(n) => assert_eq!(n, 515.968),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        }
+    }
+
+    #[test]
     fn test_bool() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
@@ -115,6 +165,35 @@ mod query_tests {
         let code = String::from("1;1.;return 1.1;");
         match aw_query::query(&code, &interval, &ds).unwrap() {
             aw_query::DataType::Number(n) => assert_eq!(n, 1.1),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        };
+    }
+
+    #[test]
+    fn test_negative_number_literal() {
+        let ds = setup_datastore_empty();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // A negative number literal is a value, not a subtraction.
+        let code = String::from("return -100;");
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            aw_query::DataType::Number(n) => assert_eq!(n, -100.0),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        };
+
+        // Subtraction still subtracts.
+        let code = String::from("return 1 - 3;");
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            aw_query::DataType::Number(n) => assert_eq!(n, -2.0),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        };
+
+        // A negative number can be assigned and used in a dict.
+        let code = String::from("a = -5; return { \"priority\": a };");
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            aw_query::DataType::Dict(d) => {
+                assert_eq!(d.get("priority"), Some(&aw_query::DataType::Number(-5.0)))
+            }
             ref data => panic!("Wrong datatype, {data:?}"),
         };
     }
@@ -170,6 +249,14 @@ mod query_tests {
         let code = String::from("return  True==1;");
         let res = aw_query::query(&code, &interval, &ds);
         assert_err_type!(res, QueryError::InvalidType(_));
+
+        // None comparison, consistent with the PartialEq impl on DataType.
+        // print() returns None, so this compares two None values.
+        let code = String::from(r#"a=print("a"); b=print("b"); return a==b;"#);
+        match aw_query::query(&code, &interval, &ds).unwrap() {
+            aw_query::DataType::Bool(b) => assert!(b),
+            ref data => panic!("Wrong datatype, {data:?}"),
+        };
     }
 
     #[test]
@@ -334,6 +421,60 @@ mod query_tests {
     }
 
     #[test]
+    fn test_flood_pulsetime() {
+        use chrono::{DateTime, Utc};
+        use std::str::FromStr;
+
+        let ds = setup_datastore_with_bucket();
+        let start: DateTime<Utc> = DateTime::from_str("2000-01-01T00:00:00Z").unwrap();
+        let e1 = Event {
+            id: None,
+            timestamp: start,
+            duration: Duration::seconds(10),
+            data: json_map! {"key": json!("a")},
+        };
+        let e2 = Event {
+            id: None,
+            timestamp: start + Duration::seconds(17),
+            duration: Duration::seconds(10),
+            data: json_map! {"key": json!("b")},
+        };
+        ds.insert_events(BUCKET_ID, &[e1, e2]).unwrap();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let durations = |args: &str| -> Vec<f64> {
+            let code = format!(r#"return flood(query_bucket("{BUCKET_ID}"){args});"#);
+            match aw_query::query(&code, &interval, &ds).unwrap() {
+                aw_query::DataType::List(l) => l
+                    .into_iter()
+                    .map(|e| match e {
+                        aw_query::DataType::Event(e) => {
+                            e.duration.num_milliseconds() as f64 / 1000.0
+                        }
+                        ref data => panic!("Wrong datatype, {data:?}"),
+                    })
+                    .collect(),
+                ref data => panic!("Wrong datatype, {data:?}"),
+            }
+        };
+        // The 7 s gap is left alone with the default pulsetime of 5 s
+        assert_eq!(durations(""), vec![10.0, 10.0]);
+        assert_eq!(durations(", 6.5"), vec![10.0, 10.0]);
+        // and filled in the middle when the gap is at most pulsetime
+        assert_eq!(durations(", 7"), vec![13.5, 13.5]);
+        assert_eq!(durations(", 10.5"), vec![13.5, 13.5]);
+
+        // Negative pulsetimes and ones that don't fit in i64 nanoseconds are rejected
+        for pulsetime in ["0 - 1", "0 - 0.0000000001", "1000000000000"] {
+            let code = format!(r#"return flood(query_bucket("{BUCKET_ID}"), {pulsetime});"#);
+            assert_err_type!(
+                aw_query::query(&code, &interval, &ds),
+                QueryError::InvalidFunctionParameters(_)
+            );
+        }
+    }
+
+    #[test]
     fn test_all_functions() {
         let ds = setup_datastore_populated();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
@@ -388,6 +529,80 @@ mod query_tests {
         let event = events.first().unwrap();
         let cats = event.data.get("$category").unwrap();
         assert_eq!(cats, &serde_json::json!(vec!["Test", "Subtest"]));
+    }
+
+    #[test]
+    fn test_categorize_priority_overrides_depth() {
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // Without priority, the deeper rule wins (existing contract).
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$" }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            return  events;"#,
+            "testid"
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(
+            events.first().unwrap().data.get("$category").unwrap(),
+            &serde_json::json!(vec!["B", "B1"])
+        );
+
+        // With an explicit priority on A, organizational depth no longer wins.
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "priority": 25 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            return  events;"#,
+            "testid"
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(
+            events.first().unwrap().data.get("$category").unwrap(),
+            &serde_json::json!(vec!["A"])
+        );
+
+        // `weight` is accepted as an alias for `priority`.
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "weight": 25 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            return  events;"#,
+            "testid"
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(
+            events.first().unwrap().data.get("$category").unwrap(),
+            &serde_json::json!(vec!["A"])
+        );
+    }
+
+    #[test]
+    fn test_categorize_negative_priority() {
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // A negative priority is a valid rule priority (it deprioritizes the
+        // rule), and the webui sends the rules as a literal in the query
+        // string, so the query language has to parse negative numbers.
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = categorize(events, [[["A"], {{ "type": "regex", "regex": "^value$", "priority": -100 }}], [["B", "B1"], {{ "type": "regex", "regex": "^value$" }}]]);
+            return  events;"#,
+            "testid"
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(
+            events.first().unwrap().data.get("$category").unwrap(),
+            &serde_json::json!(vec!["B", "B1"])
+        );
     }
 
     #[test]
@@ -547,6 +762,22 @@ mod query_tests {
             return  events;"#;
         let res = aw_query::query(code, &interval, &ds);
         assert_err_type!(res, QueryError::RegexCompileError(_));
+
+        // Test categorize rule with non-integer priority
+        let code = r#"
+            events = [];
+            events = categorize(events, [[["test"], { "type": "regex", "regex": "test", "priority": 1.5 }]]);
+            return  events;"#;
+        let res = aw_query::query(code, &interval, &ds);
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
+
+        // Test categorize rule with non-numeric priority
+        let code = r#"
+            events = [];
+            events = categorize(events, [[["test"], { "type": "regex", "regex": "test", "priority": "high" }]]);
+            return  events;"#;
+        let res = aw_query::query(code, &interval, &ds);
+        assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
     }
 
     #[test]
@@ -699,5 +930,94 @@ mod query_tests {
             DataType::Number(n) => assert_eq!(n, 3.0),
             num => panic!("Expected number, got {num:?}"),
         };
+    }
+
+    #[test]
+    fn test_merge_subwatcher_fields() {
+        let ds = setup_datastore_with_bucket();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+        let now = chrono::Utc::now();
+
+        // Insert base window events
+        let base_events = vec![Event {
+            id: None,
+            timestamp: now,
+            duration: Duration::seconds(10),
+            data: json_map! {"app": json!("Firefox"), "file": json!("base.rs")},
+        }];
+        ds.insert_events(BUCKET_ID, &base_events).unwrap();
+
+        // Insert editor events in a separate bucket
+        let editor_bucket_id = "editor-testid";
+        let editor_bucket = Bucket {
+            bid: None,
+            id: editor_bucket_id.to_string(),
+            _type: "editor".to_string(),
+            client: "testclient".to_string(),
+            hostname: "testhost".to_string(),
+            created: Some(chrono::Utc::now()),
+            data: json_map! {},
+            metadata: BucketMetadata::default(),
+            events: None,
+            last_updated: None,
+        };
+        ds.create_bucket(&editor_bucket).unwrap();
+        let editor_events = vec![Event {
+            id: None,
+            timestamp: now,
+            duration: Duration::seconds(5),
+            data: json_map! {
+                "project": json!("gptme"),
+                "file": json!("src/main.rs"),
+                "language": json!("Rust")
+            },
+        }];
+        ds.insert_events("editor-testid", &editor_events).unwrap();
+
+        // Query: fetch window events, enrich with editor fields via merge_subwatcher_fields
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            editor_events = flood(query_bucket("editor-testid"));
+            events = merge_subwatcher_fields(events, editor_events, ["project", "file"]);
+            return  events;"#,
+            BUCKET_ID
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        // The base event is split where the editor event ends; total time is kept
+        assert_eq!(events.len(), 2);
+        let event = events.first().unwrap();
+        assert_eq!(event.duration, Duration::seconds(5));
+        assert_eq!(event.data.get("project").unwrap(), &json!("gptme"));
+        assert_eq!(event.data.get("file").unwrap(), &json!("base.rs"));
+        // language was not in keys, should not be present
+        assert!(event.data.get("language").is_none());
+        // original fields are preserved
+        assert_eq!(event.data.get("app").unwrap(), &json!("Firefox"));
+        assert_eq!(events[1].duration, Duration::seconds(5));
+        assert!(events[1].data.get("project").is_none());
+
+        // Optional fourth argument selects the conflict policy
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            editor_events = query_bucket("editor-testid");
+            return merge_subwatcher_fields(events, editor_events, ["file"], "sub_wins");"#,
+            BUCKET_ID
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(events[0].data.get("file").unwrap(), &json!("src/main.rs"));
+        assert_eq!(events[1].data.get("file").unwrap(), &json!("base.rs"));
+
+        // An invalid conflict policy is a query error, not a panic
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            return merge_subwatcher_fields(events, events, ["app"], "invalid");"#,
+            BUCKET_ID
+        );
+        assert!(aw_query::query(&code, &interval, &ds).is_err());
     }
 }

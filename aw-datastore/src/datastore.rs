@@ -22,6 +22,50 @@ fn _get_db_version(conn: &Connection) -> i32 {
         .unwrap()
 }
 
+/// Infer the schema version of a populated database whose `user_version` is 0.
+///
+/// `sqlite3 .dump` (the documented corruption-recovery path) does not carry
+/// `PRAGMA user_version`, so a restored database reports 0 even though its
+/// tables exist. Re-running the v0 migrations on it panics (duplicate column,
+/// table already exists). Returns 0 for a genuinely empty database.
+pub(crate) fn _infer_db_version(conn: &Connection) -> i32 {
+    let has = |kind: &str, name: &str| -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            params![kind, name],
+            |_| Ok(()),
+        )
+        .is_ok()
+    };
+    if !has("table", "buckets") || !has("table", "events") {
+        return 0;
+    }
+    let has_column = |col: &str| -> bool {
+        conn.query_row(
+            "SELECT 1 FROM pragma_table_info('buckets') WHERE name = ?1",
+            params![col],
+            |_| Ok(()),
+        )
+        .is_ok()
+    };
+    if !has_column("data") && !has_column("data_deprecated") {
+        return 1;
+    }
+    if !has_column("data_deprecated") {
+        return 2;
+    }
+    if !has("table", "key_value") {
+        return 3;
+    }
+    if has("index", "events_bucketrow_endtime_starttime_index") {
+        6
+    } else if has("index", "events_bucketrow_starttime_endtime_index") {
+        5
+    } else {
+        4
+    }
+}
+
 /*
  * ### Database version changelog ###
  * 0: Uninitialized database
@@ -30,8 +74,37 @@ fn _get_db_version(conn: &Connection) -> i32 {
  * 3: see: https://github.com/ActivityWatch/aw-server-rust/pull/52
  * 4: Added 'key_value' table for storing key - value pairs
  * 5: Replaced single-column events indexes with a composite index
+ * 6: Added an endtime-first index for recent interval reads
  */
-static NEWEST_DB_VERSION: i32 = 5;
+pub const NEWEST_DB_VERSION: i32 = 6;
+
+/// Oldest version a read-only open (aw-sync pulling a peer db) accepts.
+///
+/// v4, v5 and v6 have identical tables and columns; v5 and v6 only changed
+/// indexes. A read-only connection cannot migrate, so queries adapt to the
+/// indexes the file has (see [`events_source`]) instead of rejecting it.
+///
+/// Rule for future migrations: if a migration changes tables or columns that
+/// reads depend on, bump this to the new version. If it only adds or drops
+/// indexes, leave it alone and teach [`events_source`] about the new index.
+pub const MIN_READ_COMPAT_DB_VERSION: i32 = 4;
+
+/// The `FROM` source for event range reads, with an `INDEXED BY` hint only
+/// when this database version is guaranteed to have that index.
+///
+/// `INDEXED BY` on a missing index is a prepare error, not a hint that
+/// SQLite ignores. Writable databases are always migrated to
+/// [`NEWEST_DB_VERSION`], but a read-only peer db (aw-sync pull) can be older:
+/// v4 has only the single-column indexes, v5 lacks the endtime-first index.
+pub(crate) fn events_source(db_version: i32, prefer_endtime: bool) -> &'static str {
+    if db_version >= 6 && prefer_endtime {
+        "events INDEXED BY events_bucketrow_endtime_starttime_index"
+    } else if db_version >= 5 {
+        "events INDEXED BY events_bucketrow_starttime_endtime_index"
+    } else {
+        "events"
+    }
+}
 
 fn _create_tables(conn: &Connection, version: i32) -> bool {
     let mut first_init = false;
@@ -55,6 +128,10 @@ fn _create_tables(conn: &Connection, version: i32) -> bool {
 
     if version < 5 {
         _migrate_v4_to_v5(conn);
+    }
+
+    if version < 6 {
+        _migrate_v5_to_v6(conn);
     }
 
     first_init
@@ -161,7 +238,7 @@ fn _migrate_v2_to_v3(conn: &Connection) {
 fn _migrate_v3_to_v4(conn: &Connection) {
     info!("Upgrading database to v4, adding table for key-value storage");
     conn.execute(
-        "CREATE TABLE key_value (
+        "CREATE TABLE IF NOT EXISTS key_value (
         key TEXT PRIMARY KEY,
         value TEXT,
         last_modified NUMBER NOT NULL
@@ -207,10 +284,282 @@ fn _migrate_v4_to_v5(conn: &Connection) {
     .expect("Failed to run v5 migration transaction");
 }
 
+fn _migrate_v5_to_v6(conn: &Connection) {
+    conn.execute_batch(
+        "BEGIN EXCLUSIVE TRANSACTION;
+         CREATE INDEX IF NOT EXISTS events_bucketrow_endtime_starttime_index
+             ON events(bucketrow, endtime, starttime DESC);
+         PRAGMA user_version = 6;
+         COMMIT;",
+    )
+    .expect("Failed to run v6 migration transaction");
+}
+
+// Both indexes can bound only one of the two interval predicates. Use the
+// bucket's time span as a cheap selectivity estimate; this affects performance,
+// never which rows qualify. Limited queries retain their ordered starttime scan
+// so LIMIT can stop early without sorting all matching rows.
+pub(crate) fn prefer_endtime_index(
+    bucket: &Bucket,
+    start: i64,
+    end: i64,
+    limit: Option<u64>,
+) -> bool {
+    if limit.is_some() {
+        return false;
+    }
+    match (
+        bucket
+            .metadata
+            .start
+            .and_then(|dt| dt.timestamp_nanos_opt()),
+        bucket.metadata.end.and_then(|dt| dt.timestamp_nanos_opt()),
+    ) {
+        (Some(first), Some(last)) => {
+            let first = i128::from(first);
+            let last = i128::from(last);
+            // Clamp unbounded ranges to the bucket span, so a full-bucket
+            // export keeps its ordered scan. Require a substantial advantage
+            // to offset sorting the endtime index's matching rows.
+            let start_scan = (i128::from(end).min(last) - first).max(0);
+            let end_scan = (last - i128::from(start).max(first)).max(0);
+            end_scan * 4 < start_scan
+        }
+        _ => false,
+    }
+}
+
+/// How [`DatastoreInstance::get_events_inner`] clips events and treats a
+/// corrupt event row. Recovery unions must use `UnclippedStrict` so a partially
+/// read source rolls back instead of committing truncated history.
+#[derive(Clone, Copy)]
+enum EventRead {
+    /// Clip events to the query range; tolerate corrupt rows (`get_events`).
+    Clipped,
+    /// No clipping; tolerate corrupt rows (`get_events_unclipped`).
+    Unclipped,
+    /// No clipping; propagate corrupt rows (`get_events_unclipped_strict`).
+    UnclippedStrict,
+}
+
 pub struct DatastoreInstance {
     buckets_cache: HashMap<String, Bucket>,
+    /// `(count, max id, names)` of the buckets table when `buckets_cache` was
+    /// loaded; lets a reader detect creates, deletes and renames by another
+    /// connection with one cheap query.
+    buckets_signature: (i64, i64, String),
     first_init: bool,
     pub db_version: i32,
+}
+
+/// Nanoseconds since the epoch for a time filter, clamped to `i64` for dates chrono can't
+/// express in nanoseconds (before 1677 or after 2262), so such a bound means "no limit"
+/// instead of panicking the datastore worker. Bounds that can't match anything are
+/// caught first by [`filter_excludes_everything`].
+fn filter_nanos(dt: DateTime<Utc>) -> i64 {
+    dt.timestamp_nanos_opt().unwrap_or(if dt.timestamp() < 0 {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
+}
+
+/// Start and end of an event as stored: nanoseconds since the epoch. An event
+/// that starts or ends outside that range (1677-2262) can't be stored and is
+/// rejected, instead of panicking the datastore worker.
+fn event_nanos(event: &Event) -> Result<(i64, i64), DatastoreError> {
+    let invalid = || {
+        DatastoreError::InvalidEvent(format!(
+            "Event at {} with duration {}s is outside the supported time range (1677-2262)",
+            event.timestamp,
+            event.duration.num_milliseconds() as f64 / 1000.0
+        ))
+    };
+    let start = event.timestamp.timestamp_nanos_opt().ok_or_else(invalid)?;
+    let duration = event.duration.num_nanoseconds().ok_or_else(invalid)?;
+    let end = start.checked_add(duration).ok_or_else(invalid)?;
+    Ok((start, end))
+}
+
+/// Whether a time filter can't match any stored event: a start after 2262 or an end
+/// before 1677, beyond the range event times are stored in.
+fn filter_excludes_everything(
+    starttime_opt: Option<DateTime<Utc>>,
+    endtime_opt: Option<DateTime<Utc>>,
+) -> bool {
+    let out_of_range = |dt: &DateTime<Utc>| dt.timestamp_nanos_opt().is_none();
+    starttime_opt.is_some_and(|dt| out_of_range(&dt) && dt.timestamp() > 0)
+        || endtime_opt.is_some_and(|dt| out_of_range(&dt) && dt.timestamp() < 0)
+}
+
+fn _datetime_from_nanos(ns: i64) -> DateTime<Utc> {
+    // Euclidean division so a negative (pre-epoch) timestamp still yields a
+    // subnanos remainder in [0, 1_000_000_000) instead of a negative value
+    // that wraps to a bogus u32 and makes `from_timestamp` return None.
+    let seconds = ns.div_euclid(1_000_000_000);
+    let subnanos = ns.rem_euclid(1_000_000_000) as u32;
+    DateTime::from_timestamp(seconds, subnanos).unwrap()
+}
+
+/// Parse an event from a row selected as `id, starttime, endtime, data`.
+///
+/// When `clip` is set to `(starttime_filter_ns, endtime_filter_ns)`, the event is
+/// clamped to that query range.
+pub(crate) fn parse_event_row(
+    row: &rusqlite::Row,
+    clip: Option<(i64, i64)>,
+) -> rusqlite::Result<Event> {
+    let id = row.get(0)?;
+    let mut starttime_ns: i64 = row.get(1)?;
+    let mut endtime_ns: i64 = row.get(2)?;
+    let data_str: String = row.get(3)?;
+
+    if let Some((starttime_filter_ns, endtime_filter_ns)) = clip {
+        if starttime_ns < starttime_filter_ns {
+            starttime_ns = starttime_filter_ns
+        }
+        if endtime_ns > endtime_filter_ns {
+            endtime_ns = endtime_filter_ns
+        }
+    }
+    let duration_ns = endtime_ns - starttime_ns;
+
+    let data: serde_json::map::Map<String, Value> =
+        serde_json::from_str(&data_str).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
+        })?;
+
+    Ok(Event {
+        id: Some(id),
+        timestamp: _datetime_from_nanos(starttime_ns),
+        duration: Duration::nanoseconds(duration_ns),
+        data,
+    })
+}
+
+/// Legacy-bucket events that overlap no other event in either bucket, so they can
+/// be moved into the destination bucket without creating overlapping records.
+///
+/// Two events overlap when `a.starttime < b.endtime AND b.starttime < a.endtime`
+/// (strict, matching the datastore's overlap semantics elsewhere). Events are
+/// read once ordered by `starttime`. A sweep keeps still-open events in a
+/// min-heap keyed by `endtime`. A positive-duration event overlaps every
+/// still-open event, so those are marked in O(1) via an epoch counter rather
+/// than scanning the heap (which would be quadratic for stacked histories).
+/// Zero-duration events are the only case that still scans, and they never stay
+/// in the open set. The pass is O(n log n).
+fn movable_legacy_event_ids(
+    conn: &Connection,
+    legacy_bid: Option<i64>,
+    destination_bid: Option<i64>,
+) -> rusqlite::Result<Vec<i64>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    struct Span {
+        id: i64,
+        starttime: i64,
+        endtime: i64,
+        legacy: bool,
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT id, starttime, endtime, bucketrow FROM events
+         WHERE bucketrow IN (?1, ?2)
+         ORDER BY starttime ASC, id ASC",
+    )?;
+    let spans = stmt
+        .query_map(params![legacy_bid, destination_bid], |row| {
+            let bucketrow: Option<i64> = row.get(3)?;
+            Ok(Span {
+                id: row.get(0)?,
+                starttime: row.get(1)?,
+                endtime: row.get(2)?,
+                legacy: bucketrow == legacy_bid,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<Span>>>()?;
+
+    let mut overlaps = vec![false; spans.len()];
+    // Open events: (endtime, index, epoch-at-push). Epoch marks the whole
+    // concurrent set in O(1) when a later positive-duration event overlaps it.
+    let mut open: BinaryHeap<Reverse<(i64, usize, u32)>> = BinaryHeap::new();
+    let mut epoch: u32 = 0;
+    for (i, span) in spans.iter().enumerate() {
+        // Events that ended at or before this start can never overlap this or
+        // any later event (later events start no earlier than this one).
+        while let Some(Reverse((endtime, j, pushed_epoch))) = open.peek().copied() {
+            if endtime <= span.starttime {
+                open.pop();
+                if pushed_epoch < epoch {
+                    overlaps[j] = true;
+                }
+            } else {
+                break;
+            }
+        }
+        if !open.is_empty() {
+            if span.endtime > span.starttime {
+                // Positive duration: every remaining open event `j` has
+                // `j.starttime <= span.starttime < span.endtime` and
+                // `span.starttime < j.endtime`, so they all overlap.
+                overlaps[i] = true;
+                epoch += 1;
+            } else {
+                // Zero-duration: overlaps open events that started strictly
+                // earlier, but not same-start positive-duration events
+                // (`j.starttime < span.endtime` fails when starttimes match).
+                let mut overlapped = false;
+                for Reverse((_, j, _)) in open.iter() {
+                    if spans[*j].starttime < span.starttime {
+                        overlaps[*j] = true;
+                        overlapped = true;
+                    }
+                }
+                if overlapped {
+                    overlaps[i] = true;
+                }
+            }
+        }
+        open.push(Reverse((span.endtime, i, epoch)));
+    }
+    while let Some(Reverse((_, j, pushed_epoch))) = open.pop() {
+        if pushed_epoch < epoch {
+            overlaps[j] = true;
+        }
+    }
+
+    Ok(spans
+        .iter()
+        .zip(overlaps.iter())
+        .filter(|(span, overlapping)| span.legacy && !**overlapping)
+        .map(|(span, _)| span.id)
+        .collect())
+}
+
+/// Reassign the given events to `bucket_bid`, in batches so the statement stays
+/// well under SQLite's bound-parameter limit.
+fn move_events_to_bucket(
+    conn: &Connection,
+    bucket_bid: Option<i64>,
+    event_ids: &[i64],
+) -> rusqlite::Result<()> {
+    const BATCH: usize = 500;
+    for chunk in event_ids.chunks(BATCH) {
+        let placeholders = (0..chunk.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("UPDATE events SET bucketrow = ?1 WHERE id IN ({placeholders})");
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut values: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() + 1);
+        values.push(&bucket_bid);
+        for id in chunk {
+            values.push(id);
+        }
+        stmt.execute(values.as_slice())?;
+    }
+    Ok(())
 }
 
 impl DatastoreInstance {
@@ -219,24 +568,50 @@ impl DatastoreInstance {
         migrate_enabled: bool,
     ) -> Result<DatastoreInstance, DatastoreError> {
         let mut first_init = false;
-        let db_version = _get_db_version(conn);
+        let mut db_version = _get_db_version(conn);
+
+        // `sqlite3 .dump` (the documented corruption-recovery path) drops
+        // `PRAGMA user_version`, so a restored file reports 0 while its schema
+        // is at some real version. Infer it and use that: a read-only open
+        // (aw-sync pulling a peer db) must not reject the file as unsupported,
+        // and a writable open must not re-run v0 migrations on it. Only a
+        // writable open persists the inferred version; a read-only one cannot.
+        if db_version == 0 {
+            let inferred = _infer_db_version(conn);
+            if inferred > 0 {
+                if migrate_enabled {
+                    warn!(
+                        "Database has user_version 0 but a populated schema (restored from a \
+                         dump?), treating it as v{inferred}"
+                    );
+                    conn.pragma_update(None, "user_version", inferred)
+                        .expect("Failed to update database version!");
+                }
+                db_version = inferred;
+            }
+        }
 
         if migrate_enabled {
             first_init = _create_tables(conn, db_version);
+            // Queries pick index hints from this, so it must describe the
+            // migrated file, not the version it had before this open.
+            db_version = _get_db_version(conn);
         } else if db_version < 0 {
             return Err(DatastoreError::Uninitialized(
                 "Tried to open an uninitialized datastore with migration disabled".to_string(),
             ));
-        } else if db_version != NEWEST_DB_VERSION {
+        } else if !(MIN_READ_COMPAT_DB_VERSION..=NEWEST_DB_VERSION).contains(&db_version) {
             return Err(DatastoreError::OldDbVersion(format!(
                 "\
                 Tried to open an database with an incompatible database version!
-                Database has version {db_version} while the supported version is {NEWEST_DB_VERSION}"
+                Database has version {db_version} while the supported versions are \
+                {MIN_READ_COMPAT_DB_VERSION}..={NEWEST_DB_VERSION}"
             )));
         }
 
         let mut ds = DatastoreInstance {
             buckets_cache: HashMap::new(),
+            buckets_signature: (0, 0, String::new()),
             first_init,
             db_version,
         };
@@ -244,7 +619,33 @@ impl DatastoreInstance {
         Ok(ds)
     }
 
+    /// Re-read the bucket list from the database. A reader instance
+    /// ([`crate::DatastoreMethod::FileReader`]) keeps a cache that goes stale
+    /// when the writer creates, deletes, renames or imports buckets.
+    pub fn reload_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
+        self.get_stored_buckets(conn)
+    }
+
+    fn read_buckets_signature(conn: &Connection) -> Result<(i64, i64, String), DatastoreError> {
+        conn.query_row(
+            "SELECT count(*), coalesce(max(id), 0), coalesce(group_concat(name, char(10)), '') \
+             FROM (SELECT id, name FROM buckets ORDER BY id)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| DatastoreError::InternalError(format!("Failed to read bucket signature: {e}")))
+    }
+
+    /// Whether buckets were created, deleted or renamed since the cache was
+    /// loaded (ids are AUTOINCREMENT, so a delete-and-recreate changes
+    /// `max(id)`; the name list catches renames).
+    pub fn buckets_changed(&self, conn: &Connection) -> Result<bool, DatastoreError> {
+        Ok(Self::read_buckets_signature(conn)? != self.buckets_signature)
+    }
+
     fn get_stored_buckets(&mut self, conn: &Connection) -> Result<(), DatastoreError> {
+        // Read before the list so a concurrent change lands in the next check.
+        let signature = Self::read_buckets_signature(conn)?;
         let mut stmt = match conn.prepare_cached(
             "
             SELECT  buckets.id, buckets.name, buckets.type, buckets.client,
@@ -265,24 +666,11 @@ impl DatastoreInstance {
         };
         let buckets = match stmt.query_map(&[] as &[&dyn ToSql], |row| {
             let opt_start_ns: Option<i64> = row.get(6)?;
-            let opt_start = match opt_start_ns {
-                Some(starttime_ns) => {
-                    let seconds: i64 = starttime_ns / 1_000_000_000;
-                    let subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
-                    Some(DateTime::from_timestamp(seconds, subnanos).unwrap())
-                }
-                None => None,
-            };
+            // Pre-epoch timestamps are valid; see `_datetime_from_nanos`.
+            let opt_start = opt_start_ns.map(_datetime_from_nanos);
 
             let opt_end_ns: Option<i64> = row.get(7)?;
-            let opt_end = match opt_end_ns {
-                Some(endtime_ns) => {
-                    let seconds: i64 = endtime_ns / 1_000_000_000;
-                    let subnanos: u32 = (endtime_ns % 1_000_000_000) as u32;
-                    Some(DateTime::from_timestamp(seconds, subnanos).unwrap())
-                }
-                None => None,
-            };
+            let opt_end = opt_end_ns.map(_datetime_from_nanos);
 
             // If data column is not set (possible on old installations), use an empty map as default
             let data_str: String = row.get(8)?;
@@ -318,10 +706,11 @@ impl DatastoreInstance {
                 )))
             }
         };
+        let mut new_cache = HashMap::new();
         for bucket in buckets {
             match bucket {
                 Ok(b) => {
-                    self.buckets_cache.insert(b.id.clone(), b.clone());
+                    new_cache.insert(b.id.clone(), b);
                 }
                 Err(e) => {
                     return Err(DatastoreError::InternalError(format!(
@@ -330,20 +719,46 @@ impl DatastoreInstance {
                 }
             }
         }
+        self.buckets_cache = new_cache;
+        self.buckets_signature = signature;
         Ok(())
     }
 
-    pub fn ensure_legacy_import(&mut self, conn: &Connection) -> Result<bool, ()> {
+    /// Imports a legacy (Python aw-server) database, if one is found.
+    ///
+    /// By default this only runs once, the first time the datastore is
+    /// created (`first_init`) — if aw-server-rust had already run before,
+    /// nothing happens and nothing is logged beyond an INFO line explaining
+    /// why the import was skipped (ActivityWatch/aw-server-rust#546). Pass
+    /// `force = true` (`aw-server --import-legacy`) to run the import
+    /// regardless of `first_init`; re-running is idempotent, since matching
+    /// events are deduped against what's already in the bucket.
+    ///
+    /// `legacy_db_path_override` overrides the default
+    /// `peewee-sqlite.v2.db` lookup location (`aw-server --legacy-dbpath`).
+    #[allow(clippy::result_unit_err)]
+    pub fn ensure_legacy_import(
+        &mut self,
+        conn: &Connection,
+        legacy_db_path_override: Option<&str>,
+        force: bool,
+    ) -> Result<bool, ()> {
         use super::legacy_import::legacy_import;
-        if !self.first_init {
+        if !self.first_init && !force {
+            info!(
+                "Datastore was already initialized, skipping legacy import \
+                 (use `aw-server --import-legacy` to run it explicitly)"
+            );
             Ok(false)
         } else {
             self.first_init = false;
-            match legacy_import(self, conn) {
-                Ok(_) => {
-                    info!("Successfully imported legacy database");
-                    self.get_stored_buckets(conn).unwrap();
-                    Ok(true)
+            match legacy_import(self, conn, legacy_db_path_override) {
+                Ok(imported) => {
+                    if imported {
+                        info!("Successfully imported legacy database");
+                        self.get_stored_buckets(conn).unwrap();
+                    }
+                    Ok(imported)
                 }
                 Err(err) => {
                     warn!("Failed to import legacy database: {:?}", err);
@@ -362,6 +777,15 @@ impl DatastoreInstance {
             Some(created) => Some(created),
             None => Some(Utc::now()),
         };
+        // Reject unstorable events before the bucket row is written, so an
+        // import with a bad event doesn't leave an empty bucket behind.
+        // Taking them out also keeps them out of the bucket cache.
+        let events = bucket.events.take().map(|events| events.take_inner());
+        if let Some(events) = &events {
+            for event in events {
+                event_nanos(event)?;
+            }
+        }
         let mut stmt = match conn.prepare_cached(
             "
                 INSERT INTO buckets (name, type, client, hostname, created, data)
@@ -390,32 +814,22 @@ impl DatastoreInstance {
                 // Get and set rowid
                 let rowid: i64 = conn.last_insert_rowid();
                 bucket.bid = Some(rowid);
-                // Take out events from struct before caching
-                let events = bucket.events;
-                bucket.events = None;
                 // Cache bucket
                 self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
                 // Insert events
                 if let Some(events) = events {
-                    self.insert_events(conn, &bucket.id, events.take_inner())?;
-                    bucket.events = None;
+                    self.insert_events(conn, &bucket.id, events)?;
                 }
                 Ok(())
             }
-            // FIXME: This match is ugly, is it possible to write it in a cleaner way?
-            Err(err) => match err {
-                rusqlite::Error::SqliteFailure { 0: sqlerr, 1: _ } => match sqlerr.code {
-                    rusqlite::ErrorCode::ConstraintViolation => {
-                        Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string()))
-                    }
-                    _ => Err(DatastoreError::InternalError(format!(
-                        "Failed to execute create_bucket SQL statement: {err}"
-                    ))),
-                },
-                _ => Err(DatastoreError::InternalError(format!(
-                    "Failed to execute create_bucket SQL statement: {err}"
-                ))),
-            },
+            Err(rusqlite::Error::SqliteFailure(sqlerr, _))
+                if sqlerr.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(DatastoreError::BucketAlreadyExists(bucket.id.to_string()))
+            }
+            Err(err) => Err(DatastoreError::InternalError(format!(
+                "Failed to execute create_bucket SQL statement: {err}"
+            ))),
         }
     }
 
@@ -460,6 +874,51 @@ impl DatastoreInstance {
         self.buckets_cache.clone()
     }
 
+    /// Serialize an export one event at a time using the caller's connection.
+    /// Returns the bucket ID for a single-bucket export (for download naming).
+    pub fn write_export(
+        &self,
+        conn: &Connection,
+        bucket_id: Option<&str>,
+        writer: impl std::io::Write,
+    ) -> Result<Option<String>, DatastoreError> {
+        crate::export::write_export(
+            conn,
+            self.db_version,
+            &self.buckets_cache,
+            bucket_id,
+            writer,
+        )?;
+        Ok(bucket_id.map(str::to_owned).or_else(|| {
+            (self.buckets_cache.len() == 1)
+                .then(|| self.buckets_cache.keys().next().unwrap().clone())
+        }))
+    }
+
+    /// Stream one bucket's events as RFC-4180 CSV, one row at a time.
+    ///
+    /// Uses the same filters, clipping, and corrupt-row policy as `get_events`.
+    pub fn write_events_csv(
+        &self,
+        conn: &Connection,
+        bucket_id: &str,
+        start: Option<chrono::DateTime<chrono::Utc>>,
+        end: Option<chrono::DateTime<chrono::Utc>>,
+        limit: Option<u64>,
+        writer: impl std::io::Write,
+    ) -> Result<(), DatastoreError> {
+        crate::export::write_events_csv(
+            conn,
+            self.db_version,
+            &self.buckets_cache,
+            bucket_id,
+            start,
+            end,
+            limit,
+            writer,
+        )
+    }
+
     pub fn insert_events(
         &mut self,
         conn: &Connection,
@@ -467,6 +926,13 @@ impl DatastoreInstance {
         mut events: Vec<Event>,
     ) -> Result<Vec<Event>, DatastoreError> {
         let mut bucket = self.get_bucket(bucket_id)?;
+        // Check every event before writing any: the worker shares one
+        // transaction across requests, so a failure halfway through would
+        // leave the earlier events of this request stored.
+        let nanos = events
+            .iter()
+            .map(event_nanos)
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut stmt = match conn.prepare_cached(
             "
@@ -480,17 +946,7 @@ impl DatastoreInstance {
                 )))
             }
         };
-        for event in &mut events {
-            let starttime_nanos = event.timestamp.timestamp_nanos_opt().unwrap();
-            let duration_nanos = match event.duration.num_nanoseconds() {
-                Some(nanos) => nanos,
-                None => {
-                    return Err(DatastoreError::InternalError(
-                        "Failed to convert duration to nanoseconds".to_string(),
-                    ))
-                }
-            };
-            let endtime_nanos = starttime_nanos + duration_nanos;
+        for (event, (starttime_nanos, endtime_nanos)) in events.iter_mut().zip(nanos) {
             let data = serde_json::to_string(&event.data).unwrap();
             let res = stmt.execute([
                 &bucket.bid.unwrap(),
@@ -516,12 +972,12 @@ impl DatastoreInstance {
     }
 
     pub fn delete_events_by_id(
-        &self,
+        &mut self,
         conn: &Connection,
         bucket_id: &str,
         event_ids: Vec<i64>,
     ) -> Result<(), DatastoreError> {
-        let bucket = self.get_bucket(bucket_id)?;
+        let mut bucket = self.get_bucket(bucket_id)?;
         let mut stmt = match conn.prepare_cached(
             "
                 DELETE FROM events
@@ -545,6 +1001,46 @@ impl DatastoreInstance {
                 }
             };
         }
+        // Deletion can shrink (or empty) the bucket's time span. prefer_endtime_index
+        // estimates selectivity from these cached bounds, so refresh them here -
+        // otherwise a bucket trimmed down after this call keeps the stale, wider
+        // span and can misjudge which index actually wins.
+        self.refresh_bucket_bounds(conn, &mut bucket)?;
+        Ok(())
+    }
+
+    /// Recompute a bucket's cached start/end bounds from the events table and
+    /// update the bucket cache. Used after deletions, which unlike inserts can
+    /// shrink the bucket's span rather than only extend it.
+    fn refresh_bucket_bounds(
+        &mut self,
+        conn: &Connection,
+        bucket: &mut Bucket,
+    ) -> Result<(), DatastoreError> {
+        let mut stmt = match conn
+            .prepare_cached("SELECT min(starttime), max(endtime) FROM events WHERE bucketrow = ?1")
+        {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to prepare refresh_bucket_bounds SQL statement: {err}"
+                )))
+            }
+        };
+        let (start_ns, end_ns): (Option<i64>, Option<i64>) = match stmt
+            .query_row([&bucket.bid.unwrap() as &dyn ToSql], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            }) {
+            Ok(bounds) => bounds,
+            Err(err) => {
+                return Err(DatastoreError::InternalError(format!(
+                    "Failed to query refresh_bucket_bounds SQL statement: {err:?}"
+                )))
+            }
+        };
+        bucket.metadata.start = start_ns.map(_datetime_from_nanos);
+        bucket.metadata.end = end_ns.map(_datetime_from_nanos);
+        self.buckets_cache.insert(bucket.id.clone(), bucket.clone());
         Ok(())
     }
 
@@ -609,16 +1105,7 @@ impl DatastoreInstance {
                 )))
             }
         };
-        let starttime_nanos = event.timestamp.timestamp_nanos_opt().unwrap();
-        let duration_nanos = match event.duration.num_nanoseconds() {
-            Some(nanos) => nanos,
-            None => {
-                return Err(DatastoreError::InternalError(
-                    "Failed to convert duration to nanoseconds".to_string(),
-                ))
-            }
-        };
-        let endtime_nanos = starttime_nanos + duration_nanos;
+        let (starttime_nanos, endtime_nanos) = event_nanos(event)?;
         let data = serde_json::to_string(&event.data).unwrap();
         match stmt.execute([
             &bucket.bid.unwrap(),
@@ -651,6 +1138,8 @@ impl DatastoreInstance {
         last_heartbeat: &mut HashMap<String, Option<Event>>,
     ) -> Result<Event, DatastoreError> {
         self.get_bucket(bucket_id)?;
+        // Reject an unstorable heartbeat before merging it into the last event.
+        event_nanos(&heartbeat)?;
         if !last_heartbeat.contains_key(bucket_id) {
             last_heartbeat.insert(bucket_id.to_string(), None);
         }
@@ -720,27 +1209,13 @@ impl DatastoreInstance {
             }
         };
 
-        // TODO: Refactor to share row-parsing logic with get_events
         let row = match stmt.query_row([&bucket.bid.unwrap(), &event_id], |row| {
-            let id = row.get(0)?;
-            let starttime_ns: i64 = row.get(1)?;
-            let endtime_ns: i64 = row.get(2)?;
-            let data_str: String = row.get(3)?;
-
-            let time_seconds: i64 = starttime_ns / 1_000_000_000;
-            let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
-            let duration_ns = endtime_ns - starttime_ns;
-            let data: serde_json::map::Map<String, Value> =
-                serde_json::from_str(&data_str).unwrap();
-
-            Ok(Event {
-                id: Some(id),
-                timestamp: DateTime::from_timestamp(time_seconds, time_subnanos).unwrap(),
-                duration: Duration::nanoseconds(duration_ns),
-                data,
-            })
+            parse_event_row(row, None)
         }) {
             Ok(rows) => rows,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(DatastoreError::NoSuchEvent(bucket_id.to_string(), event_id))
+            }
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
                     "Failed to map get_event SQL statement: {err}"
@@ -758,20 +1233,21 @@ impl DatastoreInstance {
         starttime_opt: Option<DateTime<Utc>>,
         endtime_opt: Option<DateTime<Utc>>,
         limit_opt: Option<u64>,
-        clip_to_query_range: bool,
+        mode: EventRead,
     ) -> Result<Vec<Event>, DatastoreError> {
+        let clip_to_query_range = matches!(mode, EventRead::Clipped);
+        let strict_rows = matches!(mode, EventRead::UnclippedStrict);
         let bucket = self.get_bucket(bucket_id)?;
 
         let mut list = Vec::new();
 
-        let starttime_filter_ns: i64 = match starttime_opt {
-            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => 0,
-        };
-        let endtime_filter_ns: i64 = match endtime_opt {
-            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => std::i64::MAX,
-        };
+        if filter_excludes_everything(starttime_opt, endtime_opt) {
+            return Ok(list);
+        }
+        // i64::MIN so None starttime means "all events including pre-epoch timestamps".
+        // Using 0 (Unix epoch) silently drops events with negative nanosecond timestamps.
+        let starttime_filter_ns: i64 = starttime_opt.map_or(i64::MIN, filter_nanos);
+        let endtime_filter_ns: i64 = endtime_opt.map_or(i64::MAX, filter_nanos);
         if starttime_filter_ns > endtime_filter_ns {
             warn!("Starttime in event query was lower than endtime!");
             return Ok(list);
@@ -781,17 +1257,17 @@ impl DatastoreInstance {
             None => -1,
         };
 
-        let mut stmt = match conn.prepare_cached(
-            "
-                SELECT id, starttime, endtime, data
-                FROM events
-                WHERE bucketrow = ?1
-                    AND endtime >= ?2
-                    AND starttime <= ?3
-                ORDER BY starttime DESC
-                LIMIT ?4
-            ;",
-        ) {
+        let source = events_source(
+            self.db_version,
+            prefer_endtime_index(&bucket, starttime_filter_ns, endtime_filter_ns, limit_opt),
+        );
+        let sql = format!(
+            "SELECT id, starttime, endtime, data
+             FROM {source}
+             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3
+             ORDER BY starttime DESC, endtime ASC, id ASC LIMIT ?4"
+        );
+        let mut stmt = match conn.prepare_cached(&sql) {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -800,42 +1276,12 @@ impl DatastoreInstance {
             }
         };
 
-        let rows = match stmt.query_map(
-            [
-                &bucket.bid.unwrap(),
-                &starttime_filter_ns,
-                &endtime_filter_ns,
-                &limit,
-            ],
-            |row| {
-                let id = row.get(0)?;
-                let mut starttime_ns: i64 = row.get(1)?;
-                let mut endtime_ns: i64 = row.get(2)?;
-                let data_str: String = row.get(3)?;
-
-                if clip_to_query_range {
-                    if starttime_ns < starttime_filter_ns {
-                        starttime_ns = starttime_filter_ns
-                    }
-                    if endtime_ns > endtime_filter_ns {
-                        endtime_ns = endtime_filter_ns
-                    }
-                }
-                let duration_ns = endtime_ns - starttime_ns;
-
-                let time_seconds: i64 = starttime_ns / 1_000_000_000;
-                let time_subnanos: u32 = (starttime_ns % 1_000_000_000) as u32;
-                let data: serde_json::map::Map<String, Value> =
-                    serde_json::from_str(&data_str).unwrap();
-
-                Ok(Event {
-                    id: Some(id),
-                    timestamp: DateTime::from_timestamp(time_seconds, time_subnanos).unwrap(),
-                    duration: Duration::nanoseconds(duration_ns),
-                    data,
-                })
-            },
-        ) {
+        let mut rows = match stmt.query([
+            &bucket.bid.unwrap(),
+            &starttime_filter_ns,
+            &endtime_filter_ns,
+            &limit,
+        ]) {
             Ok(rows) => rows,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -843,10 +1289,38 @@ impl DatastoreInstance {
                 )))
             }
         };
-        for row in rows {
-            match row {
+        loop {
+            let row = match rows.next() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(err) => {
+                    if strict_rows {
+                        return Err(DatastoreError::InternalError(format!(
+                            "Failed to read events in bucket {bucket_id}: {err}"
+                        )));
+                    }
+                    warn!("Failed to read events in bucket {}: {}", bucket_id, err);
+                    break;
+                }
+            };
+            match parse_event_row(
+                row,
+                clip_to_query_range.then_some((starttime_filter_ns, endtime_filter_ns)),
+            ) {
                 Ok(event) => list.push(event),
-                Err(err) => warn!("Corrupt event in bucket {}: {}", bucket_id, err),
+                Err(err) => {
+                    if strict_rows {
+                        // Recovery must never treat a partially read source as
+                        // complete: a swallowed row error would let the union
+                        // commit `done` on truncated history and skip the
+                        // source forever. Parsing failures are content errors;
+                        // SQLite stepping failures above remain operational.
+                        return Err(DatastoreError::CorruptEvent(format!(
+                            "Corrupt event in bucket {bucket_id}: {err}"
+                        )));
+                    }
+                    warn!("Corrupt event in bucket {}: {}", bucket_id, err);
+                }
             };
         }
 
@@ -861,7 +1335,14 @@ impl DatastoreInstance {
         endtime_opt: Option<DateTime<Utc>>,
         limit_opt: Option<u64>,
     ) -> Result<Vec<Event>, DatastoreError> {
-        self.get_events_inner(conn, bucket_id, starttime_opt, endtime_opt, limit_opt, true)
+        self.get_events_inner(
+            conn,
+            bucket_id,
+            starttime_opt,
+            endtime_opt,
+            limit_opt,
+            EventRead::Clipped,
+        )
     }
 
     pub fn get_events_unclipped(
@@ -878,7 +1359,29 @@ impl DatastoreInstance {
             starttime_opt,
             endtime_opt,
             limit_opt,
-            false,
+            EventRead::Unclipped,
+        )
+    }
+
+    /// Like [`Self::get_events_unclipped`], but propagates a corrupt event row
+    /// instead of logging and skipping it. Recovery unions use this so a source
+    /// that reads only partially rolls back rather than committing truncated
+    /// history as `done`.
+    pub fn get_events_unclipped_strict(
+        &mut self,
+        conn: &Connection,
+        bucket_id: &str,
+        starttime_opt: Option<DateTime<Utc>>,
+        endtime_opt: Option<DateTime<Utc>>,
+        limit_opt: Option<u64>,
+    ) -> Result<Vec<Event>, DatastoreError> {
+        self.get_events_inner(
+            conn,
+            bucket_id,
+            starttime_opt,
+            endtime_opt,
+            limit_opt,
+            EventRead::UnclippedStrict,
         )
     }
 
@@ -891,26 +1394,28 @@ impl DatastoreInstance {
     ) -> Result<i64, DatastoreError> {
         let bucket = self.get_bucket(bucket_id)?;
 
-        let starttime_filter_ns: i64 = match starttime_opt {
-            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => 0,
-        };
-        let endtime_filter_ns: i64 = match endtime_opt {
-            Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-            None => std::i64::MAX,
-        };
-        if starttime_filter_ns >= endtime_filter_ns {
-            warn!("Endtime in event query was same or lower than starttime!");
+        if filter_excludes_everything(starttime_opt, endtime_opt) {
+            return Ok(0);
+        }
+        // Same default range as get_events_inner: None includes pre-epoch events.
+        let starttime_filter_ns: i64 = starttime_opt.map_or(i64::MIN, filter_nanos);
+        let endtime_filter_ns: i64 = endtime_opt.map_or(i64::MAX, filter_nanos);
+        // Same bound check as get_events_inner, so a zero-length range counts the
+        // events that get_events returns for it.
+        if starttime_filter_ns > endtime_filter_ns {
+            warn!("Endtime in event count query was lower than starttime!");
             return Ok(0);
         }
 
-        let mut stmt = match conn.prepare_cached(
-            "
-            SELECT count(*) FROM events
-            WHERE bucketrow = ?1
-                AND endtime >= ?2
-                AND starttime <= ?3",
-        ) {
+        let source = events_source(
+            self.db_version,
+            prefer_endtime_index(&bucket, starttime_filter_ns, endtime_filter_ns, None),
+        );
+        let sql = format!(
+            "SELECT count(*) FROM {source}
+             WHERE bucketrow = ?1 AND endtime >= ?2 AND starttime <= ?3"
+        );
+        let mut stmt = match conn.prepare_cached(&sql) {
             Ok(stmt) => stmt,
             Err(err) => {
                 return Err(DatastoreError::InternalError(format!(
@@ -957,9 +1462,11 @@ impl DatastoreInstance {
             }
         };
         let timestamp = Utc::now().timestamp();
-        #[allow(clippy::expect_fun_call)]
-        stmt.execute(params![key, data, &timestamp])
-            .expect(&format!("Failed to insert key-value pair: {key}"));
+        if let Err(err) = stmt.execute(params![key, data, &timestamp]) {
+            return Err(DatastoreError::InternalError(format!(
+                "Failed to insert key-value pair: {key}: {err}"
+            )));
+        }
         Ok(())
     }
 
@@ -1113,39 +1620,251 @@ impl DatastoreInstance {
     }
 
     /// Migrates all buckets whose name starts with `aw-watcher-android-test` to use
-    /// `aw-watcher-android` instead.  This covers the old debug-build bucket naming
-    /// convention (e.g. `aw-watcher-android-test_hostname` → `aw-watcher-android_hostname`).
-    /// Events are left untouched; only the bucket metadata is updated.
-    /// Returns the number of buckets that were migrated.
-    /// Note: if a UNIQUE constraint violation occurs on any single row, `UPDATE OR IGNORE`
-    /// will skip conflicting rows instead of aborting the entire batch.
+    /// `aw-watcher-android` instead. This covers the old production bucket naming
+    /// convention (e.g. `aw-watcher-android-test_phone` → `aw-watcher-android_phone`).
+    ///
+    /// If the destination already exists, disjoint legacy events are moved into it.
+    /// Events that overlap a destination or another legacy event stay in the legacy
+    /// bucket so the migration cannot create overlapping activity records. The legacy
+    /// bucket is deleted only after it is empty.
+    /// Returns the number of legacy buckets that were fully renamed or merged.
     pub fn migrate_test_bucket_names(
         &mut self,
         conn: &Connection,
     ) -> Result<usize, DatastoreError> {
-        info!("Migrating 'aw-watcher-android-test' bucket names to 'aw-watcher-android'");
+        const OLD_PREFIX: &str = "aw-watcher-android-test";
+        const NEW_PREFIX: &str = "aw-watcher-android";
 
-        let updated = match conn.execute(
-            "UPDATE OR IGNORE buckets SET name = 'aw-watcher-android' || SUBSTR(name, LENGTH('aw-watcher-android-test') + 1) \
-             WHERE name LIKE 'aw-watcher-android-test%'",
-            [],
-        ) {
-            Ok(n) => n,
-            Err(err) => {
-                return Err(DatastoreError::InternalError(format!(
-                    "Failed to migrate test bucket names: {err}"
-                )))
+        info!("Migrating '{OLD_PREFIX}' bucket names to '{NEW_PREFIX}'");
+        let legacy_ids: Vec<String> = self
+            .buckets_cache
+            .keys()
+            .filter(|id| id.starts_with(OLD_PREFIX))
+            .cloned()
+            .collect();
+        let mut migrated = 0;
+        let mut cache_dirty = false;
+
+        for old_id in legacy_ids {
+            let new_id = old_id.replacen(OLD_PREFIX, NEW_PREFIX, 1);
+            if let Some(new_bucket) = self.buckets_cache.get(&new_id).cloned() {
+                let old_bucket = self
+                    .buckets_cache
+                    .get(&old_id)
+                    .cloned()
+                    .ok_or_else(|| DatastoreError::NoSuchBucket(old_id.clone()))?;
+
+                // Move only events that do not overlap the destination or another
+                // legacy event. A single overlapping cutover heartbeat must not strand
+                // years of disjoint history in the legacy bucket (ActivityWatch/aw-android#243).
+                //
+                // Overlaps are found with one sorted scan over both buckets instead of a
+                // correlated `NOT EXISTS` subquery per legacy event: that subquery had no
+                // lower bound on `starttime`, so it scanned every earlier event again for
+                // each row (O(n^2)). With a couple of years of Android history it kept the
+                // single datastore worker busy for hours, which blanked the web UI and
+                // produced ANRs in every main-thread datastore call (aw-android#261).
+                let movable = movable_legacy_event_ids(conn, old_bucket.bid, new_bucket.bid)
+                    .map_err(|err| {
+                        DatastoreError::InternalError(format!(
+                            "Failed to find mergeable events in '{}': {err}",
+                            old_id
+                        ))
+                    })?;
+                move_events_to_bucket(conn, new_bucket.bid, &movable).map_err(|err| {
+                    DatastoreError::InternalError(format!(
+                        "Failed to merge bucket '{}' into '{}': {err}",
+                        old_id, new_id
+                    ))
+                })?;
+                cache_dirty = true;
+
+                let remaining: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM events WHERE bucketrow = ?1",
+                        [old_bucket.bid],
+                        |row| row.get(0),
+                    )
+                    .map_err(|err| {
+                        DatastoreError::InternalError(format!(
+                            "Failed to count leftover events in '{}': {err}",
+                            old_id
+                        ))
+                    })?;
+                if remaining == 0 {
+                    conn.execute("DELETE FROM buckets WHERE id = ?1", [old_bucket.bid])
+                        .map_err(|err| {
+                            DatastoreError::InternalError(format!(
+                                "Failed to remove merged bucket '{}': {err}",
+                                old_id
+                            ))
+                        })?;
+                    info!("Merged legacy bucket '{}' into '{}'", old_id, new_id);
+                    migrated += 1;
+                } else {
+                    warn!(
+                        "Partially merged '{}' into '{}'; {} overlapping event(s) remain in the legacy bucket",
+                        old_id, new_id, remaining
+                    );
+                }
+            } else {
+                conn.execute(
+                    "UPDATE buckets SET name = ?1 WHERE name = ?2",
+                    [&new_id, &old_id],
+                )
+                .map_err(|err| {
+                    DatastoreError::InternalError(format!(
+                        "Failed to rename bucket '{}' to '{}': {err}",
+                        old_id, new_id
+                    ))
+                })?;
+                info!("Renamed legacy bucket '{}' to '{}'", old_id, new_id);
+                migrated += 1;
+                cache_dirty = true;
             }
-        };
-
-        if updated > 0 {
-            info!("Migrated {} 'aw-watcher-android-test' bucket(s)", updated);
-            // Refresh the in-memory cache so callers see the new names immediately.
-            self.get_stored_buckets(conn)?;
-        } else {
-            info!("No 'aw-watcher-android-test' buckets found; nothing to migrate");
         }
 
-        Ok(updated)
+        if cache_dirty {
+            self.get_stored_buckets(conn)?;
+        }
+        Ok(migrated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_event_read_propagates_sqlite_step_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+        let bucket = Bucket {
+            id: "test".to_owned(),
+            _type: "test".to_owned(),
+            client: "test".to_owned(),
+            hostname: "test".to_owned(),
+            bid: None,
+            created: None,
+            data: Default::default(),
+            metadata: Default::default(),
+            events: None,
+            last_updated: None,
+        };
+        ds.create_bucket(&conn, bucket).unwrap();
+        // A view deterministically raises an SQLite execution error while
+        // stepping the query, rather than an event-content conversion error.
+        // Use the v4 read path, which does not require named table indexes.
+        ds.db_version = 4;
+        conn.execute_batch(
+            "ALTER TABLE events RENAME TO saved_events;
+             CREATE VIEW events AS SELECT abs(-9223372036854775808) AS id,
+                 1 AS bucketrow, 0 AS starttime, 1 AS endtime, '{}' AS data;",
+        )
+        .unwrap();
+        let err = ds
+            .get_events_unclipped_strict(&conn, "test", None, None, None)
+            .unwrap_err();
+        assert!(
+            matches!(&err, DatastoreError::InternalError(message) if message.contains("integer overflow")),
+            "SQLite execution errors must not be deferred as corrupt content: {err:?}"
+        );
+    }
+
+    /// Minimal legacy (Python aw-server/peewee) sqlite db fixture: one
+    /// bucket, one event. Schema mirrors what `legacy_import` expects.
+    fn write_fixture_legacy_db(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE bucketmodel (
+                key INTEGER PRIMARY KEY,
+                id TEXT,
+                type TEXT,
+                client TEXT,
+                hostname TEXT,
+                created TEXT
+            );
+            CREATE TABLE eventmodel (
+                id INTEGER PRIMARY KEY,
+                bucket_id INTEGER,
+                timestamp TEXT,
+                duration REAL,
+                datastr TEXT
+            );
+            ",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bucketmodel (id, type, client, hostname, created) \
+             VALUES ('aw-watcher-afk_testhost', 'afkstatus', 'aw-watcher-afk', 'testhost', '2026-01-01T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let bucket_key = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO eventmodel (bucket_id, timestamp, duration, datastr) VALUES (?1, ?2, ?3, ?4)",
+            params![bucket_key, "2026-01-01 10:00:00+00:00", 5.0, "{}"],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ensure_legacy_import_skips_after_first_init_unless_forced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy_path = tmp.path().join("legacy.db");
+        write_fixture_legacy_db(&legacy_path);
+
+        let conn = Connection::open_in_memory().unwrap();
+        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
+
+        // First call: first_init is true (freshly created datastore), so the
+        // import runs automatically.
+        assert!(ds
+            .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), false)
+            .unwrap());
+        assert_eq!(ds.get_buckets().len(), 1);
+
+        // Second call without force: first_init is now false (this is
+        // exactly ActivityWatch/aw-server-rust#546 — a restart of an
+        // already-initialized datastore). Must skip, not re-run or panic.
+        assert!(!ds
+            .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), false)
+            .unwrap());
+
+        // With force=true (`aw-server --import-legacy`): runs again. The
+        // fixture is unchanged, so this also proves the merge path is
+        // idempotent instead of panicking on BucketAlreadyExists.
+        assert!(ds
+            .ensure_legacy_import(&conn, Some(legacy_path.to_str().unwrap()), true)
+            .unwrap());
+        let bucket_id = ds.get_buckets().keys().next().unwrap().clone();
+        let events = ds.get_events(&conn, &bucket_id, None, None, None).unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "forced re-import must not duplicate events"
+        );
+    }
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+
+    /// `_infer_db_version` must name the exact version, not just a version the
+    /// migrations would happen to repair: a v4 schema inferred as v5 would skip
+    /// the v4->v5 migration. `_create_tables(conn, 0)` builds the newest schema.
+    #[test]
+    fn infer_db_version_identifies_current_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        _create_tables(&conn, 0);
+        assert_eq!(_infer_db_version(&conn), NEWEST_DB_VERSION);
+    }
+
+    #[test]
+    fn infer_db_version_zero_for_empty_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(_infer_db_version(&conn), 0);
     }
 }

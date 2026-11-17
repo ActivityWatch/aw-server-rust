@@ -6,10 +6,13 @@ use aw_datastore::Datastore;
 pub type QueryFn =
     fn(args: Vec<DataType>, env: &VarEnv, ds: &Datastore) -> Result<DataType, QueryError>;
 
+pub type ReadOnlyQueryFn =
+    fn(args: &[&DataType], env: &VarEnv, ds: &Datastore) -> Result<DataType, QueryError>;
+
 pub fn fill_env(env: &mut VarEnv) {
     env.insert(
         "print".to_string(),
-        DataType::Function("print".to_string(), qfunctions::print),
+        DataType::ReadOnlyFunction("print".to_string(), qfunctions::print),
     );
     env.insert(
         "query_bucket".to_string(),
@@ -35,7 +38,7 @@ pub fn fill_env(env: &mut VarEnv) {
     );
     env.insert(
         "sum_durations".to_string(),
-        DataType::Function("sum_durations".to_string(), qfunctions::sum_durations),
+        DataType::ReadOnlyFunction("sum_durations".to_string(), qfunctions::sum_durations),
     );
     env.insert(
         "limit_events".to_string(),
@@ -43,7 +46,7 @@ pub fn fill_env(env: &mut VarEnv) {
     );
     env.insert(
         "contains".to_string(),
-        DataType::Function("contains".to_string(), qfunctions::contains),
+        DataType::ReadOnlyFunction("contains".to_string(), qfunctions::contains),
     );
     env.insert(
         "flood".to_string(),
@@ -58,6 +61,13 @@ pub fn fill_env(env: &mut VarEnv) {
         DataType::Function(
             "merge_events_by_keys".to_string(),
             qfunctions::merge_events_by_keys,
+        ),
+    );
+    env.insert(
+        "merge_subwatcher_fields".to_string(),
+        DataType::Function(
+            "merge_subwatcher_fields".to_string(),
+            qfunctions::merge_subwatcher_fields,
         ),
     );
     env.insert(
@@ -118,7 +128,7 @@ pub fn fill_env(env: &mut VarEnv) {
 mod qfunctions {
     use aw_datastore::Datastore;
     use aw_models::Event;
-    use aw_transform::classify::Rule;
+    use aw_transform::classify::{CategoryRule, Rule};
 
     use super::validate;
     use crate::DataType;
@@ -126,7 +136,7 @@ mod qfunctions {
     use crate::VarEnv;
 
     pub fn print(
-        args: Vec<DataType>,
+        args: &[&DataType],
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
@@ -236,17 +246,17 @@ mod qfunctions {
     }
 
     pub fn contains(
-        args: Vec<DataType>,
+        args: &[&DataType],
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
-        validate::args_length(&args, 2)?;
-        match args.first().unwrap() {
-            DataType::List(ref list) => Ok(DataType::Bool(list.contains(&args[1]))),
+        validate::args_length(args, 2)?;
+        match args[0] {
+            DataType::List(list) => Ok(DataType::Bool(list.contains(args[1]))),
             DataType::Dict(ref dict) => {
                 let s = match &args[1] {
-                    DataType::String(s) => s.to_string(),
+                    DataType::String(s) => s.as_str(),
                     _ => {
                         return Err(QueryError::InvalidFunctionParameters(format!(
                             "function contains got second argument {:?}, expected type String",
@@ -254,7 +264,7 @@ mod qfunctions {
                         )))
                     }
                 };
-                Ok(DataType::Bool(dict.contains_key(&s)))
+                Ok(DataType::Bool(dict.contains_key(s)))
             }
             _ => Err(QueryError::InvalidFunctionParameters(format!(
                 "function contains got first argument {:?}, expected type List or Dict",
@@ -269,10 +279,25 @@ mod qfunctions {
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
-        validate::args_length(&args, 1)?;
-        let events: Vec<Event> = args.into_iter().next().unwrap().try_into()?;
+        validate::args_length(&args, 1).or_else(|_| validate::args_length(&args, 2))?;
+        let mut args = args.into_iter();
+        let events: Vec<Event> = args.next().unwrap().try_into()?;
+        // Optional pulsetime in seconds, defaults to 5 like aw-core
+        let pulsetime_secs: f64 = match args.next() {
+            Some(arg) => arg.try_into()?,
+            None => 5.0,
+        };
+        let pulsetime = match aw_models::seconds_to_nanos(pulsetime_secs) {
+            // Check the sign of the input, since tiny negative values round to 0 ns
+            Some(ns) if pulsetime_secs >= 0.0 => chrono::Duration::nanoseconds(ns),
+            _ => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                    "flood pulsetime must be a non-negative number of seconds (at most ~292 years), got {pulsetime_secs}"
+                )))
+            }
+        };
         // Run flood
-        let mut flooded_events = aw_transform::flood(events, chrono::Duration::seconds(5));
+        let mut flooded_events = aw_transform::flood(events, pulsetime);
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
@@ -290,7 +315,7 @@ mod qfunctions {
         validate::args_length(&args, 2)?;
         let mut args = args.into_iter();
         let events: Vec<Event> = args.next().unwrap().try_into()?;
-        let rules: Vec<(Vec<String>, Rule)> = args.next().unwrap().try_into()?;
+        let rules: Vec<CategoryRule> = args.next().unwrap().try_into()?;
         // Run categorize
         let mut flooded_events = aw_transform::classify::categorize(events, &rules);
         // Put events back into DataType::Event container
@@ -381,22 +406,43 @@ mod qfunctions {
     }
 
     pub fn sum_durations(
-        args: Vec<DataType>,
+        args: &[&DataType],
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         // typecheck
-        validate::args_length(&args, 1)?;
-        let mut events: Vec<Event> = args.into_iter().next().unwrap().try_into()?;
-
-        // Sort by duration
+        validate::args_length(args, 1)?;
+        let events = match args[0] {
+            DataType::List(events) => events,
+            invalid_type => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                    "Expected function parameter of type List, got {invalid_type:?}"
+                )))
+            }
+        };
         let mut sum_durations = chrono::Duration::zero();
-        for event in events.drain(..) {
-            sum_durations += event.duration;
+        for event in events {
+            match event {
+                DataType::Event(event) => {
+                    sum_durations = sum_durations.checked_add(&event.duration).ok_or_else(|| {
+                        QueryError::InvalidFunctionParameters(
+                            "sum_durations overflowed".to_string(),
+                        )
+                    })?
+                }
+                invalid_type => return Err(QueryError::InvalidFunctionParameters(format!(
+                    "Expected function parameter of type List of Events, list contains {invalid_type:?}"
+                ))),
+            }
         }
-        Ok(DataType::Number(
-            (sum_durations.num_milliseconds() as f64) / 1000.0,
-        ))
+        // Nanosecond precision, like event durations are serialized. Flooring to milliseconds made
+        // totals come out up to 1 ms low (ActivityWatch/aw-server-rust#745).
+        let seconds = match sum_durations.num_nanoseconds() {
+            Some(ns) => ns as f64 / 1_000_000_000.0,
+            // Only for sums beyond ~292 years
+            None => sum_durations.num_milliseconds() as f64 / 1000.0,
+        };
+        Ok(DataType::Number(seconds))
     }
 
     pub fn merge_events_by_keys(
@@ -418,11 +464,55 @@ mod qfunctions {
         Ok(DataType::List(merged_tagged_events))
     }
 
+    pub fn merge_subwatcher_fields(
+        args: Vec<DataType>,
+        _env: &VarEnv,
+        _ds: &Datastore,
+    ) -> Result<DataType, QueryError> {
+        // typecheck
+        if args.len() != 3 && args.len() != 4 {
+            return Err(QueryError::InvalidFunctionParameters(format!(
+                "Expected 3 or 4 parameters in function, got {}",
+                args.len()
+            )));
+        }
+        let base_events: Vec<Event> = (&args[0]).try_into()?;
+        let subwatcher_events: Vec<Event> = (&args[1]).try_into()?;
+        let keys: Vec<String> = (&args[2]).try_into()?;
+
+        // conflict defaults to "base_wins" matching the Python API
+        let conflict = if args.len() >= 4 {
+            String::try_from(&args[3])?
+        } else {
+            "base_wins".to_string()
+        };
+
+        let enriched =
+            aw_transform::merge_subwatcher_fields(base_events, subwatcher_events, &keys, &conflict)
+                .map_err(QueryError::InvalidFunctionParameters)?;
+
+        let mut tagged_events = Vec::new();
+        for event in enriched.into_iter() {
+            tagged_events.push(DataType::Event(event));
+        }
+        Ok(DataType::List(tagged_events))
+    }
+
+    #[allow(deprecated)]
     pub fn chunk_events_by_key(
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
+        // Queries run repeatedly (e.g. on every dashboard refresh): warn once.
+        static DEPRECATION_WARNING: std::sync::Once = std::sync::Once::new();
+        DEPRECATION_WARNING.call_once(|| {
+            log::warn!(
+                "chunk_events_by_key is deprecated and will be removed. There is no drop-in \
+                 replacement: merge_events_by_keys merges all events with the same value \
+                 (also across gaps)."
+            );
+        });
         // typecheck
         validate::args_length(&args, 2)?;
         let mut args = args.into_iter();
@@ -601,7 +691,7 @@ mod validate {
     use crate::{DataType, QueryError, VarEnv};
     use aw_models::TimeInterval;
 
-    pub fn args_length(args: &[DataType], len: usize) -> Result<(), QueryError> {
+    pub fn args_length<T>(args: &[T], len: usize) -> Result<(), QueryError> {
         if args.len() != len {
             return Err(QueryError::InvalidFunctionParameters(format!(
                 "Expected {} parameters in function, got {}",

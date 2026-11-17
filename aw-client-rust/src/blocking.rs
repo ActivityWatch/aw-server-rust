@@ -3,7 +3,7 @@ use std::{collections::HashMap, error::Error};
 
 use chrono::{DateTime, Utc};
 
-use aw_models::{Bucket, Event};
+use aw_models::{Bucket, BucketsExport, Event};
 
 use super::AwClient as AsyncAwClient;
 
@@ -41,13 +41,32 @@ impl AwClient {
         Self::new_with_api_key(host, port, name, None)
     }
 
+    pub fn from_config(
+        name: &str,
+        testing: bool,
+        api_key: Option<String>,
+    ) -> Result<AwClient, Box<dyn Error>> {
+        let config = crate::config::load_config(testing);
+        Self::new_with_api_key(&config.hostname, config.port, name, api_key)
+    }
+
     pub fn new_with_api_key(
         host: &str,
         port: u16,
         name: &str,
         api_key: Option<String>,
     ) -> Result<AwClient, Box<dyn Error>> {
-        let async_client = AsyncAwClient::new_with_api_key(host, port, name, api_key)?;
+        Self::new_with_protocol("http", host, port, name, api_key)
+    }
+
+    pub fn new_with_protocol(
+        protocol: &str,
+        host: &str,
+        port: u16,
+        name: &str,
+        api_key: Option<String>,
+    ) -> Result<AwClient, Box<dyn Error>> {
+        let async_client = AsyncAwClient::new_with_protocol(protocol, host, port, name, api_key)?;
 
         Ok(AwClient {
             baseurl: async_client.baseurl.clone(),
@@ -70,11 +89,22 @@ impl AwClient {
         stop: Option<DateTime<Utc>>,
         limit: Option<u64>
     );
+    proxy_method!(export_all, BucketsExport,);
+    proxy_method!(export_bucket, BucketsExport, bucketname: &str);
+    proxy_method!(import_bucket, (), bucket: &Bucket);
     proxy_method!(
         query,
         Vec<serde_json::Value>,
         query: &str,
         timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>
+    );
+    proxy_method!(get_event, Option<Event>, bucketname: &str, event_id: i64);
+    proxy_method!(
+        query_cached,
+        Vec<serde_json::Value>,
+        query: &str,
+        timeperiods: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+        name: &str
     );
     proxy_method!(insert_event, (), bucketname: &str, event: &Event);
     proxy_method!(insert_events, (), bucketname: &str, events: Vec<Event>);
@@ -86,12 +116,65 @@ impl AwClient {
         pulsetime: f64
     );
     proxy_method!(delete_event, (), bucketname: &str, event_id: i64);
-    proxy_method!(get_event_count, i64, bucketname: &str);
+    proxy_method!(
+        get_event_count,
+        i64,
+        bucketname: &str,
+        start: Option<DateTime<Utc>>,
+        stop: Option<DateTime<Utc>>
+    );
     proxy_method!(get_info, aw_models::Info,);
     proxy_method!(get_setting, serde_json::Value, setting: &str);
+    proxy_method!(
+        set_setting,
+        (),
+        setting: &str,
+        value: &serde_json::Value
+    );
     proxy_method!(get_settings, aw_models::Settings,);
 
-    pub fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
-        self.client.wait_for_start()
+    pub fn request_queue(&self, testing: bool) -> std::io::Result<crate::queue::RequestQueue> {
+        self.client.request_queue(testing)
     }
+
+    pub fn request_queue_at(
+        &self,
+        path: std::path::PathBuf,
+    ) -> std::io::Result<crate::queue::RequestQueue> {
+        self.client.request_queue_at(path)
+    }
+
+    pub fn get_classes(&self) -> Vec<(crate::classes::CategoryId, crate::classes::CategorySpec)> {
+        block_on(self.client.get_classes())
+    }
+
+    pub fn wait_for_start(&self) -> Result<(), Box<dyn Error>> {
+        block_on(self.client.wait_for_start())
+    }
+}
+
+#[test]
+fn test_wait_for_start_blocking_wrapper() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server =
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                line.clear();
+            }
+            stream
+            .write_all(concat!(
+                "HTTP/1.1 200 OK\r\nContent-Length: 74\r\nConnection: close\r\n\r\n",
+                r#"{"hostname":"host","version":"v0.0.0","testing":true,"device_id":"device"}"#
+            ).as_bytes())
+            .unwrap();
+        });
+    let client = AwClient::new("127.0.0.1", port, "test-wait-for-start-blocking").unwrap();
+    client.wait_for_start().unwrap();
+    server.join().unwrap();
 }

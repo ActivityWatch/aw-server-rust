@@ -5,6 +5,8 @@ Synchronization for ActivityWatch.
 
 Works by syncing local buckets with a special folder, which in turn should be synchronized by rsync/Syncthing/Dropbox/GDrive/etc.
 
+Android is supported: the official app drives this same crate over JNI.
+
 The latest beta versions of ActivityWatch ship with the `aw-sync` binary, but it's not enabled by default. You can start it from aw-qt or the command line, but due to the early state of development might not have the best UX. Please report issues and submit PRs!
 
 Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch/aw-server/pull/50
@@ -12,24 +14,37 @@ Was originally prototyped as a PR to aw-server: https://github.com/ActivityWatch
 
 ## Usage
 
-This will start a daemon which pulls and pushes events with the sync directory (`~/ActivityWatchSync` by default) every 5 minutes:
+The command that actually pulls and pushes today is a one-shot pass. Share the sync directory first (see below), then:
 
 ```sh
-# Basic sync daemon (syncs all buckets every 5 minutes)
+# Pull every 3-level peer and push this device, then exit
+aw-sync sync
+
+# Doctor: why is pull empty / which peers exist in the folder?
+# Also prints the last persisted pass (peers, events, skips).
+aw-sync status
+
+# One-off cleanup: collapse exact-duplicate events that accumulated in
+# `-synced-from-` buckets from pull passes before #713. Never touches a
+# host's own first-hand buckets.
+aw-sync dedupe --dry-run   # report only, across every -synced-from- bucket
+aw-sync dedupe --bucket aw-watcher-window-synced-from-host  # delete the extras in one bucket (lowest-id copy is kept)
+# Deleting from every -synced-from- bucket at once (no --bucket) requires --dry-run
+# review first: -synced-from- is an ID convention, not a reserved bucket type, so
+# `--bucket` makes the buckets you're deleting from an explicit, reviewed list.
+#
+# Caveat: deduplication compares (timestamp, duration, data) for exact equality.
+# Two genuinely distinct events that happen to share all three fields would be
+# collapsed — one copy deleted. This is practically impossible for real activity
+# data, but note it before running on a live instance.
+```
+
+`aw-sync` / `aw-sync daemon` currently **does not pull** from the 3-level `{hostname}/{device_id}/` layout that Android and `aw-sync sync` write. The daemon stages `{device_id}/sync.db` at the sync-folder root and only walks two directory levels, so those peers are invisible ([#682](https://github.com/ActivityWatch/aw-server-rust/issues/682)). Until that switch lands, use `aw-sync sync` (or a systemd/cron timer around it) — not the daemon.
+
+```sh
+# Daemon — currently broken for mixed / Android layouts (see above)
 aw-sync
-
-# Same as above
 aw-sync daemon
-
-# Sync daemon with specific buckets only
-aw-sync daemon --buckets "aw-watcher-window,aw-watcher-afk" --start-date "2024-01-01"
-
-# Sync daemon in push-only or pull-only mode
-aw-sync daemon --mode push
-aw-sync daemon --mode pull
-
-# Sync all buckets once and exit
-aw-sync sync --start-date "2024-01-01"
 ```
 
 For more options, see `aw-sync --help`. Some notable options:
@@ -40,22 +55,40 @@ For more options, see `aw-sync --help`. Some notable options:
 - `--start-date`: Only sync events after this date (YYYY-MM-DD)
 - `--sync-db`: Specify a specific database file in the sync directory
 - `--mode`: Choose sync mode: "push", "pull", or "both" (default: "both")
-  - For `aw-sync sync`, passing `--mode` (with no other options) is enough to opt into the per-bucket sync path where it's respected; without it, or any of `--buckets`/`--start-date`/`--sync-db`, `aw-sync sync` falls back to the legacy host-based mode, which always does both a pull and a push
+  - On `aw-sync sync`, `--mode` / `--buckets` / `--start-date` / `--sync-db` switch to `sync_run`, which uses the two-level `{device_id}/sync.db` layout (same as the daemon). Those flags will not see Android or bare-`aw-sync sync` peers. Bare `aw-sync sync` (no extra flags) is the 3-level path and always does both a pull and a push.
 
 ### Setting up sync
 
-Once you have aw-sync running, you need to set up syncing with the sync directory using your preferred syncing tool.
+Share the sync directory with Syncthing, Dropbox, Drive, or rsync **before** running aw-sync. aw-sync only reads and writes files in that folder; it does not transport them between devices.
 
-The default sync directory is `~/ActivityWatchSync`, but you can change it using the `--sync-dir` option or by setting the `AW_SYNC_DIR` environment variable.
+Default directory: `~/ActivityWatchSync` (`--sync-dir` or `AW_SYNC_DIR`).
+
+Working paths (bare `aw-sync sync`, Android) write:
+
+```txt
+~/ActivityWatchSync/{hostname}/{device_id}/sync.db
+```
+
+The default daemon and advanced `sync_run` path write `~/ActivityWatchSync/{device_id}/sync.db` (two levels). Existing `test.db` staging databases and their SQLite sidecars are renamed to `sync.db` before opening — this applies to both the two-level layout (`{device_id}/test.db`) and the three-level layout (`{hostname}/{device_id}/test.db`) used by bare `aw-sync sync` and Android. If both names exist in the same folder, `sync.db` wins and `test.db` and its SQLite sidecars are left untouched for manual inspection.
+
+#### Experimental v2 folder format (`sync-v2` feature)
+
+Building with `--features sync-v2` compiles a writer for the immutable-segment format (`devices/{device_id}/manifest.json` plus `{slug}.{generation}.jsonl.zst` segments). It is not wired into any command yet.
+
+The writer stages every file as `*.tmp` next to its final name and renames it into place, so a file syncer can ship a half-written temp file. Readers ignore unknown names, but tell your syncer to skip them too. For Syncthing, add this to the sync folder's `.stignore`:
+
+```txt
+(?d)*.tmp
+```
 
 ### Running from source
 
 If you want to run it from source, in the root of the repository run:
 
 ```sh
-cargo run --bin aw-sync
+cargo run --bin aw-sync -- sync
 ```
-For more options, see `cargo run --bin aw-sync -- --help`.
+For more options, see `cargo run --bin aw-sync -- --help`. Bare `cargo run --bin aw-sync` starts the daemon, which currently does not pull (see Usage).
 
 ## FAQ
 
@@ -71,13 +104,12 @@ We also avoid having to implement complex features such as conflict resolution, 
 
 ### What are the limitations?
 
-- It only syncs afk and window buckets by default (since bucket IDs need to be unique)
-  - It will work a lot better once proper `hostname -> device ID` migration is complete.
-- It doesn't sync settings
-- It doesn't support Android, yet.
+- The default `aw-sync` / `aw-sync daemon` command does not pull from the 3-level layout (see Usage). Bare `aw-sync sync` and the Android app do. `aw-sync sync --mode`/`--buckets`/`--start-date` use the two-level path.
+- By default all buckets are synced. `--buckets` is opt-in filtering, not a window/afk-only default.
+- It doesn't sync settings.
 - It mirrors events to all devices,
   - If you have a lot of devices you'll get a lot of duplicates, taking up a lot of space and potentially impacting performance.
-- It doesn't support modifying/deleting events, yet.
+- Event deletion is not synced. Owner-originated edits (same timestamp, new data) are reconciled within 7 days of the destination resume cursor; older edits are skipped to keep peak memory bounded.
 
 ---
 

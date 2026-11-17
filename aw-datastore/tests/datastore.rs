@@ -9,15 +9,17 @@ extern crate dirs;
 
 #[cfg(test)]
 mod datastore_tests {
+    use chrono::DateTime;
     use chrono::Duration;
     use chrono::Utc;
     use serde_json::json;
 
-    use aw_datastore::Datastore;
+    use aw_datastore::{Datastore, DatastoreError};
 
     use aw_models::Bucket;
     use aw_models::BucketMetadata;
     use aw_models::Event;
+    use aw_models::TryVec;
 
     fn test_bucket() -> Bucket {
         Bucket {
@@ -34,30 +36,460 @@ mod datastore_tests {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
-    use std::fs;
-    use std::path::PathBuf;
-    pub fn get_cache_dir() -> Result<PathBuf, ()> {
-        #[cfg(not(target_os = "android"))]
-        {
-            let dir = dirs::cache_dir()
-                .ok_or(())?
-                .join("activitywatch")
-                .join("aw-server-rust");
-            fs::create_dir_all(&dir).expect("Unable to create cache dir");
-            Ok(dir)
-        }
-
-        #[cfg(target_os = "android")]
-        {
-            panic!("not implemented on Android");
-        }
-    }
-
     fn create_test_bucket(ds: &Datastore) -> Bucket {
         let bucket = test_bucket();
         ds.create_bucket(&bucket).unwrap();
         bucket
+    }
+
+    fn create_named_test_bucket(ds: &Datastore, id: &str) -> Bucket {
+        let mut bucket = test_bucket();
+        bucket.id = id.to_string();
+        ds.create_bucket(&bucket).unwrap();
+        bucket
+    }
+
+    fn test_event(timestamp: chrono::DateTime<Utc>, duration: Duration) -> Event {
+        Event {
+            id: None,
+            timestamp,
+            duration,
+            data: json_map! {"key": json!("value")},
+        }
+    }
+
+    #[test]
+    fn test_out_of_range_event_is_rejected_and_worker_survives() {
+        let ds = Datastore::new_in_memory(false);
+        create_test_bucket(&ds);
+        let valid = test_event(
+            "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            Duration::seconds(1),
+        );
+        let far_future = test_event(
+            "3000-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            Duration::seconds(1),
+        );
+        // Starts in range, but its end overflows the nanosecond range.
+        let ends_too_late = test_event(
+            "2262-04-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            Duration::days(30),
+        );
+
+        for bad in [&far_future, &ends_too_late] {
+            // A batch with one bad event stores none of them.
+            match ds.insert_events("testid", &[valid.clone(), bad.clone()]) {
+                Err(DatastoreError::InvalidEvent(_)) => {}
+                other => panic!("expected InvalidEvent, got {other:?}"),
+            }
+            match ds.heartbeat("testid", bad.clone(), 10.0) {
+                Err(DatastoreError::InvalidEvent(_)) => {}
+                other => panic!("expected InvalidEvent, got {other:?}"),
+            }
+        }
+        assert_eq!(ds.get_event_count("testid", None, None).unwrap(), 0);
+
+        // A heartbeat with a duration that fits on its own but whose merge
+        // into the last event would not.
+        ds.heartbeat("testid", valid.clone(), 10.0).unwrap();
+        let mut too_long = valid.clone();
+        too_long.timestamp = valid.timestamp + Duration::seconds(1);
+        too_long.duration = Duration::seconds(9_223_372_036);
+        match ds.heartbeat("testid", too_long, 10.0) {
+            Err(DatastoreError::InvalidEvent(_)) => {}
+            other => panic!("expected InvalidEvent, got {other:?}"),
+        }
+        assert_eq!(ds.get_event_count("testid", None, None).unwrap(), 1);
+        let only = ds.get_events("testid", None, None, None).unwrap();
+        ds.delete_events_by_id("testid", vec![only[0].id.unwrap()])
+            .unwrap();
+
+        // A new bucket with a bad attached event is not created at all.
+        let mut bucket = test_bucket();
+        bucket.id = "imported".to_string();
+        bucket.events = Some(TryVec::new(vec![far_future.clone()]));
+        match ds.create_bucket(&bucket) {
+            Err(DatastoreError::InvalidEvent(_)) => {}
+            other => panic!("expected InvalidEvent, got {other:?}"),
+        }
+        assert!(matches!(
+            ds.get_bucket("imported"),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+
+        // The worker is still alive.
+        ds.insert_events("testid", &[valid]).unwrap();
+        assert_eq!(ds.get_event_count("testid", None, None).unwrap(), 1);
+    }
+
+    #[test]
+    fn interval_access_paths_preserve_overlaps_ties_and_clipping() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+        let epoch = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        let events: Vec<_> = [
+            (0, 1),
+            (1, 999),
+            (900, 5),
+            (900, 1),
+            (900, 1),
+            (901, 0),
+            (1000, 1),
+        ]
+        .into_iter()
+        .map(|(start, duration)| {
+            test_event(
+                epoch + Duration::seconds(start),
+                Duration::seconds(duration),
+            )
+        })
+        .collect();
+        ds.insert_events(&bucket.id, &events).unwrap();
+        for (start, end) in [(0, 10), (500, 510), (900, 905), (1100, 1200)] {
+            let start = Some(epoch + Duration::seconds(start));
+            let end = Some(epoch + Duration::seconds(end));
+            // Limited reads always use the original starttime-first index;
+            // unrestricted reads may use the endtime-first path.
+            let original = ds.get_events(&bucket.id, start, end, Some(100)).unwrap();
+            let selective = ds.get_events(&bucket.id, start, end, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(&original).unwrap(),
+                serde_json::to_value(&selective).unwrap()
+            );
+            assert_eq!(
+                ds.get_event_count(&bucket.id, start, end).unwrap(),
+                original.len() as i64
+            );
+            for limit in [0, 1, 3] {
+                let limited = ds.get_events(&bucket.id, start, end, Some(limit)).unwrap();
+                assert_eq!(
+                    serde_json::to_value(limited).unwrap(),
+                    serde_json::to_value(&original[..original.len().min(limit as usize)]).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reader_sees_committed_writes_and_buckets_created_after_it_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("reader.sqlite")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let writer = Datastore::new(path.clone(), false);
+        // Wait for the writer to initialize (migrations) before opening the reader.
+        writer.get_buckets().unwrap();
+        let reader = Datastore::open_reader(path).unwrap();
+
+        // Bucket created after the reader opened: found via the cache-miss reload.
+        let bucket = create_test_bucket(&writer);
+        assert_eq!(reader.get_bucket(&bucket.id).unwrap().id, bucket.id);
+
+        // A heartbeat sits in the writer's uncommitted batch until force_commit.
+        let e = test_event(Utc::now(), Duration::seconds(1));
+        writer.heartbeat(&bucket.id, e.clone(), 5.0).unwrap();
+        writer.force_commit().unwrap();
+        let events = reader.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, e.timestamp);
+
+        // The bucket list itself is refreshed on read when buckets changed,
+        // including renames (same row, same count and max id).
+        assert!(reader.get_buckets().unwrap().contains_key(&bucket.id));
+        let renamed = format!("{}-renamed", bucket.id);
+        writer.rename_bucket(&bucket.id, &renamed).unwrap();
+        assert_eq!(
+            reader.get_events(&renamed, None, None, None).unwrap().len(),
+            1
+        );
+        assert!(matches!(
+            reader.get_bucket(&bucket.id),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        writer.rename_bucket(&renamed, &bucket.id).unwrap();
+        assert!(reader.get_buckets().unwrap().contains_key(&bucket.id));
+        writer.delete_bucket(&bucket.id).unwrap();
+        assert!(!reader.get_buckets().unwrap().contains_key(&bucket.id));
+        assert!(matches!(
+            reader.get_bucket(&bucket.id),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        // Explicit reload is still available for callers that know better.
+        reader.reload_buckets().unwrap();
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_renames_bucket_and_preserves_events() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        let event = test_event(Utc::now(), Duration::seconds(30));
+        ds.insert_events(old_id, std::slice::from_ref(&event))
+            .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 1);
+        assert!(!ds.get_buckets().unwrap().contains_key(old_id));
+        assert!(ds.get_buckets().unwrap().contains_key(new_id));
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_merges_non_overlapping_buckets() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[test_event(now - Duration::hours(2), Duration::minutes(30))],
+        )
+        .unwrap();
+        ds.insert_events(new_id, &[test_event(now, Duration::minutes(30))])
+            .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 1);
+        assert!(!ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_keeps_overlapping_buckets_separate() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(old_id, &[test_event(now, Duration::minutes(30))])
+            .unwrap();
+        ds.insert_events(
+            new_id,
+            &[test_event(
+                now + Duration::minutes(15),
+                Duration::minutes(30),
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        assert!(ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(old_id, None, None, None).unwrap().len(), 1);
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_moves_disjoint_events_when_some_overlap() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[
+                test_event(now - Duration::hours(2), Duration::minutes(30)),
+                test_event(now, Duration::minutes(30)),
+            ],
+        )
+        .unwrap();
+        ds.insert_events(
+            new_id,
+            &[test_event(
+                now + Duration::minutes(15),
+                Duration::minutes(30),
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        assert!(ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(old_id, None, None, None).unwrap().len(), 1);
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_keeps_overlapping_legacy_events_together() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[
+                test_event(now - Duration::hours(3), Duration::minutes(20)),
+                test_event(now, Duration::minutes(30)),
+                test_event(now + Duration::minutes(15), Duration::minutes(30)),
+            ],
+        )
+        .unwrap();
+        ds.insert_events(
+            new_id,
+            &[test_event(now + Duration::hours(2), Duration::minutes(20))],
+        )
+        .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        assert!(ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(old_id, None, None, None).unwrap().len(), 2);
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_zero_duration_event_at_shared_start_stays() {
+        // Strict overlap semantics: a zero-duration legacy event that starts exactly
+        // where a destination event starts is inside that event's open interval.
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[test_event(now + Duration::minutes(1), Duration::zero())],
+        )
+        .unwrap();
+        ds.insert_events(new_id, &[test_event(now, Duration::minutes(30))])
+            .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        assert_eq!(ds.get_events(old_id, None, None, None).unwrap().len(), 1);
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_merges_large_history_quickly() {
+        // Regression for ActivityWatch/aw-android#261: the merge used a correlated
+        // overlap subquery per legacy event (O(n^2)), which took hours on a phone
+        // with a couple of years of history and wedged the datastore worker. The
+        // sorted sweep must handle six-figure histories in seconds.
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let legacy_count = 100_000;
+        let destination_count = 10_000;
+        let start = Utc::now() - Duration::days(400);
+        let step = Duration::minutes(5);
+        let legacy: Vec<Event> = (0..legacy_count)
+            .map(|i| test_event(start + step * i, step - Duration::seconds(1)))
+            .collect();
+        for chunk in legacy.chunks(10_000) {
+            ds.insert_events(old_id, chunk).unwrap();
+        }
+        let cutover = start + step * legacy_count;
+        // One overlapping cutover event must stay behind while the rest merges.
+        ds.insert_events(
+            old_id,
+            &[test_event(
+                cutover - Duration::minutes(2),
+                Duration::minutes(4),
+            )],
+        )
+        .unwrap();
+        let destination: Vec<Event> = (0..destination_count)
+            .map(|i| test_event(cutover + step * i, step - Duration::seconds(1)))
+            .collect();
+        ds.insert_events(new_id, &destination).unwrap();
+
+        let started = std::time::Instant::now();
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "merge took {elapsed:?}; the overlap scan regressed to quadratic time"
+        );
+        assert_eq!(
+            ds.get_event_count(old_id, None, None).unwrap(),
+            2,
+            "only the overlapping cutover pair stays in the legacy bucket"
+        );
+        // Everything except the legacy event that the cutover overlaps moved over.
+        assert_eq!(
+            ds.get_event_count(new_id, None, None).unwrap(),
+            (legacy_count - 1 + destination_count) as i64,
+        );
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_heavy_overlap_is_linear() {
+        // Stacked histories must not reintroduce a quadratic open-set scan.
+        // Each event starts 1s later and outlives every later start, so the
+        // open heap grows to n; scanning it per event would be ~n².
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let n = 20_000;
+        let start = Utc::now();
+        let span = Duration::seconds(n as i64);
+        let legacy: Vec<Event> = (0..n)
+            .map(|i| test_event(start + Duration::seconds(i as i64), span))
+            .collect();
+        for chunk in legacy.chunks(5_000) {
+            ds.insert_events(old_id, chunk).unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 0);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "heavy-overlap merge took {elapsed:?}; open-set scan is quadratic"
+        );
+        assert_eq!(
+            ds.get_event_count(old_id, None, None).unwrap(),
+            n as i64,
+            "every stacked event overlaps another, so none should move"
+        );
+        assert_eq!(ds.get_event_count(new_id, None, None).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_migrate_test_bucket_names_merges_interleaved_non_overlapping_events() {
+        let ds = Datastore::new_in_memory(false);
+        let old_id = "aw-watcher-android-test_phone";
+        let new_id = "aw-watcher-android_phone";
+        create_named_test_bucket(&ds, old_id);
+        create_named_test_bucket(&ds, new_id);
+        let now = Utc::now();
+        ds.insert_events(
+            old_id,
+            &[
+                test_event(now - Duration::hours(2), Duration::minutes(20)),
+                test_event(now, Duration::minutes(20)),
+            ],
+        )
+        .unwrap();
+        ds.insert_events(
+            new_id,
+            &[test_event(now - Duration::hours(1), Duration::minutes(20))],
+        )
+        .unwrap();
+
+        assert_eq!(ds.migrate_test_bucket_names().unwrap(), 1);
+        assert!(!ds.get_buckets().unwrap().contains_key(old_id));
+        assert_eq!(ds.get_events(new_id, None, None, None).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_key_values_empty_result() {
+        let ds = Datastore::new_in_memory(false);
+
+        let values = ds.get_key_values("settings.%").unwrap();
+
+        assert!(values.is_empty());
     }
 
     #[test]
@@ -147,6 +579,15 @@ mod datastore_tests {
         let fetched_event = ds.get_event(&bucket.id, first_event_id).unwrap();
         // TODO: Check entire events to ensure integrity
         assert_eq!(fetched_event.id.unwrap(), first_event_id);
+
+        let missing_id = first_event_id + 1000;
+        match ds.get_event(&bucket.id, missing_id) {
+            Err(DatastoreError::NoSuchEvent(bid, eid)) => {
+                assert_eq!(bid, bucket.id);
+                assert_eq!(eid, missing_id);
+            }
+            other => panic!("expected NoSuchEvent, got {other:?}"),
+        }
     }
 
     #[test]
@@ -246,6 +687,53 @@ mod datastore_tests {
             .get_event_count(&bucket.id, Some(query_start), Some(query_end))
             .unwrap();
         assert_eq!(event_count, 1);
+
+        info!("A zero-length range inside the event counts it, like get_events");
+        let instant = Some(query_start);
+        assert_eq!(
+            ds.get_events(&bucket.id, instant, instant, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(ds.get_event_count(&bucket.id, instant, instant).unwrap(), 1);
+
+        info!("Bounds beyond the nanosecond range act as no limit instead of panicking");
+        let far_past = "1000-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let far_future = "9999-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            ds.get_event_count(&bucket.id, Some(far_past), Some(far_future))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            ds.get_events(&bucket.id, Some(far_past), Some(far_future), None)
+                .unwrap()
+                .len(),
+            1
+        );
+        info!("A start after the nanosecond range or an end before it matches nothing");
+        assert_eq!(
+            ds.get_event_count(&bucket.id, Some(far_future), None)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            ds.get_event_count(&bucket.id, None, Some(far_past))
+                .unwrap(),
+            0
+        );
+        assert!(ds
+            .get_events(&bucket.id, Some(far_future), None, None)
+            .unwrap()
+            .is_empty());
+
+        info!("An inverted range counts nothing");
+        assert_eq!(
+            ds.get_event_count(&bucket.id, Some(query_end), Some(query_start))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -298,6 +786,52 @@ mod datastore_tests {
             assert_eq!(new.duration, expected.duration);
             assert_eq!(new.data, expected.data);
         }
+    }
+
+    #[test]
+    fn test_events_delete_refreshes_bounds_with_pre_epoch_subsecond_event() {
+        // Regression test: refreshing bucket bounds after a delete must not
+        // panic when a remaining event has a pre-epoch timestamp with a
+        // subsecond component (negative nanoseconds, not a multiple of 1s).
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+
+        // 1969-12-31T23:59:55.250Z: negative seconds, with a fractional part.
+        let pre_epoch = DateTime::from_timestamp(-5, 250_000_000).unwrap();
+        let e_pre_epoch = Event {
+            id: None,
+            timestamp: pre_epoch,
+            duration: Duration::seconds(0),
+            data: json_map! {"key": json!("pre-epoch")},
+        };
+        let e_other = Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(0),
+            data: json_map! {"key": json!("other")},
+        };
+
+        // get_events with an unbounded (None) starttime defaults to the
+        // epoch, which would silently exclude the pre-epoch event - so fetch
+        // the inserted events' assigned ids directly instead.
+        let event_list = [e_pre_epoch.clone(), e_other.clone()];
+        let inserted = ds.insert_events(&bucket.id, &event_list).unwrap();
+        let inserted_other = inserted
+            .iter()
+            .find(|e| e.timestamp == e_other.timestamp)
+            .unwrap();
+
+        // Deleting the other event forces refresh_bucket_bounds to recompute
+        // start/end from the remaining pre-epoch event; this must not panic.
+        ds.delete_events_by_id(&bucket.id, vec![inserted_other.id.unwrap()])
+            .unwrap();
+
+        let bucket_fetched = ds.get_bucket(&bucket.id).unwrap();
+        assert_eq!(bucket_fetched.metadata.start, Some(pre_epoch));
+        assert_eq!(
+            bucket_fetched.metadata.end,
+            Some(e_pre_epoch.calculate_endtime())
+        );
     }
 
     #[test]
@@ -410,6 +944,88 @@ mod datastore_tests {
         assert!(events[0].id.is_some(), "event should have a DB id");
     }
 
+    /// Two merged heartbeats, so the worker's last-heartbeat cache holds the
+    /// stored event. Returns that event.
+    fn cached_heartbeat(ds: &Datastore, bucket_id: &str, now: DateTime<Utc>) -> Event {
+        ds.heartbeat(bucket_id, test_event(now, Duration::seconds(0)), 10.0)
+            .unwrap();
+        ds.heartbeat(
+            bucket_id,
+            test_event(now + Duration::seconds(1), Duration::seconds(0)),
+            10.0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_heartbeat_after_deleting_cached_event() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+        let now = Utc::now();
+        let cached = cached_heartbeat(&ds, &bucket.id, now);
+
+        ds.delete_events_by_id(&bucket.id, vec![cached.id.unwrap()])
+            .unwrap();
+        // Same data within pulsetime: must not merge into the deleted row.
+        let e = ds
+            .heartbeat(
+                &bucket.id,
+                test_event(now + Duration::seconds(2), Duration::seconds(0)),
+                10.0,
+            )
+            .unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, e.id);
+        assert_eq!(events[0].timestamp, now + Duration::seconds(2));
+    }
+
+    #[test]
+    fn test_heartbeat_after_recreating_bucket() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+        let now = Utc::now();
+        cached_heartbeat(&ds, &bucket.id, now);
+
+        ds.delete_bucket(&bucket.id).unwrap();
+        create_test_bucket(&ds);
+        ds.heartbeat(
+            &bucket.id,
+            test_event(now + Duration::seconds(2), Duration::seconds(0)),
+            10.0,
+        )
+        .unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, now + Duration::seconds(2));
+    }
+
+    #[test]
+    fn test_heartbeat_after_renaming_bucket_onto_cached_id() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+        let now = Utc::now();
+        cached_heartbeat(&ds, &bucket.id, now);
+
+        // Move the cached bucket away and rename another one onto its id.
+        ds.rename_bucket(&bucket.id, "moved").unwrap();
+        create_named_test_bucket(&ds, "other");
+        ds.rename_bucket("other", &bucket.id).unwrap();
+        ds.heartbeat(
+            &bucket.id,
+            test_event(now + Duration::seconds(2), Duration::seconds(0)),
+            10.0,
+        )
+        .unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, now + Duration::seconds(2));
+        assert_eq!(ds.get_events("moved", None, None, None).unwrap().len(), 1);
+    }
+
     #[test]
     fn test_event_replace() {
         // Setup datastore
@@ -471,9 +1087,69 @@ mod datastore_tests {
     }
 
     #[test]
+    fn setting_is_committed_before_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.db");
+        let ds = Datastore::new(path.to_str().unwrap().to_string(), false);
+        // Finish startup before opening an independent connection.
+        ds.force_commit().unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+
+        for value in ["false", "true"] {
+            ds.set_key_value_and_commit("settings.aw_notify_enabled", value)
+                .unwrap();
+            let stored: String = conn
+                .query_row(
+                    "SELECT value FROM key_value WHERE key = 'settings.aw_notify_enabled'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, value);
+        }
+    }
+
+    #[test]
+    fn stopwatch_changes_are_committed_before_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stopwatch.db");
+        let ds = Datastore::new(path.to_str().unwrap().to_string(), false);
+        let mut bucket = test_bucket();
+        bucket._type = "general.stopwatch".to_string();
+        ds.create_bucket(&bucket).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+
+        let mut event = test_event(Utc::now(), Duration::zero());
+        event.data = json_map! {"running": json!(true)};
+        event = ds.heartbeat(&bucket.id, event, 1.0).unwrap();
+        let id = event.id.unwrap();
+        let read_data = || -> serde_json::Value {
+            let data: String = conn
+                .query_row("SELECT data FROM events WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            serde_json::from_str(&data).unwrap()
+        };
+        assert_eq!(read_data()["running"], true);
+
+        event.data = json_map! {"running": json!(false)};
+        ds.insert_events(&bucket.id, &[event]).unwrap();
+        assert_eq!(read_data()["running"], false);
+
+        ds.delete_events_by_id(&bucket.id, vec![id]).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM events WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn test_migration_v4_to_v5() {
-        let mut db_path = get_cache_dir().unwrap();
-        db_path.push("datastore-unittest-migration-v4.db");
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("datastore-unittest-migration-v4.db");
         let db_path_str = db_path.to_str().unwrap().to_string();
 
         if db_path.exists() {
@@ -538,7 +1214,7 @@ mod datastore_tests {
             let version: i32 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 5);
+            assert_eq!(version, 6);
             let old_indexes: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN
@@ -557,17 +1233,109 @@ mod datastore_tests {
                 )
                 .unwrap();
             assert_eq!(new_index, 1, "composite index should exist");
+            let end_index: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'index'
+                 AND name = 'events_bucketrow_endtime_starttime_index'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(end_index, 1);
         }
 
         std::fs::remove_file(&db_path)
             .expect("Failed to remove datastore-unittest-migration-v4.db file");
     }
 
+    /// Regression test for the Android double-start race: a v3 database that
+    /// already has a `key_value` table must open without panicking, and any
+    /// existing row must survive through the migration to the newest version.
+    #[test]
+    fn test_v3_to_v4_migration_idempotent() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir
+            .path()
+            .join("datastore-unittest-migration-v3-with-kv.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+
+        // Build a v3 database that *already* has key_value (simulates a
+        // partially-completed startup that crashed after CREATE TABLE but
+        // before PRAGMA user_version = 4).
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE buckets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    type TEXT NOT NULL,
+                    client TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    created TEXT NOT NULL,
+                    data_deprecated TEXT DEFAULT '{}',
+                    data TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX bucket_id_index ON buckets(id);
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bucketrow INTEGER NOT NULL,
+                    starttime INTEGER NOT NULL,
+                    endtime INTEGER NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+                );
+                CREATE INDEX events_bucketrow_index ON events(bucketrow);
+                CREATE INDEX events_starttime_index ON events(starttime);
+                CREATE INDEX events_endtime_index ON events(endtime);
+                CREATE TABLE key_value (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    last_modified NUMBER NOT NULL
+                );
+                INSERT INTO key_value (key, value, last_modified) VALUES ('sentinel', 'survives', 0);
+                INSERT INTO buckets (name, type, client, hostname, created, data)
+                    VALUES ('testid', 'testtype', 'testclient', 'testhost',
+                            '2024-01-01T00:00:00+00:00', '{}');
+                INSERT INTO events (bucketrow, starttime, endtime, data)
+                    VALUES (1, 1000000000, 2000000000, '{"key": "value"}');
+                PRAGMA user_version = 3;
+            "#,
+            )
+            .unwrap();
+        }
+
+        // Opening must not panic even though key_value already exists.
+        {
+            let ds = Datastore::new(db_path_str, false);
+            let events = ds.get_events("testid", None, None, None).unwrap();
+            assert_eq!(events.len(), 1);
+            ds.close();
+        }
+
+        // Verify version reached newest and the pre-existing row survived.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let version: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, aw_datastore::NEWEST_DB_VERSION);
+            let value: String = conn
+                .query_row(
+                    "SELECT value FROM key_value WHERE key = 'sentinel'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(value, "survives");
+        }
+    }
+
     #[test]
     fn test_datastore_reload() {
         // Create tmp datastore path
-        let mut db_path = get_cache_dir().unwrap();
-        db_path.push("datastore-unittest.db");
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("datastore-unittest.db");
         let db_path_str = db_path.to_str().unwrap().to_string();
 
         if db_path.exists() {
@@ -631,7 +1399,8 @@ mod datastore_tests {
     #[cfg(any(feature = "encryption", feature = "encryption-vendored"))]
     fn test_encrypted_datastore_roundtrip() {
         use std::fs;
-        let dir = get_cache_dir().unwrap();
+        let test_dir = tempfile::tempdir().unwrap();
+        let dir = test_dir.path();
         let db_path = dir.join("test-encrypted.db").to_str().unwrap().to_string();
         // Clean up from previous runs
         let _ = fs::remove_file(&db_path);
@@ -666,5 +1435,576 @@ mod datastore_tests {
         }
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    fn privacy_event(title: &str) -> Event {
+        Event {
+            id: None,
+            timestamp: Utc::now(),
+            duration: Duration::seconds(1),
+            data: json_map! {"title": json!(title), "app": json!("Firefox")},
+        }
+    }
+
+    /// Saving privacy_filters used to persist the JSON and never load it into
+    /// the worker's engine (ActivityWatch/aw-server-rust#659). A drop rule
+    /// must actually drop a matching insert without an explicit refresh call.
+    #[test]
+    fn test_privacy_filter_applies_after_setting_saved() {
+        let ds = Datastore::new_in_memory(false);
+        let bucket = create_test_bucket(&ds);
+
+        let drop_secret =
+            r#"[{"enabled":true,"field":"title","pattern":"(?i)secret","action":"drop"}]"#;
+        ds.set_key_value("settings.privacy_filters", drop_secret)
+            .unwrap();
+
+        ds.insert_events(
+            &bucket.id,
+            &[privacy_event("my secret file"), privacy_event("readme.md")],
+        )
+        .unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "drop rule should discard the matching event"
+        );
+        assert_eq!(events[0].data.get("title").unwrap(), "readme.md");
+
+        ds.delete_key_value("settings.privacy_filters").unwrap();
+        ds.insert_events(&bucket.id, &[privacy_event("another secret")])
+            .unwrap();
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "deleting the setting should stop filtering"
+        );
+    }
+
+    /// create_bucket used to insert attached events without the privacy engine,
+    /// so a new-bucket import could persist titles a drop rule would discard.
+    #[test]
+    fn test_privacy_filter_applies_to_create_bucket_events() {
+        let ds = Datastore::new_in_memory(false);
+        let drop_secret =
+            r#"[{"enabled":true,"field":"title","pattern":"(?i)secret","action":"drop"}]"#;
+        ds.set_key_value("settings.privacy_filters", drop_secret)
+            .unwrap();
+
+        let mut bucket = test_bucket();
+        bucket.id = "import-new".to_string();
+        bucket.events = Some(TryVec::new(vec![
+            privacy_event("my secret file"),
+            privacy_event("readme.md"),
+        ]));
+        ds.create_bucket(&bucket).unwrap();
+
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "drop rule should discard matching create_bucket event, got {events:?}"
+        );
+        assert_eq!(events[0].data.get("title").unwrap(), "readme.md");
+    }
+
+    /// Rules must load at worker startup, not only after a later SetKeyValue.
+    #[test]
+    fn test_privacy_filter_survives_datastore_reload() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir
+            .path()
+            .join("datastore-unittest-privacy-filters.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+
+        let drop_secret =
+            r#"[{"enabled":true,"field":"title","pattern":"(?i)secret","action":"drop"}]"#;
+        {
+            let ds = Datastore::new(db_path_str.clone(), false);
+            create_test_bucket(&ds);
+            ds.set_key_value("settings.privacy_filters", drop_secret)
+                .unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+        }
+        {
+            let ds = Datastore::new(db_path_str, false);
+            ds.insert_events("testid", &[privacy_event("top secret notes")])
+                .unwrap();
+            let events = ds.get_events("testid", None, None, None).unwrap();
+            assert!(
+                events.is_empty(),
+                "persisted drop rule must apply after reopen, got {events:?}"
+            );
+            ds.close();
+        }
+
+        // Windows can still hold the SQLite handle after close() while the
+        // worker thread unwinds (ERROR_SHARING_VIOLATION). Cleanup is best-effort.
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    /// ActivityWatch/aw-server-rust#693: a pull must not create `-wal`/`-shm`
+    /// beside a file this device does not own.
+    #[test]
+    fn test_read_only_open_does_not_create_wal_sidecars() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("peer-readonly.db");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+
+        {
+            let ds = Datastore::new(db_path_str.clone(), false);
+            create_test_bucket(&ds);
+            ds.insert_events("testid", &[test_event(Utc::now(), Duration::seconds(1))])
+                .unwrap();
+            ds.force_commit().unwrap();
+            ds.close();
+        }
+
+        // Checkpoint so we can delete WAL sidecars without losing the row.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+
+        let wal = db_path.with_extension("db-wal");
+        let shm = db_path.with_extension("db-shm");
+        let _ = std::fs::remove_file(&wal);
+        let _ = std::fs::remove_file(&shm);
+
+        {
+            let ds = Datastore::open_read_only(db_path_str).unwrap();
+            let buckets = ds.get_buckets().unwrap();
+            assert!(
+                buckets.contains_key("testid"),
+                "read-only open must still see existing buckets, got {buckets:?}"
+            );
+            let events = ds.get_events("testid", None, None, None).unwrap();
+            assert_eq!(events.len(), 1);
+            ds.close();
+        }
+
+        assert!(
+            !wal.exists(),
+            "read-only open must not create {}",
+            wal.display()
+        );
+        assert!(
+            !shm.exists(),
+            "read-only open must not create {}",
+            shm.display()
+        );
+    }
+
+    /// Schema exactly as aw-server-rust wrote it at user_version 4 (copied
+    /// from a real v4 aw-sync staging db). Built by hand rather than via the
+    /// migrations so the fixture cannot drift with them.
+    const V4_SCHEMA: &str = "
+        CREATE TABLE buckets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            type TEXT NOT NULL,
+            client TEXT NOT NULL,
+            hostname TEXT NOT NULL,
+            created TEXT NOT NULL,
+            data_deprecated TEXT DEFAULT '{}',
+            data TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX bucket_id_index ON buckets(id);
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bucketrow INTEGER NOT NULL,
+            starttime INTEGER NOT NULL,
+            endtime INTEGER NOT NULL,
+            data TEXT NOT NULL,
+            FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+        );
+        CREATE INDEX events_bucketrow_index ON events(bucketrow);
+        CREATE INDEX events_starttime_index ON events(starttime);
+        CREATE INDEX events_endtime_index ON events(endtime);
+        CREATE TABLE key_value (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            last_modified NUMBER NOT NULL
+        );
+        PRAGMA user_version = 4;
+    ";
+
+    /// v5 = v4 tables with the composite starttime index, no endtime index.
+    const V4_TO_V5_INDEXES: &str = "
+        DROP INDEX events_bucketrow_index;
+        DROP INDEX events_starttime_index;
+        DROP INDEX events_endtime_index;
+        CREATE INDEX events_bucketrow_starttime_endtime_index
+            ON events(bucketrow, starttime DESC, endtime);
+        PRAGMA user_version = 5;
+    ";
+
+    const DAY_NS: i64 = 86_400 * 1_000_000_000;
+
+    /// Write an old-version db with one bucket: an event 100 days ago and
+    /// three in the last day. The wide span makes a recent unlimited query
+    /// take the endtime-index path (`prefer_endtime_index`).
+    fn write_old_fixture(db_path: &std::path::Path, version: i32) -> DateTime<Utc> {
+        let now = Utc::now();
+        let now_ns = now.timestamp_nanos_opt().unwrap();
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute_batch(V4_SCHEMA).unwrap();
+        if version == 5 {
+            conn.execute_batch(V4_TO_V5_INDEXES).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO buckets (name, type, client, hostname, created, data)
+             VALUES ('testid', 'testtype', 'testclient', 'testhost', ?1, '{}')",
+            [now.to_rfc3339()],
+        )
+        .unwrap();
+        let starts = [
+            now_ns - 100 * DAY_NS,
+            now_ns - DAY_NS / 2,
+            now_ns - DAY_NS / 4,
+            now_ns - DAY_NS / 8,
+        ];
+        for start in starts {
+            conn.execute(
+                "INSERT INTO events (bucketrow, starttime, endtime, data)
+                 VALUES (1, ?1, ?2, '{\"k\": \"v\"}')",
+                [start, start + 1_000_000_000],
+            )
+            .unwrap();
+        }
+        let version_now: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version_now, version);
+        now
+    }
+
+    fn write_versioned_db(db_path: &std::path::Path, version: i32) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.pragma_update(None, "user_version", version).unwrap();
+    }
+
+    /// Peers written by an older aw-sync (v4/v5) differ only in indexes, so
+    /// a read-only pull must read them rather than skip them. Every read path
+    /// a pull or export uses must avoid `INDEXED BY` on an index the file
+    /// lacks (that is a prepare error, not an ignored hint).
+    #[test]
+    fn test_read_only_open_reads_older_compatible_versions() {
+        for version in [4, 5] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join(format!("peer-v{version}.db"));
+            let now = write_old_fixture(&db_path, version);
+
+            let ds = Datastore::open_read_only(db_path.to_str().unwrap().to_string())
+                .unwrap_or_else(|e| panic!("v{version} peer must open read-only: {e:?}"));
+            let buckets = ds.get_buckets().unwrap();
+            assert!(buckets.contains_key("testid"), "v{version}: {buckets:?}");
+
+            // Full-range read (starttime index path).
+            let all = ds.get_events("testid", None, None, None).unwrap();
+            assert_eq!(all.len(), 4, "v{version} full read");
+            // Limited read (starttime index path, LIMIT).
+            let limited = ds.get_events("testid", None, None, Some(2)).unwrap();
+            assert_eq!(limited.len(), 2, "v{version} limited read");
+            // Recent unlimited read: endtime index path.
+            let since = now - Duration::days(1);
+            let recent = ds.get_events("testid", Some(since), None, None).unwrap();
+            assert_eq!(recent.len(), 3, "v{version} recent read");
+            let recent_count = ds.get_event_count("testid", Some(since), None).unwrap();
+            assert_eq!(recent_count, 3, "v{version} recent count");
+            let total_count = ds.get_event_count("testid", None, None).unwrap();
+            assert_eq!(total_count, 4, "v{version} total count");
+
+            // Export paths share the index selection.
+            ds.export_to_file(Some("testid"), tempfile::tempfile().unwrap())
+                .unwrap_or_else(|e| panic!("v{version} export: {e:?}"));
+            ds.export_csv_to_file(
+                "testid",
+                Some(since),
+                None,
+                None,
+                tempfile::tempfile().unwrap(),
+            )
+            .unwrap_or_else(|e| panic!("v{version} csv export: {e:?}"));
+            ds.close();
+
+            // Read-only really means read-only: no migration happened.
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, version, "read-only open must not migrate");
+            assert!(!db_path.with_extension("db-wal").exists());
+            assert!(!db_path.with_extension("db-shm").exists());
+        }
+    }
+
+    /// A `.dump`-restored peer has `user_version` 0 but a v4/v5 schema. The
+    /// read-only pull path (aw-sync) probes the pragma before opening, so it
+    /// must infer the version too; otherwise the peer is skipped as
+    /// unsupported even though v4/v5 are meant to be pullable.
+    #[test]
+    fn test_read_only_open_reads_dump_restored_older_versions() {
+        for version in [4, 5] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join(format!("restored-peer-v{version}.db"));
+            let now = write_old_fixture(&db_path, version);
+            write_versioned_db(&db_path, 0);
+
+            let ds = Datastore::open_read_only(db_path.to_str().unwrap().to_string())
+                .unwrap_or_else(|e| panic!("restored v{version} peer must open read-only: {e:?}"));
+            let since = now - Duration::days(1);
+            assert_eq!(
+                ds.get_events("testid", Some(since), None, None)
+                    .unwrap()
+                    .len(),
+                3,
+                "v{version} recent read"
+            );
+            ds.close();
+
+            // Inference never writes: no pragma update, no WAL sidecars.
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                after, 0,
+                "read-only open must not persist the inferred version"
+            );
+            assert!(!db_path.with_extension("db-wal").exists());
+            assert!(!db_path.with_extension("db-shm").exists());
+        }
+    }
+
+    #[test]
+    fn test_writable_open_handles_dump_restored_db() {
+        // `sqlite3 .dump` drops PRAGMA user_version; the restored DB must not
+        // re-run v0 migrations (which panic on duplicate column / table).
+        for version in [4, 5] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join("restored.db");
+            let now = write_old_fixture(&db_path, version);
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                conn.pragma_update(None, "user_version", 0).unwrap();
+            }
+
+            let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+            let since = now - Duration::days(1);
+            assert_eq!(
+                ds.get_events("testid", Some(since), None, None)
+                    .unwrap()
+                    .len(),
+                3,
+                "v{version}"
+            );
+            ds.close();
+
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, aw_datastore::NEWEST_DB_VERSION);
+        }
+    }
+
+    #[test]
+    fn test_writable_open_handles_dump_restored_current_db() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("restored-current.db");
+        let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+        create_test_bucket(&ds);
+        ds.close();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 0).unwrap();
+        }
+
+        let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+        assert_eq!(ds.get_buckets().unwrap().len(), 1);
+        ds.close();
+    }
+
+    /// The v1-v3 schemas differ only in the bucket `data` columns and the
+    /// missing `key_value` table; inference must pick the right version for
+    /// each so the remaining (non-idempotent) ALTER migrations run exactly once.
+    #[test]
+    fn test_writable_open_handles_dump_restored_early_schemas() {
+        const V1_SCHEMA: &str = "
+            CREATE TABLE buckets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                type TEXT NOT NULL,
+                client TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                created TEXT NOT NULL
+            );
+            CREATE INDEX bucket_id_index ON buckets(id);
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bucketrow INTEGER NOT NULL,
+                starttime INTEGER NOT NULL,
+                endtime INTEGER NOT NULL,
+                data TEXT NOT NULL,
+                FOREIGN KEY (bucketrow) REFERENCES buckets(id)
+            );
+            CREATE INDEX events_bucketrow_index ON events(bucketrow);
+            CREATE INDEX events_starttime_index ON events(starttime);
+            CREATE INDEX events_endtime_index ON events(endtime);
+        ";
+        const V1_TO_V2: &str = "ALTER TABLE buckets ADD COLUMN data TEXT DEFAULT '{}';";
+        const V2_TO_V3: &str = "
+            ALTER TABLE buckets RENAME COLUMN data TO data_deprecated;
+            ALTER TABLE buckets ADD COLUMN data TEXT NOT NULL DEFAULT '{}';
+        ";
+
+        for version in [1, 2, 3] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join("restored-early.db");
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                conn.execute_batch(V1_SCHEMA).unwrap();
+                if version >= 2 {
+                    conn.execute_batch(V1_TO_V2).unwrap();
+                }
+                if version >= 3 {
+                    conn.execute_batch(V2_TO_V3).unwrap();
+                }
+                conn.execute(
+                    "INSERT INTO buckets (name, type, client, hostname, created)
+                     VALUES ('testid', 'testtype', 'testclient', 'testhost', ?1)",
+                    [Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+                if version >= 2 {
+                    // A distinct payload in the pre-rename `data` column: the
+                    // v2->v3 migration renames it to `data_deprecated`, and no
+                    // later migration touches either column, so both must
+                    // survive to the newest version with this value intact.
+                    // For a v3 fixture the rename already happened, so the
+                    // payload goes straight into `data_deprecated`.
+                    let col = if version == 2 {
+                        "data"
+                    } else {
+                        "data_deprecated"
+                    };
+                    conn.execute(
+                        &format!("UPDATE buckets SET {col} = '{{\"legacy\": true}}'"),
+                        [],
+                    )
+                    .unwrap();
+                }
+                conn.execute(
+                    "INSERT INTO events (bucketrow, starttime, endtime, data)
+                     VALUES (1, 0, 1000000000, '{\"k\": \"v\"}')",
+                    [],
+                )
+                .unwrap();
+                // user_version stays 0, as after `sqlite3 .dump` + restore.
+            }
+
+            let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+            assert_eq!(
+                ds.get_events("testid", None, None, None).unwrap().len(),
+                1,
+                "v{version}"
+            );
+            ds.close();
+
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let after: i32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, aw_datastore::NEWEST_DB_VERSION, "v{version}");
+
+            if version >= 2 {
+                // `data_deprecated` survived the rename and still carries the
+                // pre-migration payload; the new `data` column holds the
+                // migration default and is never NULL.
+                let has_deprecated: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM pragma_table_info('buckets') WHERE name = 'data_deprecated'",
+                        [],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                assert!(has_deprecated, "v{version}: data_deprecated missing");
+                let legacy: String = conn
+                    .query_row(
+                        "SELECT data_deprecated FROM buckets WHERE name = 'testid'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(legacy, r#"{"legacy": true}"#, "v{version}");
+                let data: String = conn
+                    .query_row(
+                        "SELECT data FROM buckets WHERE name = 'testid'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(data, "{}", "v{version}");
+            }
+        }
+    }
+
+    /// A writable open (aw-sync's own staging db, aw-server's db) migrates a
+    /// v4 file to the newest version and then reads through the new indexes.
+    #[test]
+    fn test_writable_open_migrates_v4_fixture() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let db_path = test_dir.path().join("staging-v4.db");
+        let now = write_old_fixture(&db_path, 4);
+
+        let ds = Datastore::new(db_path.to_str().unwrap().to_string(), false);
+        let since = now - Duration::days(1);
+        assert_eq!(
+            ds.get_events("testid", Some(since), None, None)
+                .unwrap()
+                .len(),
+            3
+        );
+        ds.insert_events("testid", &[test_event(now, Duration::seconds(1))])
+            .unwrap();
+        ds.force_commit().unwrap();
+        ds.close();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let after: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, aw_datastore::NEWEST_DB_VERSION);
+    }
+
+    #[test]
+    fn test_read_only_open_skips_incompatible_versions() {
+        for version in [
+            aw_datastore::MIN_READ_COMPAT_DB_VERSION - 1,
+            aw_datastore::NEWEST_DB_VERSION + 1,
+        ] {
+            let test_dir = tempfile::tempdir().unwrap();
+            let db_path = test_dir.path().join(format!("peer-v{version}.db"));
+            write_versioned_db(&db_path, version);
+
+            let wal = db_path.with_extension("db-wal");
+            let shm = db_path.with_extension("db-shm");
+
+            match Datastore::open_read_only(db_path.to_str().unwrap().to_string()) {
+                Err(DatastoreError::OldDbVersion(msg)) => {
+                    assert!(msg.contains(&format!("version {version}")), "got {msg}");
+                }
+                other => panic!("v{version}: expected OldDbVersion, got {other:?}"),
+            }
+            assert!(!wal.exists(), "version probe must not create a WAL sidecar");
+            assert!(!shm.exists(), "version probe must not create a SHM sidecar");
+        }
     }
 }

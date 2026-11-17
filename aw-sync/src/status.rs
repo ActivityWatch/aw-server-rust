@@ -1,0 +1,577 @@
+//! `aw-sync status` — a doctor command for the sync folder.
+//!
+//! Read-only: never creates staging databases. 3-level peers are the
+//! `RemoteDb` list `pull_all` uses; classification of leftovers sits on top.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::error::Error;
+use std::io::{self, Write};
+
+use aw_client_rust::blocking::AwClient;
+use aw_models::Bucket;
+use chrono::{DateTime, Utc};
+
+use crate::sync::sanitize_hostname;
+use crate::util::{
+    inspect_sync_db, scan_sync_dir, DbInspect, SyncDirEntry, SyncEntryKind, SyncLayout,
+};
+
+/// Sanitized hostnames of every peer already imported into a local bucket,
+/// derived from the bucket ID's `-synced-from-{host}` suffix and the
+/// `$aw.sync.origin` metadata.
+///
+/// Sanitized at build time: buckets imported before aw-android hostname
+/// sanitization (ActivityWatch/aw-android#272) still hold the raw hostname in
+/// both fields. Callers compare against `sanitize_hostname(host)`, so an
+/// un-sanitized set would report those legacy imports as missing.
+fn build_imported_origins(local_buckets: &HashMap<String, Bucket>) -> HashSet<String> {
+    local_buckets
+        .keys()
+        .filter_map(|id| {
+            id.split("-synced-from-")
+                .nth(1)
+                .filter(|s| !s.is_empty())
+                .map(sanitize_hostname)
+        })
+        .chain(local_buckets.values().filter_map(|b| {
+            b.data
+                .get("$aw.sync.origin")
+                .and_then(|v| v.as_str())
+                .map(sanitize_hostname)
+        }))
+        .collect()
+}
+
+pub fn run_status(
+    client: &AwClient,
+    host: &str,
+    port: u16,
+    profile: &str,
+) -> Result<(), Box<dyn Error>> {
+    let report = collect_status(client, host, port, profile)?;
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{report}")?;
+    Ok(())
+}
+
+pub fn collect_status(
+    client: &AwClient,
+    host: &str,
+    port: u16,
+    profile: &str,
+) -> Result<String, Box<dyn Error>> {
+    let sync_dir = crate::dirs::get_sync_dir()?;
+    let server_info = client.get_info().ok();
+    let local_hostname = server_info
+        .as_ref()
+        .map(|i| i.hostname.clone())
+        .unwrap_or_else(|| client.hostname.clone());
+    let device_id = server_info.as_ref().map(|i| i.device_id.clone());
+    let server_ok = server_info.is_some();
+
+    let local_buckets = if server_ok {
+        client.get_buckets().unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    let imported_origins = build_imported_origins(&local_buckets);
+    let local_newest = local_buckets
+        .values()
+        .filter_map(|b| b.metadata.end.or(b.last_updated))
+        .max();
+
+    let mut inspected: Vec<(SyncDirEntry, Option<Result<DbInspect, String>>)> = Vec::new();
+    for entry in scan_sync_dir(&sync_dir, device_id.as_deref())? {
+        let peek = entry.db_path.as_ref().map(|p| inspect_sync_db(p));
+        inspected.push((entry, peek));
+    }
+
+    let mut out = String::new();
+    out.push_str("aw-sync status\n");
+    out.push_str("==============\n");
+    out.push_str(&format!("sync dir: {}\n", sync_dir.display()));
+    out.push_str(&format!("profile: {profile}\n"));
+    out.push_str(&format!("local hostname: {local_hostname}\n"));
+    match &device_id {
+        Some(id) => out.push_str(&format!("device_id: {id}\n")),
+        None => out.push_str("device_id: (unknown — could not reach local server)\n"),
+    }
+    out.push_str(&format!(
+        "server: {host}:{port}  {}\n",
+        if server_ok {
+            "reachable"
+        } else {
+            "UNREACHABLE"
+        }
+    ));
+
+    // Config-derived only: an explicit `--mode` on a running daemon overrides
+    // this and status has no way to see that from here. "Last pass" below
+    // reports the mode actually used on the last completed sync.
+    let (pull, config_label) = match crate::dirs::config_dir_path()
+        .and_then(|dir| crate::dirs::read_sync_config(&dir))
+    {
+        Ok((Some(cfg), path)) => {
+            let effective_mode = crate::dirs::effective_daemon_mode(None, cfg.daemon.pull);
+            out.push_str(&format!(
+                    "daemon mode: {} (pull={}, config: {}) — config-derived; see 'Last pass' below for the mode actually used, which wins if --mode was passed explicitly\n",
+                    effective_mode.as_str(),
+                    cfg.daemon.pull,
+                    path.display()
+                ));
+            (cfg.daemon.pull, path.display().to_string())
+        }
+        Ok((None, path)) => {
+            out.push_str(&format!(
+                    "daemon mode: push (pull=false, config: {} — not present, default) — config-derived; see 'Last pass' below for the mode actually used, which wins if --mode was passed explicitly\n",
+                    path.display()
+                ));
+            (false, path.display().to_string())
+        }
+        Err(e) => {
+            out.push_str(&format!(
+                "daemon mode: (could not read aw-sync config: {e})\n"
+            ));
+            (false, String::new())
+        }
+    };
+    out.push('\n');
+
+    match crate::report::load_last_report() {
+        Ok(Some(report)) => {
+            out.push_str(&report.to_string());
+            out.push('\n');
+        }
+        Ok(None) => {
+            out.push_str("Last pass: (none — no pass has been persisted yet)\n\n");
+        }
+        Err(e) => {
+            out.push_str(&format!(
+                "Last pass: (could not read last-sync-report.json: {e})\n\n"
+            ));
+        }
+    }
+
+    if inspected.is_empty() {
+        out.push_str("Entries: (none)\n");
+    } else {
+        out.push_str("Entries:\n");
+        for (entry, peek) in &inspected {
+            out.push_str(&entry.diagnostic_line());
+            out.push('\n');
+            if let Some(result) = peek {
+                match result {
+                    Ok(info) => out.push_str(&format_inspect(info, &imported_origins)),
+                    Err(e) => out.push_str(&format!("    inspect: {e}\n")),
+                }
+            }
+        }
+    }
+
+    let warnings = collect_warnings(
+        &inspected,
+        local_newest.as_ref(),
+        &imported_origins,
+        pull,
+        &config_label,
+    );
+    out.push('\n');
+    if warnings.is_empty() {
+        out.push_str("Warnings: none\n");
+    } else {
+        out.push_str("Warnings:\n");
+        for w in warnings {
+            out.push_str(&format!("  ! {w}\n"));
+        }
+    }
+
+    Ok(out)
+}
+
+fn format_inspect(info: &DbInspect, imported_origins: &HashSet<String>) -> String {
+    let mut s = String::new();
+    if let Some(host) = &info.hostname {
+        s.push_str(&format!("    hostname (buckets): {host}\n"));
+    }
+    s.push_str(&format!(
+        "    buckets: {}  events: {}  newest: {}\n",
+        info.bucket_count,
+        info.event_count,
+        info.newest_event
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string())
+    ));
+    if let Some(host) = &info.hostname {
+        let imported = imported_origins.contains(sanitize_hostname(host).as_str());
+        s.push_str(&format!(
+            "    imported locally: {}\n",
+            if imported { "yes" } else { "no" }
+        ));
+    }
+    s
+}
+
+fn collect_warnings(
+    inspected: &[(SyncDirEntry, Option<Result<DbInspect, String>>)],
+    local_newest: Option<&DateTime<Utc>>,
+    imported_origins: &HashSet<String>,
+    pull: bool,
+    config_label: &str,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // When pull is off, say so once at the top (if there are visible peers) instead
+    // of emitting a per-peer "not imported locally" warning for every peer.
+    let has_peers = inspected.iter().any(|(e, _)| e.kind == SyncEntryKind::Peer);
+    if !pull && has_peers && !config_label.is_empty() {
+        warnings.push(format!(
+            "pull is off in {config_label}; peers below are visible but not imported by the \
+             daemon (set pull = true, or run `aw-sync sync`)"
+        ));
+    }
+
+    let has_two = inspected
+        .iter()
+        .any(|(e, _)| e.layout == Some(SyncLayout::TwoLevel) && e.db_path.is_some());
+    let has_three = inspected
+        .iter()
+        .any(|(e, _)| e.layout == Some(SyncLayout::ThreeLevel) && e.db_path.is_some());
+    if has_two && has_three {
+        warnings.push(
+            "sync folder has both 2-level ({device_id}/*.db) and 3-level \
+             ({hostname}/{device_id}/*.db) databases; new daemon pushes should use the \
+             3-level host layout (ActivityWatch/aw-server-rust#682 / #685)"
+                .to_string(),
+        );
+    }
+
+    let mut by_device: BTreeMap<String, Vec<&SyncDirEntry>> = BTreeMap::new();
+    for (entry, _) in inspected {
+        if let (Some(did), Some(_)) = (&entry.device_id, &entry.db_path) {
+            by_device.entry(did.clone()).or_default().push(entry);
+        }
+    }
+    for (did, group) in &by_device {
+        if group.len() > 1 {
+            let folders: Vec<String> = group
+                .iter()
+                .map(|e| {
+                    e.hostname_folder
+                        .clone()
+                        .unwrap_or_else(|| e.path.display().to_string())
+                })
+                .collect();
+            warnings.push(format!(
+                "device_id {did} appears under {} folders: {} — pulling both can truncate history (ActivityWatch/aw-server-rust#683)",
+                group.len(),
+                folders.join(", ")
+            ));
+        }
+
+        // Orphaned 2-level staging db: the daemon switched to the 3-level
+        // layout but the old {device_id}/*.db is still replicating via
+        // Syncthing. It wastes disk and will never be pulled by the daemon.
+        // Prune is an explicit user action — delete the file and Syncthing
+        // will propagate (ActivityWatch/aw-server-rust#689 item 1).
+        let has_three = group
+            .iter()
+            .any(|e| e.layout == Some(SyncLayout::ThreeLevel));
+        if has_three {
+            // Largest 3-level size for this device_id.
+            let three_max: Option<u64> = group
+                .iter()
+                .filter(|e| e.layout == Some(SyncLayout::ThreeLevel))
+                .filter_map(|e| e.db_size)
+                .max();
+            for orphan in group
+                .iter()
+                .filter(|e| e.layout == Some(SyncLayout::TwoLevel))
+            {
+                let size = orphan
+                    .db_size
+                    .map(crate::util::format_bytes)
+                    .unwrap_or_else(|| "?".to_string());
+                // If the 2-level file is larger than the 3-level counterpart
+                // the daemon (discover_peers) would still prefer the 2-level
+                // file, so its history is not yet absorbed — do not call it
+                // safe to delete.
+                let two_larger = match (orphan.db_size, three_max) {
+                    (Some(two), Some(three)) => two > three,
+                    _ => true, // unknown sizes: assume potentially unsafe
+                };
+                if two_larger {
+                    warnings.push(format!(
+                        "{} ({size}) is a 2-level staging db that is LARGER than its \
+                         3-level counterpart for device_id {did} — its history may not \
+                         yet be fully present in the 3-level entry; do NOT delete until \
+                         the sizes equalise (ActivityWatch/aw-server-rust#689)",
+                        orphan.path.display(),
+                    ));
+                } else {
+                    warnings.push(format!(
+                        "{} ({size}) is an orphaned 2-level staging db — device_id {did} \
+                         already has a larger 3-level entry; safe to delete \
+                         (Syncthing will propagate the delete) \
+                         (ActivityWatch/aw-server-rust#689)",
+                        orphan.path.display(),
+                    ));
+                }
+            }
+        }
+    }
+
+    for (entry, peek) in inspected {
+        let Some(Ok(info)) = peek else { continue };
+        if let (Some(folder), Some(host)) = (&entry.hostname_folder, &info.hostname) {
+            if folder != host {
+                warnings.push(format!(
+                    "folder name '{folder}' ≠ bucket hostname '{host}' ({})",
+                    entry.path.display()
+                ));
+            }
+        }
+        if pull && entry.kind == SyncEntryKind::Peer {
+            if let Some(host) = &info.hostname {
+                if !imported_origins.contains(sanitize_hostname(host).as_str()) {
+                    warnings.push(format!(
+                        "peer {} ({}) has not been imported locally",
+                        entry.device_id.as_deref().unwrap_or("?"),
+                        host
+                    ));
+                }
+            }
+        }
+        if entry.kind == SyncEntryKind::OwnStaging {
+            if let (Some(staging_newest), Some(local)) = (info.newest_event, local_newest) {
+                if staging_newest < *local {
+                    warnings.push(format!(
+                        "own staging newest event ({}) is older than local server newest ({}) — this device may not be publishing",
+                        staging_newest.to_rfc3339(),
+                        local.to_rfc3339()
+                    ));
+                }
+            }
+        }
+        if info.buckets.iter().any(|b| b.id.contains("-synced-from-")) {
+            let fix = if entry.kind == SyncEntryKind::OwnStaging {
+                "; prune with `aw-sync status --clean-legacy --dry-run`"
+            } else {
+                "; only its owning device can prune it"
+            };
+            warnings.push(format!(
+                "{} still contains re-exported …-synced-from-… buckets (leftover from before ActivityWatch/aw-server-rust#648){fix}",
+                entry.path.display()
+            ));
+        }
+    }
+
+    if inspected
+        .iter()
+        .any(|(e, _)| e.db_path.as_ref().is_some_and(|p| p.ends_with("test.db")))
+    {
+        warnings.push(
+            "staging databases are still named test.db — leftover test scaffolding in a directory users are told to inspect".to_string(),
+        );
+    }
+
+    warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bucket_with_origin(id: &str, hostname: &str, origin: Option<&str>) -> Bucket {
+        let mut data = serde_json::Map::new();
+        if let Some(origin) = origin {
+            data.insert(
+                "$aw.sync.origin".to_string(),
+                serde_json::Value::String(origin.to_string()),
+            );
+        }
+        Bucket {
+            bid: None,
+            id: id.to_string(),
+            _type: "currentwindow".to_string(),
+            client: "test".to_string(),
+            hostname: hostname.to_string(),
+            created: None,
+            data,
+            metadata: Default::default(),
+            events: None,
+            last_updated: None,
+        }
+    }
+
+    #[test]
+    fn build_imported_origins_recognizes_legacy_raw_hostname_imports() {
+        // aw-server-rust#712 P2: a bucket imported before aw-android hostname
+        // sanitization (aw-android#272) holds the raw "POCO F8 Ultra" in both
+        // the bucket ID suffix and $aw.sync.origin. Lookups compare against
+        // sanitize_hostname(host) ("poco_f8_ultra"), so the set itself must
+        // be sanitized at build time or legacy imports look "not imported".
+        let mut local_buckets = HashMap::new();
+        local_buckets.insert(
+            "aw-watcher-window_POCO F8 Ultra-synced-from-POCO F8 Ultra".to_string(),
+            bucket_with_origin(
+                "aw-watcher-window_POCO F8 Ultra-synced-from-POCO F8 Ultra",
+                "local-host",
+                Some("POCO F8 Ultra"),
+            ),
+        );
+
+        let imported_origins = build_imported_origins(&local_buckets);
+
+        assert!(imported_origins.contains(sanitize_hostname("POCO F8 Ultra").as_str()));
+        assert!(imported_origins.contains("poco_f8_ultra"));
+    }
+
+    #[test]
+    fn collect_warnings_detects_orphaned_two_level_staging() {
+        // Issue #689 item 1: a 2-level leftover ({device_id}/*.db) plus a
+        // 3-level entry for the same device_id where the 3-level is LARGER —
+        // so the 2-level is truly orphaned and safe to delete.
+        use crate::util::{SyncDirEntry, SyncEntryKind, SyncLayout};
+        use std::path::PathBuf;
+
+        let did = "d7bc68e7-aaaa-bbbb-cccc-dddddddddddd";
+        let two_level = SyncDirEntry {
+            path: PathBuf::from(format!("/sync/{did}/test.db")),
+            db_path: Some(PathBuf::from(format!("/sync/{did}/test.db"))),
+            db_size: Some(273_000_000), // smaller than the 3-level — safe case
+            layout: Some(SyncLayout::TwoLevel),
+            kind: SyncEntryKind::OwnStaging,
+            hostname_folder: None,
+            device_id: Some(did.to_string()),
+            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+        };
+        let three_level = SyncDirEntry {
+            path: PathBuf::from(format!("/sync/my-host/{did}/test.db")),
+            db_path: Some(PathBuf::from(format!("/sync/my-host/{did}/test.db"))),
+            db_size: Some(1_200_000_000), // larger — 3-level has absorbed history
+            layout: Some(SyncLayout::ThreeLevel),
+            kind: SyncEntryKind::OwnStaging,
+            hostname_folder: Some("my-host".to_string()),
+            device_id: Some(did.to_string()),
+            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+        };
+
+        let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
+            vec![(two_level, None), (three_level, None)];
+
+        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let joined = warnings.join("\n");
+        assert!(
+            joined.contains("orphaned 2-level"),
+            "expected orphaned-2-level warning, got: {joined}"
+        );
+        assert!(
+            joined.contains(did),
+            "warning must name the device_id: {joined}"
+        );
+        assert!(
+            joined.contains("safe to delete"),
+            "warning must say safe to delete: {joined}"
+        );
+        assert!(
+            !joined.contains("do NOT delete"),
+            "safe case must not say do NOT delete: {joined}"
+        );
+    }
+
+    #[test]
+    fn collect_warnings_two_level_larger_than_three_warns_unsafe() {
+        // When the 2-level file is LARGER than the 3-level counterpart,
+        // discover_peers keeps the 2-level file for syncing — its history
+        // is not yet absorbed. The warning must NOT say "safe to delete".
+        use crate::util::{SyncDirEntry, SyncEntryKind, SyncLayout};
+        use std::path::PathBuf;
+
+        let did = "d7bc68e7-aaaa-bbbb-cccc-dddddddddddd";
+        let two_level = SyncDirEntry {
+            path: PathBuf::from(format!("/sync/{did}/test.db")),
+            db_path: Some(PathBuf::from(format!("/sync/{did}/test.db"))),
+            db_size: Some(1_200_000_000), // ~1.19 GB — the real-world case from #689
+            layout: Some(SyncLayout::TwoLevel),
+            kind: SyncEntryKind::OwnStaging,
+            hostname_folder: None,
+            device_id: Some(did.to_string()),
+            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+        };
+        let three_level = SyncDirEntry {
+            path: PathBuf::from(format!("/sync/my-host/{did}/test.db")),
+            db_path: Some(PathBuf::from(format!("/sync/my-host/{did}/test.db"))),
+            db_size: Some(273_000_000), // smaller — history not yet absorbed
+            layout: Some(SyncLayout::ThreeLevel),
+            kind: SyncEntryKind::OwnStaging,
+            hostname_folder: Some("my-host".to_string()),
+            device_id: Some(did.to_string()),
+            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+        };
+
+        let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
+            vec![(two_level, None), (three_level, None)];
+
+        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let joined = warnings.join("\n");
+        assert!(
+            joined.contains("LARGER"),
+            "expected LARGER warning for unsafe case, got: {joined}"
+        );
+        assert!(
+            joined.contains("do NOT delete"),
+            "unsafe case must say do NOT delete: {joined}"
+        );
+        assert!(
+            !joined.contains("safe to delete"),
+            "unsafe case must not say safe to delete: {joined}"
+        );
+        assert!(
+            joined.contains("1.1 GB") || joined.contains("1.2 GB"),
+            "warning must include size: {joined}"
+        );
+    }
+
+    #[test]
+    fn collect_warnings_no_orphan_warning_for_two_level_only() {
+        // A pure 2-level layout (no 3-level successor) should not fire the
+        // orphaned warning — the 2-level db is the legitimate staging db.
+        use crate::util::{SyncDirEntry, SyncEntryKind, SyncLayout};
+        use std::path::PathBuf;
+
+        let did = "d7bc68e7-aaaa-bbbb-cccc-dddddddddddd";
+        let two_level = SyncDirEntry {
+            path: PathBuf::from(format!("/sync/{did}/test.db")),
+            db_path: Some(PathBuf::from(format!("/sync/{did}/test.db"))),
+            db_size: Some(100_000_000),
+            layout: Some(SyncLayout::TwoLevel),
+            kind: SyncEntryKind::OwnStaging,
+            hostname_folder: None,
+            device_id: Some(did.to_string()),
+            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+        };
+
+        let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
+            vec![(two_level, None)];
+
+        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let joined = warnings.join("\n");
+        assert!(
+            !joined.contains("orphaned"),
+            "must not warn about orphan when no 3-level successor exists: {joined}"
+        );
+    }
+
+    #[test]
+    fn build_imported_origins_ignores_buckets_without_origin_markers() {
+        let mut local_buckets = HashMap::new();
+        local_buckets.insert(
+            "aw-watcher-window".to_string(),
+            bucket_with_origin("aw-watcher-window", "local-host", None),
+        );
+
+        let imported_origins = build_imported_origins(&local_buckets);
+
+        assert!(imported_origins.is_empty());
+    }
+}

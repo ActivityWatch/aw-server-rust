@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use aw_datastore::DatastoreError;
 
+use crate::endpoints::util::ApiJson;
 use crate::endpoints::HttpErrorJson;
 
 /// Map a settings API key to the datastore key (`settings.<key>`).
@@ -107,7 +108,7 @@ pub fn setting_get(
 pub fn setting_set(
     state: &State<ServerState>,
     key: String,
-    value: Json<serde_json::Value>,
+    value: ApiJson<serde_json::Value>,
 ) -> Result<Status, HttpErrorJson> {
     let setting_key = parse_key(key)?;
     let value_str = match serde_json::to_string(&value.0) {
@@ -124,7 +125,15 @@ pub fn setting_set(
     let result = datastore.set_key_value(&setting_key, &value_str);
 
     match result {
-        Ok(_) => Ok(Status::Created),
+        Ok(_) => {
+            // Worker also reloads on SetKeyValue of this key; this second
+            // RefreshPrivacyFilter is belt-and-suspenders so the HTTP path
+            // still works if a future writer bypasses that hook.
+            if setting_key == "settings.privacy_filters" {
+                let _ = datastore.refresh_privacy_filter();
+            }
+            Ok(Status::Created)
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -137,7 +146,12 @@ pub fn setting_delete(state: &State<ServerState>, key: String) -> Result<(), Htt
     let result = datastore.delete_key_value(&setting_key);
 
     match result {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            if setting_key == "settings.privacy_filters" {
+                let _ = datastore.refresh_privacy_filter();
+            }
+            Ok(())
+        }
         Err(err) => Err(err.into()),
     }
 }

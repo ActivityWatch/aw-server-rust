@@ -274,14 +274,10 @@ fn capture_refs_in_template(replacement: &str, re: &regex::Regex) -> Option<Vec<
         }
         let first = rest.as_bytes()[0];
         if first == b'{' {
-            match rest[1..].find('}') {
-                Some(end) => {
-                    let name = &rest[1..1 + end];
-                    refs.push(resolve_capture_ref(name, n_groups, &named)?);
-                    i += 2 + end + 1; // ${ name }
-                }
-                None => return None,
-            }
+            let end = rest[1..].find('}')?;
+            let name = &rest[1..1 + end];
+            refs.push(resolve_capture_ref(name, n_groups, &named)?);
+            i += 2 + end + 1; // ${ name }
             continue;
         }
         // Longest ident, matching the regex crate: `$1a` is name `1a`, not `$1` + `a`.

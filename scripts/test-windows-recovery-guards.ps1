@@ -52,6 +52,10 @@ try {
         $ScenarioPath = Join-Path $root 'scenario.ps1'
         Set-Content -LiteralPath $ScenarioPath -Value '$script:scenarioRan = $true'
         $script:scenarioRan = $false
+        # Pin the URL the hook polls: the mock used to ignore $Uri, so a
+        # harness polling the wrong port would have passed this guard.
+        $script:polledUris = @()
+        function Invoke-RestMethod { param($Uri, $TimeoutSec) $script:polledUris += $Uri; throw 'never ready' }
         $serverProcess = [pscustomobject]@{ HasExited = $false }
         $port = 1234
         $TimeoutSeconds = 1
@@ -60,6 +64,8 @@ try {
         try { . ([scriptblock]::Create($hook.Extent.Text)) }
         catch { $caught = $_.Exception.Message }
         Assert-True ($null -ne $caught -and -not $script:scenarioRan) 'scenario ran before HTTP was ready'
+        Assert-True (($script:polledUris.Count -gt 0) -and -not ($script:polledUris | Where-Object { $_ -ne 'http://127.0.0.1:1234/api/0/info' })) `
+            "scenario hook polled the wrong URL: $($script:polledUris -join ', ')"
     }
 
     & {

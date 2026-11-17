@@ -96,6 +96,28 @@ try {
 
     & {
         $scenario = @{}
+        $script:clock = [datetime]'2026-01-01'
+        $script:reads = 0
+        function Get-Date { return $script:clock }
+        function Start-Sleep { param($Seconds) $script:clock = $script:clock.AddSeconds($Seconds) }
+        function Invoke-RestMethod {
+            param($Uri, $TimeoutSec)
+            if ($Uri -notlike '*/events*') { return [pscustomobject]@{ 'aw-guard' = 1 } }
+            $script:reads++
+            if ($script:reads -lt 3) { throw 'bucket not found' }
+            return @([pscustomobject]@{ data = [pscustomobject]@{ sentinel = 'A-1' } })
+        }
+        $got = Wait-ScenarioSentinels -Port 1234 -Expected @('A-1') -Bucket 'aw-guard'
+        Assert-True ((($got -join ',') -eq 'A-1') -and $script:reads -eq 3) 'sentinel polling aborted on a transient read failure'
+        function Invoke-RestMethod { param($Uri, $TimeoutSec) throw 'bucket never appeared' }
+        $caught = $null
+        try { $null = Wait-ScenarioSentinels -Port 1234 -Expected @('A-1') -Bucket 'aw-guard' -TimeoutSeconds 5 }
+        catch { $caught = $_.Exception.Message }
+        Assert-True ($caught -like '*never appeared*') 'persistent sentinel read failure was reported as empty'
+    }
+
+    & {
+        $scenario = @{}
         foreach ($case in @('zero', 'inserted', 'skipped', 'missing')) {
             $inserted = if ($case -eq 'inserted') { 1 } else { 0 }
             $skipped = if ($case -eq 'skipped') { 3 } else { 0 }
@@ -140,7 +162,7 @@ try {
             Set-Content -LiteralPath $db -Value 'fixture'
         }
     }
-    Write-Host 'PASS: HTTP readiness gates fixtures, startup timeout cleans its process tree and evidence, restart counts fail closed, both originals required'
+    Write-Host 'PASS: HTTP readiness gates fixtures, startup timeout cleans its process tree and evidence, sentinel polling retries transient reads, restart counts fail closed, both originals required'
 }
 finally {
     $env:Public = $savedPublic

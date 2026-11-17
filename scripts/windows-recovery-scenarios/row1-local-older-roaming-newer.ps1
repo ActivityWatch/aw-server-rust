@@ -37,12 +37,7 @@ try {
     # 3. Real default-profile start must pick Roaming (newest event), migrate
     #    it and union the Local history into the selected database.
     $server = Start-ScenarioServer -Name 'assert1' -Port ($port + 2) -ExtraArgs '--profile default'
-    $deadline = (Get-Date).AddSeconds(60)
-    do {
-        $got = Get-FixtureSentinels -Port ($port + 2)
-        if (($got -join ',') -eq ($expected -join ',')) { break }
-        Start-Sleep -Seconds 2
-    } while ((Get-Date) -lt $deadline)
+    $got = Wait-ScenarioSentinels -Port ($port + 2) -Expected $expected
     $scenario['sentinels_first_start'] = $got
     Assert-True (($got -join ',') -eq ($expected -join ',')) `
         "first start: expected union $($expected -join ',') but found $($got -join ',')"

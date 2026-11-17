@@ -8,12 +8,21 @@ function Wait-ScenarioSentinels {
     # Poll until the bucket holds exactly the expected sentinels (recovery and
     # import can finish after the HTTP API is already answering).
     param([int]$Port, [string[]]$Expected, [string]$Bucket = $bucketId, [int]$TimeoutSeconds = 60)
+    # The bucket may not exist yet (404) while recovery or import still runs,
+    # so a failed read is retried; if the last read still failed, rethrow it
+    # rather than report an empty sentinel list.
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $got = @()
     do {
-        $got = Get-FixtureSentinels -Port $Port -Bucket $Bucket
-        if (($got -join ',') -eq ($Expected -join ',')) { break }
+        $lastError = $null
+        try {
+            $got = Get-FixtureSentinels -Port $Port -Bucket $Bucket
+            if (($got -join ',') -eq ($Expected -join ',')) { break }
+        }
+        catch { $lastError = $_ }
         Start-Sleep -Seconds 2
     } while ((Get-Date) -lt $deadline)
+    if ($null -ne $lastError) { throw $lastError }
     return $got
 }
 

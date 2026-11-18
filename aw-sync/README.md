@@ -39,12 +39,12 @@ aw-sync dedupe --bucket aw-watcher-window-synced-from-host  # delete the extras 
 # data, but note it before running on a live instance.
 ```
 
-`aw-sync` / `aw-sync daemon` currently **does not pull** from the 3-level `{hostname}/{device_id}/` layout that Android and `aw-sync sync` write. The daemon stages `{device_id}/sync.db` at the sync-folder root and only walks two directory levels, so those peers are invisible ([#682](https://github.com/ActivityWatch/aw-server-rust/issues/682)). Until that switch lands, use `aw-sync sync` (or a systemd/cron timer around it) — not the daemon.
+The daemon is push-only by default. To enable pulling, set `pull = true` under the `[daemon]` section in aw-sync's `config.toml`, or pass `--mode both` to `aw-sync daemon`. When pulling from the sync-folder root, the daemon discovers both the 3-level `{hostname}/{device_id}/` layout used by Android and bare `aw-sync sync`, and the legacy 2-level `{device_id}/` layout. The daemon still writes its staging database in the 2-level layout; bare `aw-sync sync` and Android write in the 3-level layout.
 
 ```sh
-# Daemon — currently broken for mixed / Android layouts (see above)
+# Daemon — push-only unless pulling is enabled in config or on the command line
 aw-sync
-aw-sync daemon
+aw-sync daemon --mode both
 ```
 
 For more options, see `aw-sync --help`. Some notable options:
@@ -54,8 +54,7 @@ For more options, see `aw-sync --help`. Some notable options:
   - Not specifying this option syncs all buckets by default
 - `--start-date`: Only sync events after this date (YYYY-MM-DD)
 - `--sync-db`: Specify a specific database file in the sync directory
-- `--mode`: Choose sync mode: "push", "pull", or "both" (default: "both")
-  - On `aw-sync sync`, `--mode` / `--buckets` / `--start-date` / `--sync-db` switch to `sync_run`, which uses the two-level `{device_id}/sync.db` layout (same as the daemon). Those flags will not see Android or bare-`aw-sync sync` peers. Bare `aw-sync sync` (no extra flags) is the 3-level path and always does both a pull and a push.
+- `--mode`: Choose sync mode: "push", "pull", or "both" (default: "both"). For the daemon, this overrides its push-only-by-default config. `aw-sync sync` with advanced options (`--mode`, `--buckets`, `--start-date`, or `--sync-db`) uses `sync_run`; without `--sync-db`, it discovers both 3-level and legacy 2-level peers, but writes to the 2-level layout. The simple `aw-sync sync` path (including `--host` without advanced options) uses the host-based wrapper and reads/writes the 3-level layout while doing both a pull and a push.
 
 ### Setting up sync
 
@@ -88,7 +87,7 @@ If you want to run it from source, in the root of the repository run:
 ```sh
 cargo run --bin aw-sync -- sync
 ```
-For more options, see `cargo run --bin aw-sync -- --help`. Bare `cargo run --bin aw-sync` starts the daemon, which currently does not pull (see Usage).
+For more options, see `cargo run --bin aw-sync -- --help`. Bare `cargo run --bin aw-sync` starts the daemon, which is push-only by default; enable pulls by setting `pull = true` under `[daemon]` in aw-sync's `config.toml`, or by passing `--mode both`.
 
 ## FAQ
 
@@ -104,7 +103,7 @@ We also avoid having to implement complex features such as conflict resolution, 
 
 ### What are the limitations?
 
-- The default `aw-sync` / `aw-sync daemon` command does not pull from the 3-level layout (see Usage). Bare `aw-sync sync` and the Android app do. `aw-sync sync --mode`/`--buckets`/`--start-date` use the two-level path.
+- The daemon is push-only by default; when pulls are enabled, its root-level scan discovers both 3-level and legacy 2-level peers. The daemon and advanced `aw-sync sync` write the 2-level layout; bare `aw-sync sync` and Android write the 3-level layout.
 - By default all buckets are synced. `--buckets` is opt-in filtering, not a window/afk-only default.
 - It doesn't sync settings.
 - It mirrors events to all devices,

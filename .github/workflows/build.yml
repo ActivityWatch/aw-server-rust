@@ -84,20 +84,44 @@ jobs:
     - name: Test isolation refusal and readiness guards
       if: runner.os == 'Windows'
       shell: pwsh
-      run: ./scripts/test-windows-disposable-profile-guards.ps1
-    - name: Prove disposable-profile isolation
+      run: |
+        ./scripts/test-windows-disposable-profile-guards.ps1
+        ./scripts/test-windows-recovery-guards.ps1
+    - name: Prove disposable-profile isolation, recovery row 1 (Local older, Roaming newer)
       if: runner.os == 'Windows'
       shell: pwsh
       run: >-
         ./scripts/test-windows-disposable-profile.ps1
         -ServerExe target/debug/aw-server.exe
-        -EvidencePath "${{ runner.temp }}/windows-disposable-profile-evidence.json"
-    - name: Retain Windows isolation evidence
+        -User awrow1
+        -EvidencePath "${{ runner.temp }}/windows-recovery-row1-evidence.json"
+        -ScenarioPath scripts/windows-recovery-scenarios/row1-local-older-roaming-newer.ps1
+    # Each row gets its own disposable user and profile, so rows cannot see
+    # one another's databases. A failed row does not hide the others.
+    - name: Windows recovery row 2 (stale Local testing history, newer Roaming)
+      if: ${{ !cancelled() && runner.os == 'Windows' }}
+      shell: pwsh
+      run: >-
+        ./scripts/test-windows-disposable-profile.ps1
+        -ServerExe target/debug/aw-server.exe
+        -User awrow2
+        -EvidencePath "${{ runner.temp }}/windows-recovery-row2-evidence.json"
+        -ScenarioPath scripts/windows-recovery-scenarios/row2-stale-local-testing-newer-roaming.ps1
+    - name: Windows recovery row 3 (Roaming history, missed Python history)
+      if: ${{ !cancelled() && runner.os == 'Windows' }}
+      shell: pwsh
+      run: >-
+        ./scripts/test-windows-disposable-profile.ps1
+        -ServerExe target/debug/aw-server.exe
+        -User awrow3
+        -EvidencePath "${{ runner.temp }}/windows-recovery-row3-evidence.json"
+        -ScenarioPath scripts/windows-recovery-scenarios/row3-roaming-with-missed-python-history.ps1
+    - name: Retain Windows recovery evidence
       if: always() && runner.os == 'Windows'
       uses: actions/upload-artifact@v7
       with:
         name: windows-disposable-profile-evidence
-        path: ${{ runner.temp }}/windows-disposable-profile-evidence.json
+        path: ${{ runner.temp }}/windows-recovery-row*-evidence.json
         if-no-files-found: warn
     - name: Run tests
       run: cargo test --workspace --verbose

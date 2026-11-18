@@ -1728,6 +1728,7 @@ fn plant_datastore_with_event(dir: &Path, seconds: i64) {
         Bucket {
             bid: None,
             id: "shared".into(),
+            device_id: "local".into(),
             _type: "test".into(),
             client: "test".into(),
             hostname: "test".into(),

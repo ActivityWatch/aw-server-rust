@@ -71,6 +71,8 @@ pub enum PeerOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BucketReport {
     pub bucket_id: String,
+    /// Net event-count change (additions minus reconciled deletions), not a
+    /// gross insertion count. Keep the serialized name for existing clients.
     pub events_new: i64,
     pub resumed_at: Option<DateTime<Utc>>,
 }
@@ -184,16 +186,16 @@ impl SyncReport {
         let peer_n = self.peers.len();
         let mut msg = match self.mode {
             SyncMode::Pull => format!(
-                "Pulled {pulled} new events from {imported}/{peer_n} peers \
+                "Pulled {pulled} events (net change) from {imported}/{peer_n} peers \
                  ({skipped} skipped, {failed} failed)"
             ),
             SyncMode::Push => format!(
-                "Pushed {pushed} new events across {} bucket(s)",
+                "Pushed {pushed} events (net change) across {} bucket(s)",
                 self.pushed.len()
             ),
             SyncMode::Both => format!(
-                "Synced {pulled} events in from {imported}/{peer_n} peers \
-                 ({skipped} skipped, {failed} failed); pushed {pushed} events"
+                "Synced {pulled} events (net change) in from {imported}/{peer_n} peers \
+                 ({skipped} skipped, {failed} failed); pushed {pushed} events (net change)"
             ),
         };
         // Daemon and JNI log this string. Warnings (push abort, empty-dir
@@ -283,7 +285,7 @@ impl fmt::Display for SyncReport {
         )?;
         writeln!(
             f,
-            "events:   {} pulled, {} pushed ({} total)",
+            "events (net change): {} pulled, {} pushed ({} total)",
             self.events_pulled(),
             self.events_pushed(),
             self.events_new()
@@ -307,9 +309,9 @@ impl fmt::Display for SyncReport {
             for bucket in &self.pushed {
                 writeln!(
                     f,
-                    "  {}  +{} events{}",
+                    "  {}  {} events (net change){}",
                     bucket.bucket_id,
-                    bucket.events_new,
+                    format_event_delta(bucket.events_new),
                     match bucket.resumed_at {
                         Some(t) => format!("  resumed {}", t.to_rfc3339()),
                         None => String::new(),
@@ -318,6 +320,17 @@ impl fmt::Display for SyncReport {
             }
         }
         Ok(())
+    }
+}
+
+/// `events_new` is a net delta: the reconcile pass can remove rows the owner
+/// deleted, so a bucket can legitimately report a negative value. Render the
+/// sign instead of a bare `+` so the summary does not print `+-1 events`.
+fn format_event_delta(events: i64) -> String {
+    if events < 0 {
+        events.to_string()
+    } else {
+        format!("+{events}")
     }
 }
 
@@ -334,7 +347,10 @@ fn format_peer_line(peer: &PeerReport) -> String {
     };
     let events: i64 = peer.buckets.iter().map(|b| b.events_new).sum();
     match &peer.outcome {
-        PeerOutcome::Imported => format!("{host} / {did}  imported  +{events} events"),
+        PeerOutcome::Imported => format!(
+            "{host} / {did}  imported  {} events (net change)",
+            format_event_delta(events)
+        ),
         PeerOutcome::Skipped { reason } => {
             format!("{host} / {did}  skipped  {reason}")
         }
@@ -416,6 +432,32 @@ mod tests {
             "aw-sync-report-{}.json",
             crate::util::unique_test_suffix(),
         ))
+    }
+
+    #[test]
+    fn deletion_reports_describe_net_changes() {
+        for mode in [SyncMode::Pull, SyncMode::Push, SyncMode::Both] {
+            let mut report = SyncReport::new(mode);
+            let bucket = BucketReport {
+                bucket_id: "test".into(),
+                events_new: -1,
+                resumed_at: None,
+            };
+            report.peers.push(PeerReport::imported(
+                "device".into(),
+                "phone".into(),
+                PathBuf::from("/sync/test.db"),
+                vec![bucket.clone()],
+            ));
+            report.pushed.push(bucket);
+            let summary = report.summary_message();
+            assert!(summary.contains("net"), "{summary}");
+            assert!(!summary.contains("new events"), "{summary}");
+            assert!(summary.contains("-1"), "{summary}");
+            let display = report.to_string();
+            assert!(display.contains("net"), "{display}");
+            assert!(!display.contains("+-1"), "{display}");
+        }
     }
 
     #[test]

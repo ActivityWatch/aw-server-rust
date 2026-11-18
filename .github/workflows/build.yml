@@ -124,6 +124,8 @@ jobs:
       run: bash ./scripts/test-compile-android-cwd.sh
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
+    - name: Test concurrent JNI initialization
+      run: python3 ./scripts/test-android-init.py
     - name: Cache cargo build
       uses: actions/cache@v6
       env:

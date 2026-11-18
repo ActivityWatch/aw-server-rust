@@ -658,6 +658,126 @@ mod query_tests {
     }
 
     #[test]
+    fn test_tag_fields_map() {
+        // Option B for ActivityWatch/aw-webui#939: per-field patterns on the
+        // existing `regex` rule, ANDed. mstsc and winbox show the same host in
+        // their titles, so only app AND title distinguish them.
+        let ds = setup_datastore_with_bucket();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        let event = |app: &str, title: &str| Event {
+            id: None,
+            timestamp: chrono::Utc::now(),
+            duration: Duration::seconds(1),
+            data: json_map! { "app": json!(app), "title": json!(title) },
+        };
+        ds.insert_events(
+            BUCKET_ID,
+            &[
+                event("mstsc.exe", "office.example.com - Remote Desktop"),
+                event("winbox64.exe", "admin@office.example.com"),
+                event("firefox", "office.example.com"),
+            ],
+        )
+        .unwrap();
+
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = tag(events, [["rdp", {{ "type": "regex", "fields": {{ "app": "mstsc.exe", "title": "office.example" }} }}], ["winbox", {{ "type": "regex", "fields": {{ "app": "winbox", "title": "office.example" }} }}]]);
+            return  events;"#,
+            BUCKET_ID
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        assert_eq!(events.len(), 3);
+
+        // `query_bucket` returns events newest-first, so key by app instead of
+        // relying on insertion order.
+        let tags_by_app: std::collections::HashMap<String, serde_json::Value> = events
+            .iter()
+            .map(|e| {
+                (
+                    e.data.get("app").unwrap().as_str().unwrap().to_string(),
+                    e.data.get("$tags").cloned().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(tags_by_app["mstsc.exe"], serde_json::json!(vec!["rdp"]));
+        assert_eq!(
+            tags_by_app["winbox64.exe"],
+            serde_json::json!(vec!["winbox"])
+        );
+        assert_eq!(
+            tags_by_app["firefox"],
+            serde_json::json!(Vec::<String>::new())
+        );
+
+        // Empty `regex`/`select_keys` count as unset, so a config that serializes
+        // them next to `fields` still parses (and stays fail-closed on servers
+        // that predate the field map, which read the empty regex as no match).
+        let code = format!(
+            r#"
+            events = query_bucket("{}");
+            events = tag(events, [["rdp", {{ "type": "regex", "regex": "", "select_keys": [], "fields": {{ "app": "mstsc" }} }}]]);
+            return  events;"#,
+            BUCKET_ID
+        );
+        let result: DataType = aw_query::query(&code, &interval, &ds).unwrap();
+        let events: Vec<Event> = Vec::try_from(&result).unwrap();
+        let rdp_tags: Vec<_> = events
+            .iter()
+            .filter(|e| e.data.get("app").unwrap().as_str() == Some("mstsc.exe"))
+            .map(|e| e.data.get("$tags").cloned().unwrap())
+            .collect();
+        assert_eq!(rdp_tags, vec![serde_json::json!(vec!["rdp"])]);
+    }
+
+    #[test]
+    fn test_rule_parsing_fields_map() {
+        let ds = setup_datastore_populated();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // A fields rule may not smuggle in a single pattern: older servers read
+        // only `regex`, so silently ignoring it would change what the rule means.
+        for member in [r#""regex": "value""#, r#""select_keys": ["app"]"#] {
+            let code = format!(
+                r#"
+                events = [];
+                events = tag(events, [["t", {{ "type": "regex", {member}, "fields": {{ "app": "value" }} }}]]);
+                return  events;"#
+            );
+            let res = aw_query::query(&code, &interval, &ds);
+            assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
+        }
+
+        // Malformed or empty field maps are rejected rather than matching all.
+        for fields in [
+            r#""fields": []"#,
+            r#""fields": {}"#,
+            r#""fields": { "app": 5 }"#,
+            r#""fields": { "app": "" }"#,
+        ] {
+            let code = format!(
+                r#"
+                events = [];
+                events = tag(events, [["t", {{ "type": "regex", {fields} }}]]);
+                return  events;"#
+            );
+            let res = aw_query::query(&code, &interval, &ds);
+            assert_err_type!(res, QueryError::InvalidFunctionParameters(_));
+        }
+
+        // An uncompilable per-field pattern is reported as a regex error.
+        let code = r#"
+            events = [];
+            events = tag(events, [["t", { "type": "regex", "fields": { "app": "!#¤%&/(=" } }]]);
+            return  events;"#;
+        let res = aw_query::query(code, &interval, &ds);
+        assert_err_type!(res, QueryError::RegexCompileError(_));
+    }
+
+    #[test]
     fn test_rule_parsing() {
         let ds = setup_datastore_populated();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();

@@ -36,7 +36,10 @@ impl RuleTrait for Rule {
     fn needs_values(&self) -> bool {
         match self {
             Rule::None => false,
-            Rule::Regex(regex_rule) => regex_rule.select_keys.is_none(),
+            // Delegate so a `fields` rule is classified from the same place the
+            // matching does; duplicating the check here would silently keep
+            // extracting the shared value set for field rules.
+            Rule::Regex(regex_rule) => regex_rule.needs_values(),
         }
     }
 }
@@ -1205,4 +1208,23 @@ fn test_rule_fields_work_for_tags() {
     );
     assert_eq!(out[0].data.get("$tags"), Some(&serde_json::json!(["rdp"])));
     assert_eq!(out[1].data.get("$tags"), Some(&serde_json::json!([])));
+}
+
+#[test]
+fn test_rule_fields_do_not_need_shared_values() {
+    // `needs_values` decides whether per-event JSON is flattened into the
+    // shared value set. A field rule reads named keys directly, so a rule set
+    // of only field rules must skip that extraction. Regression guard: the
+    // `Rule` impl used to duplicate the `select_keys` check instead of
+    // delegating, so adding `fields` changed matching but not this predicate.
+    let fields = fields_rule(&[("app", "mstsc")], false);
+    assert!(!fields.needs_values());
+
+    let plain = Rule::Regex(RegexRule::new("test", false, None).unwrap());
+    assert!(plain.needs_values());
+
+    let selected = Rule::Regex(RegexRule::new("test", false, Some(vec!["app".into()])).unwrap());
+    assert!(!selected.needs_values());
+
+    assert!(!Rule::None.needs_values());
 }

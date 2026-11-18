@@ -203,6 +203,15 @@ fn apply_android_data_dir_from_env() {
     let path = files_dir.to_string_lossy();
     info!("android data dir from XDG_DATA_HOME: {}", path);
     aw_server::dirs::set_android_data_dir(&path);
+    set_client_cache_dir(&files_dir);
+}
+
+/// Point aw-client-rust's single-instance locks at this app's cache dir, the
+/// `cache` sibling of `filesDir` (`/data/user/<user>/<package>/{files,cache}`).
+fn set_client_cache_dir(files_dir: &Path) {
+    if let Some(app_dir) = files_dir.parent() {
+        aw_client_rust::single_instance::set_android_cache_dir(&app_dir.join("cache"));
+    }
 }
 
 /// Mirror of `RustInterface.setDataDir`. Prefer this explicit path; the XDG
@@ -218,6 +227,7 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_setDataDir(
             let path: String = s.into();
             info!("Setting android data dir as {}", path);
             aw_server::dirs::set_android_data_dir(&path);
+            set_client_cache_dir(Path::new(&path));
         }
         Err(e) => {
             error!("setDataDir: failed to read path: {}", e);

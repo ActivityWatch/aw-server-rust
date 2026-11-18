@@ -107,7 +107,7 @@ pub fn bucket_new(
 }
 
 /// Parse an optional RFC 3339 query parameter, answering 400 when it doesn't parse.
-fn parse_time_param(
+pub(crate) fn parse_time_param(
     name: &str,
     value: Option<String>,
 ) -> Result<Option<DateTime<Utc>>, HttpErrorJson> {
@@ -369,12 +369,21 @@ pub fn bucket_events_delete_many(
     }
 }
 
-#[get("/<bucket_id>/export")]
+/// Export a bucket as JSON, with all its events, or with `start`/`end` (RFC 3339)
+/// those overlapping that range, cut to it like `/events`.
+#[get("/<bucket_id>/export?<start>&<end>")]
 pub fn bucket_export(
     bucket_id: &str,
+    start: Option<String>,
+    end: Option<String>,
     state: &State<ServerState>,
 ) -> Result<BucketsExportRocket, HttpErrorJson> {
-    BucketsExportRocket::new(&state.datastore, Some(bucket_id))
+    BucketsExportRocket::new(
+        &state.datastore,
+        Some(bucket_id),
+        parse_time_param("start", start)?,
+        parse_time_param("end", end)?,
+    )
 }
 
 /// Stream events for a single bucket as a CSV file.

@@ -12,8 +12,13 @@ use crate::dirs;
 use android_logger::Config;
 use rocket::serde::json::json;
 
+/// Return a greeting allocated by Rust. Reclaim it with `CString::from_raw`.
+///
+/// # Safety
+/// `to` must point to a valid, NUL-terminated C string that remains readable
+/// for the duration of this call.
 #[no_mangle]
-pub extern "C" fn rust_greeting(to: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn rust_greeting(to: *const c_char) -> *mut c_char {
     let c_str = unsafe { CStr::from_ptr(to) };
     let recipient = match c_str.to_str() {
         Err(_) => "there",
@@ -46,7 +51,7 @@ pub mod android {
     };
     use aw_datastore::Datastore;
     use aw_models::{Bucket, Event, TimeInterval};
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{Arc, Once, OnceLock};
 
     // Several app threads make their first JNI call at about the same time (the
     // watchers' init threads, the server thread, migrations). With a plain
@@ -85,11 +90,11 @@ pub mod android {
     ) -> jstring {
         jni_guard(env, "greeting", || {
             // Our Java companion code might pass-in "world" as a string, hence the name.
-            let world = rust_greeting(
-                env.get_string(java_pattern)
-                    .expect("invalid pattern string")
-                    .as_ptr(),
-            );
+            let pattern = env
+                .get_string(java_pattern)
+                .expect("invalid pattern string");
+            // Keep the JNI string guard alive while rust_greeting reads its C string.
+            let world = unsafe { rust_greeting(pattern.as_ptr()) };
             // Retake pointer so that we can use it below and allow memory to be freed when it goes out of scope.
             let world_ptr = CString::from_raw(world);
             let output = env
@@ -219,7 +224,7 @@ pub mod android {
             .await;
     }
 
-    static mut INITIALIZED: bool = false;
+    static INIT: Once = Once::new();
 
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_activitywatch_android_RustInterface_initialize(
@@ -227,7 +232,10 @@ pub mod android {
         _: JClass,
     ) {
         jni_guard_void("initialize", || {
-            if !INITIALIZED {
+            let mut initialized_here = false;
+            // JNI guards catch setup panics; allow a later caller to retry rather
+            // than permanently poisoning initialization after a caught failure.
+            INIT.call_once_force(|_| {
                 android_logger::init_once(
                     Config::default()
                         .with_max_level(log::LevelFilter::Info) // limit log level
@@ -243,10 +251,11 @@ pub mod android {
                 log_panics::init();
                 info!("Initializing aw-server-rust...");
                 debug!("Redirected aw-server-rust stdout/stderr to logcat");
-            } else {
+                initialized_here = true;
+            });
+            if !initialized_here {
                 info!("Already initialized");
             }
-            INITIALIZED = true;
 
             // Without this it might not work due to weird error probably arising from Rust optimizing away the JNIEnv:
             //  JNI DETECTED ERROR IN APPLICATION: use of deleted weak global reference

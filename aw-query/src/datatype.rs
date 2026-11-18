@@ -427,6 +427,26 @@ impl TryFrom<&DataType> for Rule {
         if rtype == "none" {
             Ok(Self::None)
         } else if rtype == "regex" {
+            let ignore_case_val = match obj.get("ignore_case") {
+                Some(case_val) => case_val,
+                None => &DataType::Bool(false),
+            };
+            let ignore_case = match ignore_case_val {
+                DataType::Bool(b) => b,
+                _ => {
+                    return Err(QueryError::InvalidFunctionParameters(
+                        "the ignore_case field of the regex rule is not a bool".to_string(),
+                    ))
+                }
+            };
+            // Option B for aw-webui#939: per-field patterns on the existing
+            // `regex` type instead of a new rule type. A `fields` rule carries
+            // no `regex` of its own, so a server that predates it either rejects
+            // the rule or (with an empty `regex`) matches nothing for it, rather
+            // than misclassifying events.
+            if obj.contains_key("fields") {
+                return parse_fields_rule(obj, *ignore_case);
+            }
             let regex_val = match obj.get("regex") {
                 Some(regex_val) => regex_val,
                 None => {
@@ -440,18 +460,6 @@ impl TryFrom<&DataType> for Rule {
                 _ => {
                     return Err(QueryError::InvalidFunctionParameters(
                         "the regex field of the regex rule is not a string".to_string(),
-                    ))
-                }
-            };
-            let ignore_case_val = match obj.get("ignore_case") {
-                Some(case_val) => case_val,
-                None => &DataType::Bool(false),
-            };
-            let ignore_case = match ignore_case_val {
-                DataType::Bool(b) => b,
-                _ => {
-                    return Err(QueryError::InvalidFunctionParameters(
-                        "the ignore_case field of the regex rule is not a bool".to_string(),
                     ))
                 }
             };
@@ -490,5 +498,97 @@ impl TryFrom<&DataType> for Rule {
                 "Unknown rule type '{rtype}'"
             )))
         }
+    }
+}
+
+/// Parse a `regex` rule that carries a per-field `fields` map (Option B for
+/// aw-webui#939), for example:
+///
+/// ```text
+/// { "type": "regex", "fields": { "app": "mstsc", "title": "office" } }
+/// ```
+///
+/// Every named field must be present, a string, and match its own pattern
+/// (unanchored, like a plain `regex`). `regex` and `select_keys` are rejected
+/// when set: silently ignoring them would turn a rule that older servers read
+/// as a single-pattern rule into something else. An empty `regex`/`select_keys`
+/// counts as unset, matching aw-core's Python `Rule` and keeping such a rule
+/// fail-closed on servers that predate the field map.
+fn parse_fields_rule(
+    obj: &HashMap<String, DataType>,
+    ignore_case: bool,
+) -> Result<Rule, QueryError> {
+    match obj.get("regex") {
+        None => {}
+        Some(DataType::String(s)) if s.is_empty() => {}
+        Some(DataType::String(_)) => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "a regex rule with 'fields' must not also carry a 'regex' pattern \
+                 (an empty string counts as unset)"
+                    .to_string(),
+            ))
+        }
+        Some(_) => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "the regex field of the regex rule is not a string".to_string(),
+            ))
+        }
+    }
+    match obj.get("select_keys") {
+        None => {}
+        Some(DataType::List(keys)) if keys.is_empty() => {}
+        Some(DataType::List(_)) => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "a regex rule with 'fields' must not also carry 'select_keys' \
+                 (an empty list counts as unset)"
+                    .to_string(),
+            ))
+        }
+        Some(_) => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "the select_keys field of the regex rule is not a list".to_string(),
+            ))
+        }
+    }
+    let fields = match obj.get("fields") {
+        Some(DataType::Dict(fields)) => fields,
+        Some(_) => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "the fields of the regex rule is not a dict".to_string(),
+            ))
+        }
+        None => {
+            return Err(QueryError::InvalidFunctionParameters(
+                "a regex rule with 'fields' is missing the 'fields' map".to_string(),
+            ))
+        }
+    };
+    if fields.is_empty() {
+        return Err(QueryError::InvalidFunctionParameters(
+            "the fields of the regex rule must not be empty".to_string(),
+        ));
+    }
+    let mut patterns = HashMap::with_capacity(fields.len());
+    for (field, pattern) in fields {
+        let pattern = match pattern {
+            DataType::String(pattern) if !pattern.is_empty() => pattern.clone(),
+            DataType::String(_) => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                    "the pattern for field '{field}' in the regex rule is empty"
+                )))
+            }
+            _ => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                    "the pattern for field '{field}' in the regex rule is not a string"
+                )))
+            }
+        };
+        patterns.insert(field.clone(), pattern);
+    }
+    match RegexRule::from_fields(patterns, ignore_case) {
+        Ok(rule) => Ok(Rule::Regex(rule)),
+        Err(err) => Err(QueryError::RegexCompileError(format!(
+            "Failed to compile a pattern in the 'fields' map of the regex rule: {err:?}"
+        ))),
     }
 }

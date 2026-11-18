@@ -36,7 +36,10 @@ impl RuleTrait for Rule {
     fn needs_values(&self) -> bool {
         match self {
             Rule::None => false,
-            Rule::Regex(regex_rule) => regex_rule.select_keys.is_none(),
+            // Delegate so a `fields` rule is classified from the same place the
+            // matching does; duplicating the check here would silently keep
+            // extracting the shared value set for field rules.
+            Rule::Regex(regex_rule) => regex_rule.needs_values(),
         }
     }
 }
@@ -61,8 +64,13 @@ impl<'a> MatchValues<'a> {
 }
 
 pub struct RegexRule {
-    regex: Arc<Regex>,
+    /// Pattern matched against `select_keys` (or every string value of the
+    /// event). `None` for a `fields` rule, which carries one pattern per field
+    /// instead, see [`RegexRule::from_fields`].
+    regex: Option<Arc<Regex>>,
     select_keys: Option<Vec<String>>,
+    /// Per-field patterns, every one of which must match (logical AND).
+    fields: Option<HashMap<String, Arc<Regex>>>,
     // An empty pattern compiles to a match-all regex, which would silently
     // categorize every event. aw-core's Python `Rule` deliberately never
     // matches on an empty regex (see ActivityWatch/aw-webui#1026); mirror
@@ -88,34 +96,39 @@ impl RegexRule {
             }
         }
 
-        let never_matches = regex_str.is_empty();
-
-        // can't use `RegexBuilder::case_insensitive` because it's not supported by fancy_regex,
-        // so we need to prefix with `(?i)` to make it case insensitive.
-        let full_regex_str = if ignore_case {
-            format!("(?i){regex_str}")
-        } else {
-            regex_str.to_string()
-        };
-
-        let cache = REGEX_CACHE.get_or_init(|| {
-            Mutex::new(LruCache::new(
-                NonZeroUsize::new(REGEX_CACHE_CAPACITY).unwrap(),
-            ))
-        });
-        let mut cache = cache.lock().unwrap();
-
-        let regex = if let Some(re) = cache.get(&full_regex_str) {
-            re.clone()
-        } else {
-            let re = Arc::new(Regex::new(&full_regex_str)?);
-            cache.put(full_regex_str.clone(), re.clone());
-            re
-        };
-
         Ok(RegexRule {
-            regex,
+            regex: Some(compile_pattern(regex_str, ignore_case)?),
             select_keys,
+            fields: None,
+            never_matches: regex_str.is_empty(),
+        })
+    }
+
+    /// A rule that tests each named field against its own pattern and requires
+    /// all of them to match (logical AND) — `{"app": …, "title": …}`.
+    ///
+    /// Each per-field pattern keeps the unanchored `search` semantics of a plain
+    /// `regex` rule (`^…$` is how an exact match is asked for), so a single
+    /// field matches exactly what the equivalent `select_keys` rule would.
+    /// Field values must be strings: a missing or non-string value fails the
+    /// whole rule.
+    ///
+    /// An empty map or an empty pattern would match every event, so such a rule
+    /// is built in the never-matching state instead.
+    pub fn from_fields(
+        fields: HashMap<String, String>,
+        ignore_case: bool,
+    ) -> Result<RegexRule, fancy_regex::Error> {
+        let mut never_matches = fields.is_empty();
+        let mut compiled = HashMap::with_capacity(fields.len());
+        for (field, pattern) in &fields {
+            never_matches |= pattern.is_empty();
+            compiled.insert(field.clone(), compile_pattern(pattern, ignore_case)?);
+        }
+        Ok(RegexRule {
+            regex: None,
+            select_keys: None,
+            fields: Some(compiled),
             never_matches,
         })
     }
@@ -124,11 +137,60 @@ impl RegexRule {
         if self.never_matches {
             return false;
         }
+        // A `fields` rule never reaches the select_keys/all-values path.
+        let Some(regex) = self.regex.as_ref() else {
+            return false;
+        };
         match value.as_str() {
-            Some(value) => self.regex.is_match(value).unwrap_or(false),
+            Some(value) => regex.is_match(value).unwrap_or(false),
             None => false,
         }
     }
+
+    /// Whether every field named by a `fields` rule is present, is a string,
+    /// and matches its pattern.
+    fn fields_match(&self, event: &Event) -> bool {
+        let Some(fields) = self.fields.as_ref() else {
+            return false;
+        };
+        if self.never_matches || fields.is_empty() {
+            return false;
+        }
+        fields.iter().all(|(field, regex)| {
+            event
+                .data
+                .get(field)
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| regex.is_match(value).unwrap_or(false))
+        })
+    }
+}
+
+/// Compile `pattern`, reusing the shared cache.
+///
+/// Can't use `RegexBuilder::case_insensitive` because it's not supported by
+/// fancy_regex, so `ignore_case` is expressed by prefixing `(?i)`. The cache key
+/// is the prepared pattern, so both cases get one entry each.
+fn compile_pattern(pattern: &str, ignore_case: bool) -> Result<Arc<Regex>, fancy_regex::Error> {
+    let full_regex_str = if ignore_case {
+        format!("(?i){pattern}")
+    } else {
+        pattern.to_string()
+    };
+
+    let cache = REGEX_CACHE.get_or_init(|| {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(REGEX_CACHE_CAPACITY).unwrap(),
+        ))
+    });
+    let mut cache = cache.lock().unwrap();
+
+    if let Some(re) = cache.get(&full_regex_str) {
+        return Ok(re.clone());
+    }
+    let re = Arc::new(Regex::new(&full_regex_str)?);
+    cache.put(full_regex_str, re.clone());
+    Ok(re)
 }
 
 /// This struct defines the rules for classification.
@@ -141,6 +203,9 @@ impl RuleTrait for RegexRule {
         if self.never_matches {
             return false;
         }
+        if self.fields.is_some() {
+            return self.fields_match(event);
+        }
         match &self.select_keys {
             Some(select_keys) => select_keys
                 .iter()
@@ -148,15 +213,20 @@ impl RuleTrait for RegexRule {
                 .any(|val| self.value_matches(val)),
             // `values` holds the same strings (in the same order) that the
             // previous `event.data.values()` iteration produced.
-            None => values
-                .0
-                .iter()
-                .any(|value| self.regex.is_match(value).unwrap_or(false)),
+            None => match self.regex.as_ref() {
+                Some(regex) => values
+                    .0
+                    .iter()
+                    .any(|value| regex.is_match(value).unwrap_or(false)),
+                // A `fields` rule has no single pattern and is handled above.
+                None => false,
+            },
         }
     }
 
     fn needs_values(&self) -> bool {
-        self.select_keys.is_none()
+        // A `fields` rule reads its named keys, not the shared value set.
+        self.select_keys.is_none() && self.fields.is_none()
     }
 }
 
@@ -167,8 +237,9 @@ impl From<Regex> for Rule {
         // cannot silently match every event.
         let never_matches = re.as_str().is_empty();
         Rule::Regex(RegexRule {
-            regex: Arc::new(re),
+            regex: Some(Arc::new(re)),
             select_keys: None,
+            fields: None,
             never_matches,
         })
     }
@@ -825,9 +896,28 @@ fn naive_rule_matches(rule: &Rule, event: &Event) -> bool {
     match rule {
         Rule::None => false,
         Rule::Regex(r) => {
+            if r.never_matches {
+                return false;
+            }
+            if let Some(fields) = &r.fields {
+                if fields.is_empty() {
+                    return false;
+                }
+                return fields.iter().all(|(key, regex)| {
+                    event
+                        .data
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .map(|s| regex.is_match(s).unwrap_or(false))
+                        .unwrap_or(false)
+                });
+            }
+            let Some(regex) = r.regex.as_ref() else {
+                return false;
+            };
             let matches_value = |v: &serde_json::Value| {
                 v.as_str()
-                    .map(|s| r.regex.is_match(s).unwrap_or(false))
+                    .map(|s| regex.is_match(s).unwrap_or(false))
                     .unwrap_or(false)
             };
             match &r.select_keys {
@@ -885,12 +975,25 @@ fn test_categorize_matches_naive_best_of_all() {
         for _ in 0..rule_count {
             let pattern = PATTERNS[rng.below(PATTERNS.len() as u64) as usize];
             let ignore_case = rng.below(2) == 0;
-            let select_keys = if rng.below(2) == 0 {
-                None
+            let rule = if rng.below(4) == 0 {
+                // Per-field (AND) rules too; `pid` is numeric, so a field rule
+                // naming it must never match — the oracle covers that case.
+                let field_count = 1 + rng.below(2) as usize;
+                let mut fields = HashMap::new();
+                for _ in 0..field_count {
+                    let key = KEYS[rng.below(KEYS.len() as u64) as usize];
+                    let pattern = PATTERNS[rng.below(PATTERNS.len() as u64) as usize];
+                    fields.insert(key.to_string(), pattern.to_string());
+                }
+                Rule::Regex(RegexRule::from_fields(fields, ignore_case).unwrap())
             } else {
-                Some(vec![KEYS[rng.below(KEYS.len() as u64) as usize].to_string()])
+                let select_keys = if rng.below(2) == 0 {
+                    None
+                } else {
+                    Some(vec![KEYS[rng.below(KEYS.len() as u64) as usize].to_string()])
+                };
+                Rule::Regex(RegexRule::new(pattern, ignore_case, select_keys).unwrap())
             };
-            let rule = Rule::Regex(RegexRule::new(pattern, ignore_case, select_keys).unwrap());
             let depth = 1 + rng.below(3) as usize;
             let category: Vec<String> = (0..depth).map(|i| format!("Cat{case}_{i}")).collect();
             let mut cr = CategoryRule::new(category, rule);
@@ -938,4 +1041,190 @@ fn test_categorize_matches_naive_best_of_all() {
             "case {case}: rank-ordered pick diverged from best-of-all"
         );
     }
+}
+
+#[cfg(test)]
+fn event_with_app_title(app: &str, title: &str) -> Event {
+    let mut e = Event::default();
+    e.data.insert("app".into(), serde_json::json!(app));
+    e.data.insert("title".into(), serde_json::json!(title));
+    e
+}
+
+#[cfg(test)]
+fn fields_rule(fields: &[(&str, &str)], ignore_case: bool) -> Rule {
+    let fields = fields
+        .iter()
+        .map(|(key, pattern)| (key.to_string(), pattern.to_string()))
+        .collect::<HashMap<_, _>>();
+    Rule::Regex(RegexRule::from_fields(fields, ignore_case).unwrap())
+}
+
+#[test]
+fn test_rule_fields_split_same_title_by_app() {
+    // Reported case (ActivityWatch/aw-webui#939): mstsc and winbox can show the
+    // same host in their window titles, so only app AND title tell them apart.
+    let events = vec![
+        event_with_app_title("mstsc.exe", "office.example.com - Remote Desktop"),
+        event_with_app_title("winbox64.exe", "admin@office.example.com"),
+        event_with_app_title("firefox", "office.example.com"),
+    ];
+    let out = categorize(
+        events.clone(),
+        &[
+            CategoryRule::new(
+                vec!["Remote".into(), "RDP".into()],
+                fields_rule(
+                    &[("app", r"mstsc\.exe"), ("title", r"office\.example")],
+                    false,
+                ),
+            ),
+            CategoryRule::new(
+                vec!["Remote".into(), "Winbox".into()],
+                fields_rule(&[("app", "winbox"), ("title", r"office\.example")], false),
+            ),
+        ],
+    );
+    assert_eq!(category_of(&out), &serde_json::json!(vec!["Remote", "RDP"]));
+    assert_eq!(
+        category_of(&out[1..]),
+        &serde_json::json!(vec!["Remote", "Winbox"])
+    );
+    assert_eq!(
+        category_of(&out[2..]),
+        &serde_json::json!(vec!["Uncategorized"])
+    );
+
+    // `Rule::matches` agrees with the cached/ranked `categorize` path.
+    let rdp_rule = fields_rule(
+        &[("app", r"mstsc\.exe"), ("title", r"office\.example")],
+        false,
+    );
+    let matched: Vec<bool> = events.iter().map(|e| rule_matches(&rdp_rule, e)).collect();
+    assert_eq!(matched, vec![true, false, false]);
+}
+
+#[test]
+fn test_rule_fields_require_present_string_values() {
+    let rule = fields_rule(&[("app", "mstsc"), ("title", "office")], false);
+    assert!(rule_matches(
+        &rule,
+        &event_with_app_title("mstsc.exe", "office")
+    ));
+    assert!(!rule_matches(
+        &rule,
+        &event_with_app_title("mstsc.exe", "home")
+    ));
+
+    // A missing field fails the whole rule.
+    let mut missing = event_with_app_title("mstsc.exe", "office");
+    missing.data.remove("title");
+    assert!(!rule_matches(&rule, &missing));
+
+    // A non-string value fails it too (watchers do store numbers).
+    let mut numeric = event_with_app_title("mstsc.exe", "office");
+    numeric.data.insert("title".into(), serde_json::json!(123));
+    assert!(!rule_matches(&rule, &numeric));
+}
+
+#[test]
+fn test_rule_fields_search_semantics_and_ignore_case() {
+    let event = event_with_app_title("mstsc.exe", "x");
+    // Unanchored like a plain `regex` rule; `^...$` is how exact match is asked for.
+    assert!(rule_matches(
+        &fields_rule(&[("app", "^mstsc")], false),
+        &event
+    ));
+    assert!(!rule_matches(
+        &fields_rule(&[("app", "^mstsc$")], false),
+        &event
+    ));
+    assert!(!rule_matches(
+        &fields_rule(&[("app", "MSTSC")], false),
+        &event
+    ));
+    assert!(rule_matches(
+        &fields_rule(&[("app", "MSTSC")], true),
+        &event
+    ));
+}
+
+#[test]
+fn test_rule_fields_single_field_matches_select_keys() {
+    // A one-field rule with the same pattern must agree with the equivalent
+    // `select_keys` rule, so migrating an editor config cannot change results.
+    let events = vec![
+        event_with_app_title("mstsc.exe", "office"),
+        event_with_app_title("firefox", "office"),
+        event_with_app_title("office", "mstsc"),
+    ];
+    let by_fields = fields_rule(&[("app", "office")], false);
+    let by_select_keys =
+        Rule::Regex(RegexRule::new("office", false, Some(vec!["app".into()])).unwrap());
+    for event in &events {
+        assert_eq!(
+            rule_matches(&by_fields, event),
+            rule_matches(&by_select_keys, event),
+            "fields and select_keys disagree on {event:?}"
+        );
+    }
+}
+
+#[test]
+fn test_rule_fields_empty_map_or_pattern_never_matches() {
+    // An empty map is vacuously true and an empty pattern compiles to a
+    // match-all regex, so neither may match every event.
+    let event = event_with_app_title("mstsc.exe", "office");
+    for rule in [
+        fields_rule(&[], false),
+        fields_rule(&[("app", "")], false),
+        fields_rule(&[("app", "mstsc"), ("title", "")], false),
+    ] {
+        assert!(!rule_matches(&rule, &event));
+    }
+
+    let out = categorize(
+        vec![event],
+        &[CategoryRule::new(
+            vec!["Everything".into()],
+            fields_rule(&[], false),
+        )],
+    );
+    assert_eq!(category_of(&out), &serde_json::json!(vec!["Uncategorized"]));
+}
+
+#[test]
+fn test_rule_fields_work_for_tags() {
+    let rules = vec![(
+        "rdp".to_string(),
+        fields_rule(&[("app", r"mstsc\.exe"), ("title", "office")], false),
+    )];
+    let out = tag(
+        vec![
+            event_with_app_title("mstsc.exe", "office"),
+            event_with_app_title("winbox64.exe", "office"),
+        ],
+        &rules,
+    );
+    assert_eq!(out[0].data.get("$tags"), Some(&serde_json::json!(["rdp"])));
+    assert_eq!(out[1].data.get("$tags"), Some(&serde_json::json!([])));
+}
+
+#[test]
+fn test_rule_fields_do_not_need_shared_values() {
+    // `needs_values` decides whether per-event JSON is flattened into the
+    // shared value set. A field rule reads named keys directly, so a rule set
+    // of only field rules must skip that extraction. Regression guard: the
+    // `Rule` impl used to duplicate the `select_keys` check instead of
+    // delegating, so adding `fields` changed matching but not this predicate.
+    let fields = fields_rule(&[("app", "mstsc")], false);
+    assert!(!fields.needs_values());
+
+    let plain = Rule::Regex(RegexRule::new("test", false, None).unwrap());
+    assert!(plain.needs_values());
+
+    let selected = Rule::Regex(RegexRule::new("test", false, Some(vec!["app".into()])).unwrap());
+    assert!(!selected.needs_values());
+
+    assert!(!Rule::None.needs_values());
 }

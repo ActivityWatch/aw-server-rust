@@ -30,14 +30,31 @@ mod api_tests {
 
     #[test]
     fn concurrent_identical_heartbeats_do_not_duplicate_stored_events() {
-        // Rocket's async_test uses one worker. Heartbeat dispatch is synchronous,
-        // so use two workers to exercise actual parallel endpoint execution.
-        rocket::tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(concurrent_identical_heartbeats());
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (sender, receiver) = mpsc::channel();
+        // A synchronous handler can block both Tokio workers and runtime drop.
+        // Keep the watchdog outside that runtime; never join a stuck worker.
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(|| {
+                // Rocket's async_test uses one worker. Heartbeat dispatch is
+                // synchronous, so use two workers for parallel endpoint execution.
+                let runtime = rocket::tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(concurrent_identical_heartbeats());
+                drop(runtime);
+            });
+            let _ = sender.send(result);
+        });
+        match receiver.recv_timeout(Duration::from_secs(90)) {
+            Ok(Ok(())) => {}
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(error) => panic!("concurrent heartbeat test did not finish within 90s: {error}"),
+        }
     }
 
     async fn concurrent_identical_heartbeats() {

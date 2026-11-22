@@ -13,7 +13,8 @@ pub mod segment;
 
 pub use manifest::{BucketEntry, Manifest, SegmentEntry};
 pub use reader::{
-    DecodedSegment, ReadError, ReadOutcome, ReaderLimits, RetryReason, SegmentReader,
+    BucketSegmentIter, DecodedSegment, ReadError, ReadOutcome, ReaderLimits, RetryReason,
+    SegmentReader,
 };
 pub use segment::{ReplaceRange, SegmentHeader, SegmentWriter};
 

@@ -73,7 +73,7 @@ The default daemon and advanced `sync_run` path write `~/ActivityWatchSync/{devi
 
 #### Experimental v2 folder format (`sync-v2` feature)
 
-Building with `--features sync-v2` compiles a writer for the immutable-segment format (`devices/{device_id}/manifest.json` plus `{slug}.{generation}.jsonl.zst` segments). It is not wired into any command yet.
+Building with `--features sync-v2` compiles a writer and read-only reader (`SegmentWriter` / `SegmentReader`) for the immutable-segment format (`devices/{device_id}/manifest.json` plus `{slug}.{generation}.jsonl.zst` segments). They are not wired into any command yet.
 
 The writer stages every file as `*.tmp` next to its final name and renames it into place, so a file syncer can ship a half-written temp file. Readers ignore unknown names, but tell your syncer to skip them too. For Syncthing, add this to the sync folder's `.stignore`:
 

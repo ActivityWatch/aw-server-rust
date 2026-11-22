@@ -193,9 +193,14 @@ pub(super) fn validate_device_id(device_id: &str) -> Result<(), String> {
     if device_id.is_empty() {
         return Err("device_id must not be empty".to_string());
     }
-    if device_id.contains('/') || device_id.contains('\\') || device_id.contains("..") {
+    if device_id == "."
+        || device_id.contains('/')
+        || device_id.contains('\\')
+        || device_id.contains("..")
+        || device_id.contains('\0')
+    {
         return Err(format!(
-            "invalid device_id {device_id:?}: must not contain path separators or '..'"
+            "invalid device_id {device_id:?}: must not contain path separators, '.', '..', or NUL"
         ));
     }
     Ok(())

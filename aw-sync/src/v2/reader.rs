@@ -47,6 +47,10 @@ pub struct ReaderLimits {
     pub max_line_bytes: usize,
     /// Maximum number of event records decoded from a single segment.
     pub max_events_per_segment: usize,
+    /// Maximum cumulative event records buffered by [`SegmentReader::read_bucket`].
+    /// Callers scanning arbitrarily long buckets should use [`SegmentReader::iter_bucket`]
+    /// to consume one segment at a time without buffering full bucket history.
+    pub max_events_per_bucket: usize,
 }
 
 impl Default for ReaderLimits {
@@ -57,6 +61,7 @@ impl Default for ReaderLimits {
             max_decompressed_segment_bytes: 256 * 1024 * 1024,
             max_line_bytes: 4 * 1024 * 1024,
             max_events_per_segment: 1_000_000,
+            max_events_per_bucket: 5_000_000,
         }
     }
 }
@@ -375,33 +380,18 @@ impl SegmentReader {
     pub fn load_manifest(&self, device_id: &str) -> Result<Manifest, ReadError> {
         validate_device_id(device_id).map_err(ReadError::InvalidDeviceId)?;
 
-        let dev_dir = self.confined_device_dir(device_id)?;
         let path = manifest_path(&self.sync_root, device_id);
-        let meta = match fs::symlink_metadata(&path) {
-            Ok(m) => m,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(ReadError::ManifestNotFound {
-                    device_id: device_id.to_string(),
-                    path,
-                });
-            }
-            Err(source) => {
-                return Err(ReadError::Io {
-                    context: "inspect manifest".to_string(),
-                    path,
-                    source,
-                });
-            }
-        };
-        if meta.file_type().is_symlink() || !meta.is_file() {
-            return Err(ReadError::InvalidPath {
-                path: path.display().to_string(),
-                reason: "manifest must be a regular file, not a symlink".to_string(),
+        let Some(file) =
+            confined_open::open_confined_file(&self.sync_root, device_id, "manifest.json")?
+        else {
+            return Err(ReadError::ManifestNotFound {
+                device_id: device_id.to_string(),
+                path,
             });
-        }
-        verify_confined_file(&dev_dir, &path)?;
+        };
 
-        let bytes = read_bounded_file(&path, self.limits.max_manifest_bytes, "manifest.json")?;
+        let bytes =
+            read_bounded_from_file(file, &path, self.limits.max_manifest_bytes, "manifest.json")?;
         let text = String::from_utf8(bytes).map_err(|e| ReadError::MalformedManifest {
             path: path.clone(),
             reason: format!("invalid UTF-8: {e}"),
@@ -454,35 +444,20 @@ impl SegmentReader {
             });
         }
 
-        let dev_dir = self.confined_device_dir(&manifest.device_id)?;
         let seg_path = device_dir(&self.sync_root, &manifest.device_id).join(&entry.file);
-
-        let meta = match fs::symlink_metadata(&seg_path) {
-            Ok(m) => m,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(ReadOutcome::Retryable(RetryReason::SegmentNotYetPresent {
-                    file: entry.file.clone(),
-                    sealed: entry.sealed,
-                }));
-            }
-            Err(source) => {
-                return Err(ReadError::Io {
-                    context: "inspect segment".to_string(),
-                    path: seg_path,
-                    source,
-                });
-            }
+        let Some(file) =
+            confined_open::open_confined_file(&self.sync_root, &manifest.device_id, &entry.file)?
+        else {
+            return Ok(ReadOutcome::Retryable(RetryReason::SegmentNotYetPresent {
+                file: entry.file.clone(),
+                sealed: entry.sealed,
+            }));
         };
-        if meta.file_type().is_symlink() || !meta.is_file() {
-            return Err(ReadError::InvalidPath {
-                path: entry.file.clone(),
-                reason: "segment must be a regular file, not a symlink".to_string(),
-            });
-        }
-        verify_confined_file(&dev_dir, &seg_path)?;
 
-        // Read compressed bytes (bounded) and verify SHA-256 BEFORE decompressing.
-        let compressed = read_bounded_file(
+        // Read compressed bytes (bounded) from the already-verified handle and
+        // verify SHA-256 BEFORE decompressing.
+        let compressed = read_bounded_from_file(
+            file,
             &seg_path,
             self.limits.max_compressed_segment_bytes,
             &format!("compressed segment {:?}", entry.file),
@@ -528,12 +503,15 @@ impl SegmentReader {
         })))
     }
 
-    /// Read all segments listed for `bucket_id` in ascending `generation` order.
-    pub fn read_bucket(
-        &self,
-        manifest: &Manifest,
-        bucket_id: &str,
-    ) -> Result<Vec<ReadOutcome>, ReadError> {
+    /// Lazily stream all segments listed for `bucket_id` in ascending `generation` order.
+    ///
+    /// Preferred over [`Self::read_bucket`] for long-lived buckets: only one segment's
+    /// decoded events live in memory at a time.
+    pub fn iter_bucket<'a>(
+        &'a self,
+        manifest: &'a Manifest,
+        bucket_id: &'a str,
+    ) -> Result<BucketSegmentIter<'a>, ReadError> {
         let bucket_entry =
             manifest
                 .buckets
@@ -543,7 +521,7 @@ impl SegmentReader {
                     bucket_id: bucket_id.to_string(),
                 })?;
 
-        let mut ordered: Vec<&SegmentEntry> = bucket_entry.segments.iter().collect();
+        let mut ordered: Vec<&'a SegmentEntry> = bucket_entry.segments.iter().collect();
         ordered.sort_by_key(|seg| seg.generation);
         for pair in ordered.windows(2) {
             if pair[0].generation == pair[1].generation {
@@ -557,82 +535,41 @@ impl SegmentReader {
             }
         }
 
-        let mut outcomes = Vec::with_capacity(ordered.len());
-        for seg in ordered {
-            outcomes.push(self.read_segment(manifest, bucket_id, seg)?);
-        }
-        Ok(outcomes)
+        Ok(BucketSegmentIter {
+            reader: self,
+            manifest,
+            bucket_id,
+            entries: ordered.into_iter(),
+        })
     }
 
-    /// Resolve and confine `<sync_root>/devices/<device_id>` ensuring neither
-    /// `devices` nor `<device_id>` is a symlink escaping `sync_root`.
-    fn confined_device_dir(&self, device_id: &str) -> Result<PathBuf, ReadError> {
-        let canon_root = fs::canonicalize(&self.sync_root).map_err(|source| ReadError::Io {
-            context: "canonicalize sync root".to_string(),
-            path: self.sync_root.clone(),
-            source,
-        })?;
-
-        let devices_root = self.sync_root.join("devices");
-        let devices_meta = match fs::symlink_metadata(&devices_root) {
-            Ok(m) => m,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(ReadError::ManifestNotFound {
-                    device_id: device_id.to_string(),
-                    path: manifest_path(&self.sync_root, device_id),
-                });
+    /// Read all segments listed for `bucket_id` in ascending `generation` order,
+    /// enforcing [`ReaderLimits::max_events_per_bucket`] across the collected result.
+    ///
+    /// For arbitrarily large buckets, prefer [`Self::iter_bucket`] to process one
+    /// segment at a time without retaining the full bucket history in memory.
+    pub fn read_bucket(
+        &self,
+        manifest: &Manifest,
+        bucket_id: &str,
+    ) -> Result<Vec<ReadOutcome>, ReadError> {
+        let iter = self.iter_bucket(manifest, bucket_id)?;
+        let mut outcomes = Vec::with_capacity(iter.len());
+        let mut total_events: usize = 0;
+        for outcome_res in iter {
+            let outcome = outcome_res?;
+            if let ReadOutcome::Ready(ref decoded) = outcome {
+                total_events = total_events.saturating_add(decoded.events.len());
+                if total_events > self.limits.max_events_per_bucket {
+                    return Err(ReadError::SizeLimitExceeded {
+                        context: format!("bucket {bucket_id:?} total event count"),
+                        limit: self.limits.max_events_per_bucket as u64,
+                    });
+                }
             }
-            Err(source) => {
-                return Err(ReadError::Io {
-                    context: "inspect devices directory".to_string(),
-                    path: devices_root,
-                    source,
-                });
-            }
-        };
-        if devices_meta.file_type().is_symlink() || !devices_meta.is_dir() {
-            return Err(ReadError::InvalidPath {
-                path: devices_root.display().to_string(),
-                reason: "devices directory must be a real directory, not a symlink".to_string(),
-            });
+            outcomes.push(outcome);
         }
-
-        let dev_dir = device_dir(&self.sync_root, device_id);
-        let dev_meta = match fs::symlink_metadata(&dev_dir) {
-            Ok(m) => m,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(ReadError::ManifestNotFound {
-                    device_id: device_id.to_string(),
-                    path: manifest_path(&self.sync_root, device_id),
-                });
-            }
-            Err(source) => {
-                return Err(ReadError::Io {
-                    context: "inspect device directory".to_string(),
-                    path: dev_dir,
-                    source,
-                });
-            }
-        };
-        if dev_meta.file_type().is_symlink() || !dev_meta.is_dir() {
-            return Err(ReadError::InvalidPath {
-                path: dev_dir.display().to_string(),
-                reason: "device directory must be a real directory, not a symlink".to_string(),
-            });
-        }
-
-        let canon_dev = fs::canonicalize(&dev_dir).map_err(|source| ReadError::Io {
-            context: "canonicalize device directory".to_string(),
-            path: dev_dir,
-            source,
-        })?;
-        if !canon_dev.starts_with(&canon_root) {
-            return Err(ReadError::InvalidPath {
-                path: canon_dev.display().to_string(),
-                reason: "device directory escapes sync root".to_string(),
-            });
-        }
-        Ok(canon_dev)
+        Ok(outcomes)
     }
 
     fn decode_verified_segment(
@@ -775,12 +712,39 @@ fn strip_line_ending(bytes: &[u8]) -> &[u8] {
     bytes.strip_suffix(b"\r").unwrap_or(bytes)
 }
 
-fn read_bounded_file(path: &Path, max_bytes: u64, context: &str) -> Result<Vec<u8>, ReadError> {
-    let file = File::open(path).map_err(|source| ReadError::Io {
-        context: format!("open {context}"),
-        path: path.to_path_buf(),
-        source,
-    })?;
+/// Lazy streaming iterator over a bucket's segments in ascending `generation` order.
+#[derive(Debug)]
+pub struct BucketSegmentIter<'a> {
+    reader: &'a SegmentReader,
+    manifest: &'a Manifest,
+    bucket_id: &'a str,
+    entries: std::vec::IntoIter<&'a SegmentEntry>,
+}
+
+impl Iterator for BucketSegmentIter<'_> {
+    type Item = Result<ReadOutcome, ReadError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.entries.next()?;
+        Some(
+            self.reader
+                .read_segment(self.manifest, self.bucket_id, entry),
+        )
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.entries.size_hint()
+    }
+}
+
+impl ExactSizeIterator for BucketSegmentIter<'_> {}
+
+fn read_bounded_from_file(
+    file: File,
+    path: &Path,
+    max_bytes: u64,
+    context: &str,
+) -> Result<Vec<u8>, ReadError> {
     let mut buf = Vec::new();
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut buf)
@@ -798,19 +762,243 @@ fn read_bounded_file(path: &Path, max_bytes: u64, context: &str) -> Result<Vec<u
     Ok(buf)
 }
 
-fn verify_confined_file(canon_parent: &Path, path: &Path) -> Result<(), ReadError> {
-    let canon_file = fs::canonicalize(path).map_err(|source| ReadError::Io {
-        context: "canonicalize file".to_string(),
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if canon_file.parent() != Some(canon_parent) {
-        return Err(ReadError::InvalidPath {
-            path: path.display().to_string(),
-            reason: "file escapes device directory".to_string(),
-        });
+#[cfg(unix)]
+mod confined_open {
+    use std::ffi::CString;
+    use std::fs::File;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+    use std::path::Path;
+
+    use super::ReadError;
+
+    fn open_subdir_nofollow(
+        parent: &OwnedFd,
+        name: &str,
+        display_path: &Path,
+    ) -> Result<Option<OwnedFd>, ReadError> {
+        let c_name = CString::new(name).map_err(|_| ReadError::InvalidPath {
+            path: display_path.display().to_string(),
+            reason: "path component contains NUL byte".to_string(),
+        })?;
+        // SAFETY: `parent` is a valid open directory fd and `c_name` is a valid NUL-terminated C string.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let err = io::Error::last_os_error();
+            return match err.raw_os_error() {
+                Some(libc::ENOENT) => Ok(None),
+                Some(libc::ELOOP) | Some(libc::ENOTDIR) => Err(ReadError::InvalidPath {
+                    path: display_path.display().to_string(),
+                    reason: "directory component is a symlink or not a directory".to_string(),
+                }),
+                _ => Err(ReadError::Io {
+                    context: "open directory".to_string(),
+                    path: display_path.to_path_buf(),
+                    source: err,
+                }),
+            };
+        }
+        // SAFETY: `fd` is a newly opened descriptor returned by `openat`.
+        Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
     }
-    Ok(())
+
+    /// Open `<sync_root>/devices/<device_id>/<filename>` strictly relative to
+    /// checked directory handles using `O_NOFOLLOW` at every hop inside `sync_root`.
+    /// Returns `Ok(None)` when any component does not exist (`ENOENT`).
+    pub(super) fn open_confined_file(
+        sync_root: &Path,
+        device_id: &str,
+        filename: &str,
+    ) -> Result<Option<File>, ReadError> {
+        let c_root =
+            CString::new(sync_root.as_os_str().as_bytes()).map_err(|_| ReadError::InvalidPath {
+                path: sync_root.display().to_string(),
+                reason: "sync root path contains NUL byte".to_string(),
+            })?;
+        // Allow `sync_root` itself to be a user-configured symlink (e.g. ~/ActivityWatchSync),
+        // then enforce O_NOFOLLOW at every component inside `sync_root`.
+        // SAFETY: `c_root` is a valid NUL-terminated path string.
+        let root_fd = unsafe {
+            libc::open(
+                c_root.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if root_fd < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(None);
+            }
+            return Err(ReadError::Io {
+                context: "open sync root".to_string(),
+                path: sync_root.to_path_buf(),
+                source: err,
+            });
+        }
+        // SAFETY: `root_fd` is a newly opened descriptor returned by `open`.
+        let root_fd = unsafe { OwnedFd::from_raw_fd(root_fd) };
+
+        let devices_path = sync_root.join("devices");
+        let Some(devices_fd) = open_subdir_nofollow(&root_fd, "devices", &devices_path)? else {
+            return Ok(None);
+        };
+
+        let dev_path = devices_path.join(device_id);
+        let Some(dev_fd) = open_subdir_nofollow(&devices_fd, device_id, &dev_path)? else {
+            return Ok(None);
+        };
+
+        let file_path = dev_path.join(filename);
+        let c_file = CString::new(filename).map_err(|_| ReadError::InvalidPath {
+            path: filename.to_string(),
+            reason: "filename contains NUL byte".to_string(),
+        })?;
+        // O_NOFOLLOW rejects symlinks atomically during open; O_NONBLOCK prevents
+        // blocking on a malicious FIFO before fstat verifies `is_file()`.
+        // SAFETY: `dev_fd` is a valid open directory fd and `c_file` is NUL-terminated.
+        let file_fd = unsafe {
+            libc::openat(
+                dev_fd.as_raw_fd(),
+                c_file.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
+        };
+        if file_fd < 0 {
+            let err = io::Error::last_os_error();
+            return match err.raw_os_error() {
+                Some(libc::ENOENT) => Ok(None),
+                Some(libc::ELOOP) => Err(ReadError::InvalidPath {
+                    path: filename.to_string(),
+                    reason: "file is a symlink".to_string(),
+                }),
+                Some(libc::EISDIR) => Err(ReadError::InvalidPath {
+                    path: filename.to_string(),
+                    reason: "expected regular file, found directory".to_string(),
+                }),
+                _ => Err(ReadError::Io {
+                    context: "open file".to_string(),
+                    path: file_path,
+                    source: err,
+                }),
+            };
+        }
+        // SAFETY: `file_fd` is a newly opened descriptor returned by `openat`.
+        let file = File::from(unsafe { OwnedFd::from_raw_fd(file_fd) });
+        let meta = file.metadata().map_err(|source| ReadError::Io {
+            context: "stat opened file".to_string(),
+            path: file_path,
+            source,
+        })?;
+        if !meta.is_file() {
+            return Err(ReadError::InvalidPath {
+                path: filename.to_string(),
+                reason: "expected a regular file".to_string(),
+            });
+        }
+        Ok(Some(file))
+    }
+}
+
+#[cfg(windows)]
+mod confined_open {
+    use std::fs::{self, File, OpenOptions};
+    use std::io;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::path::Path;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    use super::ReadError;
+
+    pub(super) fn open_confined_file(
+        sync_root: &Path,
+        device_id: &str,
+        filename: &str,
+    ) -> Result<Option<File>, ReadError> {
+        let canon_root = match fs::canonicalize(sync_root) {
+            Ok(p) => p,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(ReadError::Io {
+                    context: "canonicalize sync root".to_string(),
+                    path: sync_root.to_path_buf(),
+                    source,
+                });
+            }
+        };
+
+        let devices_dir = sync_root.join("devices");
+        let dev_dir = devices_dir.join(device_id);
+        for dir in [&devices_dir, &dev_dir] {
+            let meta = match fs::symlink_metadata(dir) {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(source) => {
+                    return Err(ReadError::Io {
+                        context: "inspect directory".to_string(),
+                        path: dir.to_path_buf(),
+                        source,
+                    });
+                }
+            };
+            if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || !meta.is_dir() {
+                return Err(ReadError::InvalidPath {
+                    path: dir.display().to_string(),
+                    reason: "directory component is a reparse point or not a directory".to_string(),
+                });
+            }
+        }
+
+        let canon_dev = fs::canonicalize(&dev_dir).map_err(|source| ReadError::Io {
+            context: "canonicalize device directory".to_string(),
+            path: dev_dir,
+            source,
+        })?;
+        if !canon_dev.starts_with(&canon_root) {
+            return Err(ReadError::InvalidPath {
+                path: canon_dev.display().to_string(),
+                reason: "device directory escapes sync root".to_string(),
+            });
+        }
+
+        let target = canon_dev.join(filename);
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&target)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(ReadError::Io {
+                    context: "open file".to_string(),
+                    path: target,
+                    source,
+                });
+            }
+        };
+        let meta = file.metadata().map_err(|source| ReadError::Io {
+            context: "inspect opened file".to_string(),
+            path: target,
+            source,
+        })?;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || !meta.is_file() {
+            return Err(ReadError::InvalidPath {
+                path: filename.to_string(),
+                reason: "file is a reparse point or not a regular file".to_string(),
+            });
+        }
+        Ok(Some(file))
+    }
 }
 
 fn check_supported_version(context: &str, version: u32) -> Result<(), ReadError> {
@@ -914,6 +1102,13 @@ fn validate_header_identity(
             field: "header.bucket_hostname",
             expected: bucket_entry.hostname.clone(),
             actual: header.bucket_hostname.clone(),
+        });
+    }
+    if header.bucket_created != bucket_entry.created {
+        return Err(ReadError::IdentityMismatch {
+            field: "header.bucket_created",
+            expected: format!("{:?}", bucket_entry.created),
+            actual: format!("{:?}", header.bucket_created),
         });
     }
     Ok(())
@@ -1606,11 +1801,147 @@ mod tests {
     }
 
     #[test]
+    fn test_bucket_created_mismatch_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-created";
+        let bucket = sample_bucket("aw-watcher-window_created", "host-created");
+        let reader = SegmentReader::new(dir.path());
+
+        let mut h = base_header(device_id, &bucket, 1);
+        h.bucket_created = Some(Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap());
+        let (manifest, entry, _) =
+            write_synthetic_segment(dir.path(), device_id, &bucket, &h, &[], true);
+        let err = reader
+            .read_segment(&manifest, &bucket.id, &entry)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ReadError::IdentityMismatch {
+                field: "header.bucket_created",
+                ..
+            }
+        ));
+
+        let mut h_none = base_header(device_id, &bucket, 1);
+        h_none.bucket_created = None;
+        let (manifest2, entry2, _) =
+            write_synthetic_segment(dir.path(), device_id, &bucket, &h_none, &[], true);
+        let err = reader
+            .read_segment(&manifest2, &bucket.id, &entry2)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ReadError::IdentityMismatch {
+                field: "header.bucket_created",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_iter_bucket_streams_and_read_bucket_enforces_bucket_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-bucket-limit";
+        let bucket = sample_bucket("aw-watcher-window_lim", "lim");
+
+        let ts1 = Utc.with_ymd_and_hms(2026, 11, 22, 8, 0, 0).unwrap();
+        let mut writer = SegmentWriter::new(dir.path(), device_id, &bucket.id).unwrap();
+        writer
+            .write_events(
+                &bucket,
+                &[
+                    sample_event(Some(1), ts1, 1_000, "A"),
+                    sample_event(Some(2), ts1 + Duration::seconds(2), 1_000, "B"),
+                ],
+            )
+            .unwrap();
+
+        let mut manifest = Manifest::load_or_default(dir.path(), device_id, "lim").unwrap();
+        manifest.buckets.get_mut(&bucket.id).unwrap().segments[0].first_written_at =
+            Some(Utc::now() - Duration::days(2));
+        manifest.save(dir.path(), device_id).unwrap();
+
+        writer
+            .write_events(
+                &bucket,
+                &[
+                    sample_event(Some(3), ts1 + Duration::seconds(10), 1_000, "C"),
+                    sample_event(Some(4), ts1 + Duration::seconds(12), 1_000, "D"),
+                ],
+            )
+            .unwrap();
+
+        let reader = SegmentReader::with_limits(
+            dir.path(),
+            ReaderLimits {
+                max_events_per_segment: 2,
+                max_events_per_bucket: 3,
+                ..ReaderLimits::default()
+            },
+        );
+        let loaded = reader.load_manifest(device_id).unwrap();
+
+        let err = reader.read_bucket(&loaded, &bucket.id).unwrap_err();
+        assert!(matches!(err, ReadError::SizeLimitExceeded { .. }));
+
+        let mut streamed_ids = Vec::new();
+        for item in reader.iter_bucket(&loaded, &bucket.id).unwrap() {
+            let decoded = item.unwrap().into_ready().unwrap();
+            assert_eq!(decoded.events.len(), 2);
+            streamed_ids.extend(decoded.events.iter().filter_map(|e| e.id));
+        }
+        assert_eq!(streamed_ids, vec![1, 2, 3, 4]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlinked_device_dir_rejected_while_symlinked_sync_root_works() {
+        use std::os::unix::fs::symlink;
+
+        let real_root = tempfile::tempdir().unwrap();
+        let link_parent = tempfile::tempdir().unwrap();
+        let linked_root = link_parent.path().join("ActivityWatchSync");
+        symlink(real_root.path(), &linked_root).unwrap();
+
+        let device_id = "dev-sym-ok";
+        let bucket = sample_bucket("aw-watcher-window_sym", "sym");
+        let ts = Utc.with_ymd_and_hms(2026, 11, 22, 9, 0, 0).unwrap();
+        let mut writer = SegmentWriter::new(&linked_root, device_id, &bucket.id).unwrap();
+        writer
+            .write_events(&bucket, &[sample_event(Some(1), ts, 1_000, "App")])
+            .unwrap();
+
+        let reader = SegmentReader::new(&linked_root);
+        let manifest = reader.load_manifest(device_id).unwrap();
+        let decoded = reader
+            .read_bucket(&manifest, &bucket.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_ready()
+            .unwrap();
+        assert_eq!(decoded.events.len(), 1);
+
+        let outside = tempfile::tempdir().unwrap();
+        let evil_dev_dir = real_root.path().join("devices").join("dev-sym-evil");
+        symlink(outside.path(), &evil_dev_dir).unwrap();
+        let err = reader.load_manifest("dev-sym-evil").unwrap_err();
+        assert!(
+            matches!(err, ReadError::InvalidPath { .. }),
+            "expected InvalidPath for symlinked device dir, got {err:?}"
+        );
+    }
+
+    #[test]
     fn test_reader_is_strictly_read_only_on_missing_root() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist");
         let reader = SegmentReader::new(&missing);
         assert!(reader.discover_devices().unwrap().is_empty());
+        let err = reader.load_manifest("dev-missing").unwrap_err();
+        assert!(err.is_retryable());
+        assert!(matches!(err, ReadError::ManifestNotFound { .. }));
         assert!(
             !missing.exists(),
             "reader must never create missing directories"

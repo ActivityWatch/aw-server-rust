@@ -5,8 +5,12 @@
 //! folder or local datastore.
 //!
 //! Security and integrity invariants:
-//! - Every path is validated and confined under `<sync_root>/devices/<device_id>`
-//!   with symlink rejection inside the sync root.
+//! - On Unix, every path under `<sync_root>/devices/<device_id>` is opened via
+//!   directory-handle-relative `openat` with `O_NOFOLLOW` at every hop inside
+//!   `sync_root` (preventing TOCTOU parent-directory and file symlink swaps).
+//!   Non-Unix platforms (including Windows) fail closed with
+//!   [`ReadError::UnsupportedPlatform`] until handle-relative confinement is
+//!   implemented and tested there.
 //! - Format versions outside `1..=MAX_V` are refused.
 //! - Compressed-byte SHA-256 is verified before any decompression or JSON
 //!   parsing occurs; a hash mismatch never yields decoded events.
@@ -190,6 +194,10 @@ pub enum ReadError {
         line: usize,
         reason: String,
     },
+    UnsupportedPlatform {
+        platform: &'static str,
+        reason: String,
+    },
     Io {
         context: String,
         path: PathBuf,
@@ -260,6 +268,10 @@ impl fmt::Display for ReadError {
             Self::MalformedSegment { file, line, reason } => {
                 write!(f, "malformed segment {file:?} at line {line}: {reason}")
             }
+            Self::UnsupportedPlatform { platform, reason } => write!(
+                f,
+                "sync v2 reader is not supported on platform {platform:?}: {reason}"
+            ),
             Self::Io {
                 context,
                 path,
@@ -318,6 +330,7 @@ impl SegmentReader {
     /// Device directories whose `manifest.json` has not arrived yet, hidden/tmp
     /// entries, symlinks, and non-directories are skipped without error.
     pub fn discover_devices(&self) -> Result<Vec<String>, ReadError> {
+        confined_open::ensure_platform_supported()?;
         let devices_root = self.sync_root.join("devices");
         let root_meta = match fs::symlink_metadata(&devices_root) {
             Ok(meta) => meta,
@@ -765,6 +778,10 @@ fn read_bounded_from_file(
 #[cfg(unix)]
 mod confined_open {
     use std::ffi::CString;
+
+    pub(super) fn ensure_platform_supported() -> Result<(), super::ReadError> {
+        Ok(())
+    }
     use std::fs::File;
     use std::io;
     use std::os::unix::ffi::OsStrExt;
@@ -906,98 +923,32 @@ mod confined_open {
     }
 }
 
-#[cfg(windows)]
+#[cfg(not(unix))]
 mod confined_open {
-    use std::fs::{self, File, OpenOptions};
-    use std::io;
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::fs::File;
     use std::path::Path;
-
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
-    };
 
     use super::ReadError;
 
+    const REASON: &str =
+        "handle-relative no-follow directory confinement is not yet implemented on this platform";
+
+    pub(super) fn ensure_platform_supported() -> Result<(), ReadError> {
+        Err(ReadError::UnsupportedPlatform {
+            platform: std::env::consts::OS,
+            reason: REASON.to_string(),
+        })
+    }
+
     pub(super) fn open_confined_file(
-        sync_root: &Path,
-        device_id: &str,
-        filename: &str,
+        _sync_root: &Path,
+        _device_id: &str,
+        _filename: &str,
     ) -> Result<Option<File>, ReadError> {
-        let canon_root = match fs::canonicalize(sync_root) {
-            Ok(p) => p,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => {
-                return Err(ReadError::Io {
-                    context: "canonicalize sync root".to_string(),
-                    path: sync_root.to_path_buf(),
-                    source,
-                });
-            }
-        };
-
-        let devices_dir = sync_root.join("devices");
-        let dev_dir = devices_dir.join(device_id);
-        for dir in [&devices_dir, &dev_dir] {
-            let meta = match fs::symlink_metadata(dir) {
-                Ok(m) => m,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(source) => {
-                    return Err(ReadError::Io {
-                        context: "inspect directory".to_string(),
-                        path: dir.to_path_buf(),
-                        source,
-                    });
-                }
-            };
-            if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || !meta.is_dir() {
-                return Err(ReadError::InvalidPath {
-                    path: dir.display().to_string(),
-                    reason: "directory component is a reparse point or not a directory".to_string(),
-                });
-            }
-        }
-
-        let canon_dev = fs::canonicalize(&dev_dir).map_err(|source| ReadError::Io {
-            context: "canonicalize device directory".to_string(),
-            path: dev_dir,
-            source,
-        })?;
-        if !canon_dev.starts_with(&canon_root) {
-            return Err(ReadError::InvalidPath {
-                path: canon_dev.display().to_string(),
-                reason: "device directory escapes sync root".to_string(),
-            });
-        }
-
-        let target = canon_dev.join(filename);
-        let file = match OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(&target)
-        {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => {
-                return Err(ReadError::Io {
-                    context: "open file".to_string(),
-                    path: target,
-                    source,
-                });
-            }
-        };
-        let meta = file.metadata().map_err(|source| ReadError::Io {
-            context: "inspect opened file".to_string(),
-            path: target,
-            source,
-        })?;
-        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || !meta.is_file() {
-            return Err(ReadError::InvalidPath {
-                path: filename.to_string(),
-                reason: "file is a reparse point or not a regular file".to_string(),
-            });
-        }
-        Ok(Some(file))
+        Err(ReadError::UnsupportedPlatform {
+            platform: std::env::consts::OS,
+            reason: REASON.to_string(),
+        })
     }
 }
 
@@ -1124,7 +1075,7 @@ fn expected_segment_filename(slug: &str, generation: u64) -> String {
     format!("{slug}.{generation:08}.jsonl.zst")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::collections::HashMap;
 
@@ -1931,6 +1882,23 @@ mod tests {
             matches!(err, ReadError::InvalidPath { .. }),
             "expected InvalidPath for symlinked device dir, got {err:?}"
         );
+
+        // Parent-directory swap after load_manifest: move the real device dir outside
+        // sync_root and replace it with a symlink pointing to that outside dir (whose
+        // segment file is a normal regular file with matching SHA-256).
+        let entry = manifest.buckets[&bucket.id].segments[0].clone();
+        let real_dev_dir = real_root.path().join("devices").join(device_id);
+        let moved_dev_dir = outside.path().join("moved-dev");
+        fs::rename(&real_dev_dir, &moved_dev_dir).unwrap();
+        symlink(&moved_dev_dir, &real_dev_dir).unwrap();
+
+        let err = reader
+            .read_segment(&manifest, &bucket.id, &entry)
+            .unwrap_err();
+        assert!(
+            matches!(err, ReadError::InvalidPath { .. }),
+            "expected InvalidPath when parent device dir is swapped to a symlink, got {err:?}"
+        );
     }
 
     #[test]
@@ -1946,5 +1914,60 @@ mod tests {
             !missing.exists(),
             "reader must never create missing directories"
         );
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod non_unix_tests {
+    use chrono::{TimeZone, Utc};
+    use serde_json::Map;
+
+    use aw_models::Bucket;
+
+    use super::*;
+    use crate::v2::SegmentWriter;
+
+    #[test]
+    fn test_reader_fails_closed_on_non_unix_platforms() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-win";
+        let bucket = Bucket {
+            bid: None,
+            id: "aw-watcher-window_win".to_string(),
+            _type: "currentwindow".to_string(),
+            client: "aw-watcher-window".to_string(),
+            hostname: "win".to_string(),
+            created: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+            data: Map::new(),
+            metadata: Default::default(),
+            events: None,
+            last_updated: None,
+        };
+        let mut writer = SegmentWriter::new(dir.path(), device_id, &bucket.id).unwrap();
+        let ev = Event {
+            id: Some(1),
+            timestamp: Utc.with_ymd_and_hms(2026, 11, 22, 9, 0, 0).unwrap(),
+            duration: chrono::Duration::seconds(5),
+            data: Map::new(),
+        };
+        writer.write_events(&bucket, &[ev]).unwrap();
+        let manifest = Manifest::load_or_default(dir.path(), device_id, "win").unwrap();
+        let entry = manifest.buckets[&bucket.id].segments[0].clone();
+
+        let reader = SegmentReader::new(dir.path());
+        assert!(matches!(
+            reader.discover_devices().unwrap_err(),
+            ReadError::UnsupportedPlatform { .. }
+        ));
+        assert!(matches!(
+            reader.load_manifest(device_id).unwrap_err(),
+            ReadError::UnsupportedPlatform { .. }
+        ));
+        assert!(matches!(
+            reader
+                .read_segment(&manifest, &bucket.id, &entry)
+                .unwrap_err(),
+            ReadError::UnsupportedPlatform { .. }
+        ));
     }
 }

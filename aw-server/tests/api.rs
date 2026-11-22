@@ -29,6 +29,145 @@ mod api_tests {
     }
 
     #[test]
+    fn concurrent_identical_heartbeats_do_not_duplicate_stored_events() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (sender, receiver) = mpsc::channel();
+        // A synchronous handler can block both Tokio workers and runtime drop.
+        // Keep the watchdog outside that runtime; never join a stuck worker.
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(|| {
+                // Rocket's async_test uses one worker. Heartbeat dispatch is
+                // synchronous, so use two workers for parallel endpoint execution.
+                let runtime = rocket::tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(concurrent_identical_heartbeats());
+                drop(runtime);
+            });
+            let _ = sender.send(result);
+        });
+        match receiver.recv_timeout(Duration::from_secs(90)) {
+            Ok(Ok(())) => {}
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(error) => panic!("concurrent heartbeat test did not finish within 90s: {error}"),
+        }
+    }
+
+    async fn concurrent_identical_heartbeats() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use rocket::local::asynchronous::Client as AsyncClient;
+        use rocket::tokio::{sync::Barrier, task::JoinSet, time::timeout};
+
+        let client = Arc::new(AsyncClient::untracked(setup_testserver()).await.unwrap());
+        const WRITERS: usize = 8;
+        // Fresh buckets cover racing first inserts as well as later merges.
+        // Rotate and reverse request durations deterministically. The barrier
+        // releases requests together without imposing a global dispatch lock.
+        for round in 0..16 {
+            let bucket = format!("heartbeat-race-{round}");
+            let response = client
+                .post(format!("/api/0/buckets/{bucket}"))
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(json!({"type": "test", "client": "test", "hostname": "test"}).to_string())
+                .dispatch()
+                .await;
+            assert_eq!(response.status(), Status::Ok);
+            // Alternate cold buckets and buckets with an existing last event.
+            if round % 2 == 1 {
+                let response = client
+                    .post(format!("/api/0/buckets/{bucket}/heartbeat?pulsetime=10"))
+                    .header(ContentType::JSON)
+                    .header(Header::new("Host", "127.0.0.1:5600"))
+                    .body(
+                        json!({
+                            "timestamp": "2026-01-05T09:00:00Z", "duration": 0,
+                            "data": {"app": "Code", "title": "concurrent-heartbeat"}
+                        })
+                        .to_string(),
+                    )
+                    .dispatch()
+                    .await;
+                assert_eq!(response.status(), Status::Ok);
+            }
+            let durations: Vec<_> = (0..WRITERS)
+                .map(|i| {
+                    let rotated = (i + round) % WRITERS;
+                    if round % 2 == 0 {
+                        rotated
+                    } else {
+                        WRITERS - rotated - 1
+                    }
+                })
+                .collect();
+            let schedule = format!("round={round}, request durations={durations:?}");
+            let barrier = Arc::new(Barrier::new(WRITERS));
+            let mut tasks = JoinSet::new();
+            for (request, duration) in durations.into_iter().enumerate() {
+                let client = Arc::clone(&client);
+                let barrier = Arc::clone(&barrier);
+                let endpoint = format!("/api/0/buckets/{bucket}/heartbeat?pulsetime=10");
+                tasks.spawn(async move {
+                    let payload = json!({
+                        "timestamp": "2026-01-05T09:00:00Z", "duration": duration,
+                        "data": {"app": "Code", "title": "concurrent-heartbeat"}
+                    });
+                    barrier.wait().await;
+                    let response = client
+                        .post(endpoint)
+                        .header(ContentType::JSON)
+                        .header(Header::new("Host", "127.0.0.1:5600"))
+                        .body(payload.to_string())
+                        .dispatch()
+                        .await;
+                    (request, response.status(), response.into_string().await)
+                });
+            }
+            timeout(Duration::from_secs(30), async {
+                while let Some(result) = tasks.join_next().await {
+                    let (request, status, body) = result.expect(&schedule);
+                    assert_eq!(
+                        status,
+                        Status::Ok,
+                        "{schedule}, request={request}, body={body:?}"
+                    );
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("heartbeat requests timed out: {schedule}"));
+
+            let response = client
+                .get(format!("/api/0/buckets/{bucket}/events?limit=-1"))
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .dispatch()
+                .await;
+            assert_eq!(response.status(), Status::Ok, "{schedule}");
+            let body = response.into_string().await.unwrap();
+            let events: Vec<Value> = serde_json::from_str(&body).unwrap();
+            // All requests have the same timestamp and data, so any second
+            // stored event is a duplicate pair. Keep the production write lock:
+            // this guards the observable endpoint contract under racing callers,
+            // not a claim to reproduce the historical bug behind that lock.
+            assert_eq!(
+                events.len(),
+                1,
+                "duplicate stored events: {schedule}, {body}"
+            );
+            assert_eq!(
+                events[0]["duration"].as_f64(),
+                Some((WRITERS - 1) as f64),
+                "a racing shorter heartbeat lost the longest duration: {schedule}, {body}"
+            );
+        }
+    }
+
+    #[test]
     fn export_includes_pending_writes_and_preserves_headers_and_missing_bucket_errors() {
         let server = setup_testserver();
         let datastore = server

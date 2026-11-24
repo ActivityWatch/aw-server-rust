@@ -2,12 +2,24 @@ use crate::DataType;
 use crate::QueryError;
 use crate::VarEnv;
 use aw_datastore::Datastore;
+use std::time::Instant;
 
-pub type QueryFn =
-    fn(args: Vec<DataType>, env: &VarEnv, ds: &Datastore) -> Result<DataType, QueryError>;
+/// Every query function receives the request deadline as part of its type, so
+/// a long-running function can stop at its own checkpoints however it was
+/// reached (by name, or through an alias such as `c = categorize;`).
+pub type QueryFn = fn(
+    args: Vec<DataType>,
+    env: &VarEnv,
+    ds: &Datastore,
+    deadline: Option<Instant>,
+) -> Result<DataType, QueryError>;
 
-pub type ReadOnlyQueryFn =
-    fn(args: &[&DataType], env: &VarEnv, ds: &Datastore) -> Result<DataType, QueryError>;
+pub type ReadOnlyQueryFn = fn(
+    args: &[&DataType],
+    env: &VarEnv,
+    ds: &Datastore,
+    deadline: Option<Instant>,
+) -> Result<DataType, QueryError>;
 
 pub fn fill_env(env: &mut VarEnv) {
     env.insert(
@@ -126,19 +138,22 @@ pub fn fill_env(env: &mut VarEnv) {
 }
 
 mod qfunctions {
-    use aw_datastore::Datastore;
-    use aw_models::Event;
-    use aw_transform::classify::{CategoryRule, Rule};
+    use std::time::Instant;
 
     use super::validate;
+    use crate::datatype::{category_rules_checked, tag_rules_checked};
+    use crate::interpret::check_deadline;
     use crate::DataType;
     use crate::QueryError;
     use crate::VarEnv;
+    use aw_datastore::Datastore;
+    use aw_models::Event;
 
     pub fn print(
         args: &[&DataType],
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         for arg in args {
             info!("{:?}", arg);
@@ -150,6 +165,7 @@ mod qfunctions {
         args: Vec<DataType>,
         env: &VarEnv,
         ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // Typecheck
         validate::args_length(&args, 1)?;
@@ -186,6 +202,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         validate::args_length(&args, 0)?;
         let mut bucketnames: Vec<DataType> = Vec::new();
@@ -207,6 +224,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         validate::args_length(&args, 1).or_else(|_| validate::args_length(&args, 2))?;
 
@@ -249,6 +267,7 @@ mod qfunctions {
         args: &[&DataType],
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(args, 2)?;
@@ -277,6 +296,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1).or_else(|_| validate::args_length(&args, 2))?;
@@ -310,14 +330,16 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
+        let check = || check_deadline(deadline, "categorize");
         // typecheck
         validate::args_length(&args, 2)?;
         let mut args = args.into_iter();
         let events: Vec<Event> = args.next().unwrap().try_into()?;
-        let rules: Vec<CategoryRule> = args.next().unwrap().try_into()?;
+        let rules = category_rules_checked(args.next().unwrap(), check)?;
         // Run categorize
-        let mut flooded_events = aw_transform::classify::categorize(events, &rules);
+        let mut flooded_events = aw_transform::classify::categorize_checked(events, &rules, check)?;
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
@@ -330,14 +352,16 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
+        let check = || check_deadline(deadline, "tag");
         // typecheck
         validate::args_length(&args, 2)?;
         let mut args = args.into_iter();
         let events: Vec<Event> = args.next().unwrap().try_into()?;
-        let rules: Vec<(String, Rule)> = args.next().unwrap().try_into()?;
-        // Run categorize
-        let mut flooded_events = aw_transform::classify::tag(events, &rules);
+        let rules = tag_rules_checked(args.next().unwrap(), check)?;
+        // Run tag
+        let mut flooded_events = aw_transform::classify::tag_checked(events, &rules, check)?;
         // Put events back into DataType::Event container
         let mut tagged_flooded_events = Vec::new();
         for event in flooded_events.drain(..) {
@@ -350,6 +374,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
@@ -369,6 +394,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
@@ -390,6 +416,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
@@ -409,6 +436,7 @@ mod qfunctions {
         args: &[&DataType],
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(args, 1)?;
@@ -449,6 +477,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
@@ -468,6 +497,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         if args.len() != 3 && args.len() != 4 {
@@ -503,6 +533,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // Queries run repeatedly (e.g. on every dashboard refresh): warn once.
         static DEPRECATION_WARNING: std::sync::Once = std::sync::Once::new();
@@ -531,6 +562,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 3)?;
@@ -553,7 +585,9 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
+        let check = || check_deadline(deadline, "filter_keyvals_regex");
         // typecheck
         validate::args_length(&args, 3)?;
         let mut args = args.into_iter();
@@ -569,7 +603,8 @@ mod qfunctions {
             }
         };
 
-        let mut filtered_events = aw_transform::filter_keyvals_regex(events, &key, &regex);
+        let mut filtered_events =
+            aw_transform::filter_keyvals_regex_checked(events, &key, &regex, check)?;
         let mut filtered_tagged_events = Vec::new();
         for event in filtered_events.drain(..) {
             filtered_tagged_events.push(DataType::Event(event));
@@ -581,6 +616,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 3)?;
@@ -601,6 +637,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
@@ -620,6 +657,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 1)?;
@@ -637,6 +675,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         let mut event_list = Vec::new();
         for arg in args {
@@ -652,6 +691,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;
@@ -671,6 +711,7 @@ mod qfunctions {
         args: Vec<DataType>,
         _env: &VarEnv,
         _ds: &Datastore,
+        _deadline: Option<Instant>,
     ) -> Result<DataType, QueryError> {
         // typecheck
         validate::args_length(&args, 2)?;

@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use fancy_regex::Regex;
 use serde_json::value::Value;
 
@@ -37,10 +39,27 @@ pub fn filter_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<
 /// input:  [a:"HELLO"][a:"hello"][a:3][b:"HELLO"]
 /// output: [a:"HELLO"]
 /// ```
-pub fn filter_keyvals_regex(mut events: Vec<Event>, key: &str, regex: &Regex) -> Vec<Event> {
+pub fn filter_keyvals_regex(events: Vec<Event>, key: &str, regex: &Regex) -> Vec<Event> {
+    match filter_keyvals_regex_checked(events, key, regex, || Ok::<(), Infallible>(())) {
+        Ok(events) => events,
+        Err(never) => match never {},
+    }
+}
+
+/// Like [`filter_keyvals_regex`], but calls `check` before every event and
+/// once more at the end, and stops with the first error it returns. A single
+/// regex match cannot be interrupted, so a deadline enforced through `check`
+/// can be overshot by up to one match.
+pub fn filter_keyvals_regex_checked<E>(
+    mut events: Vec<Event>,
+    key: &str,
+    regex: &Regex,
+    mut check: impl FnMut() -> Result<(), E>,
+) -> Result<Vec<Event>, E> {
     let mut filtered_events = Vec::new();
 
     for event in events.drain(..) {
+        check()?;
         if let Some(value) = event.data.get(key).and_then(|v| v.as_str()) {
             match regex.is_match(value) {
                 Ok(true) => filtered_events.push(event),
@@ -49,7 +68,8 @@ pub fn filter_keyvals_regex(mut events: Vec<Event>, key: &str, regex: &Regex) ->
             };
         }
     }
-    filtered_events
+    check()?;
+    Ok(filtered_events)
 }
 
 /// Drops events matching the specified key and value(s). Opposite of filter_keyvals.
@@ -86,7 +106,9 @@ mod tests {
 
     use aw_models::Event;
 
-    use super::{exclude_keyvals, filter_keyvals, filter_keyvals_regex};
+    use super::{
+        exclude_keyvals, filter_keyvals, filter_keyvals_regex, filter_keyvals_regex_checked,
+    };
 
     #[test]
     fn test_filter_keyvals() {
@@ -162,5 +184,36 @@ mod tests {
         e3.data = json_map! {"test": json!(2)};
         let res = exclude_keyvals(vec![e1.clone(), e2.clone(), e3], "test", &[json!(2)]);
         assert_eq!(vec![e1, e2], res);
+    }
+
+    #[test]
+    fn test_filter_keyvals_regex_checked_propagates_every_cancellation_point() {
+        let event = |value: &str| Event {
+            data: json_map! {"test": json!(value)},
+            ..Event::default()
+        };
+        let events = vec![event("aa"), event("b"), event("aaa")];
+        let regex = RegexBuilder::new("^a+$").build().unwrap();
+        let mut total = 0;
+        let kept = filter_keyvals_regex_checked(events.clone(), "test", &regex, || {
+            total += 1;
+            Ok::<(), usize>(())
+        })
+        .unwrap();
+        assert_eq!(kept, filter_keyvals_regex(events.clone(), "test", &regex));
+        // One check per event plus one at the end.
+        assert_eq!(total, 4);
+        for fail_at in 1..=total {
+            let mut calls = 0;
+            let result = filter_keyvals_regex_checked(events.clone(), "test", &regex, || {
+                calls += 1;
+                if calls == fail_at {
+                    Err(calls)
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result.err(), Some(fail_at));
+        }
     }
 }

@@ -41,7 +41,9 @@ mod sort;
 pub use sort::{sort_by_duration, sort_by_timestamp};
 
 mod filter_keyvals;
-pub use filter_keyvals::{exclude_keyvals, filter_keyvals, filter_keyvals_regex};
+pub use filter_keyvals::{
+    exclude_keyvals, filter_keyvals, filter_keyvals_regex, filter_keyvals_regex_checked,
+};
 
 mod filter_period;
 pub use filter_period::filter_period_intersect;

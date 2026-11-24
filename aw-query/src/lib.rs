@@ -47,9 +47,8 @@ pub enum QueryError {
     BucketNotFound(String),
     BucketQueryError(String),
     RegexCompileError(String),
-    /// The caller's time budget ran out before the program finished; the
-    /// interpreter checks it between statements, so a single statement is
-    /// never interrupted.
+    /// The caller's time budget ran out before the program finished. See
+    /// [`query_with_deadline`] for where the budget is checked.
     TimeBudgetExceeded(String),
 }
 
@@ -64,9 +63,12 @@ pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, 
 }
 
 /// Like [`query`], but gives up with [`QueryError::TimeBudgetExceeded`] once
-/// `deadline` has passed. The check runs before every statement, so the
-/// program stops at the next statement boundary rather than mid-transform;
-/// a `query_bucket` read that has already started always completes.
+/// `deadline` has passed. The check runs before every statement, around every
+/// function call, at the end of the program, and inside `categorize`, `tag`
+/// and `filter_keyvals_regex` between events, rules and regex matches, so
+/// those transforms can stop within a statement. Work that has already
+/// started is never interrupted: a single regex match or compilation, a
+/// `query_bucket` read, or another transform runs to completion first.
 pub fn query_with_deadline(
     code: &str,
     ti: &TimeInterval,

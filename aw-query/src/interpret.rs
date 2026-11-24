@@ -525,7 +525,8 @@ mod tests {
         let ds = Datastore::new_in_memory(false);
         let ti =
             TimeInterval::new_from_string("2000-01-01T00:00:00Z/2000-01-02T00:00:00Z").unwrap();
-        // 200 slow titles take far longer than the budget without checkpoints.
+        // 2000 slow titles take seconds even in a release build, far longer
+        // than the budget, so the deadline always expires inside the function.
         let cases = [
             (
                 "f = categorize; RETURN = f(events, [[[\"c\"], rule]]);",
@@ -543,11 +544,11 @@ mod tests {
         for (code, expected) in cases {
             let program = crate::parser::parse(crate::lexer::Lexer::new(code)).unwrap();
             let mut env = init_env(&ti);
-            env.insert("events".into(), slow_events(200));
+            env.insert("events".into(), slow_events(2000));
             env.insert("rule".into(), regex_rule(BACKTRACKING_RULE));
             env.insert("pattern".into(), DataType::String(BACKTRACKING_RULE.into()));
             let started = Instant::now();
-            let deadline = Some(started + std::time::Duration::from_millis(200));
+            let deadline = Some(started + std::time::Duration::from_millis(500));
             let result = program
                 .stmts
                 .into_iter()
@@ -587,7 +588,12 @@ mod tests {
             .remove(0);
         let deadline = Some(Instant::now() + std::time::Duration::from_millis(20));
         let msg = expect_timeout(interpret_expr(&mut env, &ds, call, deadline));
-        assert!(msg.contains("using the result of slow"), "{msg}");
+        // Normally the check after the call fires; a stall of >20ms before
+        // the call is rejected by the check before it instead.
+        assert!(
+            msg.contains("using the result of slow") || msg.contains("calling slow"),
+            "{msg}"
+        );
         assert!(!env.contains_key("RETURN"));
     }
 

@@ -32,7 +32,9 @@ mod query_deadline {
     /// pinning a Rocket worker far past `query_timeout` (#893).
     #[test]
     fn categorize_backtracking_regex_respects_query_timeout() {
-        const N_EVENTS: usize = 60;
+        // Enough work that even a release build runs far past the budget
+        // without in-transform deadline checks.
+        const N_EVENTS: usize = 600;
         const N_RULES: usize = 1;
         let budget = Duration::from_secs(1);
 

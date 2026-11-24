@@ -19,8 +19,6 @@ pub trait AccessMethod: std::fmt::Debug {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String>;
-    /// Fetch a single original row without query-range clipping.
-    fn get_event(&self, bucket_id: &str, event_id: i64) -> Result<Event, String>;
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String>;
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
@@ -54,9 +52,6 @@ impl AccessMethod for Datastore {
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
         Datastore::get_events(self, bucket_id, start, end, limit).map_err(|e| format!("{e:?}"))
-    }
-    fn get_event(&self, bucket_id: &str, event_id: i64) -> Result<Event, String> {
-        Datastore::get_event(self, bucket_id, event_id).map_err(|e| format!("{e:?}"))
     }
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
         Datastore::heartbeat(self, bucket_id, event, duration).map_err(|e| format!("{e:?}"))?;
@@ -107,11 +102,6 @@ impl AccessMethod for AwClient {
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
         AwClient::get_events(self, bucket_id, start, end, limit).map_err(|e| e.to_string())
-    }
-    fn get_event(&self, bucket_id: &str, event_id: i64) -> Result<Event, String> {
-        AwClient::get_event(self, bucket_id, event_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Source event {event_id} disappeared from bucket '{bucket_id}'"))
     }
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
         AwClient::insert_events(self, bucket_id, events).map_err(|e| e.to_string())

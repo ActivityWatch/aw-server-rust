@@ -9,7 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -962,18 +962,15 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
 /// also re-fetched as a start-clipped fragment, and heartbeat() refuses to
 /// merge different data, which would insert a duplicate unless dest already
 /// holds the new payload.
-///
-/// Returns the source IDs the incremental copy needs to classify the
-/// zero-length rows it fetches at `resume`; see [`ResumeSourceIds`].
 fn reconcile_updated_events(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
-) -> Result<ResumeSourceIds, String> {
+) -> Result<(), String> {
     let Some(resume) = resume_sync_at else {
-        return Ok(ResumeSourceIds::default());
+        return Ok(());
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
     // get_events clips an event straddling the start bound to start at that
@@ -1017,27 +1014,11 @@ fn reconcile_updated_events(
     }
 
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
-    let mut ids = ResumeSourceIds::default();
     for src in source_events {
-        // A row that starts before `resume` and ends exactly there comes back
-        // from the incremental fetch as a zero-length fragment at `resume`.
-        // The end survives the `fetch_start` clip, so this also covers rows
-        // that started outside the lookback window.
-        if src.timestamp < resume && src.timestamp + src.duration == resume {
-            if let Some(id) = src.id {
-                ids.interval_tails.insert(id);
-            }
-        }
         // Skip events that start at/after the dest cursor; the incremental
         // copy owns those. Do not use end>resume: the dest-latest event starts
         // before resume and must still be title-reconciled.
-        if src.timestamp < lookback_start {
-            if let Some(id) = src.id {
-                ids.outside_lookback.insert(id);
-            }
-            continue;
-        }
-        if src.timestamp >= resume {
+        if src.timestamp < lookback_start || src.timestamp >= resume {
             continue;
         }
         src_by_identity
@@ -1083,52 +1064,7 @@ fn reconcile_updated_events(
         }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
-    Ok(ids)
-}
-
-/// Source IDs that tell the incremental copy what a zero-length row fetched at
-/// `resume` really is.
-#[derive(Default)]
-struct ResumeSourceIds {
-    /// Rows skipped outside the edit window. Their zero-length resume
-    /// fragments are dropped by ID, even when an edit changed their payload
-    /// and they no longer match any destination fingerprint.
-    outside_lookback: HashSet<i64>,
-    /// Positive rows that end exactly at `resume`. Their resume fragments are
-    /// interval tails, not genuine points, so they dedup against destination
-    /// intervals and never consume a destination point's count.
-    interval_tails: HashSet<i64>,
-}
-
-/// Boundary-dedup key: (end time in ns, data, is a genuine point).
-///
-/// End time and data are clip-invariant, but a clipped interval tail and a
-/// genuine point at `resume` share them. Keeping the two kinds apart stops an
-/// interval tail from consuming a point's count and the reverse.
-type BoundaryFingerprint = (i64, String, bool);
-
-/// Spend one destination occurrence of `fp`, if any is left.
-fn spend_boundary_count(
-    remaining: &mut HashMap<BoundaryFingerprint, usize>,
-    fp: &BoundaryFingerprint,
-) -> bool {
-    match remaining.get_mut(fp) {
-        Some(count) if *count > 0 => {
-            *count -= 1;
-            true
-        }
-        _ => false,
-    }
-}
-
-fn boundary_fingerprint(event: &Event, is_point: bool) -> BoundaryFingerprint {
-    (
-        (event.timestamp + event.duration)
-            .timestamp_nanos_opt()
-            .unwrap_or(0),
-        serde_json::to_string(&event.data).unwrap_or_default(),
-        is_point,
-    )
+    Ok(())
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -1161,8 +1097,7 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    let resume_ids =
-        reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch
@@ -1204,11 +1139,10 @@ fn sync_one(
     // tie than this is already corrupted well beyond what a resume-boundary dedup can repair —
     // that's the one-off cleanup tracked as a separate follow-up issue.
     const BOUNDARY_DEDUP_LOOKBACK: u64 = 2000;
-    // Destination intervals ending at resume. A configured sync start may
-    // have clipped an old source row to begin inside the edit window.
-    let mut old_dest_intervals: Vec<Event> = Vec::new();
-    let boundary_dedup: HashMap<BoundaryFingerprint, usize> = if newest_timestamp.is_some() {
-        let mut counts = HashMap::new();
+    let boundary_dedup: std::collections::HashMap<(i64, String), usize> = if newest_timestamp
+        .is_some()
+    {
+        let mut counts = std::collections::HashMap::new();
         for e in ds_to
             .get_events(
                 bucket_to.id.as_str(),
@@ -1218,16 +1152,12 @@ fn sync_one(
             )
             .map_err(|e| format!("Failed to fetch destination boundary events for dedup: {e}"))?
         {
-            // A destination interval ending at resume only dedups source
-            // interval tails; it must not consume a genuine point at resume
-            // with the same data. It may hold more than one source row (for
-            // example a long row and a short tail merged by heartbeat).
-            let fp = boundary_fingerprint(&e, e.duration.is_zero());
-            if resume_sync_at
-                .is_some_and(|resume| !e.duration.is_zero() && e.timestamp + e.duration == resume)
-            {
-                old_dest_intervals.push(e);
-            }
+            let fp = (
+                (e.timestamp + e.duration)
+                    .timestamp_nanos_opt()
+                    .unwrap_or(0),
+                serde_json::to_string(&e.data).unwrap_or_default(),
+            );
             *counts.entry(fp).or_insert(0) += 1;
         }
         counts
@@ -1256,28 +1186,6 @@ fn sync_one(
     let mut events_sent = 0usize;
     let mut pages_written = 0u32;
 
-    // Drop the resume fragments of rows that started outside the edit window,
-    // by source ID: an edit may have changed their payload, so they need not
-    // match any destination fingerprint. Genuine points at resume have distinct
-    // source IDs, even with the same data. Returns the dropped fragments.
-    let suppress_old_tails = |chunk: &mut Vec<Event>| -> Vec<Event> {
-        let (dropped, kept): (Vec<Event>, Vec<Event>) = chunk.drain(..).partition(|e| {
-            newest_timestamp.is_some()
-                && Some(e.timestamp) == resume_sync_at
-                && e.duration.is_zero()
-                && e.id
-                    .is_some_and(|id| resume_ids.outside_lookback.contains(&id))
-        });
-        *chunk = kept;
-        dropped
-    };
-    // IDs are only meaningful within the source datastore.
-    let clear_ids = |chunk: &mut Vec<Event>| {
-        for event in chunk {
-            event.id = None;
-        }
-    };
-
     loop {
         let raw = ds_from.get_events(
             bucket_from.id.as_str(),
@@ -1293,9 +1201,14 @@ fn sync_one(
         // Fewer events than requested means there's nothing older left to fetch.
         let is_last_fetch = raw.len() < BATCH_SIZE;
 
-        // Keep source IDs and all raw rows until pagination has chosen its
-        // boundary. Suppression must not change which timestamps get re-fetched.
-        let mut chunk = raw;
+        let mut chunk: Vec<Event> = raw
+            .into_iter()
+            .map(|mut e| {
+                // Unset ID on events, as they are not globally unique
+                e.id = None;
+                e
+            })
+            .collect();
 
         if !is_last_fetch {
             // chunk is in DESC order (newest first); chunk.last() = oldest in this (full) page.
@@ -1309,7 +1222,7 @@ fn sync_one(
             // Note: we must drop the boundary event itself, not just its duplicates. Keeping
             // one copy in this chunk while also setting `fetch_end = Some(boundary_ts)` (inclusive)
             // would cause that event to be fetched again next page, producing a duplicate row.
-            // `raw` was non-empty and `chunk` still contains every row.
+            // `raw` was non-empty and `chunk` is a 1:1 map of it, so both ends exist.
             let (Some(oldest), Some(newest)) = (chunk.last(), chunk.first()) else {
                 return Err(format!(
                     "Empty event page while syncing bucket '{}'",
@@ -1334,9 +1247,6 @@ fn sync_one(
 
             // Reverse to ASC order (oldest first) before inserting.
             chunk.reverse();
-            // Boundary dedup only runs on the last page; nothing to account for here.
-            suppress_old_tails(&mut chunk);
-            clear_ids(&mut chunk);
             events_sent += chunk.len();
             pages_written += 1;
             for batch in chunk.chunks(BATCH_SIZE) {
@@ -1346,7 +1256,6 @@ fn sync_one(
         } else {
             // Last (oldest) page: process oldest-first to preserve ID ordering.
             chunk.reverse(); // chunk is now ASC (oldest first)
-            let old_tails = suppress_old_tails(&mut chunk);
 
             // Dedup: skip boundary events already in the destination, up to the count
             // confirmed present there. Consuming from the count (rather than a blanket
@@ -1355,96 +1264,30 @@ fn sync_one(
             // new — a plain set would silently drop all of them. Handles the duration=0
             // re-import, same-timestamp tie, and clipped-overlap cases (#711). Fingerprint
             // must match the (end_time, data) scheme used to build `boundary_dedup` above —
-            // see the comment there for why. Source IDs are still present here: a
-            // zero-length row is a genuine point unless its source row is an interval
-            // ending at resume.
+            // see the comment there for why.
             if !boundary_dedup.is_empty() {
                 let mut remaining = boundary_dedup.clone();
-                // A dropped old tail may be a late import that was never
-                // copied. Recover its unclipped identity by source ID before
-                // spending a destination interval's count. Payload alone (or
-                // an arbitrary leftover) can steal a heartbeat-merged row's
-                // count and cause its already-copied short tail to be inserted.
-                let mut originals = Vec::new();
-                for e in &old_tails {
-                    if let Some(id) = e.id {
-                        let mut original = ds_from.get_event(bucket_from.id.as_str(), id)?;
-                        // The first copy may have been clipped by the requested
-                        // sync start. Compare the identity that copy would have,
-                        // not a full row that was never stored on destination.
-                        if let Some(start) = sync_spec.start {
-                            if original.timestamp < start {
-                                original.duration -= start - original.timestamp;
-                                original.timestamp = start;
-                            }
-                        }
-                        originals.push(original);
-                    }
-                }
-                // Match unchanged rows first, then same-identity edits. This
-                // preserves multiplicity without letting an edited sibling
-                // take another source row's unchanged destination payload.
-                let mut matched = vec![false; originals.len()];
-                for require_same_data in [true, false] {
-                    for (i, src) in originals.iter().enumerate() {
-                        if matched[i] {
-                            continue;
-                        }
-                        if let Some(j) = old_dest_intervals.iter().position(|dst| {
-                            event_identity(dst) == event_identity(src)
-                                && (!require_same_data || dst.data == src.data)
-                        }) {
-                            let dst = old_dest_intervals.swap_remove(j);
-                            spend_boundary_count(
-                                &mut remaining,
-                                &boundary_fingerprint(&dst, false),
-                            );
-                            matched[i] = true;
-                        }
-                    }
-                }
-
-                // Genuine points dedup only against destination points. Interval
-                // tails dedup against destination intervals, then against points
-                // left over: an earlier sync may have stored an unmatched tail as
-                // a zero-length row. Points go first so a tail never takes the
-                // count of a point that is really present.
-                let is_point: Vec<bool> = chunk
-                    .iter()
-                    .map(|e| {
-                        e.duration.is_zero()
-                            && !e
-                                .id
-                                .is_some_and(|id| resume_ids.interval_tails.contains(&id))
-                    })
-                    .collect();
-                let mut keep = vec![true; chunk.len()];
-                for points_pass in [true, false] {
-                    for (i, e) in chunk.iter().enumerate() {
-                        if is_point[i] != points_pass {
-                            continue;
-                        }
-                        let hit = spend_boundary_count(
-                            &mut remaining,
-                            &boundary_fingerprint(e, is_point[i]),
-                        ) || (!is_point[i]
-                            && e.duration.is_zero()
-                            && spend_boundary_count(
-                                &mut remaining,
-                                &boundary_fingerprint(e, true),
-                            ));
-                        keep[i] = !hit;
-                    }
-                }
                 let before_dedup = chunk.len();
-                let mut keep = keep.into_iter();
-                chunk.retain(|_| keep.next().unwrap_or(true));
+                chunk.retain(|e| {
+                    let fp = (
+                        (e.timestamp + e.duration)
+                            .timestamp_nanos_opt()
+                            .unwrap_or(0),
+                        serde_json::to_string(&e.data).unwrap_or_default(),
+                    );
+                    match remaining.get_mut(&fp) {
+                        Some(count) if *count > 0 => {
+                            *count -= 1;
+                            false
+                        }
+                        _ => true,
+                    }
+                });
                 let skipped = before_dedup - chunk.len();
                 if skipped > 0 {
                     info!("  - Skipped {} boundary duplicate(s)", skipped);
                 }
             }
-            clear_ids(&mut chunk);
 
             // Use heartbeat() for the oldest event only in the single-page case:
             // dest's "last event" is still the pre-sync resume-boundary row, so heartbeat()
@@ -1717,599 +1560,6 @@ mod boundary_dedup_multipage_tests {
     //! inserted via `insert_events()` instead, which exposes the duplicate
     //! directly if the dedup fingerprint fails to match.
     use super::*;
-
-    #[test]
-    fn full_page_of_long_clips_keeps_genuine_resume_point() {
-        let src = Datastore::new_in_memory(false);
-        let dest = Datastore::new_in_memory(false);
-        let bucket: Bucket = serde_json::from_value(serde_json::json!({
-            "id": "long-events", "type": "test", "hostname": "laptop", "client": "test"
-        }))
-        .unwrap();
-        src.create_bucket(&bucket).unwrap();
-        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
-        let resume = base + Duration::days(10);
-        let events: Vec<Event> = (0..BATCH_SIZE - 1)
-            .map(|i| Event {
-                id: None,
-                timestamp: base,
-                duration: Duration::days(10),
-                data: serde_json::json!({"label": format!("old-{i}")})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            })
-            .collect();
-        src.insert_events(&bucket.id, &events).unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-
-        let mut edited = src
-            .get_events(&bucket.id, None, None, Some(1))
-            .unwrap()
-            .remove(0);
-        src.delete_events_by_id(&bucket.id, vec![edited.id.unwrap()])
-            .unwrap();
-        edited.id = None;
-        edited
-            .data
-            .insert("label".into(), serde_json::json!("edited"));
-        let point = Event {
-            id: None,
-            timestamp: resume,
-            duration: Duration::zero(),
-            data: edited.data.clone(),
-        };
-        src.insert_events(&bucket.id, &[edited, point.clone()])
-            .unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-
-        let got = dest
-            .get_events("long-events-synced-from-laptop", None, None, None)
-            .unwrap();
-        assert_eq!(got.len(), BATCH_SIZE, "{got:?}");
-        let points: Vec<_> = got.iter().filter(|e| e.timestamp == resume).collect();
-        assert_eq!(points.len(), 1, "{got:?}");
-        assert_eq!(points[0].duration, Duration::zero());
-        assert_eq!(points[0].data, point.data);
-        assert_eq!(
-            got.iter()
-                .filter(|e| e.timestamp == base && e.duration == Duration::days(10))
-                .count(),
-            BATCH_SIZE - 1
-        );
-    }
-
-    #[test]
-    fn merged_long_event_does_not_create_a_point_from_short_source_tail() {
-        for add_point in [false, true] {
-            let src = Datastore::new_in_memory(false);
-            let dest = Datastore::new_in_memory(false);
-            let bucket: Bucket = serde_json::from_value(serde_json::json!({
-                "id": "merged-long", "type": "test", "hostname": "laptop", "client": "test"
-            }))
-            .unwrap();
-            src.create_bucket(&bucket).unwrap();
-            let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
-            let data = serde_json::json!({"label": "same"})
-                .as_object()
-                .unwrap()
-                .clone();
-            let long = Event {
-                id: None,
-                timestamp: base,
-                duration: Duration::days(10),
-                data: data.clone(),
-            };
-            src.insert_events(&bucket.id, &[long]).unwrap();
-            src.force_commit().unwrap();
-            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-            let short = Event {
-                id: None,
-                timestamp: base + Duration::days(10),
-                duration: Duration::hours(1),
-                data: data.clone(),
-            };
-            src.insert_events(&bucket.id, &[short]).unwrap();
-            src.force_commit().unwrap();
-            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-            let merged = dest
-                .get_events("merged-long-synced-from-laptop", None, None, None)
-                .unwrap();
-            assert_eq!(
-                merged.len(),
-                1,
-                "single-page heartbeat must merge the source tail"
-            );
-            assert_eq!(merged[0].duration, Duration::days(10) + Duration::hours(1));
-            let resume = base + Duration::days(10) + Duration::hours(1);
-            let mut added: Vec<Event> = (1..=6)
-                .map(|i| Event {
-                    id: None,
-                    timestamp: resume + Duration::hours(i),
-                    duration: Duration::zero(),
-                    data: serde_json::json!({"label": format!("new-{i}")})
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                })
-                .collect();
-            if add_point {
-                added.push(Event {
-                    id: None,
-                    timestamp: resume,
-                    duration: Duration::zero(),
-                    data: data.clone(),
-                });
-            }
-            src.insert_events(&bucket.id, &added).unwrap();
-            src.force_commit().unwrap();
-            for _ in 0..2 {
-                sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-                let got = dest
-                    .get_events("merged-long-synced-from-laptop", None, None, None)
-                    .unwrap();
-                assert_eq!(got.len(), 1 + added.len(), "{got:?}");
-                assert_eq!(
-                    got.iter()
-                        .filter(|e| e.timestamp == resume && e.duration.is_zero())
-                        .count(),
-                    usize::from(add_point),
-                    "{got:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn imported_old_tail_does_not_spend_a_merged_intervals_match() {
-        for imported_label in ["different", "same"] {
-            let src = Datastore::new_in_memory(false);
-            let dest = Datastore::new_in_memory(false);
-            let bucket: Bucket = serde_json::from_value(serde_json::json!({
-                "id": "imported-tail", "type": "test", "hostname": "laptop", "client": "test"
-            }))
-            .unwrap();
-            src.create_bucket(&bucket).unwrap();
-            let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
-            src.insert_events(
-                &bucket.id,
-                &[Event {
-                    id: None,
-                    timestamp: base,
-                    duration: Duration::days(10),
-                    data: label("same"),
-                }],
-            )
-            .unwrap();
-            src.force_commit().unwrap();
-            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-            src.insert_events(
-                &bucket.id,
-                &[Event {
-                    id: None,
-                    timestamp: base + Duration::days(10),
-                    duration: Duration::hours(1),
-                    data: label("same"),
-                }],
-            )
-            .unwrap();
-            src.force_commit().unwrap();
-            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-            let resume = base + Duration::days(10) + Duration::hours(1);
-            let before = dest
-                .get_events("imported-tail-synced-from-laptop", None, None, None)
-                .unwrap();
-            assert_eq!(before.len(), 1);
-            assert_eq!(before[0].duration, Duration::days(10) + Duration::hours(1));
-            // Imported after the cursor advanced: never copied to dest. Its
-            // clipped tail must not consume the merged row's dedup count,
-            // even when its payload matches that row.
-            let mut added = new_points(resume);
-            added.push(Event {
-                id: None,
-                timestamp: base + Duration::days(1),
-                duration: Duration::days(9) + Duration::hours(1),
-                data: label(imported_label),
-            });
-            src.insert_events(&bucket.id, &added).unwrap();
-            src.force_commit().unwrap();
-            for _ in 0..2 {
-                sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-                let got = dest
-                    .get_events("imported-tail-synced-from-laptop", None, None, None)
-                    .unwrap();
-                assert_eq!(got.len(), 7, "imported label={imported_label}: {got:?}");
-                assert!(!got
-                    .iter()
-                    .any(|e| e.timestamp == resume && e.duration.is_zero()));
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "known draft blocker: merged interval needs source provenance; run explicitly"]
-    fn merged_old_segment_does_not_hide_a_new_short_tail() {
-        let src = Datastore::new_in_memory(false);
-        let dest = Datastore::new_in_memory(false);
-        let bucket: Bucket = serde_json::from_value(serde_json::json!({
-            "id": "merged-old-segment", "type": "test", "hostname": "laptop", "client": "test"
-        }))
-        .unwrap();
-        src.create_bucket(&bucket).unwrap();
-        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
-        src.insert_events(
-            &bucket.id,
-            &[Event {
-                id: None,
-                timestamp: base,
-                duration: Duration::days(10),
-                data: label("same"),
-            }],
-        )
-        .unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-        src.insert_events(
-            &bucket.id,
-            &[Event {
-                id: None,
-                timestamp: base + Duration::days(10),
-                duration: Duration::days(8),
-                data: label("same"),
-            }],
-        )
-        .unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-        let resume = base + Duration::days(18);
-        let merged = dest
-            .get_events("merged-old-segment-synced-from-laptop", None, None, None)
-            .unwrap();
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].duration, Duration::days(18));
-        let mut added = new_points(resume);
-        added.push(Event {
-            id: None,
-            timestamp: resume - Duration::hours(1),
-            duration: Duration::hours(1),
-            data: label("same"),
-        });
-        src.insert_events(&bucket.id, &added).unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-        let got = dest
-            .get_events("merged-old-segment-synced-from-laptop", None, None, None)
-            .unwrap();
-        assert_eq!(got.len(), 8, "{got:?}");
-    }
-
-    #[test]
-    fn start_clipped_old_tail_spends_its_destination_match() {
-        let src = Datastore::new_in_memory(false);
-        let dest = Datastore::new_in_memory(false);
-        let bucket: Bucket = serde_json::from_value(serde_json::json!({
-            "id": "start-clipped", "type": "test", "hostname": "laptop", "client": "test"
-        }))
-        .unwrap();
-        src.create_bucket(&bucket).unwrap();
-        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
-        let resume = base + Duration::days(20);
-        let spec = SyncSpec {
-            start: Some(base + Duration::days(18)),
-            ..SyncSpec::default()
-        };
-        src.insert_events(
-            &bucket.id,
-            &[Event {
-                id: None,
-                timestamp: base,
-                duration: Duration::days(20),
-                data: label("same"),
-            }],
-        )
-        .unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &spec).unwrap();
-        let mut added = new_points(resume);
-        added.push(Event {
-            id: None,
-            timestamp: resume - Duration::hours(1),
-            duration: Duration::hours(1),
-            data: label("same"),
-        });
-        src.insert_events(&bucket.id, &added).unwrap();
-        src.force_commit().unwrap();
-        for _ in 0..2 {
-            sync_datastores(&src, &dest, false, None, &spec).unwrap();
-            let got = dest
-                .get_events("start-clipped-synced-from-laptop", None, None, None)
-                .unwrap();
-            assert_eq!(got.len(), 8, "{got:?}");
-        }
-    }
-
-    #[test]
-    fn suppressed_long_tail_does_not_dedup_a_new_tail_with_same_data() {
-        let src = Datastore::new_in_memory(false);
-        let dest = Datastore::new_in_memory(false);
-        let bucket: Bucket = serde_json::from_value(serde_json::json!({
-            "id": "long-tail", "type": "test", "hostname": "laptop", "client": "test"
-        }))
-        .unwrap();
-        src.create_bucket(&bucket).unwrap();
-        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
-        let data = serde_json::json!({"label": "same"})
-            .as_object()
-            .unwrap()
-            .clone();
-        let long = Event {
-            id: None,
-            timestamp: base,
-            duration: Duration::days(10),
-            data: data.clone(),
-        };
-        src.insert_events(&bucket.id, &[long]).unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-        let resume = base + Duration::days(10);
-        // A distinct event inside the edit window that ends with the long row
-        // and has the same data. The long row's own resume fragment is dropped
-        // by source ID; it must also release the destination interval count,
-        // or the new tail is deduped against it and lost.
-        let mut added = vec![Event {
-            id: None,
-            timestamp: resume - Duration::hours(1),
-            duration: Duration::hours(1),
-            data: data.clone(),
-        }];
-        added.extend((1..=6).map(|i| {
-            Event {
-                id: None,
-                timestamp: resume + Duration::hours(i),
-                duration: Duration::zero(),
-                data: serde_json::json!({"label": format!("new-{i}")})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            }
-        }));
-        src.insert_events(&bucket.id, &added).unwrap();
-        src.force_commit().unwrap();
-        for _ in 0..2 {
-            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-            let got = dest
-                .get_events("long-tail-synced-from-laptop", None, None, None)
-                .unwrap();
-            assert_eq!(got.len(), 1 + added.len(), "{got:?}");
-        }
-    }
-
-    fn label(text: &str) -> serde_json::Map<String, serde_json::Value> {
-        serde_json::json!({ "label": text })
-            .as_object()
-            .unwrap()
-            .clone()
-    }
-
-    fn new_points(after: DateTime<Utc>) -> Vec<Event> {
-        (1..=6)
-            .map(|i| Event {
-                id: None,
-                timestamp: after + Duration::hours(i),
-                duration: Duration::zero(),
-                data: label(&format!("new-{i}")),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn edited_old_tail_does_not_dedup_a_new_tail_with_the_old_data() {
-        // The long row is edited from A to B on the source; the destination
-        // still holds A. Its dropped tail carries B but was synced as A, so it
-        // must spend A's count, or a new short tail with data A is lost.
-        let src = Datastore::new_in_memory(false);
-        let dest = Datastore::new_in_memory(false);
-        let bucket: Bucket = serde_json::from_value(serde_json::json!({
-            "id": "edited-tail", "type": "test", "hostname": "laptop", "client": "test"
-        }))
-        .unwrap();
-        src.create_bucket(&bucket).unwrap();
-        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
-        let long = Event {
-            id: None,
-            timestamp: base,
-            duration: Duration::days(10),
-            data: label("A"),
-        };
-        src.insert_events(&bucket.id, std::slice::from_ref(&long))
-            .unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-        let ids: Vec<i64> = src
-            .get_events(&bucket.id, None, None, None)
-            .unwrap()
-            .iter()
-            .map(|e| e.id.unwrap())
-            .collect();
-        src.delete_events_by_id(&bucket.id, ids).unwrap();
-        src.insert_events(
-            &bucket.id,
-            &[Event {
-                data: label("B"),
-                ..long
-            }],
-        )
-        .unwrap();
-        let resume = base + Duration::days(10);
-        let mut added = vec![Event {
-            id: None,
-            timestamp: resume - Duration::hours(1),
-            duration: Duration::hours(1),
-            data: label("A"),
-        }];
-        added.extend(new_points(resume));
-        src.insert_events(&bucket.id, &added).unwrap();
-        src.force_commit().unwrap();
-        for _ in 0..2 {
-            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-            let got = dest
-                .get_events("edited-tail-synced-from-laptop", None, None, None)
-                .unwrap();
-            assert_eq!(got.len(), 1 + added.len(), "{got:?}");
-        }
-    }
-
-    #[test]
-    fn stored_tail_is_not_copied_again_by_a_later_multipage_sync() {
-        // A new tail that matches nothing is stored as a zero-length row at
-        // resume. When it is the destination's newest row, the next sync
-        // fetches the same source tail again and must match it to that row.
-        let src = Datastore::new_in_memory(false);
-        let dest = Datastore::new_in_memory(false);
-        let bucket: Bucket = serde_json::from_value(serde_json::json!({
-            "id": "stored-tail", "type": "test", "hostname": "laptop", "client": "test"
-        }))
-        .unwrap();
-        src.create_bucket(&bucket).unwrap();
-        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
-        let resume = base + Duration::days(10);
-        src.insert_events(
-            &bucket.id,
-            &[Event {
-                id: None,
-                timestamp: base,
-                duration: Duration::days(10),
-                data: label("long"),
-            }],
-        )
-        .unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-        src.insert_events(
-            &bucket.id,
-            &[Event {
-                id: None,
-                timestamp: resume - Duration::hours(1),
-                duration: Duration::hours(1),
-                data: label("tail"),
-            }],
-        )
-        .unwrap();
-        src.force_commit().unwrap();
-        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-        let stored = dest
-            .get_events("stored-tail-synced-from-laptop", None, None, None)
-            .unwrap();
-        assert_eq!(stored.len(), 2, "{stored:?}");
-        assert_eq!(stored[0].timestamp, resume);
-        assert!(stored[0].duration.is_zero());
-        src.insert_events(&bucket.id, &new_points(resume)).unwrap();
-        src.force_commit().unwrap();
-        for _ in 0..2 {
-            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-            let got = dest
-                .get_events("stored-tail-synced-from-laptop", None, None, None)
-                .unwrap();
-            assert_eq!(got.len(), 2 + 6, "{got:?}");
-        }
-    }
-
-    #[test]
-    fn long_event_keeps_matching_points_across_multiple_pages() {
-        for (long_count, existing_points, new_points, edit_long) in [
-            (1, 0, 1, false),
-            (2, 0, 1, false),
-            (1, 1, 1, false),
-            (1, 1, 2, false),
-            (1, 0, 1, true),
-            (2, 1, 1, true),
-        ] {
-            let src = Datastore::new_in_memory(false);
-            let dest = Datastore::new_in_memory(false);
-            let bucket: Bucket = serde_json::from_value(serde_json::json!({
-                "id": "long-events", "type": "test", "hostname": "laptop", "client": "test"
-            }))
-            .unwrap();
-            src.create_bucket(&bucket).unwrap();
-            let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
-            let resume = base + Duration::days(10);
-            let data = serde_json::json!({"label": "same"})
-                .as_object()
-                .unwrap()
-                .clone();
-            let point = Event {
-                id: None,
-                timestamp: resume,
-                duration: Duration::zero(),
-                data: data.clone(),
-            };
-            let mut initial: Vec<Event> = (0..long_count)
-                .map(|i| Event {
-                    id: None,
-                    timestamp: base - Duration::hours(i),
-                    duration: Duration::days(10) + Duration::hours(i),
-                    data: data.clone(),
-                })
-                .collect();
-            initial.extend(std::iter::repeat_n(point.clone(), existing_points));
-            src.insert_events(&bucket.id, &initial).unwrap();
-            src.force_commit().unwrap();
-            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-
-            if edit_long {
-                // The point still matches the OLD destination payload. A
-                // decrement using only the suppressed source payload misses it.
-                let mut long_rows: Vec<Event> = src
-                    .get_events(&bucket.id, None, None, None)
-                    .unwrap()
-                    .into_iter()
-                    .filter(|e| e.duration > Duration::zero())
-                    .collect();
-                src.delete_events_by_id(
-                    &bucket.id,
-                    long_rows.iter().map(|e| e.id.unwrap()).collect(),
-                )
-                .unwrap();
-                for row in &mut long_rows {
-                    row.id = None;
-                    row.data.insert("label".into(), serde_json::json!("edited"));
-                }
-                src.insert_events(&bucket.id, &long_rows).unwrap();
-            }
-            let mut added = vec![point; new_points];
-            // More than one page makes the point use insert_events, so an
-            // accidental heartbeat merge cannot conceal that it was dropped.
-            added.extend((1..=6).map(|i| {
-                Event {
-                    id: None,
-                    timestamp: resume + Duration::hours(i),
-                    duration: Duration::zero(),
-                    data: serde_json::json!({"label": format!("new-{i}")})
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                }
-            }));
-            src.insert_events(&bucket.id, &added).unwrap();
-            src.force_commit().unwrap();
-            for _ in 0..2 {
-                sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
-                let got = dest
-                    .get_events("long-events-synced-from-laptop", None, None, None)
-                    .unwrap();
-                assert_eq!(got.len(), initial.len() + added.len(), "{got:?}");
-                assert_eq!(
-                    got.iter()
-                        .filter(|e| e.timestamp == resume && e.duration.is_zero() && e.data == data)
-                        .count(),
-                    existing_points + new_points,
-                    "{got:?}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn no_duplicate_on_positive_duration_boundary_across_multiple_pages() {

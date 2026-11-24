@@ -218,9 +218,9 @@ dependencies = [
  "aw-transform",
  "chrono",
  "criterion",
+ "crossbeam-channel",
  "dirs",
  "log",
- "mpsc_requests",
  "regex",
  "rusqlite",
  "serde",
@@ -1845,15 +1845,6 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "mpsc_requests"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd820d6682abb7a602c084e779aaf8052365bc2d25cd36afe81eee69a75484ae"
-dependencies = [
- "crossbeam-channel",
 ]
 
 [[package]]

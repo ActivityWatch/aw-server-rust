@@ -21,12 +21,17 @@ use aw_models::Event;
 use aw_models::TryVec;
 
 use crate::privacy_filter::PrivacyFilterEngine;
+use crate::request_channel;
 use crate::DatastoreError;
 use crate::DatastoreInstance;
 use crate::DatastoreMethod;
 
-type RequestSender = mpsc_requests::RequestSender<Command, Result<Response, DatastoreError>>;
-type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>;
+type RequestSender = request_channel::RequestSender<Command, Result<Response, DatastoreError>>;
+type RequestReceiver = request_channel::RequestReceiver<Command, Result<Response, DatastoreError>>;
+
+/// Longest a write stays in the open batch before it is committed, including
+/// when the worker is idle.
+const COMMIT_INTERVAL_SECS: i64 = 15;
 
 /// SQLite URI for a side-effect-free open: no `-wal`/`-shm`, no locks that
 /// fight a file syncer. `?`/`#`/`%` in the path are encoded so they cannot
@@ -318,10 +323,7 @@ struct DatastoreWorker {
 }
 
 impl DatastoreWorker {
-    pub fn new(
-        responder: mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>,
-        legacy_import_opts: LegacyImportOptions,
-    ) -> Self {
+    pub fn new(responder: RequestReceiver, legacy_import_opts: LegacyImportOptions) -> Self {
         DatastoreWorker {
             responder,
             legacy_import_opts,
@@ -516,9 +518,22 @@ impl DatastoreWorker {
             // Commands that force a commit are acknowledged only after it
             // succeeds. Other commands can return before the batch commits.
             let mut deferred_ack = None;
+            let mut batch_open = false;
             loop {
-                let (request, response_sender) = match self.responder.poll() {
-                    Ok((req, res_sender)) => (req, res_sender),
+                // Once the batch holds a request, wait no longer than the
+                // commit interval: with no further request the worker would
+                // otherwise sit on acknowledged writes indefinitely.
+                let polled = if batch_open {
+                    let elapsed = (Utc::now() - last_commit_time).to_std().unwrap_or_default();
+                    let interval = std::time::Duration::from_secs(COMMIT_INTERVAL_SECS as u64);
+                    self.responder
+                        .poll_timeout(interval.saturating_sub(elapsed))
+                } else {
+                    self.responder.poll().map(Some)
+                };
+                let (request, response_sender) = match polled {
+                    Ok(Some((req, res_sender))) => (req, res_sender),
+                    Ok(None) => break,
                     Err(err) => {
                         // All references to responder is gone, quit
                         error!("DB worker quitting, error: {err:?}");
@@ -526,6 +541,7 @@ impl DatastoreWorker {
                         break;
                     }
                 };
+                batch_open = true;
                 let response = self.handle_request(request, &mut ds, &tx);
                 if self.commit || self.quit {
                     deferred_ack = Some((response_sender, response));
@@ -542,7 +558,8 @@ impl DatastoreWorker {
                 }
 
                 let now: DateTime<Utc> = Utc::now();
-                let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
+                let commit_interval_passed: bool =
+                    (now - last_commit_time) > Duration::seconds(COMMIT_INTERVAL_SECS);
                 if self.commit
                     || commit_interval_passed
                     || self.uncommitted_events > 100
@@ -1013,7 +1030,7 @@ impl Datastore {
 
     fn _new_internal(method: DatastoreMethod, legacy_import_opts: LegacyImportOptions) -> Self {
         let (requester, responder) =
-            mpsc_requests::channel::<Command, Result<Response, DatastoreError>>();
+            request_channel::channel::<Command, Result<Response, DatastoreError>>();
         let _thread = thread::spawn(move || {
             let mut di = DatastoreWorker::new(responder, legacy_import_opts);
             di.work_loop(method);

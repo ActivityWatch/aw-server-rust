@@ -832,6 +832,42 @@ mod api_tests {
             .body(r#"{"timestamp":"2018-01-01T01:01:01Z","duration":1.0,"data":{}}"#)
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
+
+        let count_before = client
+            .get("/api/0/buckets/id/events/count")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch()
+            .into_string()
+            .unwrap();
+
+        // Heartbeat with negative duration — rejected like POST /events
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=10")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(r#"{"timestamp":"2018-01-02T00:00:00Z","duration":-5.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::BadRequest);
+
+        // Non-finite pulsetime — rejected
+        for pt in ["NaN", "inf"] {
+            let res = client
+                .post(format!("/api/0/buckets/id/heartbeat?pulsetime={pt}"))
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(r#"{"timestamp":"2018-01-03T00:00:00Z","duration":0.0,"data":{}}"#)
+                .dispatch();
+            assert_eq!(
+                res.status(),
+                rocket::http::Status::BadRequest,
+                "pulsetime={pt}"
+            );
+        }
+        let count_res = client
+            .get("/api/0/buckets/id/events/count")
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .dispatch();
+        assert_eq!(count_res.into_string().unwrap(), count_before);
     }
 
     #[test]

@@ -224,12 +224,24 @@ pub fn bucket_events_heartbeat(
     let _guard = state.write_lock.lock().unwrap();
     // Reject negative pulsetime; it has no meaningful interpretation and is
     // almost always a client bug (negated constant, sign-flip on subtraction).
-    if pulsetime < 0.0 {
-        let err_msg = format!("Invalid pulsetime: must be non-negative, got {pulsetime}");
+    // NaN compares false against everything, so check finiteness first.
+    if !pulsetime.is_finite() || pulsetime < 0.0 {
+        let err_msg =
+            format!("Invalid pulsetime: must be a finite non-negative number, got {pulsetime}");
         warn!("{}", err_msg);
         return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
     }
     let heartbeat = heartbeat_json.into_inner();
+    // Same rule as event creation: a negative duration corrupts totals (#602).
+    if heartbeat.duration < Duration::zero() {
+        let err_msg = format!(
+            "Invalid heartbeat: duration must be non-negative, got {}s",
+            heartbeat.duration.num_seconds() as f64
+                + heartbeat.duration.subsec_nanos() as f64 / 1_000_000_000.0
+        );
+        warn!("{}", err_msg);
+        return Err(HttpErrorJson::new(Status::BadRequest, err_msg));
+    }
     // The returned event spans every merged/replaced event, so invalidating its
     // extent covers the stored previous event even if it had a different range.
     let heartbeat_range = event_range(&heartbeat);

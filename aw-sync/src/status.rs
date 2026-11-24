@@ -291,6 +291,21 @@ fn collect_warnings(
                     .db_size
                     .map(crate::util::format_bytes)
                     .unwrap_or_else(|| "?".to_string());
+                // This device's own 2-level db is not a leftover: `aw-sync
+                // daemon` still stages at {sync_dir}/{device_id}/ (sync_run ->
+                // setup_local_remote), while plain `aw-sync sync` writes the
+                // 3-level entry. Deleting it forces a full re-export and
+                // Syncthing propagates the delete to every peer (#887).
+                if orphan.kind == SyncEntryKind::OwnStaging {
+                    warnings.push(format!(
+                        "{} ({size}) is this device's 2-level staging db, which `aw-sync \
+                         daemon` still writes (plain `aw-sync sync` writes the 3-level \
+                         entry); it is not orphaned — do NOT delete it while the daemon \
+                         runs (ActivityWatch/aw-server-rust#887)",
+                        orphan.path.display(),
+                    ));
+                    continue;
+                }
                 // If the 2-level file is larger than the 3-level counterpart
                 // the daemon (discover_peers) would still prefer the 2-level
                 // file, so its history is not yet absorbed — do not call it
@@ -310,7 +325,7 @@ fn collect_warnings(
                 } else {
                     warnings.push(format!(
                         "{} ({size}) is an orphaned 2-level staging db — device_id {did} \
-                         already has a larger 3-level entry; safe to delete \
+                         already has an equal or larger 3-level entry; safe to delete \
                          (Syncthing will propagate the delete) \
                          (ActivityWatch/aw-server-rust#689)",
                         orphan.path.display(),
@@ -440,20 +455,20 @@ mod tests {
             db_path: Some(PathBuf::from(format!("/sync/{did}/test.db"))),
             db_size: Some(273_000_000), // smaller than the 3-level — safe case
             layout: Some(SyncLayout::TwoLevel),
-            kind: SyncEntryKind::OwnStaging,
+            kind: SyncEntryKind::Peer,
             hostname_folder: None,
             device_id: Some(did.to_string()),
-            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+            not_visible_to_daemon: None,
         };
         let three_level = SyncDirEntry {
             path: PathBuf::from(format!("/sync/my-host/{did}/test.db")),
             db_path: Some(PathBuf::from(format!("/sync/my-host/{did}/test.db"))),
             db_size: Some(1_200_000_000), // larger — 3-level has absorbed history
             layout: Some(SyncLayout::ThreeLevel),
-            kind: SyncEntryKind::OwnStaging,
+            kind: SyncEntryKind::Peer,
             hostname_folder: Some("my-host".to_string()),
             device_id: Some(did.to_string()),
-            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+            not_visible_to_daemon: None,
         };
 
         let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
@@ -472,6 +487,10 @@ mod tests {
         assert!(
             joined.contains("safe to delete"),
             "warning must say safe to delete: {joined}"
+        );
+        assert!(
+            joined.contains("equal or larger"),
+            "an equal-size 3-level entry is not \"larger\": {joined}"
         );
         assert!(
             !joined.contains("do NOT delete"),
@@ -493,20 +512,20 @@ mod tests {
             db_path: Some(PathBuf::from(format!("/sync/{did}/test.db"))),
             db_size: Some(1_200_000_000), // ~1.19 GB — the real-world case from #689
             layout: Some(SyncLayout::TwoLevel),
-            kind: SyncEntryKind::OwnStaging,
+            kind: SyncEntryKind::Peer,
             hostname_folder: None,
             device_id: Some(did.to_string()),
-            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+            not_visible_to_daemon: None,
         };
         let three_level = SyncDirEntry {
             path: PathBuf::from(format!("/sync/my-host/{did}/test.db")),
             db_path: Some(PathBuf::from(format!("/sync/my-host/{did}/test.db"))),
             db_size: Some(273_000_000), // smaller — history not yet absorbed
             layout: Some(SyncLayout::ThreeLevel),
-            kind: SyncEntryKind::OwnStaging,
+            kind: SyncEntryKind::Peer,
             hostname_folder: Some("my-host".to_string()),
             device_id: Some(did.to_string()),
-            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+            not_visible_to_daemon: None,
         };
 
         let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
@@ -529,6 +548,52 @@ mod tests {
         assert!(
             joined.contains("1.1 GB") || joined.contains("1.2 GB"),
             "warning must include size: {joined}"
+        );
+    }
+
+    #[test]
+    fn collect_warnings_own_two_level_staging_is_not_orphaned() {
+        // #887: the daemon stages at the 2-level path while plain `aw-sync
+        // sync` writes the 3-level layout, so this device's own 2-level db is
+        // live even when an equal-size 3-level entry exists.
+        use crate::util::{SyncDirEntry, SyncEntryKind, SyncLayout};
+        use std::path::PathBuf;
+
+        let did = "d7bc68e7-aaaa-bbbb-cccc-dddddddddddd";
+        let entry = |path: String, layout, folder: Option<&str>| SyncDirEntry {
+            path: PathBuf::from(&path),
+            db_path: Some(PathBuf::from(&path)),
+            db_size: Some(200_000_000),
+            layout: Some(layout),
+            kind: SyncEntryKind::OwnStaging,
+            hostname_folder: folder.map(str::to_string),
+            device_id: Some(did.to_string()),
+            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+        };
+        let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> = vec![
+            (
+                entry(format!("/sync/{did}/test.db"), SyncLayout::TwoLevel, None),
+                None,
+            ),
+            (
+                entry(
+                    format!("/sync/my-host/{did}/test.db"),
+                    SyncLayout::ThreeLevel,
+                    Some("my-host"),
+                ),
+                None,
+            ),
+        ];
+
+        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let joined = warnings.join("\n");
+        assert!(
+            !joined.contains("safe to delete") && !joined.contains("orphaned 2-level"),
+            "own daemon staging db must not be called orphaned/safe to delete: {joined}"
+        );
+        assert!(
+            joined.contains("do NOT delete") && joined.contains("aw-sync daemon"),
+            "own 2-level db must be explained as the daemon's live staging: {joined}"
         );
     }
 

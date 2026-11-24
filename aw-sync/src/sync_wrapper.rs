@@ -185,3 +185,50 @@ pub fn push_with_hostname(client: &AwClient, hostname: &str) -> Result<SyncRepor
     };
     sync_run(client, &sync_spec, SyncMode::Push)
 }
+
+/// Keep the pull report when a full sync proceeds to its push phase.
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn full_sync_pull_result(
+    pulled: Result<(SyncReport, Option<String>), Box<dyn Error>>,
+) -> (SyncReport, Option<String>) {
+    let (mut report, pull_failure) = match pulled {
+        Ok(pulled) => pulled,
+        Err(e) => (SyncReport::new(SyncMode::Both), Some(e.to_string())),
+    };
+    report.mode = SyncMode::Both;
+    if let Some(e) = &pull_failure {
+        report.record_pull_phase_failure(e);
+    }
+    (report, pull_failure)
+}
+
+#[cfg(test)]
+mod full_sync_tests {
+    use super::*;
+
+    #[test]
+    fn failed_full_sync_reports_both_attempted_phases() {
+        for pulled in [
+            Err("discovery failed".into()),
+            Ok((
+                SyncReport::new(SyncMode::Pull),
+                Some("all peers failed".into()),
+            )),
+        ] {
+            let (mut report, failure) = full_sync_pull_result(pulled);
+            assert!(failure.is_some());
+            report.record_push_failure("local server unavailable");
+            report.finish();
+            assert_eq!(report.mode, SyncMode::Both);
+            assert_eq!(serde_json::to_value(&report).unwrap()["mode"], "both");
+            assert!(report
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("pull failed:")));
+            assert!(report
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("push failed:")));
+        }
+    }
+}

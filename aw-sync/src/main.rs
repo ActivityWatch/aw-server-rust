@@ -108,9 +108,9 @@ enum Commands {
     /// First pulls remote buckets from the sync directory to the local aw-server.
     /// Then pushes local buckets from the aw-server to the local sync directory.
     Sync {
-        /// Host(s) to pull from, comma separated. Will pull from all hosts if not specified.
-        #[clap(long, value_parser=parse_list)]
-        host: Option<::std::vec::Vec<String>>,
+        /// Host(s) to pull from, comma separated or repeated. Pulls all hosts if omitted.
+        #[clap(long, value_delimiter = ',')]
+        host: Option<Vec<String>>,
 
         /// Date to start syncing from.
         /// If not specified, start from beginning.

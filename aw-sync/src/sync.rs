@@ -239,7 +239,11 @@ fn pull_then_push(
         let pulled =
             peers.and_then(|remotes| pull_from_remotes(remotes, local, sync_spec, report, true));
         if let Err(e) = pulled {
-            warn!("Pull failed, still pushing local data: {e}");
+            if staging.is_some() {
+                warn!("Pull failed, still pushing local data: {e}");
+            } else {
+                warn!("Pull failed: {e}");
+            }
             report.record_pull_phase_failure(&e);
             pull_err = Some(e);
         }
@@ -1887,6 +1891,14 @@ mod peer_isolation_tests {
         local
             .create_bucket(&bucket("aw-watcher-window_own-host", "own-host"))
             .unwrap();
+        let event: aw_models::Event = serde_json::from_value(serde_json::json!({
+            "timestamp": "2026-01-01T12:00:00Z", "duration": 60,
+            "data": {"app": "editor", "title": "unsynced activity"}
+        }))
+        .unwrap();
+        local
+            .insert_events("aw-watcher-window_own-host", std::slice::from_ref(&event))
+            .unwrap();
         let staging = Datastore::new_in_memory(false);
         let broken = unreadable_peer("push-after-pull");
         let db = peer_db("dev-a", "host-a", PathBuf::from("/nonexistent-a.db"));
@@ -1912,6 +1924,14 @@ mod peer_isolation_tests {
             "own bucket must be pushed despite the pull failure"
         );
         assert_eq!(report.pushed.len(), 1);
+        assert_eq!(report.pushed[0].events_new, 1);
+        let copied = staging
+            .get_events("aw-watcher-window_own-host", None, None, None)
+            .unwrap();
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].timestamp, event.timestamp);
+        assert_eq!(copied[0].duration, event.duration);
+        assert_eq!(copied[0].data, event.data);
         assert!(
             report
                 .warnings
@@ -1932,6 +1952,14 @@ mod peer_isolation_tests {
         local
             .create_bucket(&bucket("aw-watcher-afk_own-host", "own-host"))
             .unwrap();
+        let event: aw_models::Event = serde_json::from_value(serde_json::json!({
+            "timestamp": "2026-01-02T12:00:00Z", "duration": 30,
+            "data": {"status": "not-afk"}
+        }))
+        .unwrap();
+        local
+            .insert_events("aw-watcher-afk_own-host", std::slice::from_ref(&event))
+            .unwrap();
         let staging = Datastore::new_in_memory(false);
         let mut report = SyncReport::new(SyncMode::Both);
 
@@ -1950,6 +1978,14 @@ mod peer_isolation_tests {
             .get_buckets()
             .unwrap()
             .contains_key("aw-watcher-afk_own-host"));
+        assert_eq!(report.pushed[0].events_new, 1);
+        let copied = staging
+            .get_events("aw-watcher-afk_own-host", None, None, None)
+            .unwrap();
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].timestamp, event.timestamp);
+        assert_eq!(copied[0].duration, event.duration);
+        assert_eq!(copied[0].data, event.data);
         local.close();
         staging.close();
     }

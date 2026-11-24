@@ -12,7 +12,7 @@ use jni::JNIEnv;
 use serde_json::json;
 
 use crate::sync_wrapper::pull_all_partial;
-use crate::{pull, pull_all, push_with_hostname, SyncMode, SyncReport};
+use crate::{pull, pull_all, push_with_hostname};
 
 const ANDROID_LOG_FATAL: c_int = 7;
 const ANDROID_LOG_TAG: &str = "aw-sync";
@@ -351,13 +351,8 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
             // A failed pull must not skip this device's push
             // (ActivityWatch/aw-server-rust#875, item 8): record it, push,
             // then report the pull error.
-            let (mut report, pull_failure) = match pull_all_partial(&client) {
-                Ok(pulled) => pulled,
-                Err(e) => (SyncReport::new(SyncMode::Pull), Some(e.to_string())),
-            };
-            if let Some(e) = &pull_failure {
-                report.record_pull_phase_failure(e);
-            }
+            let (mut report, pull_failure) =
+                crate::sync_wrapper::full_sync_pull_result(pull_all_partial(&client));
 
             // Persist the pull result even if push fails, so the report on
             // disk reflects the work the pass actually did.

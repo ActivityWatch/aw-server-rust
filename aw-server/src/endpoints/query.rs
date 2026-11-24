@@ -33,7 +33,8 @@ fn query_error_status(e: &QueryError) -> Status {
         | QueryError::InvalidType(_)
         | QueryError::InvalidFunctionParameters(_)
         | QueryError::TimeIntervalError(_)
-        | QueryError::RegexCompileError(_) => Status::BadRequest,
+        | QueryError::RegexCompileError(_)
+        | QueryError::ValueTooLarge(_) => Status::BadRequest,
     }
 }
 

@@ -51,6 +51,10 @@ pub enum QueryError {
     /// interpreter checks it between statements, so a single statement is
     /// never interrupted.
     TimeBudgetExceeded(String),
+    /// Combining values would build one larger than the interpreter's size
+    /// bound (1 GiB, approximate), e.g. a string or list doubled by repeated
+    /// `a = a + a;`.
+    ValueTooLarge(String),
 }
 
 impl fmt::Display for QueryError {

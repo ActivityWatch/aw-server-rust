@@ -812,6 +812,20 @@ impl DatastoreInstance {
         // Taking them out also keeps them out of the bucket cache.
         let events = bucket.events.take().map(|events| events.take_inner());
         if let Some(events) = &events {
+            // A retry must report the existing bucket before treating its event IDs
+            // as foreign to a new bucket. Read SQLite rather than the bucket cache.
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM buckets WHERE name = ?1)",
+                    [&bucket.id],
+                    |row| row.get(0),
+                )
+                .map_err(|err| {
+                    DatastoreError::InternalError(format!("Failed to look up bucket: {err}"))
+                })?;
+            if exists {
+                return Err(DatastoreError::BucketAlreadyExists(bucket.id));
+            }
             for event in events {
                 event_nanos(event)?;
             }

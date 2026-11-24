@@ -91,6 +91,26 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_create_bucket_retry_with_explicit_event_id_returns_already_exists() {
+        let ds = Datastore::new_in_memory(false);
+        let t = "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut event = test_event(t, Duration::seconds(1));
+        event.id = Some(42);
+        let mut bucket = test_bucket();
+        bucket.events = Some(TryVec::new(vec![event.clone()]));
+        ds.create_bucket(&bucket).unwrap();
+
+        assert!(matches!(
+            ds.create_bucket(&bucket),
+            Err(DatastoreError::BucketAlreadyExists(id)) if id == bucket.id
+        ));
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, event.id);
+        assert_eq!(events[0].duration, event.duration);
+    }
+
+    #[test]
     fn test_create_bucket_with_other_buckets_event_id_leaves_no_bucket() {
         let ds = Datastore::new_in_memory(false);
         let source = create_named_test_bucket(&ds, "source");

@@ -113,7 +113,13 @@ where
         // two distinct events crossing the previous cut can come back with the
         // same duration. Their real durations are unknown here: never flag
         // them (a missed duplicate is harmless, a wrong deletion is not).
-        page.retain(|e| page_end.is_none_or(|end| e.timestamp + e.duration < end));
+        // Durations travel through f64 JSON seconds: conversion of i64 nanos
+        // to f64, division by 1e9 and conversion back can lose nanoseconds.
+        // 4096ns conservatively covers that roundtrip even near i64::MAX;
+        // an exact-bound comparison would let rounded-down clipped events in.
+        page.retain(|e| {
+            page_end.is_none_or(|end| e.timestamp + e.duration < end - Duration::nanoseconds(4096))
+        });
         duplicate_ids.extend(find_duplicate_ids(&page));
 
         if exhausted {
@@ -366,6 +372,37 @@ mod tests {
         assert_eq!(total, all.len());
         assert!(dups.is_empty(), "all events are distinct, got: {dups:?}");
         assert_eq!(dups, single_shot(&all));
+    }
+
+    #[test]
+    fn json_rounded_clipped_events_are_not_flagged() {
+        for span in [500, 10_000_000, 9_000_000_000] {
+            // The second page clips x to `span` seconds + 1ns. At large
+            // magnitudes the f64 JSON duration loses that nanosecond, making
+            // the returned end appear strictly before the fetch bound.
+            let mut cut = event(28, 200 + span, 10, "a");
+            cut.timestamp += Duration::nanoseconds(2);
+            let all = vec![
+                event(30, 400 + span, 10, "c"),
+                event(29, 300 + span, 10, "b"),
+                cut,
+                event(11, 200, span + 200, "x"),
+                event(10, 200, span + 100, "x"),
+                event(2, 100, 10, "z"),
+                event(1, 100, 10, "z"),
+            ];
+            let (total, dups) = dedupe_bucket_paginated(|end, limit| {
+                let page = fake_fetch_page(&all, end, limit)?;
+                Ok(serde_json::from_str(&serde_json::to_string(&page)?)?)
+            })
+            .unwrap();
+            assert_eq!(total, all.len());
+            assert_eq!(
+                dups,
+                vec![2],
+                "span {span}: distinct clipped events flagged"
+            );
+        }
     }
 
     #[test]

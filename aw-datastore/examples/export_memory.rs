@@ -95,7 +95,8 @@ fn main() {
             );
         }
         "stream" => {
-            ds.write_export(&conn, None, std::io::sink()).unwrap();
+            ds.write_export(&conn, None, None, None, std::io::sink())
+                .unwrap();
             println!("{mode}: {count} synthetic events, {:?}", start.elapsed());
         }
         "materialized" => {

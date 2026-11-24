@@ -347,30 +347,39 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 // Simple host-based sync mode (backwards compatibility)
                 let mut report = sync::SyncReport::new(sync::SyncMode::Both);
-                // Pull
+                // Pull. A failed pull must not skip this device's push
+                // (ActivityWatch/aw-server-rust#875, item 8): record it, keep
+                // going, push, then return the first pull error.
+                let mut pull_err: Option<Box<dyn Error>> = None;
                 match host {
                     Some(hosts) => {
                         for host in hosts.iter() {
                             info!("Pulling from host: {}", host);
-                            // A later host's `?` must not drop earlier hosts
-                            // from last-sync-report.json. Same contract as the
-                            // push-failure path below: persist the aggregate,
-                            // then propagate.
                             match sync_wrapper::pull(host, &client) {
                                 Ok(one) => report.merge(one),
                                 Err(e) => {
+                                    warn!("Pull from {} failed, continuing: {}", host, e);
                                     report.record_pull_failure(host, &e);
-                                    report.finish();
-                                    info!("{}", report.summary_message());
-                                    aw_sync_persist(&report);
-                                    return Err(e);
+                                    pull_err.get_or_insert(e);
                                 }
                             }
                         }
                     }
                     None => {
                         info!("Pulling from all hosts");
-                        report.merge(sync_wrapper::pull_all(&client)?);
+                        match sync_wrapper::pull_all_partial(&client) {
+                            Ok((one, failure)) => {
+                                report.merge(one);
+                                if let Some(e) = failure {
+                                    report.record_pull_phase_failure(&e);
+                                    pull_err = Some(e.into());
+                                }
+                            }
+                            Err(e) => {
+                                report.record_pull_phase_failure(&e);
+                                pull_err = Some(e);
+                            }
+                        }
                     }
                 }
 
@@ -385,12 +394,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                         report.finish();
                         info!("{}", report.summary_message());
                         aw_sync_persist(&report);
-                        return Err(e);
+                        return Err(match pull_err {
+                            Some(p) => format!("pull failed: {p}; push failed: {e}").into(),
+                            None => e,
+                        });
                     }
                 }
                 report.finish();
                 info!("{}", report.summary_message());
                 aw_sync_persist(&report);
+                if let Some(e) = pull_err {
+                    return Err(e);
+                }
             }
         }
 

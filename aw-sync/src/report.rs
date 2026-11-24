@@ -133,6 +133,15 @@ impl SyncReport {
             .push(format!("pull from {host} failed: {err}"));
     }
 
+    /// Record a failed pull phase on a report whose push still ran.
+    ///
+    /// A total pull failure no longer skips the push
+    /// (ActivityWatch/aw-server-rust#875, item 8), so the failure has to stay
+    /// visible next to the pushed buckets instead of being the only outcome.
+    pub fn record_pull_phase_failure(&mut self, err: impl fmt::Display) {
+        self.warnings.push(format!("pull failed: {err}"));
+    }
+
     pub fn events_new(&self) -> i64 {
         self.peers
             .iter()

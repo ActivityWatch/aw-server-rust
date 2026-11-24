@@ -6,7 +6,30 @@ use crate::report::{PeerReport, SyncMode, SyncReport};
 use crate::sync::{sync_run, SyncSpec};
 use aw_client_rust::blocking::AwClient;
 
+// Unused by the CLI binary since its sync pushes through `pull_all_partial`;
+// still the library's pull-only entry point (Android `syncPull`).
+#[allow(dead_code)]
 pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
+    let (report, failure) = pull_all_partial(client)?;
+    match failure {
+        Some(e) => {
+            // Persist the aggregate (the failures) so a total abort is
+            // visible afterwards, then fail the pass.
+            crate::report::persist_last_report_warn(&report);
+            Err(e.into())
+        }
+        None => Ok(report),
+    }
+}
+
+/// `pull_all`, but a total pull failure comes back next to the report
+/// instead of replacing it.
+///
+/// A caller that pushes after pulling must still push when every peer failed
+/// (ActivityWatch/aw-server-rust#875, item 8), and must keep the failed-peer
+/// rows in the report it persists. `Err` is left for setup failures before
+/// any peer was tried.
+pub fn pull_all_partial(client: &AwClient) -> Result<(SyncReport, Option<String>), Box<dyn Error>> {
     let sync_root = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
     let dbs = crate::util::list_remote_dbs(&sync_root)?;
     let selection = crate::util::select_remote_dbs_detailed(dbs);
@@ -30,7 +53,7 @@ pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
     if selection.selected.is_empty() {
         info!("No remote databases found in {:?}", sync_root);
         report.finish();
-        return Ok(report);
+        return Ok((report, None));
     }
     info!(
         "Pulling {} remote database(s): {:?}",
@@ -78,19 +101,15 @@ pub fn pull_all(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
             }
         }
     }
+    report.finish();
     if attempted > 0 && succeeded == 0 {
-        report.finish();
-        // Persist the aggregate (the failures) so a total abort is visible
-        // afterwards, then fail the pass.
-        crate::report::persist_last_report_warn(&report);
-        return Err(format!(
+        let err = format!(
             "all {attempted} peers failed; last error: {}",
             last_err.as_deref().unwrap_or("unknown")
-        )
-        .into());
+        );
+        return Ok((report, Some(err)));
     }
-    report.finish();
-    Ok(report)
+    Ok((report, None))
 }
 
 pub fn pull(host: &str, client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {

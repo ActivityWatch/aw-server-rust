@@ -832,6 +832,24 @@ mod query_tests {
     }
 
     #[test]
+    fn test_unlexable_character_is_a_parse_error() {
+        // A character no token matches used to end the token stream silently,
+        // so everything after it was dropped and the query still succeeded.
+        let ds = setup_datastore_empty();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        for code in [
+            "return 1;\n@ return 2;",
+            "return 1;\u{a0}return 2;",
+            "return 1;\u{201c}x\u{201d}",
+            "return 1; x = \"unterminated;",
+        ] {
+            let res = aw_query::query(code, &interval, &ds);
+            assert_err_type!(res, QueryError::ParsingError(_));
+        }
+    }
+
+    #[test]
     fn test_list() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();

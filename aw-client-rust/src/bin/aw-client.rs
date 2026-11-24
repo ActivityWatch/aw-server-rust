@@ -19,13 +19,13 @@ use clap::{Parser, Subcommand};
     about = "CLI utility for aw-client to aid in interacting with the ActivityWatch server"
 )]
 struct Cli {
-    /// Address of host
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-    /// Port to use [default: 5600, or 5666 with --testing]
+    /// Address of host [default: from aw-client.toml, else 127.0.0.1]
+    #[arg(long)]
+    host: Option<String>,
+    /// Port to use [default: from aw-client.toml, else 5600, or 5666 with --testing]
     #[arg(long)]
     port: Option<u16>,
-    /// Use the testing server port by default
+    /// Use the testing server (`[server-testing]` in aw-client.toml) by default
     #[arg(long)]
     testing: bool,
     /// API key, if the server requires one
@@ -135,10 +135,13 @@ fn main() {
 }
 
 fn run(cli: Cli, out: &mut impl Write) -> Result<(), Box<dyn Error>> {
-    let port = cli.port.unwrap_or(if cli.testing { 5666 } else { 5600 });
+    // Like the Python CLI: flags win, then aw-client.toml (the file the watchers read).
+    let config = aw_client_rust::config::load_config(cli.testing);
+    let host = cli.host.unwrap_or(config.hostname);
+    let port = cli.port.unwrap_or(config.port);
     // A per-process name, so concurrent invocations don't trip the single-instance lock.
     let name = format!("aw-client-cli-{}", std::process::id());
-    let client = AwClient::new_with_api_key(&cli.host, port, &name, cli.api_key)?;
+    let client = AwClient::new_with_api_key(&host, port, &name, cli.api_key)?;
 
     match cli.command {
         Command::Heartbeat {

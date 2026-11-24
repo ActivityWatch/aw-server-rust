@@ -185,3 +185,42 @@ fn cli_reports_errors_with_a_non_zero_exit() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).starts_with("Error: "));
 }
+
+/// Without `--host`/`--port`, the server comes from `aw-client.toml`, as in the Python CLI.
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_reads_the_server_from_aw_client_toml() {
+    let (port, shutdown) = start_server();
+    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-cli-config-test").unwrap();
+    client
+        .wait_for_start()
+        .expect("aw-server didn't start; see stderr for a launch error");
+    client
+        .create_bucket_simple("aw-test-from-config", "test")
+        .unwrap();
+
+    let config_home =
+        std::env::temp_dir().join(format!("aw-client-cli-config-{}", std::process::id()));
+    let dir = config_home.join("activitywatch").join("aw-client");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("aw-client.toml"),
+        format!("[server]\nhostname = \"127.0.0.1\"\nport = \"{port}\"\n"),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aw-client"))
+        .env("XDG_CONFIG_HOME", &config_home)
+        .arg("buckets")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&config_home);
+    assert!(
+        output.status.success(),
+        "aw-client buckets failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("aw-test-from-config"));
+
+    shutdown.notify();
+}

@@ -1,7 +1,7 @@
 use std::cmp::max;
 
 use aw_models::Event;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 use crate::sort_by_timestamp;
 
@@ -26,8 +26,12 @@ pub fn filter_period_intersect(events: Vec<Event>, filter_events: Vec<Event>) ->
     // Intervals are treated as closed when either of them has zero duration: a zero-duration event
     // lying within a filter event (boundaries included) is kept, and an event containing a
     // zero-duration filter event yields a zero-duration part at that point.
-    let events = sort_by_timestamp(events);
-    let filter_events = sort_by_timestamp(filter_events);
+    //
+    // A negative-duration event covers no time; passed through, it would subtract time from any
+    // sum over the result. Drop it, as flood does.
+    let covers_time = |e: &Event| e.duration >= Duration::zero();
+    let events = sort_by_timestamp(events.into_iter().filter(covers_time).collect());
+    let filter_events = sort_by_timestamp(filter_events.into_iter().filter(covers_time).collect());
 
     let mut filtered_events = Vec::new();
     let mut i = 0;
@@ -251,6 +255,19 @@ mod tests {
 
         let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(5, 0, "")]);
         assert_eq!(res, vec![ev(5, 0, "x")]);
+    }
+
+    #[test]
+    fn test_filter_period_intersect_negative_duration() {
+        // A negative-duration event covers no time. Passed through, it would subtract time from
+        // any sum over the result, so it's dropped like flood drops it, as event or filter.
+        let res = filter_period_intersect(vec![ev(5, -2, "x")], vec![ev(0, 10, "")]);
+        assert_eq!(res, vec![]);
+        let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(5, -2, "")]);
+        assert_eq!(res, vec![]);
+        let res =
+            filter_period_intersect(vec![ev(0, 10, "x"), ev(5, -2, "y")], vec![ev(0, 10, "")]);
+        assert_eq!(res, vec![ev(0, 10, "x")]);
     }
 
     #[test]

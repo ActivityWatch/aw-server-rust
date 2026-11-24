@@ -1204,8 +1204,8 @@ fn sync_one(
     // tie than this is already corrupted well beyond what a resume-boundary dedup can repair —
     // that's the one-off cleanup tracked as a separate follow-up issue.
     const BOUNDARY_DEDUP_LOOKBACK: u64 = 2000;
-    // Destination intervals that start outside the edit window and end at
-    // resume. Their source rows' resume tails are dropped by ID below.
+    // Destination intervals ending at resume. A configured sync start may
+    // have clipped an old source row to begin inside the edit window.
     let mut old_dest_intervals: Vec<Event> = Vec::new();
     let boundary_dedup: HashMap<BoundaryFingerprint, usize> = if newest_timestamp.is_some() {
         let mut counts = HashMap::new();
@@ -1223,11 +1223,9 @@ fn sync_one(
             // with the same data. It may hold more than one source row (for
             // example a long row and a short tail merged by heartbeat).
             let fp = boundary_fingerprint(&e, e.duration.is_zero());
-            if resume_sync_at.is_some_and(|resume| {
-                !e.duration.is_zero()
-                    && e.timestamp < resume - EDIT_RECONCILE_LOOKBACK
-                    && e.timestamp + e.duration == resume
-            }) {
+            if resume_sync_at
+                .is_some_and(|resume| !e.duration.is_zero() && e.timestamp + e.duration == resume)
+            {
                 old_dest_intervals.push(e);
             }
             *counts.entry(fp).or_insert(0) += 1;
@@ -1931,6 +1929,63 @@ mod boundary_dedup_multipage_tests {
     }
 
     #[test]
+    #[ignore = "known draft blocker: merged interval needs source provenance; run explicitly"]
+    fn merged_old_segment_does_not_hide_a_new_short_tail() {
+        let src = Datastore::new_in_memory(false);
+        let dest = Datastore::new_in_memory(false);
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "merged-old-segment", "type": "test", "hostname": "laptop", "client": "test"
+        }))
+        .unwrap();
+        src.create_bucket(&bucket).unwrap();
+        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
+        src.insert_events(
+            &bucket.id,
+            &[Event {
+                id: None,
+                timestamp: base,
+                duration: Duration::days(10),
+                data: label("same"),
+            }],
+        )
+        .unwrap();
+        src.force_commit().unwrap();
+        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+        src.insert_events(
+            &bucket.id,
+            &[Event {
+                id: None,
+                timestamp: base + Duration::days(10),
+                duration: Duration::days(8),
+                data: label("same"),
+            }],
+        )
+        .unwrap();
+        src.force_commit().unwrap();
+        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+        let resume = base + Duration::days(18);
+        let merged = dest
+            .get_events("merged-old-segment-synced-from-laptop", None, None, None)
+            .unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].duration, Duration::days(18));
+        let mut added = new_points(resume);
+        added.push(Event {
+            id: None,
+            timestamp: resume - Duration::hours(1),
+            duration: Duration::hours(1),
+            data: label("same"),
+        });
+        src.insert_events(&bucket.id, &added).unwrap();
+        src.force_commit().unwrap();
+        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+        let got = dest
+            .get_events("merged-old-segment-synced-from-laptop", None, None, None)
+            .unwrap();
+        assert_eq!(got.len(), 8, "{got:?}");
+    }
+
+    #[test]
     fn start_clipped_old_tail_spends_its_destination_match() {
         let src = Datastore::new_in_memory(false);
         let dest = Datastore::new_in_memory(false);
@@ -1942,7 +1997,7 @@ mod boundary_dedup_multipage_tests {
         let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
         let resume = base + Duration::days(20);
         let spec = SyncSpec {
-            start: Some(base + Duration::days(10)),
+            start: Some(base + Duration::days(18)),
             ..SyncSpec::default()
         };
         src.insert_events(

@@ -1370,7 +1370,17 @@ fn sync_one(
                 let mut originals = Vec::new();
                 for e in &old_tails {
                     if let Some(id) = e.id {
-                        originals.push(ds_from.get_event(bucket_from.id.as_str(), id)?);
+                        let mut original = ds_from.get_event(bucket_from.id.as_str(), id)?;
+                        // The first copy may have been clipped by the requested
+                        // sync start. Compare the identity that copy would have,
+                        // not a full row that was never stored on destination.
+                        if let Some(start) = sync_spec.start {
+                            if original.timestamp < start {
+                                original.duration -= start - original.timestamp;
+                                original.timestamp = start;
+                            }
+                        }
+                        originals.push(original);
                     }
                 }
                 // Match unchanged rows first, then same-identity edits. This
@@ -1917,6 +1927,51 @@ mod boundary_dedup_multipage_tests {
                     .iter()
                     .any(|e| e.timestamp == resume && e.duration.is_zero()));
             }
+        }
+    }
+
+    #[test]
+    fn start_clipped_old_tail_spends_its_destination_match() {
+        let src = Datastore::new_in_memory(false);
+        let dest = Datastore::new_in_memory(false);
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "start-clipped", "type": "test", "hostname": "laptop", "client": "test"
+        }))
+        .unwrap();
+        src.create_bucket(&bucket).unwrap();
+        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
+        let resume = base + Duration::days(20);
+        let spec = SyncSpec {
+            start: Some(base + Duration::days(10)),
+            ..SyncSpec::default()
+        };
+        src.insert_events(
+            &bucket.id,
+            &[Event {
+                id: None,
+                timestamp: base,
+                duration: Duration::days(20),
+                data: label("same"),
+            }],
+        )
+        .unwrap();
+        src.force_commit().unwrap();
+        sync_datastores(&src, &dest, false, None, &spec).unwrap();
+        let mut added = new_points(resume);
+        added.push(Event {
+            id: None,
+            timestamp: resume - Duration::hours(1),
+            duration: Duration::hours(1),
+            data: label("same"),
+        });
+        src.insert_events(&bucket.id, &added).unwrap();
+        src.force_commit().unwrap();
+        for _ in 0..2 {
+            sync_datastores(&src, &dest, false, None, &spec).unwrap();
+            let got = dest
+                .get_events("start-clipped-synced-from-laptop", None, None, None)
+                .unwrap();
+            assert_eq!(got.len(), 8, "{got:?}");
         }
     }
 

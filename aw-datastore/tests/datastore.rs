@@ -111,6 +111,33 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_create_existing_bucket_validates_attached_event_times() {
+        let ds = Datastore::new_in_memory(false);
+        let t = "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut bucket = test_bucket();
+        bucket.events = Some(TryVec::new(vec![test_event(t, Duration::seconds(1))]));
+        ds.create_bucket(&bucket).unwrap();
+        let original = ds.get_events(&bucket.id, None, None, None).unwrap();
+
+        for bad in [
+            test_event(DateTime::<Utc>::MAX_UTC, Duration::seconds(1)),
+            test_event(t, Duration::seconds(9_223_372_036)),
+        ] {
+            bucket.events = Some(TryVec::new(vec![bad]));
+            assert!(matches!(
+                ds.create_bucket(&bucket),
+                Err(DatastoreError::InvalidEvent(_))
+            ));
+            let remaining = ds.get_events(&bucket.id, None, None, None).unwrap();
+            assert_eq!(remaining.len(), original.len());
+            assert_eq!(remaining[0].id, original[0].id);
+            assert_eq!(remaining[0].timestamp, original[0].timestamp);
+            assert_eq!(remaining[0].duration, original[0].duration);
+            assert_eq!(remaining[0].data, original[0].data);
+        }
+    }
+
+    #[test]
     fn test_create_bucket_with_other_buckets_event_id_leaves_no_bucket() {
         let ds = Datastore::new_in_memory(false);
         let source = create_named_test_bucket(&ds, "source");

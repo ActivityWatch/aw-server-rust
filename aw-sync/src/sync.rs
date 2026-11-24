@@ -1164,6 +1164,16 @@ fn sync_one(
             )
             .map_err(|e| format!("Failed to fetch destination boundary events for dedup: {e}"))?
         {
+            // Older long-event clips are suppressed by source ID below. Do not
+            // also allocate their destination fingerprint to dedup: that would
+            // consume a genuine point at resume with the same data. Exclude the
+            // destination row even if its source title changed, and retain the
+            // counted fingerprints of any actual points already stored there.
+            if resume_sync_at.is_some_and(|resume| {
+                e.timestamp < resume - EDIT_RECONCILE_LOOKBACK && e.timestamp + e.duration == resume
+            }) {
+                continue;
+            }
             let fp = (
                 (e.timestamp + e.duration)
                     .timestamp_nanos_opt()
@@ -1646,6 +1656,101 @@ mod boundary_dedup_multipage_tests {
                 .count(),
             BATCH_SIZE - 1
         );
+    }
+
+    #[test]
+    fn long_event_keeps_matching_points_across_multiple_pages() {
+        for (long_count, existing_points, new_points, edit_long) in [
+            (1, 0, 1, false),
+            (2, 0, 1, false),
+            (1, 1, 1, false),
+            (1, 1, 2, false),
+            (1, 0, 1, true),
+            (2, 1, 1, true),
+        ] {
+            let src = Datastore::new_in_memory(false);
+            let dest = Datastore::new_in_memory(false);
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "long-events", "type": "test", "hostname": "laptop", "client": "test"
+            }))
+            .unwrap();
+            src.create_bucket(&bucket).unwrap();
+            let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
+            let resume = base + Duration::days(10);
+            let data = serde_json::json!({"label": "same"})
+                .as_object()
+                .unwrap()
+                .clone();
+            let point = Event {
+                id: None,
+                timestamp: resume,
+                duration: Duration::zero(),
+                data: data.clone(),
+            };
+            let mut initial: Vec<Event> = (0..long_count)
+                .map(|i| Event {
+                    id: None,
+                    timestamp: base - Duration::hours(i),
+                    duration: Duration::days(10) + Duration::hours(i),
+                    data: data.clone(),
+                })
+                .collect();
+            initial.extend(std::iter::repeat_n(point.clone(), existing_points));
+            src.insert_events(&bucket.id, &initial).unwrap();
+            src.force_commit().unwrap();
+            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+
+            if edit_long {
+                // The point still matches the OLD destination payload. A
+                // decrement using only the suppressed source payload misses it.
+                let mut long_rows: Vec<Event> = src
+                    .get_events(&bucket.id, None, None, None)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|e| e.duration > Duration::zero())
+                    .collect();
+                src.delete_events_by_id(
+                    &bucket.id,
+                    long_rows.iter().map(|e| e.id.unwrap()).collect(),
+                )
+                .unwrap();
+                for row in &mut long_rows {
+                    row.id = None;
+                    row.data.insert("label".into(), serde_json::json!("edited"));
+                }
+                src.insert_events(&bucket.id, &long_rows).unwrap();
+            }
+            let mut added = vec![point; new_points];
+            // More than one page makes the point use insert_events, so an
+            // accidental heartbeat merge cannot conceal that it was dropped.
+            added.extend((1..=6).map(|i| {
+                Event {
+                    id: None,
+                    timestamp: resume + Duration::hours(i),
+                    duration: Duration::zero(),
+                    data: serde_json::json!({"label": format!("new-{i}")})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                }
+            }));
+            src.insert_events(&bucket.id, &added).unwrap();
+            src.force_commit().unwrap();
+            for _ in 0..2 {
+                sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+                let got = dest
+                    .get_events("long-events-synced-from-laptop", None, None, None)
+                    .unwrap();
+                assert_eq!(got.len(), initial.len() + added.len(), "{got:?}");
+                assert_eq!(
+                    got.iter()
+                        .filter(|e| e.timestamp == resume && e.duration.is_zero() && e.data == data)
+                        .count(),
+                    existing_points + new_points,
+                    "{got:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1206,7 +1206,7 @@ fn sync_one(
     const BOUNDARY_DEDUP_LOOKBACK: u64 = 2000;
     // Destination intervals that start outside the edit window and end at
     // resume. Their source rows' resume tails are dropped by ID below.
-    let mut old_dest_intervals: Vec<BoundaryFingerprint> = Vec::new();
+    let mut old_dest_intervals: Vec<Event> = Vec::new();
     let boundary_dedup: HashMap<BoundaryFingerprint, usize> = if newest_timestamp.is_some() {
         let mut counts = HashMap::new();
         for e in ds_to
@@ -1228,7 +1228,7 @@ fn sync_one(
                     && e.timestamp < resume - EDIT_RECONCILE_LOOKBACK
                     && e.timestamp + e.duration == resume
             }) {
-                old_dest_intervals.push(fp.clone());
+                old_dest_intervals.push(e);
             }
             *counts.entry(fp).or_insert(0) += 1;
         }
@@ -1362,22 +1362,38 @@ fn sync_one(
             // ending at resume.
             if !boundary_dedup.is_empty() {
                 let mut remaining = boundary_dedup.clone();
-                // Each dropped old tail was synced as one of the old destination
-                // intervals. Spend that interval's count first, so a distinct new
-                // tail with its data is not deduped against it. Pair by data;
-                // a tail whose payload was edited since pairs with any leftover.
-                let mut unpaired = 0usize;
+                // A dropped old tail may be a late import that was never
+                // copied. Recover its unclipped identity by source ID before
+                // spending a destination interval's count. Payload alone (or
+                // an arbitrary leftover) can steal a heartbeat-merged row's
+                // count and cause its already-copied short tail to be inserted.
+                let mut originals = Vec::new();
                 for e in &old_tails {
-                    let fp = boundary_fingerprint(e, false);
-                    if let Some(i) = old_dest_intervals.iter().position(|d| *d == fp) {
-                        old_dest_intervals.swap_remove(i);
-                        spend_boundary_count(&mut remaining, &fp);
-                    } else {
-                        unpaired += 1;
+                    if let Some(id) = e.id {
+                        originals.push(ds_from.get_event(bucket_from.id.as_str(), id)?);
                     }
                 }
-                for fp in old_dest_intervals.iter().take(unpaired) {
-                    spend_boundary_count(&mut remaining, fp);
+                // Match unchanged rows first, then same-identity edits. This
+                // preserves multiplicity without letting an edited sibling
+                // take another source row's unchanged destination payload.
+                let mut matched = vec![false; originals.len()];
+                for require_same_data in [true, false] {
+                    for (i, src) in originals.iter().enumerate() {
+                        if matched[i] {
+                            continue;
+                        }
+                        if let Some(j) = old_dest_intervals.iter().position(|dst| {
+                            event_identity(dst) == event_identity(src)
+                                && (!require_same_data || dst.data == src.data)
+                        }) {
+                            let dst = old_dest_intervals.swap_remove(j);
+                            spend_boundary_count(
+                                &mut remaining,
+                                &boundary_fingerprint(&dst, false),
+                            );
+                            matched[i] = true;
+                        }
+                    }
                 }
 
                 // Genuine points dedup only against destination points. Interval
@@ -1834,6 +1850,72 @@ mod boundary_dedup_multipage_tests {
                     usize::from(add_point),
                     "{got:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn imported_old_tail_does_not_spend_a_merged_intervals_match() {
+        for imported_label in ["different", "same"] {
+            let src = Datastore::new_in_memory(false);
+            let dest = Datastore::new_in_memory(false);
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": "imported-tail", "type": "test", "hostname": "laptop", "client": "test"
+            }))
+            .unwrap();
+            src.create_bucket(&bucket).unwrap();
+            let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
+            src.insert_events(
+                &bucket.id,
+                &[Event {
+                    id: None,
+                    timestamp: base,
+                    duration: Duration::days(10),
+                    data: label("same"),
+                }],
+            )
+            .unwrap();
+            src.force_commit().unwrap();
+            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+            src.insert_events(
+                &bucket.id,
+                &[Event {
+                    id: None,
+                    timestamp: base + Duration::days(10),
+                    duration: Duration::hours(1),
+                    data: label("same"),
+                }],
+            )
+            .unwrap();
+            src.force_commit().unwrap();
+            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+            let resume = base + Duration::days(10) + Duration::hours(1);
+            let before = dest
+                .get_events("imported-tail-synced-from-laptop", None, None, None)
+                .unwrap();
+            assert_eq!(before.len(), 1);
+            assert_eq!(before[0].duration, Duration::days(10) + Duration::hours(1));
+            // Imported after the cursor advanced: never copied to dest. Its
+            // clipped tail must not consume the merged row's dedup count,
+            // even when its payload matches that row.
+            let mut added = new_points(resume);
+            added.push(Event {
+                id: None,
+                timestamp: base + Duration::days(1),
+                duration: Duration::days(9) + Duration::hours(1),
+                data: label(imported_label),
+            });
+            src.insert_events(&bucket.id, &added).unwrap();
+            src.force_commit().unwrap();
+            for _ in 0..2 {
+                sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+                let got = dest
+                    .get_events("imported-tail-synced-from-laptop", None, None, None)
+                    .unwrap();
+                assert_eq!(got.len(), 7, "imported label={imported_label}: {got:?}");
+                assert!(!got
+                    .iter()
+                    .any(|e| e.timestamp == resume && e.duration.is_zero()));
             }
         }
     }

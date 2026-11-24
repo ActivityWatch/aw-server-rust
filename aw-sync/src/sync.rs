@@ -1071,7 +1071,6 @@ fn sync_one(
     bucket_to: Bucket,
     sync_spec: &SyncSpec,
 ) -> Result<BucketReport, String> {
-    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
     // Sync events
@@ -1094,6 +1093,11 @@ fn sync_one(
     }
 
     reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    // Count after reconcile: it may legitimately delete rows (a stale copy of an
+    // edited event, or a pre-existing duplicate), which must not trip the
+    // "shrank" check below. That check guards the incremental copy, which
+    // only adds or extends events.
+    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch

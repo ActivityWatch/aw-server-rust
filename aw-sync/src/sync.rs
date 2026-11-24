@@ -1107,6 +1107,20 @@ struct ResumeSourceIds {
 /// interval tail from consuming a point's count and the reverse.
 type BoundaryFingerprint = (i64, String, bool);
 
+/// Spend one destination occurrence of `fp`, if any is left.
+fn spend_boundary_count(
+    remaining: &mut HashMap<BoundaryFingerprint, usize>,
+    fp: &BoundaryFingerprint,
+) -> bool {
+    match remaining.get_mut(fp) {
+        Some(count) if *count > 0 => {
+            *count -= 1;
+            true
+        }
+        _ => false,
+    }
+}
+
 fn boundary_fingerprint(event: &Event, is_point: bool) -> BoundaryFingerprint {
     (
         (event.timestamp + event.duration)
@@ -1190,6 +1204,9 @@ fn sync_one(
     // tie than this is already corrupted well beyond what a resume-boundary dedup can repair —
     // that's the one-off cleanup tracked as a separate follow-up issue.
     const BOUNDARY_DEDUP_LOOKBACK: u64 = 2000;
+    // Destination intervals that start outside the edit window and end at
+    // resume. Their source rows' resume tails are dropped by ID below.
+    let mut old_dest_intervals: Vec<BoundaryFingerprint> = Vec::new();
     let boundary_dedup: HashMap<BoundaryFingerprint, usize> = if newest_timestamp.is_some() {
         let mut counts = HashMap::new();
         for e in ds_to
@@ -1206,6 +1223,13 @@ fn sync_one(
             // with the same data. It may hold more than one source row (for
             // example a long row and a short tail merged by heartbeat).
             let fp = boundary_fingerprint(&e, e.duration.is_zero());
+            if resume_sync_at.is_some_and(|resume| {
+                !e.duration.is_zero()
+                    && e.timestamp < resume - EDIT_RECONCILE_LOOKBACK
+                    && e.timestamp + e.duration == resume
+            }) {
+                old_dest_intervals.push(fp.clone());
+            }
             *counts.entry(fp).or_insert(0) += 1;
         }
         counts
@@ -1338,29 +1362,59 @@ fn sync_one(
             // ending at resume.
             if !boundary_dedup.is_empty() {
                 let mut remaining = boundary_dedup.clone();
-                // A dropped old tail is the source of a destination interval
-                // ending at resume. Spend that interval's count first, so a
-                // distinct new tail with the same data is not deduped against it.
+                // Each dropped old tail was synced as one of the old destination
+                // intervals. Spend that interval's count first, so a distinct new
+                // tail with its data is not deduped against it. Pair by data;
+                // a tail whose payload was edited since pairs with any leftover.
+                let mut unpaired = 0usize;
                 for e in &old_tails {
-                    if let Some(count) = remaining.get_mut(&boundary_fingerprint(e, false)) {
-                        *count = count.saturating_sub(1);
+                    let fp = boundary_fingerprint(e, false);
+                    if let Some(i) = old_dest_intervals.iter().position(|d| *d == fp) {
+                        old_dest_intervals.swap_remove(i);
+                        spend_boundary_count(&mut remaining, &fp);
+                    } else {
+                        unpaired += 1;
+                    }
+                }
+                for fp in old_dest_intervals.iter().take(unpaired) {
+                    spend_boundary_count(&mut remaining, fp);
+                }
+
+                // Genuine points dedup only against destination points. Interval
+                // tails dedup against destination intervals, then against points
+                // left over: an earlier sync may have stored an unmatched tail as
+                // a zero-length row. Points go first so a tail never takes the
+                // count of a point that is really present.
+                let is_point: Vec<bool> = chunk
+                    .iter()
+                    .map(|e| {
+                        e.duration.is_zero()
+                            && !e
+                                .id
+                                .is_some_and(|id| resume_ids.interval_tails.contains(&id))
+                    })
+                    .collect();
+                let mut keep = vec![true; chunk.len()];
+                for points_pass in [true, false] {
+                    for (i, e) in chunk.iter().enumerate() {
+                        if is_point[i] != points_pass {
+                            continue;
+                        }
+                        let hit = spend_boundary_count(
+                            &mut remaining,
+                            &boundary_fingerprint(e, is_point[i]),
+                        ) || (!is_point[i]
+                            && e.duration.is_zero()
+                            && spend_boundary_count(
+                                &mut remaining,
+                                &boundary_fingerprint(e, true),
+                            ));
+                        keep[i] = !hit;
                     }
                 }
                 let before_dedup = chunk.len();
-                chunk.retain(|e| {
-                    let is_point = e.duration.is_zero()
-                        && !e
-                            .id
-                            .is_some_and(|id| resume_ids.interval_tails.contains(&id));
-                    let fp = boundary_fingerprint(e, is_point);
-                    match remaining.get_mut(&fp) {
-                        Some(count) if *count > 0 => {
-                            *count -= 1;
-                            false
-                        }
-                        _ => true,
-                    }
-                });
+                let mut keep = keep.into_iter();
+                chunk.retain(|_| keep.next().unwrap_or(true));
                 let skipped = before_dedup - chunk.len();
                 if skipped > 0 {
                     info!("  - Skipped {} boundary duplicate(s)", skipped);
@@ -1837,6 +1891,136 @@ mod boundary_dedup_multipage_tests {
                 .get_events("long-tail-synced-from-laptop", None, None, None)
                 .unwrap();
             assert_eq!(got.len(), 1 + added.len(), "{got:?}");
+        }
+    }
+
+    fn label(text: &str) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::json!({ "label": text })
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    fn new_points(after: DateTime<Utc>) -> Vec<Event> {
+        (1..=6)
+            .map(|i| Event {
+                id: None,
+                timestamp: after + Duration::hours(i),
+                duration: Duration::zero(),
+                data: label(&format!("new-{i}")),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn edited_old_tail_does_not_dedup_a_new_tail_with_the_old_data() {
+        // The long row is edited from A to B on the source; the destination
+        // still holds A. Its dropped tail carries B but was synced as A, so it
+        // must spend A's count, or a new short tail with data A is lost.
+        let src = Datastore::new_in_memory(false);
+        let dest = Datastore::new_in_memory(false);
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "edited-tail", "type": "test", "hostname": "laptop", "client": "test"
+        }))
+        .unwrap();
+        src.create_bucket(&bucket).unwrap();
+        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
+        let long = Event {
+            id: None,
+            timestamp: base,
+            duration: Duration::days(10),
+            data: label("A"),
+        };
+        src.insert_events(&bucket.id, std::slice::from_ref(&long))
+            .unwrap();
+        src.force_commit().unwrap();
+        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+        let ids: Vec<i64> = src
+            .get_events(&bucket.id, None, None, None)
+            .unwrap()
+            .iter()
+            .map(|e| e.id.unwrap())
+            .collect();
+        src.delete_events_by_id(&bucket.id, ids).unwrap();
+        src.insert_events(
+            &bucket.id,
+            &[Event {
+                data: label("B"),
+                ..long
+            }],
+        )
+        .unwrap();
+        let resume = base + Duration::days(10);
+        let mut added = vec![Event {
+            id: None,
+            timestamp: resume - Duration::hours(1),
+            duration: Duration::hours(1),
+            data: label("A"),
+        }];
+        added.extend(new_points(resume));
+        src.insert_events(&bucket.id, &added).unwrap();
+        src.force_commit().unwrap();
+        for _ in 0..2 {
+            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+            let got = dest
+                .get_events("edited-tail-synced-from-laptop", None, None, None)
+                .unwrap();
+            assert_eq!(got.len(), 1 + added.len(), "{got:?}");
+        }
+    }
+
+    #[test]
+    fn stored_tail_is_not_copied_again_by_a_later_multipage_sync() {
+        // A new tail that matches nothing is stored as a zero-length row at
+        // resume. When it is the destination's newest row, the next sync
+        // fetches the same source tail again and must match it to that row.
+        let src = Datastore::new_in_memory(false);
+        let dest = Datastore::new_in_memory(false);
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "stored-tail", "type": "test", "hostname": "laptop", "client": "test"
+        }))
+        .unwrap();
+        src.create_bucket(&bucket).unwrap();
+        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
+        let resume = base + Duration::days(10);
+        src.insert_events(
+            &bucket.id,
+            &[Event {
+                id: None,
+                timestamp: base,
+                duration: Duration::days(10),
+                data: label("long"),
+            }],
+        )
+        .unwrap();
+        src.force_commit().unwrap();
+        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+        src.insert_events(
+            &bucket.id,
+            &[Event {
+                id: None,
+                timestamp: resume - Duration::hours(1),
+                duration: Duration::hours(1),
+                data: label("tail"),
+            }],
+        )
+        .unwrap();
+        src.force_commit().unwrap();
+        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+        let stored = dest
+            .get_events("stored-tail-synced-from-laptop", None, None, None)
+            .unwrap();
+        assert_eq!(stored.len(), 2, "{stored:?}");
+        assert_eq!(stored[0].timestamp, resume);
+        assert!(stored[0].duration.is_zero());
+        src.insert_events(&bucket.id, &new_points(resume)).unwrap();
+        src.force_commit().unwrap();
+        for _ in 0..2 {
+            sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+            let got = dest
+                .get_events("stored-tail-synced-from-laptop", None, None, None)
+                .unwrap();
+            assert_eq!(got.len(), 2 + 6, "{got:?}");
         }
     }
 

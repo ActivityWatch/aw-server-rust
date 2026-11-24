@@ -2113,6 +2113,47 @@ mod api_tests {
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
     }
+    #[test]
+    fn query_cache_skips_queries_that_reassign_timeinterval() {
+        use std::sync::Arc;
+
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
+        let cache: Arc<endpoints::query_cache::QueryCache> = Arc::clone(&state.query_cache);
+        let server = endpoints::build_rocket(state, config::AWConfig::default());
+        let client = Client::untracked(server).expect("valid instance");
+        let post_query = |query: &str| {
+            client
+                .post("/api/0/query")
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(
+                    json!({
+                        "timeperiods": ["2000-01-01T00:00:00Z/2000-01-02T00:00:00Z"],
+                        "query": [query]
+                    })
+                    .to_string(),
+                )
+                .dispatch()
+        };
+
+        // Reads a range other than the requested period, so a write there
+        // could never invalidate a cached result: don't store it.
+        let res = post_query(
+            "TIMEINTERVAL = \"2010-01-01T00:00:00Z/2011-01-01T00:00:00Z\"; RETURN = TIMEINTERVAL;",
+        );
+        assert_eq!(res.status(), Status::Ok);
+        assert_eq!(cache.stats().entries, 0);
+
+        // An ordinary query for the same past period is still cached.
+        let res = post_query("RETURN = TIMEINTERVAL;");
+        assert_eq!(res.status(), Status::Ok);
+        assert_eq!(cache.stats().entries, 1);
+    }
+
     /// End-to-end check of the finished-period query cache: a past period is
     /// served from cache, and a write overlapping it invalidates the entry.
     #[test]

@@ -59,6 +59,47 @@ impl fmt::Display for QueryError {
     }
 }
 
+/// Whether `code` assigns to `TIMEINTERVAL` anywhere, including inside `if`
+/// blocks. `query_bucket` reads its range from that variable, so a program that
+/// reassigns it can read events outside the requested timeperiod, and a cached
+/// result for the requested period would miss writes to the range it actually
+/// read (ActivityWatch/aw-server-rust#882 item 7). Code that doesn't parse
+/// returns `false`; running it fails anyway.
+pub fn assigns_timeinterval(code: &str) -> bool {
+    use ast::Expr_;
+    let program = match parser::parse(lexer::Lexer::new(code)) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    // Iterative, so a deeply nested program can't overflow the stack here.
+    let mut stack: Vec<&ast::Expr> = program.stmts.iter().collect();
+    while let Some(expr) = stack.pop() {
+        match &expr.node {
+            Expr_::Assign(var, _) if var == "TIMEINTERVAL" => return true,
+            Expr_::Add(a, b)
+            | Expr_::Sub(a, b)
+            | Expr_::Mul(a, b)
+            | Expr_::Div(a, b)
+            | Expr_::Mod(a, b)
+            | Expr_::Equal(a, b) => {
+                stack.push(a);
+                stack.push(b);
+            }
+            Expr_::Assign(_, e) | Expr_::Function(_, e) | Expr_::Return(e) => stack.push(e),
+            Expr_::If(branches) => {
+                for (cond, block) in branches {
+                    stack.push(cond);
+                    stack.extend(block.iter());
+                }
+            }
+            Expr_::List(items) => stack.extend(items.iter()),
+            Expr_::Dict(d) => stack.extend(d.values()),
+            Expr_::Var(_) | Expr_::Bool(_) | Expr_::Number(_) | Expr_::String(_) => (),
+        }
+    }
+    false
+}
+
 pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
     query_with_deadline(code, ti, ds, None)
 }

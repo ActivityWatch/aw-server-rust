@@ -90,6 +90,11 @@ pub fn query(
     // Whether results computed here may be stored. A failed flush leaves
     // overlapping writes invisible to the reader.
     let mut store_results = use_cache;
+    // A program that reassigns TIMEINTERVAL reads outside the requested
+    // periods, so writes the cache tracks by period can't invalidate it.
+    if store_results && aw_query::assigns_timeinterval(&query_code) {
+        store_results = false;
+    }
     // The reader only sees committed data, and writes (heartbeats, but also
     // edits to old events and imports) are acknowledged before the writer's
     // batch commits. Flush first when any write since the last flush touched

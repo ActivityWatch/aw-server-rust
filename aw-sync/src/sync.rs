@@ -973,6 +973,14 @@ fn reconcile_updated_events(
         return Ok(());
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
+    // get_events clips an event straddling the start bound to start at that
+    // bound. Querying from `lookback_start` would give a straddler the clipped
+    // identity `(lookback_start, shortened)` on both sides, and an edit would
+    // then replace the full dest row with the clipped copy, permanently
+    // dropping its earlier part. Query 1ns earlier instead: straddlers come back
+    // at `fetch_start` and the `>= lookback_start` filters below skip them.
+    // Their start lies outside the edit window, like any older event.
+    let fetch_start = lookback_start - Duration::nanoseconds(1);
 
     // Bound both fetches to the lookback window ending at `resume`.
     // end=None would load every newer source event when dest is far behind,
@@ -988,16 +996,12 @@ fn reconcile_updated_events(
     // ActivityWatch/aw-server-rust#697 then drops this bucket, not the daemon.
     let source_events = ds_from.get_events(
         bucket_from.id.as_str(),
-        Some(lookback_start),
+        Some(fetch_start),
         Some(resume),
         None,
     )?;
-    let dest_events = ds_to.get_events(
-        bucket_to.id.as_str(),
-        Some(lookback_start),
-        Some(resume),
-        None,
-    )?;
+    let dest_events =
+        ds_to.get_events(bucket_to.id.as_str(), Some(fetch_start), Some(resume), None)?;
 
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for event in dest_events {

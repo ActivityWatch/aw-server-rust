@@ -176,9 +176,15 @@ mod query_tests {
 
         // Modulo by zero is a MathError, like division by zero (it used to yield NaN).
         let res = aw_query::query("return 5 % 0;", &interval, &ds);
-        assert_err_type!(res, QueryError::MathError(_));
+        match res {
+            Err(QueryError::MathError(message)) => assert!(message.contains("zero divisor")),
+            other => panic!("Expected a zero-divisor error, got {other:?}"),
+        }
         let res = aw_query::query("return filter_keyvals([], \"k\", [0 % 0]);", &interval, &ds);
         assert_err_type!(res, QueryError::MathError(_));
+
+        let res = aw_query::query("return 0 % 5;", &interval, &ds).unwrap();
+        assert_eq!(res, DataType::Number(0.0));
 
         // A literal too large for f64 is infinite; converting it to a JSON value
         // used to unwrap None and panic the request.

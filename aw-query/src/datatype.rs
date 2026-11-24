@@ -49,8 +49,9 @@ fn serialize_function<S, F>(_element: &str, _fun: &F, _serializer: S) -> Result<
 where
     S: Serializer,
 {
-    panic!("Query function was unevaluated and was attempted to be serialized, panic!");
-    //element.id.serialize(serializer)
+    Err(serde::ser::Error::custom(
+        "Query function cannot be serialized; call it instead",
+    ))
 }
 
 // Needed because of a limitation in rust where you cannot derive(Debug) on a
@@ -504,6 +505,24 @@ impl TryFrom<&DataType> for Rule {
             Err(QueryError::InvalidFunctionParameters(format!(
                 "Unknown rule type '{rtype}'"
             )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod serialization_tests {
+    use super::{functions, DataType};
+    use crate::VarEnv;
+
+    #[test]
+    fn serializing_function_values_returns_errors() {
+        let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
+        for name in ["print", "query_bucket"] {
+            let function = env.get(name).unwrap().clone();
+            assert!(serde_json::to_string(&function).is_err());
+            assert!(serde_json::to_value(&function).is_err());
+            assert!(serde_json::to_string(&DataType::List(vec![function])).is_err());
         }
     }
 }

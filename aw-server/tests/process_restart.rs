@@ -42,6 +42,7 @@ impl Server {
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("LOG_LEVEL", "info")
             .env_remove("AW_DB_PASSWORD")
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
@@ -143,6 +144,19 @@ impl Drop for Server {
     }
 }
 
+fn assert_clean_shutdown(root: &Path) {
+    let log = std::fs::read_to_string(root.join("server.log")).unwrap();
+    assert_eq!(
+        log.matches("Sending close request to database").count(),
+        2,
+        "graceful shutdown must close both the reader and writer: {log}"
+    );
+    assert!(
+        !log.contains("DB worker quitting"),
+        "graceful shutdown must not leave a database worker unclosed: {log}"
+    );
+}
+
 fn stopwatch_restart(graceful: bool) {
     let dir = TempDir::new().unwrap();
     let mut server = Server::start(dir.path());
@@ -154,6 +168,9 @@ fn stopwatch_restart(graceful: bool) {
     );
     assert!(started["id"].is_number());
     server.stop(graceful);
+    if graceful {
+        assert_clean_shutdown(dir.path());
+    }
     server = Server::start(dir.path());
     assert_eq!(server.events("timer"), json!([started.clone()]));
 
@@ -163,6 +180,9 @@ fn stopwatch_restart(graceful: bool) {
     let acknowledged = server.post("/buckets/timer/events", &json!([stopped.clone()]));
     assert_eq!(acknowledged, json!([stopped]));
     server.stop(graceful);
+    if graceful {
+        assert_clean_shutdown(dir.path());
+    }
     server = Server::start(dir.path());
     assert_eq!(server.events("timer"), acknowledged);
     server.stop(false);

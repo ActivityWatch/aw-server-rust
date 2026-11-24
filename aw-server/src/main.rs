@@ -609,6 +609,9 @@ async fn main() -> Result<(), rocket::Error> {
     // Rocket owns the server state; keep a handle so the DB can be closed
     // (final commit + WAL checkpoint) after a graceful shutdown.
     let datastore_handle = datastore.clone();
+    // The read-only handle (#807) has its own worker; close it too, or that
+    // worker logs the same spurious "DB worker quitting" ERROR on shutdown.
+    let reader_handle = reader.clone();
     let server_state = endpoints::ServerState {
         reader,
         query_cache_enabled: config.query_cache,
@@ -632,6 +635,10 @@ async fn main() -> Result<(), rocket::Error> {
     // Commit the open batch and checkpoint the WAL before exiting. Otherwise
     // the worker only notices the dropped handles (logging a spurious
     // "DB worker quitting" ERROR) and commits in a race with process exit.
+    // Reader first, so the writer's WAL checkpoint is not held back by it.
+    if let Some(reader) = &reader_handle {
+        reader.close();
+    }
     datastore_handle.close();
     launched?;
 

@@ -353,7 +353,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut pull_err: Option<Box<dyn Error>> = None;
                 match host {
                     Some(hosts) => {
-                        for host in hosts.iter() {
+                        for host in hosts
+                            .iter()
+                            .map(|host| host.trim())
+                            .filter(|host| !host.is_empty())
+                        {
                             info!("Pulling from host: {}", host);
                             match sync_wrapper::pull(host, &client) {
                                 Ok(one) => report.merge(one),

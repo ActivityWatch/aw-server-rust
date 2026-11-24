@@ -382,6 +382,35 @@ fn event_nanos(event: &Event) -> Result<(i64, i64), DatastoreError> {
     Ok((start, end))
 }
 
+/// Explicit IDs may replace events only in their owning bucket. A new bucket
+/// has no row ID yet, so every existing event ID belongs to another bucket.
+fn validate_event_ids(
+    conn: &Connection,
+    bucket_id: &str,
+    bucketrow: Option<i64>,
+    events: &[Event],
+) -> Result<(), DatastoreError> {
+    for event in events {
+        let Some(id) = event.id else { continue };
+        let owner: Option<i64> = conn
+            .query_row("SELECT bucketrow FROM events WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|err| {
+                DatastoreError::InternalError(format!(
+                    "Failed to look up owner of event {id}: {err}"
+                ))
+            })?;
+        if owner.is_some() && owner != bucketrow {
+            return Err(DatastoreError::InvalidEvent(format!(
+                "Event id {id} belongs to a different bucket than '{bucket_id}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Whether a time filter can't match any stored event: a start after 2262 or an end
 /// before 1677, beyond the range event times are stored in.
 fn filter_excludes_everything(
@@ -786,6 +815,7 @@ impl DatastoreInstance {
             for event in events {
                 event_nanos(event)?;
             }
+            validate_event_ids(conn, &bucket.id, None, events)?;
         }
         let mut stmt = match conn.prepare_cached(
             "
@@ -938,25 +968,7 @@ impl DatastoreInstance {
         // `events.id` is global to all buckets, so INSERT OR REPLACE would move (and so
         // delete) another bucket's event when handed its id. Refuse that, up front for the
         // same all-or-nothing reason as above.
-        let bucketrow = bucket.bid.unwrap();
-        for event in events.iter() {
-            let Some(id) = event.id else { continue };
-            let owner: Option<i64> = conn
-                .query_row("SELECT bucketrow FROM events WHERE id = ?1", [id], |row| {
-                    row.get(0)
-                })
-                .optional()
-                .map_err(|err| {
-                    DatastoreError::InternalError(format!(
-                        "Failed to look up owner of event {id}: {err}"
-                    ))
-                })?;
-            if owner.is_some_and(|owner| owner != bucketrow) {
-                return Err(DatastoreError::InvalidEvent(format!(
-                    "Event id {id} belongs to a different bucket than '{bucket_id}'"
-                )));
-            }
-        }
+        validate_event_ids(conn, bucket_id, bucket.bid, &events)?;
 
         let mut stmt = match conn.prepare_cached(
             "

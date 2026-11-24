@@ -73,7 +73,11 @@ mod datastore_tests {
 
         let mut hijack = test_event(t, Duration::seconds(5));
         hijack.id = Some(foreign_id);
-        assert!(ds.insert_events(&b.id, &[hijack]).is_err());
+        let valid = test_event(t, Duration::seconds(2));
+        assert!(matches!(
+            ds.insert_events(&b.id, &[valid, hijack]),
+            Err(DatastoreError::InvalidEvent(_))
+        ));
 
         assert_eq!(ds.get_event_count(&a.id, None, None).unwrap(), 1);
         assert_eq!(ds.get_event_count(&b.id, None, None).unwrap(), 0);
@@ -84,6 +88,42 @@ mod datastore_tests {
         let events = ds.get_events(&a.id, None, None, None).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].duration, Duration::seconds(7));
+    }
+
+    #[test]
+    fn test_create_bucket_with_other_buckets_event_id_leaves_no_bucket() {
+        let ds = Datastore::new_in_memory(false);
+        let source = create_named_test_bucket(&ds, "source");
+        let t = "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let stored = ds
+            .insert_events(&source.id, &[test_event(t, Duration::seconds(1))])
+            .unwrap();
+        let mut hijack = test_event(t, Duration::seconds(5));
+        hijack.id = stored[0].id;
+        let mut bucket = test_bucket();
+        bucket.events = Some(TryVec::new(vec![
+            test_event(t, Duration::seconds(2)),
+            hijack,
+        ]));
+
+        assert!(matches!(
+            ds.create_bucket(&bucket),
+            Err(DatastoreError::InvalidEvent(_))
+        ));
+        assert!(matches!(
+            ds.get_bucket(&bucket.id),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        assert!(!ds.get_buckets().unwrap().contains_key(&bucket.id));
+        let remaining = ds.get_events(&source.id, None, None, None).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, stored[0].id);
+        assert_eq!(remaining[0].duration, Duration::seconds(1));
+
+        // A corrected retry succeeds: neither a database row nor a cache entry remains.
+        bucket.events = Some(TryVec::new(vec![test_event(t, Duration::seconds(2))]));
+        ds.create_bucket(&bucket).unwrap();
+        assert_eq!(ds.get_event_count(&bucket.id, None, None).unwrap(), 1);
     }
 
     #[test]

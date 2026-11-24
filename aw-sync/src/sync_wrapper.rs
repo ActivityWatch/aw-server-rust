@@ -87,10 +87,6 @@ pub fn pull_all_partial(client: &AwClient) -> Result<(SyncReport, Option<String>
                     "Skipping peer '{}' ({:?}): {e}",
                     remote.hostname, remote.path
                 );
-                warn!(
-                    "Skipping peer '{}' ({:?}): {e}",
-                    remote.hostname, remote.path
-                );
                 report.peers.push(PeerReport::failed(
                     remote.device_id,
                     remote.hostname,

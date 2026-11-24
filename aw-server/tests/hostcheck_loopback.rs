@@ -23,8 +23,7 @@ fn client_bound_to(address: &str) -> Client {
 
 /// A server bound to the IPv6 loopback (`address = "::1"`) is just as local as
 /// one bound to 127.0.0.1, so a DNS-rebinding page (AAAA attacker.example -> ::1)
-/// must not be able to read data. HostCheck only enables validation for the
-/// literal strings "127.0.0.1" / "localhost", so it is silently disabled here.
+/// must not be able to read data. HostCheck used to skip validation for this bind.
 #[test]
 fn ipv6_loopback_bind_rejects_rebinding_host_on_read() {
     let client = client_bound_to("::1");
@@ -56,10 +55,10 @@ fn ipv6_loopback_bind_rejects_rebinding_host_on_write() {
         .get("/api/0/buckets/rebound")
         .header(Header::new("Host", "[::1]:5600"))
         .dispatch();
-    assert_ne!(
+    assert_eq!(
         res.status(),
-        Status::Ok,
-        "bucket was created through a rebinding Host header"
+        Status::NotFound,
+        "expected the bucket to be absent after the rejected write"
     );
 }
 
@@ -83,6 +82,12 @@ fn loopback_binds_accept_their_own_host() {
         ("::1", "[::1]:5600"),
         ("::1", "[::1]"),
         ("::1", "localhost:5600"),
+        ("::1", "[0:0:0:0:0:0:0:1]:5600"),
+        ("::ffff:127.0.0.1", "[::ffff:127.0.0.1]:5600"),
+        ("::ffff:127.0.0.1", "[::ffff:7f00:1]:5600"),
+        ("::ffff:127.0.0.2", "[::ffff:7f00:2]:5600"),
+        ("::ffff:7f00:2", "127.0.0.2:5600"),
+        ("127.0.0.2", "[::ffff:127.0.0.2]:5600"),
         ("127.0.0.2", "127.0.0.2:5600"),
         ("127.0.0.1", "127.0.0.1:5600"),
     ] {
@@ -95,11 +100,41 @@ fn loopback_binds_accept_their_own_host() {
     }
 }
 
+/// Canonicalizing IP literals must not broaden the allowlist to unrelated IPs.
+#[test]
+fn loopback_bind_rejects_unrelated_ip_hosts() {
+    let client = client_bound_to("127.0.0.2");
+    for host in [
+        "127.0.0.3:5600",
+        "[::ffff:7f00:3]:5600",
+        "192.168.0.1:5600",
+        "[::ffff:192.168.0.1]:5600",
+        "[2001:db8::1]:5600",
+    ] {
+        let res = client
+            .get("/api/0/info")
+            .header(Header::new("Host", host))
+            .dispatch();
+        assert_eq!(res.status(), Status::BadRequest, "Host {host}");
+    }
+}
+
 /// A malformed bracketed Host is rejected rather than parsed loosely.
 #[test]
 fn malformed_ipv6_host_is_rejected() {
     let client = client_bound_to("::1");
-    for host in ["[::1", "[::1]x", "[attacker.example]:5600"] {
+    for host in [
+        "[::1",
+        "[::1]x",
+        "[attacker.example]:5600",
+        "[localhost]:5600",
+        "[127.0.0.1]:5600",
+        "[::1]:not-a-port",
+        "[::1]:",
+        "[::1]:5600:extra",
+        "localhost:not-a-port",
+        "localhost:5600:extra",
+    ] {
         let res = client
             .get("/api/0/info")
             .header(Header::new("Host", host))

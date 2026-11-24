@@ -7,7 +7,6 @@ use std::{
 };
 
 use chrono::DateTime;
-use chrono::Duration;
 use chrono::Utc;
 
 use rusqlite::Connection;
@@ -31,7 +30,7 @@ type RequestReceiver = request_channel::RequestReceiver<Command, Result<Response
 
 /// Longest a write stays in the open batch before it is committed, including
 /// when the worker is idle.
-const COMMIT_INTERVAL_SECS: i64 = 15;
+const COMMIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// SQLite URI for a side-effect-free open: no `-wal`/`-shm`, no locks that
 /// fight a file syncer. `?`/`#`/`%` in the path are encoded so they cannot
@@ -494,7 +493,8 @@ impl DatastoreWorker {
 
         // Start handling and respond to requests
         loop {
-            let last_commit_time: DateTime<Utc> = Utc::now();
+            // Monotonic: a wall-clock correction must not stretch the window.
+            let last_commit_time = std::time::Instant::now();
             let mut tx: Transaction = match conn.transaction_with_behavior(tx_behavior) {
                 Ok(tx) => tx,
                 Err(err) => {
@@ -524,10 +524,8 @@ impl DatastoreWorker {
                 // commit interval: with no further request the worker would
                 // otherwise sit on acknowledged writes indefinitely.
                 let polled = if batch_open {
-                    let elapsed = (Utc::now() - last_commit_time).to_std().unwrap_or_default();
-                    let interval = std::time::Duration::from_secs(COMMIT_INTERVAL_SECS as u64);
                     self.responder
-                        .poll_timeout(interval.saturating_sub(elapsed))
+                        .poll_timeout(COMMIT_INTERVAL.saturating_sub(last_commit_time.elapsed()))
                 } else {
                     self.responder.poll().map(Some)
                 };
@@ -557,9 +555,7 @@ impl DatastoreWorker {
                     break;
                 }
 
-                let now: DateTime<Utc> = Utc::now();
-                let commit_interval_passed: bool =
-                    (now - last_commit_time) > Duration::seconds(COMMIT_INTERVAL_SECS);
+                let commit_interval_passed: bool = last_commit_time.elapsed() > COMMIT_INTERVAL;
                 if self.commit
                     || commit_interval_passed
                     || self.uncommitted_events > 100

@@ -295,9 +295,20 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
     fs::create_dir_all(path)?;
 
     let remotedir = path.join(device_id);
+    refuse_symlink(&remotedir)?;
     fs::create_dir_all(&remotedir)?;
 
     let dbfile = local_staging_db_path(&remotedir)?;
+    // A peer can replicate a symlink into our staging dir (Syncthing does on
+    // Unix). Opening it would migrate and write whatever file it points at,
+    // so refuse the database and every sidecar sqlite may open next to it.
+    // A symlinked legacy test.db is caught here too: renaming moves the link.
+    refuse_symlink(&dbfile)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = dbfile.clone().into_os_string();
+        sidecar.push(suffix);
+        refuse_symlink(Path::new(&sidecar))?;
+    }
 
     // Print a message if dbfile doesn't already exist
     if !dbfile.exists() {
@@ -306,6 +317,20 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
 
     let ds_localremote = create_datastore(&dbfile)?;
     Ok(ds_localremote)
+}
+
+/// Fail if `path` itself is a symlink; a missing path is fine.
+fn refuse_symlink(path: &Path) -> Result<(), Box<dyn Error>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(format!(
+            "refusing to use staging path {}: it is a symlink",
+            path.display()
+        )
+        .into()),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn local_staging_db_path(remotedir: &Path) -> Result<PathBuf, Box<dyn Error>> {
@@ -1400,6 +1425,68 @@ mod pull_only_staging_tests {
         let remotes = crate::util::find_remotes_nonlocal(&dir, "device-local", None).unwrap();
         assert!(remotes.is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A peer can replicate a symlink into our own staging dir (Syncthing does
+    /// on Unix). Push must not open whatever it points at read-write.
+    #[cfg(unix)]
+    fn assert_symlinked_staging_refused(plant: impl FnOnce(&Path, &Path)) {
+        let dir = temp_dir();
+        let outside = temp_dir();
+        let foreign = outside.join("places.sqlite");
+        fs::write(&foreign, b"not an aw-sync database").unwrap();
+        let device_dir = dir.join("device-local");
+        plant(&device_dir, &foreign);
+
+        let result = setup_local_remote(&dir, "device-local");
+        let err = match result {
+            Ok(ds) => {
+                ds.close();
+                panic!("push opened a symlinked staging path");
+            }
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("symlink"), "{err}");
+        assert_eq!(fs::read(&foreign).unwrap(), b"not an aw-sync database");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_refuses_symlinked_staging_db() {
+        assert_symlinked_staging_refused(|device_dir, foreign| {
+            fs::create_dir_all(device_dir).unwrap();
+            std::os::unix::fs::symlink(foreign, device_dir.join("sync.db")).unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_refuses_symlinked_legacy_staging_db() {
+        assert_symlinked_staging_refused(|device_dir, foreign| {
+            fs::create_dir_all(device_dir).unwrap();
+            std::os::unix::fs::symlink(foreign, device_dir.join("test.db")).unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_refuses_symlinked_staging_sidecar() {
+        assert_symlinked_staging_refused(|device_dir, foreign| {
+            fs::create_dir_all(device_dir).unwrap();
+            std::os::unix::fs::symlink(foreign, device_dir.join("sync.db-wal")).unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_refuses_symlinked_device_dir() {
+        assert_symlinked_staging_refused(|device_dir, foreign| {
+            let target = foreign.parent().unwrap().join("elsewhere");
+            fs::create_dir_all(&target).unwrap();
+            std::os::unix::fs::symlink(&target, device_dir).unwrap();
+        });
     }
 
     #[test]

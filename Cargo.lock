@@ -223,6 +223,7 @@ dependencies = [
  "log",
  "regex",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

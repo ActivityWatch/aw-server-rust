@@ -32,6 +32,30 @@ type RequestReceiver = request_channel::RequestReceiver<Command, Result<Response
 /// when the worker is idle.
 const COMMIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
+// CLOCK_BOOTTIME is monotonic and includes device suspend on Linux/Android.
+// std::time::Instant uses CLOCK_MONOTONIC there, which stops during suspend.
+// A request on wake therefore commits an overdue batch immediately; the
+// channel timeout itself still waits in awake time when no request arrives.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+struct CommitInstant(rustix::time::Timespec);
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+impl CommitInstant {
+    fn now() -> Self {
+        Self(rustix::time::clock_gettime(rustix::time::ClockId::Boottime))
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        let now = Self::now();
+        (now.0 - self.0)
+            .try_into()
+            .expect("monotonic boot clock went backwards")
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+use std::time::Instant as CommitInstant;
+
 /// SQLite URI for a side-effect-free open: no `-wal`/`-shm`, no locks that
 /// fight a file syncer. `?`/`#`/`%` in the path are encoded so they cannot
 /// be parsed as the query string.
@@ -494,7 +518,7 @@ impl DatastoreWorker {
         // Start handling and respond to requests
         loop {
             // Monotonic: a wall-clock correction must not stretch the window.
-            let last_commit_time = std::time::Instant::now();
+            let last_commit_time = CommitInstant::now();
             let mut tx: Transaction = match conn.transaction_with_behavior(tx_behavior) {
                 Ok(tx) => tx,
                 Err(err) => {

@@ -9,7 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -962,15 +962,19 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
 /// also re-fetched as a start-clipped fragment, and heartbeat() refuses to
 /// merge different data, which would insert a duplicate unless dest already
 /// holds the new payload.
+///
+/// Return source IDs skipped outside the edit window. The incremental copy
+/// must ignore their zero-length resume fragments even when an edit changed
+/// their payload; those fragments no longer match destination fingerprints.
 fn reconcile_updated_events(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
-) -> Result<(), String> {
+) -> Result<HashSet<i64>, String> {
     let Some(resume) = resume_sync_at else {
-        return Ok(());
+        return Ok(HashSet::new());
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
     // get_events clips an event straddling the start bound to start at that
@@ -1014,11 +1018,18 @@ fn reconcile_updated_events(
     }
 
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
+    let mut outside_lookback = HashSet::new();
     for src in source_events {
         // Skip events that start at/after the dest cursor; the incremental
         // copy owns those. Do not use end>resume: the dest-latest event starts
         // before resume and must still be title-reconciled.
-        if src.timestamp < lookback_start || src.timestamp >= resume {
+        if src.timestamp < lookback_start {
+            if let Some(id) = src.id {
+                outside_lookback.insert(id);
+            }
+            continue;
+        }
+        if src.timestamp >= resume {
             continue;
         }
         src_by_identity
@@ -1064,7 +1075,7 @@ fn reconcile_updated_events(
         }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
-    Ok(())
+    Ok(outside_lookback)
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -1097,7 +1108,8 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    let outside_lookback =
+        reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch
@@ -1186,6 +1198,21 @@ fn sync_one(
     let mut events_sent = 0usize;
     let mut pages_written = 0u32;
 
+    let prepare_chunk = |chunk: &mut Vec<Event>| {
+        chunk.retain(|e| {
+            // Genuine points at resume have distinct source IDs, even with the
+            // same data. Positive-duration tails still use the heartbeat path.
+            !(newest_timestamp.is_some()
+                && Some(e.timestamp) == resume_sync_at
+                && e.duration.is_zero()
+                && e.id.is_some_and(|id| outside_lookback.contains(&id)))
+        });
+        for event in chunk {
+            // IDs are only meaningful within the source datastore.
+            event.id = None;
+        }
+    };
+
     loop {
         let raw = ds_from.get_events(
             bucket_from.id.as_str(),
@@ -1201,14 +1228,9 @@ fn sync_one(
         // Fewer events than requested means there's nothing older left to fetch.
         let is_last_fetch = raw.len() < BATCH_SIZE;
 
-        let mut chunk: Vec<Event> = raw
-            .into_iter()
-            .map(|mut e| {
-                // Unset ID on events, as they are not globally unique
-                e.id = None;
-                e
-            })
-            .collect();
+        // Keep source IDs and all raw rows until pagination has chosen its
+        // boundary. Suppression must not change which timestamps get re-fetched.
+        let mut chunk = raw;
 
         if !is_last_fetch {
             // chunk is in DESC order (newest first); chunk.last() = oldest in this (full) page.
@@ -1222,7 +1244,7 @@ fn sync_one(
             // Note: we must drop the boundary event itself, not just its duplicates. Keeping
             // one copy in this chunk while also setting `fetch_end = Some(boundary_ts)` (inclusive)
             // would cause that event to be fetched again next page, producing a duplicate row.
-            // `raw` was non-empty and `chunk` is a 1:1 map of it, so both ends exist.
+            // `raw` was non-empty and `chunk` still contains every row.
             let (Some(oldest), Some(newest)) = (chunk.last(), chunk.first()) else {
                 return Err(format!(
                     "Empty event page while syncing bucket '{}'",
@@ -1247,6 +1269,7 @@ fn sync_one(
 
             // Reverse to ASC order (oldest first) before inserting.
             chunk.reverse();
+            prepare_chunk(&mut chunk);
             events_sent += chunk.len();
             pages_written += 1;
             for batch in chunk.chunks(BATCH_SIZE) {
@@ -1256,6 +1279,7 @@ fn sync_one(
         } else {
             // Last (oldest) page: process oldest-first to preserve ID ordering.
             chunk.reverse(); // chunk is now ASC (oldest first)
+            prepare_chunk(&mut chunk);
 
             // Dedup: skip boundary events already in the destination, up to the count
             // confirmed present there. Consuming from the count (rather than a blanket
@@ -1560,6 +1584,69 @@ mod boundary_dedup_multipage_tests {
     //! inserted via `insert_events()` instead, which exposes the duplicate
     //! directly if the dedup fingerprint fails to match.
     use super::*;
+
+    #[test]
+    fn full_page_of_long_clips_keeps_genuine_resume_point() {
+        let src = Datastore::new_in_memory(false);
+        let dest = Datastore::new_in_memory(false);
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "long-events", "type": "test", "hostname": "laptop", "client": "test"
+        }))
+        .unwrap();
+        src.create_bucket(&bucket).unwrap();
+        let base: DateTime<Utc> = "2026-11-01T00:00:00Z".parse().unwrap();
+        let resume = base + Duration::days(10);
+        let events: Vec<Event> = (0..BATCH_SIZE - 1)
+            .map(|i| Event {
+                id: None,
+                timestamp: base,
+                duration: Duration::days(10),
+                data: serde_json::json!({"label": format!("old-{i}")})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            })
+            .collect();
+        src.insert_events(&bucket.id, &events).unwrap();
+        src.force_commit().unwrap();
+        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+
+        let mut edited = src
+            .get_events(&bucket.id, None, None, Some(1))
+            .unwrap()
+            .remove(0);
+        src.delete_events_by_id(&bucket.id, vec![edited.id.unwrap()])
+            .unwrap();
+        edited.id = None;
+        edited
+            .data
+            .insert("label".into(), serde_json::json!("edited"));
+        let point = Event {
+            id: None,
+            timestamp: resume,
+            duration: Duration::zero(),
+            data: edited.data.clone(),
+        };
+        src.insert_events(&bucket.id, &[edited, point.clone()])
+            .unwrap();
+        src.force_commit().unwrap();
+        sync_datastores(&src, &dest, false, None, &SyncSpec::default()).unwrap();
+
+        let got = dest
+            .get_events("long-events-synced-from-laptop", None, None, None)
+            .unwrap();
+        assert_eq!(got.len(), BATCH_SIZE, "{got:?}");
+        let points: Vec<_> = got.iter().filter(|e| e.timestamp == resume).collect();
+        assert_eq!(points.len(), 1, "{got:?}");
+        assert_eq!(points[0].duration, Duration::zero());
+        assert_eq!(points[0].data, point.data);
+        assert_eq!(
+            got.iter()
+                .filter(|e| e.timestamp == base && e.duration == Duration::days(10))
+                .count(),
+            BATCH_SIZE - 1
+        );
+    }
 
     #[test]
     fn no_duplicate_on_positive_duration_boundary_across_multiple_pages() {

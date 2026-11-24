@@ -236,7 +236,8 @@ pub fn bucket_events_heartbeat(
     if heartbeat.duration < Duration::zero() {
         let err_msg = format!(
             "Invalid heartbeat: duration must be non-negative, got {}s",
-            heartbeat.duration.num_milliseconds() as f64 / 1000.0
+            heartbeat.duration.num_seconds() as f64
+                + heartbeat.duration.subsec_nanos() as f64 / 1_000_000_000.0
         );
         warn!("{}", err_msg);
         return Err(HttpErrorJson::new(Status::BadRequest, err_msg));

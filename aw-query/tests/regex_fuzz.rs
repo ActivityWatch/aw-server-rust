@@ -227,3 +227,19 @@ fn regression_notepad_escaped_plus_is_valid() {
         result
     );
 }
+
+#[test]
+fn classification_rejects_oversized_compiled_rules() {
+    let ds = setup_datastore_with_bucket();
+    let interval = setup_interval();
+    for code in [
+        r#"return categorize([], [[["large"], {"type":"regex", "regex":"a{200000}z"}]]);"#,
+        r#"return tag([], [["large", {"type":"regex", "regex":"a{200000}z", "ignore_case":true, "select_keys":["title"]}]]);"#,
+    ] {
+        let result = aw_query::query(code, &interval, &ds);
+        assert!(
+            matches!(result, Err(QueryError::RegexCompileError(_))),
+            "oversized rule must report a compilation error: {result:?}"
+        );
+    }
+}

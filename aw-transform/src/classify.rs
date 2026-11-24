@@ -2,13 +2,17 @@
 ///
 /// Based on code in aw_research: https://github.com/ActivityWatch/aw-research/blob/master/aw_research/classify.py
 use aw_models::Event;
-use fancy_regex::Regex;
+use fancy_regex::{Regex, RegexBuilder};
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 
 const REGEX_CACHE_CAPACITY: usize = 512;
+// Limit each delegated automaton before admitting a rule to the shared cache.
+// fancy-regex applies these per delegated subexpression, not to the total VM.
+const REGEX_DELEGATE_SIZE_LIMIT: usize = 256 * 1024;
+const REGEX_DELEGATE_DFA_SIZE_LIMIT: usize = 256 * 1024;
 
 static REGEX_CACHE: OnceLock<Mutex<LruCache<String, Arc<Regex>>>> = OnceLock::new();
 
@@ -108,7 +112,12 @@ impl RegexRule {
         let regex = if let Some(re) = cache.get(&full_regex_str) {
             re.clone()
         } else {
-            let re = Arc::new(Regex::new(&full_regex_str)?);
+            let re = Arc::new(
+                RegexBuilder::new(&full_regex_str)
+                    .delegate_size_limit(REGEX_DELEGATE_SIZE_LIMIT)
+                    .delegate_dfa_size_limit(REGEX_DELEGATE_DFA_SIZE_LIMIT)
+                    .build()?,
+            );
             cache.put(full_regex_str.clone(), re.clone());
             re
         };

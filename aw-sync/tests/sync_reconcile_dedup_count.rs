@@ -68,3 +68,47 @@ fn reconcile_dedup_is_not_reported_as_failure() {
     assert!(r.is_ok(), "no-op pass reported failure: {r:?}");
     assert_eq!(all_sorted(&dest, dest_b).len(), 2);
 }
+
+/// Cleanup removes one stale row while the copy phase adds one real event.
+/// A pre-cleanup count baseline would incorrectly report zero new events.
+#[test]
+fn reconcile_dedup_still_counts_new_events() {
+    let src = Datastore::new_in_memory(false);
+    let dest = Datastore::new_in_memory(false);
+    let b = create_bucket(&src, "aw-watcher-window_laptop", "currentwindow", "laptop");
+    let t0 = Utc::now() - Duration::hours(3);
+    let t1 = t0 + Duration::minutes(10);
+    let t2 = t0 + Duration::minutes(30);
+    src.insert_events(
+        &b,
+        &[
+            ev(t0, Duration::minutes(10), json!({"title": "x"})),
+            ev(t1, Duration::minutes(5), json!({"title": "y"})),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    pull(&src, &dest).unwrap();
+    let dest_b = "aw-watcher-window_laptop-synced-from-laptop";
+    dest.insert_events(
+        dest_b,
+        &[ev(t0, Duration::minutes(10), json!({"title": "x"}))],
+    )
+    .unwrap();
+    dest.force_commit().unwrap();
+    let new_event = ev(t2, Duration::minutes(3), json!({"title": "new"}));
+    src.insert_events(&b, &[new_event.clone()]).unwrap();
+    src.force_commit().unwrap();
+
+    let report = pull(&src, &dest).unwrap();
+    assert_eq!(report.len(), 1);
+    assert_eq!(report[0].events_new, 1);
+    let got = all_sorted(&dest, dest_b);
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[0].timestamp, t0);
+    assert_eq!(got[1].timestamp, t1);
+    assert_eq!(got[2].timestamp, new_event.timestamp);
+    assert_eq!(got[2].duration, new_event.duration);
+    assert_eq!(got[2].data, new_event.data);
+    assert_eq!(pull(&src, &dest).unwrap()[0].events_new, 0);
+}

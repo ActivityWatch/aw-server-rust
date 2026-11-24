@@ -136,7 +136,13 @@ fn main() {
 
 fn run(cli: Cli, out: &mut impl Write) -> Result<(), Box<dyn Error>> {
     // Like the Python CLI: flags win, then aw-client.toml (the file the watchers read).
-    let config = aw_client_rust::config::load_config(cli.testing);
+    let config = if cli.host.is_some() && cli.port.is_some() {
+        aw_client_rust::config::ClientConfig::default_for(cli.testing)
+    } else {
+        aw_client_rust::config::load_config_with_warning(cli.testing, |warning| {
+            eprintln!("Warning: {warning}");
+        })
+    };
     let host = cli.host.unwrap_or(config.hostname);
     let port = cli.port.unwrap_or(config.port);
     // A per-process name, so concurrent invocations don't trip the single-instance lock.

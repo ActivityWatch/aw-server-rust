@@ -9,9 +9,13 @@ use aw_client_rust::Event;
 use chrono::{Duration, Utc};
 
 fn start_server() -> (u16, rocket::Shutdown) {
+    start_server_at("127.0.0.1")
+}
+
+fn start_server_at(address: &str) -> (u16, rocket::Shutdown) {
     use aw_server::endpoints::{AssetResolver, ServerState};
 
-    let port = TcpListener::bind(("127.0.0.1", 0))
+    let port = TcpListener::bind((address, 0))
         .unwrap()
         .local_addr()
         .unwrap()
@@ -22,6 +26,7 @@ fn start_server() -> (u16, rocket::Shutdown) {
         "test_id".to_string(),
     );
     let config = aw_server::config::AWConfig {
+        address: address.to_string(),
         port,
         testing: true,
         ..Default::default()
@@ -190,8 +195,8 @@ fn cli_reports_errors_with_a_non_zero_exit() {
 #[cfg(target_os = "linux")]
 #[test]
 fn cli_reads_the_server_from_aw_client_toml() {
-    let (port, shutdown) = start_server();
-    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-cli-config-test").unwrap();
+    let (port, shutdown) = start_server_at("127.0.0.2");
+    let client = AwClient::new("127.0.0.2", port, "aw-client-rust-cli-config-test").unwrap();
     client
         .wait_for_start()
         .expect("aw-server didn't start; see stderr for a launch error");
@@ -205,7 +210,7 @@ fn cli_reads_the_server_from_aw_client_toml() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("aw-client.toml"),
-        format!("[server]\nhostname = \"127.0.0.1\"\nport = \"{port}\"\n"),
+        format!("[server]\nhostname = \"127.0.0.2\"\nport = \"{port}\"\n"),
     )
     .unwrap();
 
@@ -222,5 +227,52 @@ fn cli_reads_the_server_from_aw_client_toml() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("aw-test-from-config"));
 
+    shutdown.notify();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_warns_about_invalid_config_only_when_using_it() {
+    let (port, shutdown) = start_server();
+    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-cli-warning-test").unwrap();
+    client.wait_for_start().unwrap();
+    let config_home =
+        std::env::temp_dir().join(format!("aw-client-cli-warning-{}", std::process::id()));
+    let dir = config_home.join("activitywatch").join("aw-client");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("aw-client.toml"), "not toml").unwrap();
+
+    // Even a successful request must warn if its host came from a broken config.
+    let output = Command::new(env!("CARGO_BIN_EXE_aw-client"))
+        .env("XDG_CONFIG_HOME", &config_home)
+        .args(["--port", &port.to_string(), "buckets"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("aw-client.toml") && stderr.contains("using defaults"),
+        "{stderr}"
+    );
+
+    // Explicit address flags don't need the file, so shouldn't warn about it.
+    let output = Command::new(env!("CARGO_BIN_EXE_aw-client"))
+        .env("XDG_CONFIG_HOME", &config_home)
+        .args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "buckets",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&config_home);
     shutdown.notify();
 }

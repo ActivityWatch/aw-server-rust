@@ -63,6 +63,12 @@ pub fn config_path() -> Option<PathBuf> {
 /// A missing file gives the defaults; an unreadable or invalid file is logged and
 /// also gives the defaults, so a broken config never stops a watcher from starting.
 pub fn load_config(testing: bool) -> ClientConfig {
+    load_config_with_warning(testing, |warning| log::warn!("{warning}"))
+}
+
+/// Like [`load_config`], but lets callers without a logger display fallback warnings.
+/// Missing files are normal and do not produce a warning.
+pub fn load_config_with_warning(testing: bool, mut warn: impl FnMut(String)) -> ClientConfig {
     let Some(path) = config_path() else {
         return ClientConfig::default_for(testing);
     };
@@ -72,12 +78,15 @@ pub fn load_config(testing: bool) -> ClientConfig {
             return ClientConfig::default_for(testing)
         }
         Err(err) => {
-            log::warn!("Failed to read {}, using defaults: {err}", path.display());
+            warn(format!(
+                "Failed to read {}, using defaults: {err}",
+                path.display()
+            ));
             return ClientConfig::default_for(testing);
         }
     };
     parse_config(&raw, testing).unwrap_or_else(|err| {
-        log::warn!("Invalid {}, using defaults: {err}", path.display());
+        warn(format!("Invalid {}, using defaults: {err}", path.display()));
         ClientConfig::default_for(testing)
     })
 }

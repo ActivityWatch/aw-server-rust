@@ -265,6 +265,9 @@ mod tests {
         assert_eq!(res, vec![]);
         let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(5, -2, "")]);
         assert_eq!(res, vec![]);
+        // Only the negative filter is dropped, not the whole filter list
+        let res = filter_period_intersect(vec![ev(0, 10, "x")], vec![ev(5, -2, ""), ev(6, 4, "")]);
+        assert_eq!(res, vec![ev(6, 4, "x")]);
         let res =
             filter_period_intersect(vec![ev(0, 10, "x"), ev(5, -2, "y")], vec![ev(0, 10, "")]);
         assert_eq!(res, vec![ev(0, 10, "x")]);

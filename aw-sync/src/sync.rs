@@ -829,6 +829,10 @@ pub fn sync_datastores(
     // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
 
+    // A bucket refused for missing provenance is a per-bucket failure, like
+    // any other skip below: collecting it with `?` would abort every sibling
+    // bucket from the same peer (ActivityWatch/aw-server-rust#875 item 5).
+    let mut refused: Vec<(String, String)> = Vec::new();
     let mut buckets_from: Vec<Bucket> = ds_from
         .get_buckets()
         .map_err(|e| format!("Failed to list buckets in {ds_from:?}: {e}"))?
@@ -872,23 +876,34 @@ pub fn sync_datastores(
                 // Refuse the sync instead (the previous code unwrapped the None
                 // here, which on Android aborts the whole app).
                 let did = src_did.ok_or_else(|| {
-                    format!(
+                    let msg = format!(
                         "Bucket '{}' has an unknown hostname/device ID and there is no source \
                          device ID to substitute; refusing to sync it without provenance",
                         tup.1.id
-                    )
+                    );
+                    (tup.1.id.clone(), msg)
                 })?;
                 warn!(" ! Bucket hostname/device ID was invalid, setting to device ID/hostname");
                 tup.1.hostname = did.to_string();
             }
             Ok(tup.1.clone())
         })
-        .collect::<Result<Vec<Bucket>, String>>()?;
+        .filter_map(|res: Result<Bucket, (String, String)>| match res {
+            Ok(bucket) => Some(bucket),
+            Err(refusal) => {
+                warn!(" ! Skipping bucket: {}", refusal.1);
+                refused.push(refusal);
+                None
+            }
+        })
+        .collect();
 
     // Log warning for buckets requested but not found
     if let Some(buckets) = &sync_spec.buckets {
         for b_id in buckets {
-            if !buckets_from.iter().any(|b| b.id == *b_id) {
+            let found = buckets_from.iter().any(|b| b.id == *b_id)
+                || refused.iter().any(|(id, _)| id == b_id);
+            if !found {
                 error!(" ! Bucket \"{}\" not found in source datastore", b_id);
             }
         }
@@ -901,9 +916,9 @@ pub fn sync_datastores(
     // Total failure must still be Err: otherwise a destination that is down
     // reports success, which is the #682 silence reintroduced via #688's skip.
     let mut buckets = Vec::with_capacity(buckets_from.len());
-    let mut attempted = 0usize;
+    let mut attempted = refused.len();
     let mut succeeded = 0usize;
-    let mut last_err: Option<String> = None;
+    let mut last_err: Option<String> = refused.pop().map(|(_, e)| e);
     for bucket_from in buckets_from {
         attempted += 1;
         let bucket_id = bucket_from.id.clone();

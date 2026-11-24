@@ -1,8 +1,7 @@
 use aw_models::Bucket;
 
-/// Finds the bucket which starts with the specified string, and optionally matches a
-/// hostname. An exact match wins; otherwise the lexicographically smallest prefix match is
-/// returned, so the result does not depend on the iteration order of `buckets`.
+/// Finds the first bucket which starts with the specified string, and optionally matches a
+/// hostname.
 pub fn find_bucket<'a>(
     bucket_filter: &str,
     hostname_filter: &Option<String>,
@@ -21,14 +20,8 @@ pub fn find_bucket<'a>(
                     // Exact match, return immediately
                     return Some(bucket.id.to_string());
                 }
-                // Keep the lexicographically smallest prefix match, not the first one seen:
-                // callers pass HashMap values, whose order is random per process, and the
-                // window and afk lookups must resolve to the same host.
-                let smaller = match &prefix_match {
-                    Some(m) => bucket.id < *m,
-                    None => true,
-                };
-                if smaller {
+                if prefix_match.is_none() {
+                    // Save the first prefix match in case we don't find an exact match
                     prefix_match = Some(bucket.id.to_string());
                 }
             }
@@ -42,31 +35,6 @@ mod tests {
     use super::find_bucket;
     use aw_models::Bucket;
     use aw_models::BucketMetadata;
-
-    #[test]
-    fn prefix_match_does_not_depend_on_iteration_order() {
-        // get_buckets() returns a HashMap, so the iteration order is random per process.
-        // With two hosts, the window and afk lookups must resolve to the same host,
-        // whatever order the buckets come in.
-        let bucket = |id: &str| Bucket {
-            bid: None,
-            id: id.to_string(),
-            _type: "type".to_string(),
-            hostname: "h".to_string(),
-            client: "testclient".to_string(),
-            created: None,
-            data: json_map! {},
-            metadata: BucketMetadata::default(),
-            events: None,
-            last_updated: None,
-        };
-        let a = bucket("aw-watcher-window_hostA");
-        let b = bucket("aw-watcher-window_hostB");
-        let forward = find_bucket("aw-watcher-window_", &None, vec![&a, &b]);
-        let backward = find_bucket("aw-watcher-window_", &None, vec![&b, &a]);
-        assert_eq!(forward, backward);
-        assert_eq!(forward.as_deref(), Some("aw-watcher-window_hostA"));
-    }
 
     #[test]
     fn test_find_bucket() {

@@ -14,6 +14,7 @@ use aw_models::Event;
 
 use rusqlite::params;
 use rusqlite::types::ToSql;
+use rusqlite::OptionalExtension;
 
 use super::DatastoreError;
 
@@ -933,6 +934,29 @@ impl DatastoreInstance {
             .iter()
             .map(event_nanos)
             .collect::<Result<Vec<_>, _>>()?;
+
+        // `events.id` is global to all buckets, so INSERT OR REPLACE would move (and so
+        // delete) another bucket's event when handed its id. Refuse that, up front for the
+        // same all-or-nothing reason as above.
+        let bucketrow = bucket.bid.unwrap();
+        for event in events.iter() {
+            let Some(id) = event.id else { continue };
+            let owner: Option<i64> = conn
+                .query_row("SELECT bucketrow FROM events WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(|err| {
+                    DatastoreError::InternalError(format!(
+                        "Failed to look up owner of event {id}: {err}"
+                    ))
+                })?;
+            if owner.is_some_and(|owner| owner != bucketrow) {
+                return Err(DatastoreError::InvalidEvent(format!(
+                    "Event id {id} belongs to a different bucket than '{bucket_id}'"
+                )));
+            }
+        }
 
         let mut stmt = match conn.prepare_cached(
             "

@@ -59,6 +59,34 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_insert_event_with_other_buckets_id_is_rejected() {
+        // `INSERT OR REPLACE` on the global events.id key used to move another bucket's
+        // event into this one: the source bucket silently lost it.
+        let ds = Datastore::new_in_memory(false);
+        let a = create_named_test_bucket(&ds, "a");
+        let b = create_named_test_bucket(&ds, "b");
+        let t = "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let stored = ds
+            .insert_events(&a.id, &[test_event(t, Duration::seconds(1))])
+            .unwrap();
+        let foreign_id = stored[0].id.unwrap();
+
+        let mut hijack = test_event(t, Duration::seconds(5));
+        hijack.id = Some(foreign_id);
+        assert!(ds.insert_events(&b.id, &[hijack]).is_err());
+
+        assert_eq!(ds.get_event_count(&a.id, None, None).unwrap(), 1);
+        assert_eq!(ds.get_event_count(&b.id, None, None).unwrap(), 0);
+        // Replacing within the owning bucket still works.
+        let mut update = test_event(t, Duration::seconds(7));
+        update.id = Some(foreign_id);
+        ds.insert_events(&a.id, &[update]).unwrap();
+        let events = ds.get_events(&a.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].duration, Duration::seconds(7));
+    }
+
+    #[test]
     fn test_out_of_range_event_is_rejected_and_worker_survives() {
         let ds = Datastore::new_in_memory(false);
         create_test_bucket(&ds);

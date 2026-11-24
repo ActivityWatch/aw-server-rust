@@ -56,11 +56,13 @@ pub fn merge_events_by_keys(events: Vec<Event>, keys: Vec<String>) -> Vec<Event>
         let mut key_values = Vec::new();
         for key in &keys {
             match event.data.get(key) {
-                Some(v) => key_values.push(v.to_string()),
+                Some(v) => key_values.push(v),
                 None => continue 'event,
             }
         }
-        let summed_key = key_values.join(".");
+        // Serialize the values as one JSON array: joining them with a separator is
+        // ambiguous ({a: 1, b: 5.2} and {a: 1.5, b: 2} would share a key).
+        let summed_key = serde_json::to_string(&key_values).expect("JSON values always serialize");
         match index.entry(summed_key) {
             std::collections::hash_map::Entry::Occupied(entry) => {
                 merged[*entry.get()].duration += event.duration;
@@ -88,6 +90,23 @@ mod tests {
     use crate::sort_by_timestamp;
 
     use super::merge_events_by_keys;
+
+    #[test]
+    fn merge_does_not_conflate_float_values_across_keys() {
+        // Joining the key values with "." made {a: 1, b: 5.2} and {a: 1.5, b: 2}
+        // both "1.5.2", so two different groups were summed into one.
+        let base = Event {
+            id: None,
+            timestamp: DateTime::from_str("2000-01-01T00:00:01Z").unwrap(),
+            duration: Duration::seconds(1),
+            data: json_map! {"a": json!(1), "b": json!(5.2)},
+        };
+        let mut other = base.clone();
+        other.data = json_map! {"a": json!(1.5), "b": json!(2)};
+        let result = merge_events_by_keys(vec![base, other], vec!["a".into(), "b".into()]);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|e| e.duration == Duration::seconds(1)));
+    }
 
     #[test]
     fn merge_preserves_first_payload_and_clears_id() {

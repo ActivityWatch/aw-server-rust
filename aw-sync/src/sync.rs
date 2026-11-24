@@ -1063,6 +1063,57 @@ fn reconcile_updated_events(
     Ok(())
 }
 
+/// Delete the destination's latest event when the source replaced it.
+///
+/// The resume cursor is the latest event's end, so the reconcile window
+/// (`timestamp < resume`) never sees a zero-duration latest event, and a
+/// replacement that changes its data is copied in next to the stale row.
+/// Examples: a stopwatch timer synced while running, then stopped (duration
+/// and `running` change), or a title edit of a zero-duration latest event.
+///
+/// Under the single-writer model the source owns this bucket: if it still has
+/// events starting at the latest event's timestamp but none carries its data,
+/// the row was replaced. Dropping it lowers the cursor, so the incremental copy
+/// fetches the replacement whole. A latest event with no source row at its
+/// timestamp is left alone (deletions are reconciled separately), and a
+/// duration-only update keeps its data, so it stays on the heartbeat path.
+fn drop_replaced_latest_event(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    bucket_from: &Bucket,
+    bucket_to: &Bucket,
+    most_recent_events: &[Event],
+) -> Result<bool, String> {
+    let Some(latest) = most_recent_events.first() else {
+        return Ok(false);
+    };
+    let Some(latest_id) = latest.id else {
+        return Ok(false);
+    };
+    // Start 1ns early so events ending exactly at `latest.timestamp` are
+    // clipped to that earlier start and filtered out below; events starting at
+    // the timestamp keep their true start and data.
+    let source_at_ts: Vec<Event> = ds_from
+        .get_events(
+            bucket_from.id.as_str(),
+            Some(latest.timestamp - Duration::nanoseconds(1)),
+            Some(latest.timestamp),
+            None,
+        )?
+        .into_iter()
+        .filter(|e| e.timestamp == latest.timestamp)
+        .collect();
+    if source_at_ts.is_empty() || source_at_ts.iter().any(|e| e.data == latest.data) {
+        return Ok(false);
+    }
+    ds_to.delete_events_by_id(bucket_to.id.as_str(), vec![latest_id])?;
+    info!(
+        "   ~ Latest event at {:?} was replaced on the source; re-syncing it",
+        latest.timestamp
+    );
+    Ok(true)
+}
+
 /// Syncs a single bucket from one datastore to another
 fn sync_one(
     ds_from: &dyn AccessMethod,
@@ -1078,7 +1129,16 @@ fn sync_one(
     // FIXME: This should use bucket_to.metadata.end, but it doesn't because it doesn't work
     // for empty buckets (Should be None, is Some(unknown_time))
     // let resume_sync_at = bucket_to.metadata.end;
-    let most_recent_events = ds_to.get_events(bucket_to.id.as_str(), None, None, Some(1))?;
+    let mut most_recent_events = ds_to.get_events(bucket_to.id.as_str(), None, None, Some(1))?;
+    if drop_replaced_latest_event(
+        ds_from,
+        ds_to,
+        &bucket_from,
+        &bucket_to,
+        &most_recent_events,
+    )? {
+        most_recent_events = ds_to.get_events(bucket_to.id.as_str(), None, None, Some(1))?;
+    }
     // If the destination bucket already has events, resume from where it left off.
     // Otherwise (first sync of this bucket), fall back to sync_spec.start, if specified.
     let newest_timestamp = most_recent_events.first().map(|e| e.timestamp);

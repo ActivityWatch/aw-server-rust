@@ -507,7 +507,15 @@ fn pull_from_remotes(
     let mut last_err: Option<String> = None;
     for (db, ds_from) in remotes {
         attempted += 1;
-        match sync_datastores(*ds_from, dest, false, None, sync_spec) {
+        let mut warnings = Vec::new();
+        let result =
+            sync_datastores_with_warnings(*ds_from, dest, false, None, sync_spec, &mut warnings);
+        report.warnings.extend(
+            warnings
+                .into_iter()
+                .map(|warning| format!("Peer '{}': {warning}", db.hostname)),
+        );
+        match result {
             Ok(buckets) => {
                 succeeded += 1;
                 if record_peers {
@@ -825,6 +833,19 @@ pub fn sync_datastores(
     src_did: Option<&str>,
     sync_spec: &SyncSpec,
 ) -> Result<Vec<BucketReport>, String> {
+    sync_datastores_with_warnings(ds_from, ds_to, is_push, src_did, sync_spec, &mut Vec::new())
+}
+
+// Keep the public datastore API unchanged while letting peer pulls retain
+// per-bucket provenance refusals in the status/JNI report.
+fn sync_datastores_with_warnings(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    is_push: bool,
+    src_did: Option<&str>,
+    sync_spec: &SyncSpec,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<BucketReport>, String> {
     // FIXME: "-synced" should only be appended when synced to the local database, not to the
     // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
@@ -892,6 +913,7 @@ pub fn sync_datastores(
             Ok(bucket) => Some(bucket),
             Err(refusal) => {
                 warn!(" ! Skipping bucket: {}", refusal.1);
+                warnings.push(refusal.1.clone());
                 refused.push(refusal);
                 None
             }
@@ -1831,6 +1853,38 @@ mod peer_isolation_tests {
         );
         broken.close();
         healthy.close();
+        dest.close();
+    }
+
+    #[test]
+    fn unknown_bucket_refusal_is_kept_in_successful_pull_report() {
+        let source = Datastore::new_in_memory(false);
+        source
+            .create_bucket(&bucket("bucket-unknown-host", "unknown"))
+            .unwrap();
+        source
+            .create_bucket(&bucket("bucket-healthy", "host-ok"))
+            .unwrap();
+        let dest = Datastore::new_in_memory(false);
+        let db = peer_db("dev-a", "host-ok", PathBuf::from("/peer.db"));
+        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = vec![(&db, &source)];
+        let mut report = dummy_report();
+
+        pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, true)
+            .expect("a refused bucket must not abort healthy siblings");
+
+        assert_eq!(report.peers_imported(), 1);
+        assert_eq!(report.peers[0].buckets.len(), 1);
+        assert_eq!(report.warnings.len(), 1);
+        let warning = &report.warnings[0];
+        assert!(warning.contains("host-ok"), "{warning}");
+        assert!(warning.contains("bucket-unknown-host"), "{warning}");
+        assert!(warning.contains("without provenance"), "{warning}");
+        assert!(report.to_string().contains(warning));
+        assert!(report.summary_message().contains(warning));
+        let json: serde_json::Value = serde_json::from_str(&report.to_jni_json()).unwrap();
+        assert_eq!(json["warnings"][0], warning.as_str());
+        source.close();
         dest.close();
     }
 

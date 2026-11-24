@@ -735,6 +735,12 @@ mod sync_tests {
             .unwrap();
             state.ds_src.create_bucket(&bucket).unwrap();
         }
+        let event = create_event("42");
+        state
+            .ds_src
+            .insert_events("bucket-healthy", std::slice::from_ref(&event))
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
 
         let result = aw_sync::sync_datastores(
             &state.ds_src,
@@ -747,6 +753,15 @@ mod sync_tests {
             result.is_ok(),
             "one refused bucket must not abort the pass; got {result:?}"
         );
+        assert_eq!(result.unwrap()[0].events_new, 1);
+        let events = state
+            .ds_dest
+            .get_events("bucket-healthy-synced-from-device-0", None, None, None)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, event.timestamp);
+        assert_eq!(events[0].duration, event.duration);
+        assert_eq!(events[0].data, event.data);
 
         let dest_buckets = state.ds_dest.get_buckets().unwrap();
         assert!(

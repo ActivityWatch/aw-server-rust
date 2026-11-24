@@ -105,6 +105,52 @@ pub fn assigns_timeinterval(code: &str) -> bool {
     assigns
 }
 
+/// Limits on how deeply a program can nest (ActivityWatch/aw-server-rust#882).
+///
+/// The interpreter, serde and the AST's generated `Drop` all recurse once per
+/// tree level, so a deep enough program overflows the thread stack and aborts
+/// the whole process, which `catch_unwind` cannot stop. The grammar is
+/// left-recursive, so each binary operator in a statement can add a level, and
+/// so can each bracket. Bounding both bounds the tree depth before a tree is
+/// built. Measured on a 2 MiB thread stack: a debug build overflows at about
+/// 150 levels and a release build passes 3000, so these keep debug builds safe
+/// too. aw-webui's queries use functions such as `concat` rather than operators
+/// and nest brackets only a few levels deep.
+const MAX_OPERATORS_PER_STATEMENT: usize = 64;
+const MAX_BRACKET_DEPTH: usize = 32;
+
+fn check_nesting(tokens: &[(lexer::Token, lexer::Span)]) -> Result<(), QueryError> {
+    use lexer::Token;
+    let mut operators = 0;
+    let mut depth: usize = 0;
+    for (token, _) in tokens {
+        match token {
+            Token::Plus
+            | Token::Minus
+            | Token::Star
+            | Token::Slash
+            | Token::Percent
+            | Token::Equals => operators += 1,
+            Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+            // Unbalanced closers are left for the parser to report.
+            Token::RParen | Token::RBracket | Token::RBrace => depth = depth.saturating_sub(1),
+            Token::Semi if depth == 0 => operators = 0,
+            _ => (),
+        }
+        if operators > MAX_OPERATORS_PER_STATEMENT {
+            return Err(QueryError::ParsingError(format!(
+                "a statement has more than {MAX_OPERATORS_PER_STATEMENT} operators"
+            )));
+        }
+        if depth > MAX_BRACKET_DEPTH {
+            return Err(QueryError::ParsingError(format!(
+                "brackets are nested more than {MAX_BRACKET_DEPTH} deep"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
     query_with_deadline(code, ti, ds, None)
 }
@@ -119,8 +165,9 @@ pub fn query_with_deadline(
     ds: &Datastore,
     deadline: Option<Instant>,
 ) -> Result<DataType, QueryError> {
-    let lexer = lexer::Lexer::new(code);
-    let program = match parser::parse(lexer) {
+    let tokens: Vec<_> = lexer::Lexer::new(code).collect();
+    check_nesting(&tokens)?;
+    let program = match parser::parse(tokens.into_iter()) {
         Ok(p) => p,
         Err(e) => {
             // TODO: Improve parsing error message

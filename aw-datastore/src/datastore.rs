@@ -356,7 +356,7 @@ pub struct DatastoreInstance {
 /// express in nanoseconds (before 1677 or after 2262), so such a bound means "no limit"
 /// instead of panicking the datastore worker. Bounds that can't match anything are
 /// caught first by [`filter_excludes_everything`].
-fn filter_nanos(dt: DateTime<Utc>) -> i64 {
+pub(crate) fn filter_nanos(dt: DateTime<Utc>) -> i64 {
     dt.timestamp_nanos_opt().unwrap_or(if dt.timestamp() < 0 {
         i64::MIN
     } else {
@@ -383,7 +383,7 @@ fn event_nanos(event: &Event) -> Result<(i64, i64), DatastoreError> {
 
 /// Whether a time filter can't match any stored event: a start after 2262 or an end
 /// before 1677, beyond the range event times are stored in.
-fn filter_excludes_everything(
+pub(crate) fn filter_excludes_everything(
     starttime_opt: Option<DateTime<Utc>>,
     endtime_opt: Option<DateTime<Utc>>,
 ) -> bool {

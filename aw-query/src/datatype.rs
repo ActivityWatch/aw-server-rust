@@ -348,13 +348,28 @@ impl TryFrom<DataType> for usize {
     }
 }
 
+impl DataType {
+    /// Whether this value is, or contains, a function. Functions can't be serialized,
+    /// so such a value can't be returned from a query.
+    pub(crate) fn contains_function(&self) -> bool {
+        match self {
+            DataType::Function(..) | DataType::ReadOnlyFunction(..) => true,
+            DataType::List(l) => l.iter().any(DataType::contains_function),
+            DataType::Dict(d) => d.values().any(DataType::contains_function),
+            _ => false,
+        }
+    }
+}
+
 impl TryFrom<DataType> for Value {
     type Error = QueryError;
     fn try_from(value: DataType) -> Result<Self, Self::Error> {
         match value {
             DataType::None() => Ok(Value::Null),
             DataType::Bool(b) => Ok(Value::Bool(b)),
-            DataType::Number(n) => Ok(Value::Number(Number::from_f64(n).unwrap())),
+            DataType::Number(n) => Number::from_f64(n).map(Value::Number).ok_or_else(|| {
+                QueryError::InvalidType(format!("Number {n} is not finite"))
+            }),
             DataType::String(s) => Ok(Value::String(s)),
             DataType::List(l) => {
                 let mut values: Vec<Value> = Vec::with_capacity(l.len());

@@ -16,6 +16,11 @@ fn named_host_forms_continue_after_first_pull_failure() {
         (vec![], 0, true),
     ] {
         let root = tempfile::tempdir().unwrap();
+        // Windows resolves known folders from `%USERPROFILE%\AppData\...` and
+        // fails if the folder is missing, so the isolated profile needs both.
+        for dir in ["AppData/Local", "AppData/Roaming"] {
+            std::fs::create_dir_all(root.path().join(dir)).unwrap();
+        }
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);

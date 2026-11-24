@@ -39,11 +39,18 @@ fn named_host_forms_continue_after_first_pull_failure() {
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(root.path().join("last-report.json").is_file());
         let log = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        let report_path = root.path().join("last-report.json");
+        assert!(
+            report_path.is_file(),
+            "no report at {}; dir: {:?}\n{log}",
+            report_path.display(),
+            std::fs::read_dir(root.path())
+                .map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
         );
         assert!(!log.contains("panicked"), "{log}");
         if expected_hosts > 0 {

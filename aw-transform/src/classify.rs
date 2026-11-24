@@ -12,7 +12,6 @@ const REGEX_CACHE_CAPACITY: usize = 512;
 // Limit each delegated automaton before admitting a rule to the shared cache.
 // fancy-regex applies these per delegated subexpression, not to the total VM.
 const REGEX_DELEGATE_SIZE_LIMIT: usize = 256 * 1024;
-const REGEX_DELEGATE_DFA_SIZE_LIMIT: usize = 256 * 1024;
 
 static REGEX_CACHE: OnceLock<Mutex<LruCache<String, Arc<Regex>>>> = OnceLock::new();
 
@@ -115,7 +114,6 @@ impl RegexRule {
             let re = Arc::new(
                 RegexBuilder::new(&full_regex_str)
                     .delegate_size_limit(REGEX_DELEGATE_SIZE_LIMIT)
-                    .delegate_dfa_size_limit(REGEX_DELEGATE_DFA_SIZE_LIMIT)
                     .build()?,
             );
             cache.put(full_regex_str.clone(), re.clone());

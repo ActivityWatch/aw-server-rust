@@ -102,12 +102,18 @@ where
             limit *= 2;
         };
 
+        let page_end = fetch_end;
         if let Some(cut) = cut_ts.filter(|_| !exhausted) {
             page.retain(|e| e.timestamp >= cut);
             fetch_end = Some(cut - Duration::nanoseconds(1));
         }
 
         total_events += page.len();
+        // An event reaching this page's `end` may have been clipped to it, so
+        // two distinct events crossing the previous cut can come back with the
+        // same duration. Their real durations are unknown here: never flag
+        // them (a missed duplicate is harmless, a wrong deletion is not).
+        page.retain(|e| page_end.is_none_or(|end| e.timestamp + e.duration < end));
         duplicate_ids.extend(find_duplicate_ids(&page));
 
         if exhausted {
@@ -341,6 +347,25 @@ mod tests {
         let (total, dups) = paginated(&all);
         assert_eq!(total, all.len());
         assert!(dups.is_empty(), "all events are distinct, got: {dups:?}");
+    }
+
+    /// Two distinct events (same start and data, different durations) that
+    /// both cross a page cut are clipped to the same end by the next page's
+    /// `end = cut - 1ns`, and must not then compare equal (#875 item 9).
+    #[test]
+    fn events_clipped_by_page_cut_are_not_flagged() {
+        let all = vec![
+            event(30, 900, 10, "c"),
+            event(29, 800, 10, "b"),
+            event(28, 700, 10, "a"),  // PAGE_SIZE-th event: the cut
+            event(11, 200, 600, "x"), // ends 800, crosses the cut
+            event(10, 200, 550, "x"), // ends 750, crosses the cut
+            event(1, 100, 10, "z"),
+        ];
+        let (total, dups) = paginated(&all);
+        assert_eq!(total, all.len());
+        assert!(dups.is_empty(), "all events are distinct, got: {dups:?}");
+        assert_eq!(dups, single_shot(&all));
     }
 
     #[test]

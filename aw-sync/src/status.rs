@@ -174,6 +174,7 @@ pub fn collect_status(
         &imported_origins,
         pull,
         &config_label,
+        device_id.as_deref(),
     );
     out.push('\n');
     if warnings.is_empty() {
@@ -217,6 +218,7 @@ fn collect_warnings(
     imported_origins: &HashSet<String>,
     pull: bool,
     config_label: &str,
+    local_device_id: Option<&str>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
 
@@ -268,11 +270,10 @@ fn collect_warnings(
             ));
         }
 
-        // Orphaned 2-level staging db: the daemon switched to the 3-level
-        // layout but the old {device_id}/*.db is still replicating via
-        // Syncthing. It wastes disk and will never be pulled by the daemon.
-        // Prune is an explicit user action — delete the file and Syncthing
-        // will propagate (ActivityWatch/aw-server-rust#689 item 1).
+        // Check duplicate 2-level staging dbs against the 3-level layout.
+        // Own staging is still written by the daemon. Peer cleanup advice
+        // requires a known local device ID, otherwise a "peer" may be our
+        // own staging db (ActivityWatch/aw-server-rust#887 / #689 item 1).
         let has_three = group
             .iter()
             .any(|e| e.layout == Some(SyncLayout::ThreeLevel));
@@ -300,8 +301,20 @@ fn collect_warnings(
                     warnings.push(format!(
                         "{} ({size}) is this device's 2-level staging db, which `aw-sync \
                          daemon` still writes (plain `aw-sync sync` writes the 3-level \
-                         entry); it is not orphaned — do NOT delete it while the daemon \
-                         runs (ActivityWatch/aw-server-rust#887)",
+                         entry); it is not orphaned — do NOT delete it. Deleting it forces \
+                         a full re-export, and Syncthing can spread the deletion to peers \
+                         even while the daemon is stopped (ActivityWatch/aw-server-rust#887)",
+                        orphan.path.display(),
+                    ));
+                    continue;
+                }
+                if local_device_id.is_none() {
+                    warnings.push(format!(
+                        "{} ({size}) is a 2-level staging db for device_id {did}, but the \
+                         local device_id is unknown — this may be this device's own \
+                         daemon staging db; do NOT delete it. Restore access to the \
+                         local server and rerun `aw-sync status` before considering \
+                         cleanup (ActivityWatch/aw-server-rust#887)",
                         orphan.path.display(),
                     ));
                     continue;
@@ -474,7 +487,8 @@ mod tests {
         let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
             vec![(two_level, None), (three_level, None)];
 
-        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let warnings =
+            collect_warnings(&inspected, None, &HashSet::new(), false, "", Some("local"));
         let joined = warnings.join("\n");
         assert!(
             joined.contains("orphaned 2-level"),
@@ -531,7 +545,8 @@ mod tests {
         let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
             vec![(two_level, None), (three_level, None)];
 
-        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let warnings =
+            collect_warnings(&inspected, None, &HashSet::new(), false, "", Some("local"));
         let joined = warnings.join("\n");
         assert!(
             joined.contains("LARGER"),
@@ -585,7 +600,7 @@ mod tests {
             ),
         ];
 
-        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "", Some(did));
         let joined = warnings.join("\n");
         assert!(
             !joined.contains("safe to delete") && !joined.contains("orphaned 2-level"),
@@ -595,6 +610,44 @@ mod tests {
             joined.contains("do NOT delete") && joined.contains("aw-sync daemon"),
             "own 2-level db must be explained as the daemon's live staging: {joined}"
         );
+        assert!(
+            !joined.contains("while the daemon runs")
+                && joined.contains("even while the daemon is stopped"),
+            "stopping the daemon must not imply deletion is safe: {joined}"
+        );
+    }
+
+    #[test]
+    fn collect_warnings_unknown_device_never_recommends_deletion() {
+        let root = tempfile::tempdir().unwrap();
+        let did = "d7bc68e7-aaaa-bbbb-cccc-dddddddddddd";
+        let two = root.path().join(did);
+        let three = root.path().join("my-host").join(did);
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::create_dir_all(&three).unwrap();
+        std::fs::write(two.join("test.db"), b"db").unwrap();
+
+        // Without a local device ID, scan_sync_dir classifies even our own
+        // staging db as a peer. Exercise both equal and larger 3-level copies.
+        for contents in [b"db".as_slice(), b"larger db".as_slice()] {
+            std::fs::write(three.join("test.db"), contents).unwrap();
+            let inspected: Vec<_> = scan_sync_dir(root.path(), None)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry, None))
+                .collect();
+            assert!(inspected.iter().all(|(e, _)| e.kind == SyncEntryKind::Peer));
+            let joined =
+                collect_warnings(&inspected, None, &HashSet::new(), false, "", None).join("\n");
+            assert!(
+                !joined.contains("safe to delete") && !joined.contains("orphaned 2-level"),
+                "unknown ownership must not allow deletion advice: {joined}"
+            );
+            assert!(
+                joined.contains("local device_id is unknown") && joined.contains("do NOT delete"),
+                "must explain why cleanup advice is withheld: {joined}"
+            );
+        }
     }
 
     #[test]
@@ -619,7 +672,7 @@ mod tests {
         let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
             vec![(two_level, None)];
 
-        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "", Some(did));
         let joined = warnings.join("\n");
         assert!(
             !joined.contains("orphaned"),

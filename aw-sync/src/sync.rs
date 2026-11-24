@@ -1063,55 +1063,106 @@ fn reconcile_updated_events(
     Ok(())
 }
 
-/// Delete the destination's latest event when the source replaced it.
+/// Reconcile source replacements at the destination's latest timestamp.
 ///
-/// The resume cursor is the latest event's end, so the reconcile window
-/// (`timestamp < resume`) never sees a zero-duration latest event, and a
-/// replacement that changes its data is copied in next to the stale row.
-/// Examples: a stopwatch timer synced while running, then stopped (duration
-/// and `running` change), or a title edit of a zero-duration latest event.
+/// A stopped stopwatch changes both data and duration; a zero-duration title
+/// edit lies outside the ordinary reconcile window. Fetch these replacements
+/// by ID, since the timestamp probe clips their duration to zero. Insert them
+/// directly before deleting stale rows: heartbeat would merge touching events,
+/// and deleting first can lose the replacement if the pass is interrupted.
 ///
-/// Under the single-writer model the source owns this bucket: if it still has
-/// events starting at the latest event's timestamp but none carries its data,
-/// the row was replaced. Dropping it lowers the cursor, so the incremental copy
-/// fetches the replacement whole. A latest event with no source row at its
-/// timestamp is left alone (deletions are reconciled separately), and a
-/// duration-only update keeps its data, so it stays on the heartbeat path.
-fn drop_replaced_latest_event(
+/// Check every destination row at this timestamp, including when the newest
+/// row already matches: an interrupted insert-before-delete leaves both old
+/// and new rows, and the next pass must finish removing the old one. No source
+/// rows means deletion reconciliation owns the change. Matching data leaves
+/// duration-only extensions on the incremental heartbeat path.
+///
+/// FIXME: the replacement is durable, but the resume cursor is not. If the
+/// pass stops after deletion and before copying new overlapping rows, the
+/// replacement's later end can skip them on retry. This needs a durable cursor
+/// or an atomic copy/reconciliation boundary before this path is crash-safe.
+fn reconcile_replaced_latest_event(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     most_recent_events: &[Event],
-) -> Result<bool, String> {
+) -> Result<Option<DateTime<Utc>>, String> {
     let Some(latest) = most_recent_events.first() else {
-        return Ok(false);
+        return Ok(None);
     };
-    let Some(latest_id) = latest.id else {
-        return Ok(false);
-    };
-    // Start 1ns early so events ending exactly at `latest.timestamp` are
-    // clipped to that earlier start and filtered out below; events starting at
-    // the timestamp keep their true start and data.
-    let source_at_ts: Vec<Event> = ds_from
-        .get_events(
-            bucket_from.id.as_str(),
+    // Start 1ns early so earlier events ending here are clipped to that start
+    // and filtered out, while events starting here keep their true timestamp.
+    let at_timestamp = |ds: &dyn AccessMethod, bucket: &Bucket| {
+        ds.get_events(
+            bucket.id.as_str(),
             Some(latest.timestamp - Duration::nanoseconds(1)),
             Some(latest.timestamp),
             None,
-        )?
-        .into_iter()
-        .filter(|e| e.timestamp == latest.timestamp)
-        .collect();
-    if source_at_ts.is_empty() || source_at_ts.iter().any(|e| e.data == latest.data) {
-        return Ok(false);
+        )
+        .map(|events| {
+            events
+                .into_iter()
+                .filter(|e| e.timestamp == latest.timestamp)
+                .collect::<Vec<_>>()
+        })
+    };
+    let source_at_ts = at_timestamp(ds_from, bucket_from)?;
+    if source_at_ts.is_empty() {
+        return Ok(None);
     }
-    ds_to.delete_events_by_id(bucket_to.id.as_str(), vec![latest_id])?;
+    let dest_at_ts = at_timestamp(ds_to, bucket_to)?;
+    if dest_at_ts
+        .iter()
+        .all(|dst| source_at_ts.iter().any(|src| src.data == dst.data))
+    {
+        return Ok(None);
+    }
+
+    // The probe clipped every duration. Recover full identities before matching:
+    // distinct events can share a timestamp and data but have different durations.
+    let fetch_full = |ds: &dyn AccessMethod, bucket: &Bucket, candidates: Vec<Event>| {
+        candidates
+            .into_iter()
+            .map(|candidate| {
+                let id = candidate.id.ok_or_else(|| "Event has no ID".to_string())?;
+                let full = ds.get_event(bucket.id.as_str(), id)?;
+                if full.timestamp != latest.timestamp || full.data != candidate.data {
+                    return Err(format!(
+                        "Event {id} changed while reconciling its replacement"
+                    ));
+                }
+                Ok(full)
+            })
+            .collect::<Result<Vec<_>, String>>()
+    };
+    let source = fetch_full(ds_from, bucket_from, source_at_ts)?;
+    let mut dest = fetch_full(ds_to, bucket_to, dest_at_ts)?;
+    // A retry after insertion may return the longer replacement as "latest".
+    // Retained stale rows still carry the earlier cursor that must be resumed.
+    let resume = dest.iter().map(|e| e.timestamp + e.duration).min();
+    let mut replacements = Vec::new();
+    for mut src in source {
+        if let Some(index) = dest
+            .iter()
+            .position(|dst| event_identity(dst) == event_identity(&src) && dst.data == src.data)
+        {
+            dest.remove(index);
+        } else {
+            src.id = None;
+            replacements.push(src);
+        }
+    }
+    let stale: Vec<i64> = dest.into_iter().filter_map(|dst| dst.id).collect();
+    if !replacements.is_empty() {
+        ds_to.insert_events(bucket_to.id.as_str(), replacements)?;
+    }
+    ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
     info!(
-        "   ~ Latest event at {:?} was replaced on the source; re-syncing it",
+        "   ~ Reconciled replaced latest event at {:?}",
         latest.timestamp
     );
-    Ok(true)
+    Ok(resume)
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -1122,29 +1173,30 @@ fn sync_one(
     bucket_to: Bucket,
     sync_spec: &SyncSpec,
 ) -> Result<BucketReport, String> {
-    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
     // Sync events
     // FIXME: This should use bucket_to.metadata.end, but it doesn't because it doesn't work
     // for empty buckets (Should be None, is Some(unknown_time))
     // let resume_sync_at = bucket_to.metadata.end;
-    let mut most_recent_events = ds_to.get_events(bucket_to.id.as_str(), None, None, Some(1))?;
-    if drop_replaced_latest_event(
+    let most_recent_events = ds_to.get_events(bucket_to.id.as_str(), None, None, Some(1))?;
+    let reconcile_resume = reconcile_replaced_latest_event(
         ds_from,
         ds_to,
         &bucket_from,
         &bucket_to,
         &most_recent_events,
-    )? {
-        most_recent_events = ds_to.get_events(bucket_to.id.as_str(), None, None, Some(1))?;
-    }
+    )?;
+    // Reconciliation can finish an interrupted deletion and legitimately shrink
+    // the row count. Measure newly copied events from the repaired baseline.
+    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
+    // Keep the original cursor: a replacement may extend past newly appended
+    // overlapping events that still need to be copied.
     // If the destination bucket already has events, resume from where it left off.
     // Otherwise (first sync of this bucket), fall back to sync_spec.start, if specified.
     let newest_timestamp = most_recent_events.first().map(|e| e.timestamp);
-    let resume_sync_at = most_recent_events
-        .first()
-        .map(|e| e.timestamp + e.duration)
+    let resume_sync_at = reconcile_resume
+        .or_else(|| most_recent_events.first().map(|e| e.timestamp + e.duration))
         .or(sync_spec.start);
 
     if let Some(resume_time) = resume_sync_at {

@@ -49,8 +49,9 @@ fn serialize_function<S, F>(_element: &str, _fun: &F, _serializer: S) -> Result<
 where
     S: Serializer,
 {
-    panic!("Query function was unevaluated and was attempted to be serialized, panic!");
-    //element.id.serialize(serializer)
+    Err(serde::ser::Error::custom(
+        "Query function cannot be serialized; call it instead",
+    ))
 }
 
 // Needed because of a limitation in rust where you cannot derive(Debug) on a
@@ -348,13 +349,28 @@ impl TryFrom<DataType> for usize {
     }
 }
 
+impl DataType {
+    /// Whether this value is, or contains, a function. Functions can't be serialized,
+    /// so such a value can't be returned from a query.
+    pub(crate) fn contains_function(&self) -> bool {
+        match self {
+            DataType::Function(..) | DataType::ReadOnlyFunction(..) => true,
+            DataType::List(l) => l.iter().any(DataType::contains_function),
+            DataType::Dict(d) => d.values().any(DataType::contains_function),
+            _ => false,
+        }
+    }
+}
+
 impl TryFrom<DataType> for Value {
     type Error = QueryError;
     fn try_from(value: DataType) -> Result<Self, Self::Error> {
         match value {
             DataType::None() => Ok(Value::Null),
             DataType::Bool(b) => Ok(Value::Bool(b)),
-            DataType::Number(n) => Ok(Value::Number(Number::from_f64(n).unwrap())),
+            DataType::Number(n) => Number::from_f64(n).map(Value::Number).ok_or_else(|| {
+                QueryError::InvalidType(format!("Number {n} is not finite"))
+            }),
             DataType::String(s) => Ok(Value::String(s)),
             DataType::List(l) => {
                 let mut values: Vec<Value> = Vec::with_capacity(l.len());
@@ -489,6 +505,24 @@ impl TryFrom<&DataType> for Rule {
             Err(QueryError::InvalidFunctionParameters(format!(
                 "Unknown rule type '{rtype}'"
             )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod serialization_tests {
+    use super::{functions, DataType};
+    use crate::VarEnv;
+
+    #[test]
+    fn serializing_function_values_returns_errors() {
+        let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
+        for name in ["print", "query_bucket"] {
+            let function = env.get(name).unwrap().clone();
+            assert!(serde_json::to_string(&function).is_err());
+            assert!(serde_json::to_value(&function).is_err());
+            assert!(serde_json::to_string(&DataType::List(vec![function])).is_err());
         }
     }
 }

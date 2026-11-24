@@ -82,5 +82,11 @@ pub fn query_with_deadline(
             return Err(QueryError::ParsingError(format!("{e:?}")));
         }
     };
-    interpret::interpret_prog(program, ti, ds, deadline)
+    let result = interpret::interpret_prog(program, ti, ds, deadline)?;
+    if result.contains_function() {
+        return Err(QueryError::InvalidType(
+            "A query can't return a function; call it instead".to_string(),
+        ));
+    }
+    Ok(result)
 }

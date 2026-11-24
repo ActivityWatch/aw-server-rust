@@ -192,6 +192,11 @@ fn interpret_expr(
                     ))
                 }
             };
+            if b_num == 0.0 {
+                return Err(QueryError::MathError(
+                    "Cannot take the remainder with a zero divisor".to_string(),
+                ));
+            }
             Ok(DataType::Number(a_num % b_num))
         }
         Equal(lhs, rhs) => {

@@ -170,6 +170,45 @@ mod query_tests {
     }
 
     #[test]
+    fn test_non_finite_numbers_are_errors_not_panics() {
+        let ds = setup_datastore_empty();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+
+        // Modulo by zero is a MathError, like division by zero (it used to yield NaN).
+        let res = aw_query::query("return 5 % 0;", &interval, &ds);
+        match res {
+            Err(QueryError::MathError(message)) => assert!(message.contains("zero divisor")),
+            other => panic!("Expected a zero-divisor error, got {other:?}"),
+        }
+        let res = aw_query::query("return filter_keyvals([], \"k\", [0 % 0]);", &interval, &ds);
+        assert_err_type!(res, QueryError::MathError(_));
+
+        let res = aw_query::query("return 0 % 5;", &interval, &ds).unwrap();
+        assert_eq!(res, DataType::Number(0.0));
+
+        // A literal too large for f64 is infinite; converting it to a JSON value
+        // used to unwrap None and panic the request.
+        let code = format!("return filter_keyvals([], \"k\", [1{}]);", "0".repeat(400));
+        let res = aw_query::query(&code, &interval, &ds);
+        assert_err_type!(res, QueryError::InvalidType(_));
+    }
+
+    #[test]
+    fn test_returning_a_function_is_an_error() {
+        // A function value can't be serialized; the endpoint used to panic on it.
+        let ds = setup_datastore_empty();
+        let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();
+        for code in [
+            "return print;",
+            "return [query_bucket];",
+            "return {\"f\": sum_durations};",
+        ] {
+            let res = aw_query::query(code, &interval, &ds);
+            assert_err_type!(res, QueryError::InvalidType(_));
+        }
+    }
+
+    #[test]
     fn test_negative_number_literal() {
         let ds = setup_datastore_empty();
         let interval = TimeInterval::new_from_string(TIME_INTERVAL).unwrap();

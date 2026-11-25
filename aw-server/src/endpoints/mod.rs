@@ -85,6 +85,22 @@ Build with <code>AW_WEBUI_DIR</code> pointing at a built aw-webui, or pass \
     )
 }
 
+/// Acquire one of `ServerState`'s request-ordering mutexes, recovering from
+/// poisoning.
+///
+/// `write_lock` and `flush_lock` guard only the ordering of a read-record-write
+/// sequence; they protect no data that a panic could leave inconsistent. A
+/// panic while a handler held one of them (a bug, or untrusted input reaching
+/// an arithmetic overflow, see #873) used to poison the `Mutex`, after which
+/// every later `.lock().unwrap()` panicked too — turning one bad request into
+/// permanent 500s until restart. Recovering the guard keeps the failure local
+/// to the request that caused it.
+pub fn lock_ignoring_poison<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 // The Datastore is just a cheap handle to the DB worker thread (a crossbeam
 // channel sender), which serializes all DB access internally. No mutex is
 // needed here — wrapping it in one would serialize all HTTP requests, letting

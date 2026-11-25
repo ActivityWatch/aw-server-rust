@@ -10,7 +10,7 @@ use aw_query::QueryError;
 
 use crate::endpoints::query_cache::CacheKey;
 use crate::endpoints::util::ApiJson;
-use crate::endpoints::{HttpErrorJson, ServerState};
+use crate::endpoints::{lock_ignoring_poison, HttpErrorJson, ServerState};
 
 /// Queries slower than this are logged at `info` with their timeperiod and
 /// size, so a server that gets bogged down by long-range queries leaves a
@@ -114,7 +114,7 @@ pub fn query(
             .collect();
         // Held through the commit: a concurrent query waits here instead of
         // finding nothing pending while the flush is still in progress.
-        let _flushing = state.flush_lock.lock().unwrap();
+        let _flushing = lock_ignoring_poison(&state.flush_lock);
         let pending = if reassigns_timeinterval {
             state.query_cache.pending_generation()
         } else {

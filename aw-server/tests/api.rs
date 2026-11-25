@@ -981,6 +981,100 @@ mod api_tests {
     }
 
     #[test]
+    fn test_far_future_event_returns_400_without_poisoning_the_write_lock() {
+        // #873: a timestamp far enough in the future that `timestamp + duration`
+        // overflows chrono's representable range used to panic inside the
+        // `write_lock` critical section. That poisoned the Mutex, so every later
+        // write returned 500 until the server restarted. Both write endpoints must
+        // reject such an event with 400 and leave the lock usable.
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = || Header::new("Host", "127.0.0.1:5600");
+        let count = |client: &Client| {
+            client
+                .get("/api/0/buckets/id/events/count")
+                .header(host())
+                .dispatch()
+                .into_string()
+                .unwrap()
+        };
+
+        client
+            .post("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"id":"id","type":"test","client":"test","hostname":"127.0.0.1"}"#)
+            .dispatch();
+
+        // `duration` is ~285 years, so the end overflows even a far-future start.
+        let far_future_heartbeat = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=1")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"timestamp":"+262000-01-01T00:00:00Z","duration":9000000000,"data":{}}"#)
+            .dispatch();
+        assert_eq!(
+            far_future_heartbeat.status(),
+            rocket::http::Status::BadRequest
+        );
+        assert_eq!(count(&client), "0");
+
+        let far_future_events = client
+            .post("/api/0/buckets/id/events")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"[{"timestamp":"+262000-01-01T00:00:00Z","duration":9000000000,"data":{}}]"#)
+            .dispatch();
+        assert_eq!(far_future_events.status(), rocket::http::Status::BadRequest);
+        assert_eq!(count(&client), "0");
+
+        // The write lock is not poisoned: an ordinary heartbeat still succeeds.
+        let ok = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=10")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"timestamp":"2018-01-01T00:00:00Z","duration":1.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(ok.status(), rocket::http::Status::Ok);
+        assert_eq!(count(&client), "1");
+    }
+
+    #[test]
+    fn test_poisoned_write_lock_still_accepts_writes() {
+        // Defense in depth for #873: the write lock guards only request ordering
+        // and protects no invariant, so a panic while any handler holds it must
+        // not leave it poisoned and turn every later write into a 500.
+        let state = endpoints::ServerState::new(
+            aw_datastore::Datastore::new_in_memory(false),
+            endpoints::AssetResolver::new(None),
+            "test_id".to_string(),
+        );
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.write_lock.lock().unwrap();
+            panic!("simulated handler panic while holding the write lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(state.write_lock.is_poisoned());
+
+        let client = Client::untracked(endpoints::build_rocket(state, config::AWConfig::default()))
+            .expect("valid instance");
+        let host = || Header::new("Host", "127.0.0.1:5600");
+        client
+            .post("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"id":"id","type":"test","client":"test","hostname":"127.0.0.1"}"#)
+            .dispatch();
+        let res = client
+            .post("/api/0/buckets/id/heartbeat?pulsetime=10")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"timestamp":"2018-01-01T00:00:00Z","duration":1.0,"data":{}}"#)
+            .dispatch();
+        assert_eq!(res.status(), rocket::http::Status::Ok);
+    }
+
+    #[test]
     fn test_import_existing_bucket_rejects_out_of_range_event_times() {
         let client = Client::untracked(setup_testserver()).expect("valid instance");
         let host = Header::new("Host", "127.0.0.1:5600");

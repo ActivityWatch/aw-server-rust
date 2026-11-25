@@ -37,8 +37,20 @@ use aw_models::Event;
 pub type TimeRange = (DateTime<Utc>, DateTime<Utc>);
 
 /// Full extent of an event, as the datastore's overlap check sees it.
+///
+/// `Event::calculate_endtime()` panics when `timestamp + duration` overflows
+/// chrono's representable range. That is reachable from an untrusted request
+/// (a far-future timestamp with a large duration) and, because this runs while
+/// the endpoint holds `write_lock`, the panic used to poison that lock and turn
+/// every later write into a 500 (#873). Such events are rejected by the
+/// datastore as out of range and never stored, so only the invalidation bounds
+/// of a request that is about to fail are affected: saturate instead of panicking.
 pub fn event_range(event: &Event) -> TimeRange {
-    (event.timestamp, event.calculate_endtime())
+    let end = event
+        .timestamp
+        .checked_add_signed(event.duration)
+        .unwrap_or(DateTime::<Utc>::MAX_UTC);
+    (event.timestamp, end)
 }
 
 /// Inclusive on both ends: conservative (may invalidate a touching period).

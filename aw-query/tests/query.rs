@@ -1077,4 +1077,45 @@ mod query_tests {
         );
         assert!(aw_query::query(&code, &interval, &ds).is_err());
     }
+
+    #[test]
+    fn test_assigns_timeinterval_deep_tree_cleanup() {
+        // Run in a child process: a stack overflow aborts rather than unwinds.
+        const CHILD: &str = "AW_TEST_ASSIGNMENT_DEEP_TREE";
+        if std::env::var_os(CHILD).is_some() {
+            for assignment in [false, true] {
+                // The last statement is visited first, so the assignment case
+                // also covers cleanup after what used to be an early return.
+                let suffix = if assignment { "TIMEINTERVAL = 1;" } else { "" };
+                let code = format!("RETURN = {}1; {suffix}", "1 + ".repeat(100_000));
+                assert_eq!(aw_query::assigns_timeinterval(&code), assignment);
+            }
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "query_tests::test_assigns_timeinterval_deep_tree_cleanup",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "deep AST inspection aborted: {status}");
+    }
+
+    #[test]
+    fn test_assigns_timeinterval() {
+        assert!(!aw_query::assigns_timeinterval(
+            "events = query_bucket(\"x\"); RETURN = events;"
+        ));
+        // Reading it is fine; only assignment counts.
+        assert!(!aw_query::assigns_timeinterval("RETURN = TIMEINTERVAL;"));
+        assert!(aw_query::assigns_timeinterval(
+            "TIMEINTERVAL = \"2000-01-01T00:00:00Z/2001-01-01T00:00:00Z\"; RETURN = 1;"
+        ));
+        assert!(aw_query::assigns_timeinterval(
+            "if True { if True { TIMEINTERVAL = \"x\"; } } RETURN = 1;"
+        ));
+        assert!(!aw_query::assigns_timeinterval("this does not parse ("));
+    }
 }

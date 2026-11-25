@@ -59,6 +59,52 @@ impl fmt::Display for QueryError {
     }
 }
 
+/// Whether `code` assigns to `TIMEINTERVAL` anywhere, including inside `if`
+/// blocks. `query_bucket` reads its range from that variable, so a program that
+/// reassigns it can read events outside the requested timeperiod, and a cached
+/// result for the requested period would miss writes to the range it actually
+/// read (ActivityWatch/aw-server-rust#882 item 7). Code that doesn't parse
+/// returns `false`; running it fails anyway.
+pub fn assigns_timeinterval(code: &str) -> bool {
+    use ast::Expr_;
+    let program = match parser::parse(lexer::Lexer::new(code)) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    // Consume the children as we walk: borrowing them would leave recursive
+    // AST destruction on return. Drain the whole tree even after a match.
+    let mut assigns = false;
+    let mut stack = program.stmts;
+    while let Some(expr) = stack.pop() {
+        match expr.node {
+            Expr_::Add(a, b)
+            | Expr_::Sub(a, b)
+            | Expr_::Mul(a, b)
+            | Expr_::Div(a, b)
+            | Expr_::Mod(a, b)
+            | Expr_::Equal(a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            Expr_::Assign(var, e) => {
+                assigns |= var == "TIMEINTERVAL";
+                stack.push(*e);
+            }
+            Expr_::Function(_, e) | Expr_::Return(e) => stack.push(*e),
+            Expr_::If(branches) => {
+                for (cond, block) in branches {
+                    stack.push(*cond);
+                    stack.extend(block);
+                }
+            }
+            Expr_::List(items) => stack.extend(items),
+            Expr_::Dict(d) => stack.extend(d.into_values()),
+            Expr_::Var(_) | Expr_::Bool(_) | Expr_::Number(_) | Expr_::String(_) => (),
+        }
+    }
+    assigns
+}
+
 pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
     query_with_deadline(code, ti, ds, None)
 }

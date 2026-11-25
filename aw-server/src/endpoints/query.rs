@@ -76,8 +76,11 @@ pub fn query(
     cache: Option<bool>,
     state: &State<ServerState>,
 ) -> Result<RawJson<String>, HttpErrorJson> {
-    let query_code = query_req.0.query.join("\n");
     let intervals = &query_req.0.timeperiods;
+    if intervals.is_empty() {
+        return Ok(RawJson("[]".to_string()));
+    }
+    let query_code = query_req.0.query.join("\n");
     let use_cache = state.query_cache_enabled && cache.unwrap_or(true);
     let datastore = state.query_datastore();
     let request_start = Instant::now();
@@ -90,11 +93,20 @@ pub fn query(
     // Whether results computed here may be stored. A failed flush leaves
     // overlapping writes invisible to the reader.
     let mut store_results = use_cache;
+    // A program that reassigns TIMEINTERVAL reads outside the requested
+    // periods, so writes the cache tracks by period can't invalidate it.
+    // Reader freshness also needs this check when caching is disabled.
+    let reassigns_timeinterval =
+        (use_cache || state.reader.is_some()) && aw_query::assigns_timeinterval(&query_code);
+    if reassigns_timeinterval {
+        store_results = false;
+    }
     // The reader only sees committed data, and writes (heartbeats, but also
     // edits to old events and imports) are acknowledged before the writer's
     // batch commits. Flush first when any write since the last flush touched
     // one of the periods; untouched past periods, the bulk of a Year / All
-    // time view, skip the fsync.
+    // time view, skip the fsync. Reassigned ranges are unknown, so any pending
+    // write must be flushed for those queries.
     if state.reader.is_some() {
         let periods: Vec<_> = intervals
             .iter()
@@ -103,7 +115,12 @@ pub fn query(
         // Held through the commit: a concurrent query waits here instead of
         // finding nothing pending while the flush is still in progress.
         let _flushing = state.flush_lock.lock().unwrap();
-        if let Some(generation) = state.query_cache.pending_overlapping(&periods) {
+        let pending = if reassigns_timeinterval {
+            state.query_cache.pending_generation()
+        } else {
+            state.query_cache.pending_overlapping(&periods)
+        };
+        if let Some(generation) = pending {
             match state.datastore.force_commit() {
                 Ok(()) => state.query_cache.clear_pending_through(generation),
                 Err(e) => {

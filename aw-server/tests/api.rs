@@ -2150,6 +2150,124 @@ mod api_tests {
             .dispatch();
         assert_eq!(res.status(), rocket::http::Status::Ok);
     }
+    #[test]
+    fn empty_query_periods_preserve_pending_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-periods.sqlite");
+        let server = setup_file_testserver(path.to_str().unwrap());
+        let state = server.state::<endpoints::ServerState>().unwrap();
+        assert!(state.reader.is_some());
+        let cache = std::sync::Arc::clone(&state.query_cache);
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "empty-periods", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        state.datastore.create_bucket(&bucket).unwrap();
+        state.datastore.force_commit().unwrap();
+        let client = Client::untracked(server).expect("valid instance");
+        let res = client
+            .post("/api/0/buckets/empty-periods/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(
+                json!([{
+                    "timestamp": "2010-01-01T12:00:00Z", "duration": 60, "data": {}
+                }])
+                .to_string(),
+            )
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+        let pending = cache.pending_generation();
+        assert!(pending.is_some());
+
+        for cache_enabled in [true, false] {
+            let res = client
+                .post(format!("/api/0/query?cache={cache_enabled}"))
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(
+                    json!({
+                        "timeperiods": [],
+                        "query": ["TIMEINTERVAL = 1; RETURN = 1;"]
+                    })
+                    .to_string(),
+                )
+                .dispatch();
+            assert_eq!(res.status(), Status::Ok);
+            assert_eq!(res.into_json::<Value>().unwrap(), json!([]));
+            assert_eq!(cache.pending_generation(), pending);
+            assert_eq!(cache.stats().entries, 0);
+        }
+    }
+
+    #[test]
+    fn query_cache_skips_queries_that_reassign_timeinterval() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reassigned.sqlite");
+        let server = setup_file_testserver(path.to_str().unwrap());
+        let state = server.state::<endpoints::ServerState>().unwrap();
+        let cache: Arc<endpoints::query_cache::QueryCache> = Arc::clone(&state.query_cache);
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "reassigned", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        state.datastore.create_bucket(&bucket).unwrap();
+        state.datastore.force_commit().unwrap();
+        let client = Client::untracked(server).expect("valid instance");
+        let post_query = |query: &str, cache_enabled: bool| {
+            client
+                .post(format!("/api/0/query?cache={cache_enabled}"))
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(
+                    json!({
+                        "timeperiods": ["2000-01-01T00:00:00Z/2000-01-02T00:00:00Z"],
+                        "query": [query]
+                    })
+                    .to_string(),
+                )
+                .dispatch()
+        };
+
+        // Reads a range other than the requested period, so a write there
+        // could never invalidate a cached result: don't store it.
+        let query = "TIMEINTERVAL = \"2010-01-01T00:00:00Z/2011-01-01T00:00:00Z\"; RETURN = query_bucket(\"reassigned\");";
+        let res = post_query(query, true);
+        assert_eq!(res.status(), Status::Ok);
+        assert_eq!(res.into_json::<Value>().unwrap(), json!([[]]));
+        assert_eq!(cache.stats().entries, 0);
+
+        // Writes in 2010 do not overlap the requested 2000 period. They must
+        // still be flushed to the reader, even when caching is disabled.
+        for (i, cache_enabled) in [true, false].into_iter().enumerate() {
+            let res = client
+                .post("/api/0/buckets/reassigned/events")
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(
+                    json!([{
+                        "timestamp": format!("2010-01-0{}T12:00:00Z", i + 1),
+                        "duration": 60, "data": {"insert": i}
+                    }])
+                    .to_string(),
+                )
+                .dispatch();
+            assert_eq!(res.status(), Status::Ok);
+            let res = post_query(query, cache_enabled);
+            assert_eq!(res.status(), Status::Ok);
+            let body = res.into_json::<Value>().unwrap();
+            assert_eq!(body[0].as_array().unwrap().len(), i + 1);
+            assert_eq!(cache.stats().entries, 0);
+        }
+
+        // An ordinary query for the same past period is still cached.
+        let res = post_query("RETURN = TIMEINTERVAL;", true);
+        assert_eq!(res.status(), Status::Ok);
+        assert_eq!(cache.stats().entries, 1);
+    }
+
     /// End-to-end check of the finished-period query cache: a past period is
     /// served from cache, and a write overlapping it invalidates the entry.
     #[test]

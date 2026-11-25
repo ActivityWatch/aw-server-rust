@@ -842,7 +842,7 @@ mod query_tests {
             "return 1;\n@ return 2;",
             "return 1;\u{a0}return 2;",
             "return 1;\u{201c}x\u{201d}",
-            "return 1; x = \"unterminated;",
+            "return 1; \"unterminated;",
         ] {
             let res = aw_query::query(code, &interval, &ds);
             assert_err_type!(res, QueryError::ParsingError(_));

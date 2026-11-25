@@ -9,7 +9,9 @@ use serde::{
     Serialize, Serializer,
 };
 
-use crate::datastore::{events_source, parse_event_row, prefer_endtime_index};
+use crate::datastore::{
+    events_source, filter_excludes_everything, filter_nanos, parse_event_row, prefer_endtime_index,
+};
 use crate::DatastoreError;
 
 struct EventRows<'a> {
@@ -319,17 +321,15 @@ pub(crate) fn write_events_csv(
         None => return Err(DatastoreError::NoSuchBucket(bucket_id.to_owned())),
     };
 
-    let starttime_filter_ns: i64 = match starttime_opt {
-        Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-        // Match get_events: None means all events, including pre-epoch ones.
-        None => i64::MIN,
-    };
-    let endtime_filter_ns: i64 = match endtime_opt {
-        Some(dt) => dt.timestamp_nanos_opt().unwrap(),
-        None => i64::MAX,
-    };
-    if starttime_filter_ns > endtime_filter_ns {
-        warn!("Starttime in event query was lower than endtime!");
+    // Same bound handling as get_events: dates outside chrono's nanosecond range clamp or
+    // exclude everything instead of panicking the datastore worker.
+    let starttime_filter_ns: i64 = starttime_opt.map_or(i64::MIN, filter_nanos);
+    let endtime_filter_ns: i64 = endtime_opt.map_or(i64::MAX, filter_nanos);
+    let excludes_everything = filter_excludes_everything(starttime_opt, endtime_opt);
+    if excludes_everything || starttime_filter_ns > endtime_filter_ns {
+        if !excludes_everything {
+            warn!("Starttime in event query was later than endtime!");
+        }
         write_csv_header(&mut writer, &[])?;
         return writer.flush().map_err(csv_io_err);
     }
@@ -548,6 +548,49 @@ mod tests {
             "-0.001500000"
         );
         assert_eq!(duration_csv(&Duration::seconds(-1)), "-1.000000000");
+    }
+
+    #[test]
+    fn csv_out_of_range_bounds_match_get_events_instead_of_panicking() {
+        // Dates chrono can't express in nanoseconds (before 1677, after 2262) used to hit
+        // `timestamp_nanos_opt().unwrap()` and panic the datastore worker.
+        let (conn, mut ds) = setup();
+        // Clamping an impossible bound must not accidentally include events at the limits.
+        let events = [i64::MIN, i64::MAX]
+            .into_iter()
+            .map(|ns| {
+                Event::new(
+                    DateTime::from_timestamp_nanos(ns),
+                    Duration::zero(),
+                    Default::default(),
+                )
+            })
+            .collect();
+        ds.insert_events(&conn, "populated", events).unwrap();
+        let far_past = DateTime::from_timestamp(-20_000_000_000, 0).unwrap();
+        let far_future = DateTime::from_timestamp(10_000_000_000, 0).unwrap();
+        let csv_rows = |start, end| {
+            let mut output = Vec::new();
+            ds.write_events_csv(&conn, "populated", start, end, None, &mut output)
+                .unwrap();
+            String::from_utf8(output).unwrap().lines().count()
+        };
+        let all = csv_rows(None, None);
+        assert_eq!(all, 8); // Header, five setup events, and both timestamp-limit events.
+        assert_eq!(
+            csv_rows(Some(DateTime::from_timestamp_nanos(i64::MAX)), None),
+            2
+        );
+        assert_eq!(
+            csv_rows(None, Some(DateTime::from_timestamp_nanos(i64::MIN))),
+            2
+        );
+        // A start before 1677 or an end after 2262 can't exclude anything.
+        assert_eq!(csv_rows(Some(far_past), None), all);
+        assert_eq!(csv_rows(None, Some(far_future)), all);
+        // A start after 2262 or an end before 1677 can't match anything: header only.
+        assert_eq!(csv_rows(Some(far_future), None), 1);
+        assert_eq!(csv_rows(None, Some(far_past)), 1);
     }
 
     #[test]

@@ -9,9 +9,13 @@ use aw_client_rust::Event;
 use chrono::{Duration, Utc};
 
 fn start_server() -> (u16, rocket::Shutdown) {
+    start_server_at("127.0.0.1")
+}
+
+fn start_server_at(address: &str) -> (u16, rocket::Shutdown) {
     use aw_server::endpoints::{AssetResolver, ServerState};
 
-    let port = TcpListener::bind(("127.0.0.1", 0))
+    let port = TcpListener::bind((address, 0))
         .unwrap()
         .local_addr()
         .unwrap()
@@ -22,6 +26,7 @@ fn start_server() -> (u16, rocket::Shutdown) {
         "test_id".to_string(),
     );
     let config = aw_server::config::AWConfig {
+        address: address.to_string(),
         port,
         testing: true,
         ..Default::default()
@@ -179,9 +184,142 @@ fn cli_reports_errors_with_a_non_zero_exit() {
         .unwrap()
         .port();
     let output = Command::new(env!("CARGO_BIN_EXE_aw-client"))
-        .args(["--port", &port.to_string(), "buckets"])
+        .args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "buckets",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).starts_with("Error: "));
+}
+
+#[cfg(target_os = "linux")]
+fn local_client(host: &str, port: u16) -> reqwest::blocking::Client {
+    // Keep setup local even when the developer's proxy excludes only 127.0.0.1.
+    // Do not change process-wide proxy variables: the tests run in parallel.
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let info = format!("http://{host}:{port}/api/0/info");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if client
+            .get(&info)
+            .send()
+            .and_then(|response| response.error_for_status())
+            .is_ok()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "aw-server didn't start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    client
+}
+
+/// Without `--host`/`--port`, the server comes from `aw-client.toml`, as in the Python CLI.
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_reads_the_server_from_aw_client_toml() {
+    let (port, shutdown) = start_server_at("127.0.0.2");
+    let client = local_client("127.0.0.2", port);
+    client
+        .post(format!(
+            "http://127.0.0.2:{port}/api/0/buckets/aw-test-from-config"
+        ))
+        .json(&serde_json::json!({
+            "type": "test",
+            "client": "aw-client-rust-cli-config-test",
+            "hostname": "clihost"
+        }))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let config_home =
+        std::env::temp_dir().join(format!("aw-client-cli-config-{}", std::process::id()));
+    let dir = config_home.join("activitywatch").join("aw-client");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("aw-client.toml"),
+        format!("[server]\nhostname = \"127.0.0.2\"\nport = \"{port}\"\n"),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_aw-client"))
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("NO_PROXY", "127.0.0.2")
+        .env("no_proxy", "127.0.0.2")
+        .arg("buckets")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&config_home);
+    assert!(
+        output.status.success(),
+        "aw-client buckets failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("aw-test-from-config"));
+
+    shutdown.notify();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_warns_about_invalid_config_only_when_using_it() {
+    let (port, shutdown) = start_server();
+    let _client = local_client("127.0.0.1", port);
+    let config_home =
+        std::env::temp_dir().join(format!("aw-client-cli-warning-{}", std::process::id()));
+    let dir = config_home.join("activitywatch").join("aw-client");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("aw-client.toml"), "not toml").unwrap();
+
+    // Even a successful request must warn if its host came from a broken config.
+    let output = Command::new(env!("CARGO_BIN_EXE_aw-client"))
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .args(["--port", &port.to_string(), "buckets"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("aw-client.toml") && stderr.contains("using defaults"),
+        "{stderr}"
+    );
+
+    // Explicit address flags don't need the file, so shouldn't warn about it.
+    let output = Command::new(env!("CARGO_BIN_EXE_aw-client"))
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "buckets",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&config_home);
+    shutdown.notify();
 }

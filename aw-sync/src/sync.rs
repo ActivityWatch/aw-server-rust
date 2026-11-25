@@ -973,8 +973,10 @@ fn reconcile_updated_events(
     let Some(resume) = resume_sync_at else {
         return Ok(());
     };
-    // The window always covers dest's newest event (the one ending at
-    // `resume`), even when it starts before `resume - 7d`. The main pull
+    // The window covers dest's newest positive-duration event (ending at
+    // `resume`), even when it starts before `resume - 7d`. A zero-duration
+    // newest event starts at `resume` and is excluded by the filters below;
+    // edits to that point are not reconciled here. The main pull
     // re-fetches that event clipped to a zero-length row at `resume`, and the
     // boundary dedup built after this function only absorbs that clip if dest
     // already holds the source's current payload. Leaving an edit of it

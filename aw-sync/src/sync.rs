@@ -161,16 +161,13 @@ pub fn sync_run(
     // open (or abort on) peer databases at all — pushing only uses the local
     // staging datastore, and unreadable/incompatible peers would otherwise
     // block or silently taint a push pass.
+    let pulling = mode == SyncMode::Pull || mode == SyncMode::Both;
     let mut ds_remotes = Vec::new();
-    if mode == SyncMode::Pull || mode == SyncMode::Both {
+    let mut open_err: Option<String> = None;
+    if pulling {
         match open_peer_datastores(&selection.selected, &mut report, true) {
             Ok(opened) => ds_remotes = opened,
-            Err(e) => {
-                report.finish();
-                crate::report::persist_last_report_warn(&report);
-                close_opened_datastores(&ds_remotes, &ds_localremote);
-                return Err(e.into());
-            }
+            Err(e) => open_err = Some(e),
         }
     }
 
@@ -182,34 +179,20 @@ pub fn sync_run(
         );
     }
 
-    // Pull
-    if mode == SyncMode::Pull || mode == SyncMode::Both {
-        info!("Pulling...");
-        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = ds_remotes
-            .iter()
-            .map(|(db, ds)| (db, ds as &dyn AccessMethod))
-            .collect();
-        if let Err(e) = pull_from_remotes(&remotes, client, sync_spec, &mut report, true) {
-            report.finish();
-            crate::report::persist_last_report_warn(&report);
-            close_opened_datastores(&ds_remotes, &ds_localremote);
-            return Err(e.into());
-        }
-    }
-
-    // Push local server buckets to sync folder
-    if let Some(ds_local) = &ds_localremote {
-        info!("Pushing...");
-        match sync_datastores(client, ds_local, true, Some(device_id), sync_spec) {
-            Ok(buckets) => report.pushed = buckets,
-            Err(e) => {
-                report.record_push_failure(&e);
-                report.finish();
-                crate::report::persist_last_report_warn(&report);
-                close_opened_datastores(&ds_remotes, &ds_localremote);
-                return Err(e.into());
-            }
-        }
+    let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = ds_remotes
+        .iter()
+        .map(|(db, ds)| (db, ds as &dyn AccessMethod))
+        .collect();
+    let peers = pulling.then_some(match open_err {
+        Some(e) => Err(e),
+        None => Ok(remotes.as_slice()),
+    });
+    let staging = ds_localremote.as_ref().map(|ds| ds as &dyn AccessMethod);
+    if let Err(e) = pull_then_push(peers, client, staging, device_id, sync_spec, &mut report) {
+        report.finish();
+        crate::report::persist_last_report_warn(&report);
+        close_opened_datastores(&ds_remotes, &ds_localremote);
+        return Err(e.into());
     }
 
     // Close open database connections
@@ -226,6 +209,64 @@ pub fn sync_run(
 
     report.finish();
     Ok(report)
+}
+
+/// Peers opened for a pull, or why none could be opened.
+type OpenedPeers<'a> = Result<&'a [(&'a RemoteDb, &'a dyn AccessMethod)], String>;
+
+/// One pass's pull phase, then its push phase.
+///
+/// `peers` is `None` when the pass does not pull, and `Err` when every
+/// discovered peer failed to open. `staging` is `None` when it does not push.
+///
+/// A failed pull is about other devices' data and must not stop this device
+/// publishing its own: when one bad peer breaks every device's pull, an early
+/// return meant none of them pushed, so the outage spread to the whole sync
+/// group (ActivityWatch/aw-server-rust#875, item 8). The push therefore always
+/// runs. A pull failure is recorded and returned after it; when the push fails
+/// too, both errors are returned.
+fn pull_then_push(
+    peers: Option<OpenedPeers<'_>>,
+    local: &dyn AccessMethod,
+    staging: Option<&dyn AccessMethod>,
+    device_id: &str,
+    sync_spec: &SyncSpec,
+    report: &mut SyncReport,
+) -> Result<(), String> {
+    let mut pull_err = None;
+    if let Some(peers) = peers {
+        info!("Pulling...");
+        let pulled =
+            peers.and_then(|remotes| pull_from_remotes(remotes, local, sync_spec, report, true));
+        if let Err(e) = pulled {
+            if staging.is_some() {
+                warn!("Pull failed, still pushing local data: {e}");
+            } else {
+                warn!("Pull failed: {e}");
+            }
+            report.record_pull_phase_failure(&e);
+            pull_err = Some(e);
+        }
+    }
+
+    if let Some(staging) = staging {
+        info!("Pushing...");
+        match sync_datastores(local, staging, true, Some(device_id), sync_spec) {
+            Ok(buckets) => report.pushed = buckets,
+            Err(e) => {
+                report.record_push_failure(&e);
+                return Err(match pull_err {
+                    Some(p) => format!("pull failed: {p}; push failed: {e}"),
+                    None => e,
+                });
+            }
+        }
+    }
+
+    match pull_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Stop datastore worker threads. Drop alone does not wait for the sqlite
@@ -1839,6 +1880,136 @@ mod peer_isolation_tests {
         broken_a.close();
         broken_b.close();
         dest.close();
+    }
+
+    /// #875 item 8: when every peer fails on pull, this device must still
+    /// push its own data. Before, the pull error returned before the push
+    /// block, so one shared bad peer stopped every device publishing.
+    #[test]
+    fn all_peers_failing_on_pull_still_pushes_own_data() {
+        let local = Datastore::new_in_memory(false);
+        local
+            .create_bucket(&bucket("aw-watcher-window_own-host", "own-host"))
+            .unwrap();
+        let event: aw_models::Event = serde_json::from_value(serde_json::json!({
+            "timestamp": "2026-01-01T12:00:00Z", "duration": 60,
+            "data": {"app": "editor", "title": "unsynced activity"}
+        }))
+        .unwrap();
+        local
+            .insert_events("aw-watcher-window_own-host", std::slice::from_ref(&event))
+            .unwrap();
+        let staging = Datastore::new_in_memory(false);
+        let broken = unreadable_peer("push-after-pull");
+        let db = peer_db("dev-a", "host-a", PathBuf::from("/nonexistent-a.db"));
+        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = vec![(&db, &broken)];
+        let mut report = SyncReport::new(SyncMode::Both);
+
+        let err = pull_then_push(
+            Some(Ok(remotes.as_slice())),
+            &local,
+            Some(&staging),
+            "own-device",
+            &SyncSpec::default(),
+            &mut report,
+        )
+        .expect_err("a failed pull is still reported as Err");
+
+        assert!(err.contains("all 1 peers failed"), "got: {err}");
+        assert!(
+            staging
+                .get_buckets()
+                .unwrap()
+                .contains_key("aw-watcher-window_own-host"),
+            "own bucket must be pushed despite the pull failure"
+        );
+        assert_eq!(report.pushed.len(), 1);
+        assert_eq!(report.pushed[0].events_new, 1);
+        let copied = staging
+            .get_events("aw-watcher-window_own-host", None, None, None)
+            .unwrap();
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].timestamp, event.timestamp);
+        assert_eq!(copied[0].duration, event.duration);
+        assert_eq!(copied[0].data, event.data);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("pull failed:")),
+            "pull failure must stay visible: {:?}",
+            report.warnings
+        );
+        broken.close();
+        local.close();
+        staging.close();
+    }
+
+    /// Same as above when every peer already failed to *open*.
+    #[test]
+    fn peer_open_failure_still_pushes_own_data() {
+        let local = Datastore::new_in_memory(false);
+        local
+            .create_bucket(&bucket("aw-watcher-afk_own-host", "own-host"))
+            .unwrap();
+        let event: aw_models::Event = serde_json::from_value(serde_json::json!({
+            "timestamp": "2026-01-02T12:00:00Z", "duration": 30,
+            "data": {"status": "not-afk"}
+        }))
+        .unwrap();
+        local
+            .insert_events("aw-watcher-afk_own-host", std::slice::from_ref(&event))
+            .unwrap();
+        let staging = Datastore::new_in_memory(false);
+        let mut report = SyncReport::new(SyncMode::Both);
+
+        let err = pull_then_push(
+            Some(Err("all 2 discovered peers failed to open".to_string())),
+            &local,
+            Some(&staging),
+            "own-device",
+            &SyncSpec::default(),
+            &mut report,
+        )
+        .expect_err("open failure is still Err");
+
+        assert!(err.contains("failed to open"), "got: {err}");
+        assert!(staging
+            .get_buckets()
+            .unwrap()
+            .contains_key("aw-watcher-afk_own-host"));
+        assert_eq!(report.pushed[0].events_new, 1);
+        let copied = staging
+            .get_events("aw-watcher-afk_own-host", None, None, None)
+            .unwrap();
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].timestamp, event.timestamp);
+        assert_eq!(copied[0].duration, event.duration);
+        assert_eq!(copied[0].data, event.data);
+        local.close();
+        staging.close();
+    }
+
+    /// Pull-only passes keep the old contract: no push, pull error returned.
+    #[test]
+    fn pull_only_failure_is_err_without_push() {
+        let local = Datastore::new_in_memory(false);
+        let broken = unreadable_peer("pull-only");
+        let db = peer_db("dev-a", "host-a", PathBuf::from("/nonexistent-a.db"));
+        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = vec![(&db, &broken)];
+        let mut report = SyncReport::new(SyncMode::Pull);
+        pull_then_push(
+            Some(Ok(remotes.as_slice())),
+            &local,
+            None,
+            "own-device",
+            &SyncSpec::default(),
+            &mut report,
+        )
+        .expect_err("total pull failure is Err");
+        assert!(report.pushed.is_empty());
+        broken.close();
+        local.close();
     }
 
     #[test]

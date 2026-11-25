@@ -11,6 +11,7 @@ use jni::sys::{jint, jstring, JNI_VERSION_1_6};
 use jni::JNIEnv;
 use serde_json::json;
 
+use crate::sync_wrapper::pull_all_partial;
 use crate::{pull, pull_all, push_with_hostname};
 
 const ANDROID_LOG_FATAL: c_int = 7;
@@ -347,7 +348,11 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
                 .into();
             let client = get_client(port)?;
 
-            let mut report = pull_all(&client).map_err(|e| format!("Pull phase failed: {}", e))?;
+            // A failed pull must not skip this device's push
+            // (ActivityWatch/aw-server-rust#875, item 8): record it, push,
+            // then report the pull error.
+            let (mut report, pull_failure) =
+                crate::sync_wrapper::full_sync_pull_result(pull_all_partial(&client));
 
             // Persist the pull result even if push fails, so the report on
             // disk reflects the work the pass actually did.
@@ -357,11 +362,17 @@ pub extern "C" fn Java_net_activitywatch_android_SyncInterface_syncBoth(
                     report.record_push_failure(&e);
                     report.finish();
                     crate::report::persist_last_report_warn(&report);
-                    return Err(format!("Push phase failed: {}", e));
+                    return Err(match &pull_failure {
+                        Some(p) => format!("Pull phase failed: {}; push phase failed: {}", p, e),
+                        None => format!("Push phase failed: {}", e),
+                    });
                 }
             }
             report.finish();
             crate::report::persist_last_report_warn(&report);
+            if let Some(e) = pull_failure {
+                return Err(format!("Pull phase failed: {}", e));
+            }
             Ok(report.to_jni_json())
         })();
         sync_result_to_jstring(env, "syncBoth", result)

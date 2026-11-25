@@ -216,3 +216,63 @@ fn edited_newest_straddler_does_not_consume_a_genuine_point_with_old_data() {
         assert_eq!(got[1].data, *old_data.as_object().unwrap());
     }
 }
+
+/// Greptile P1 on #890 at `05ec60a`: two events share a start and the shorter
+/// one sets `resume`. The reconcile fetch ends at `resume`, which clips the
+/// longer event to the shorter one's identity. An edit of the longer event
+/// must not replace its full row with that clipped copy.
+#[test]
+fn edit_of_longer_same_start_event_is_not_truncated_to_resume() {
+    let src = Datastore::new_in_memory(false);
+    let dest = Datastore::new_in_memory(false);
+    let b = create_bucket(&src, "aw-watcher-afk_laptop", "afkstatus", "laptop");
+    let base = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    let short = json!({"status": "afk", "note": "short"});
+    let long = json!({"status": "afk", "note": "long"});
+    let edited = json!({"status": "afk", "note": "long-edited"});
+    src.insert_events(
+        &b,
+        &[
+            ev(base, Duration::days(10), short.clone()),
+            ev(base, Duration::days(12), long.clone()),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    pull(&src, &dest).unwrap();
+    let dest_b = "aw-watcher-afk_laptop-synced-from-laptop";
+
+    let target = src
+        .get_events(&b, None, None, None)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.duration == Duration::days(12))
+        .unwrap();
+    src.delete_events_by_id(&b, vec![target.id.unwrap()])
+        .unwrap();
+    src.insert_events(&b, &[ev(base, Duration::days(12), edited.clone())])
+        .unwrap();
+    src.force_commit().unwrap();
+
+    for _ in 0..2 {
+        pull(&src, &dest).unwrap();
+        let got = all_sorted(&dest, dest_b);
+        assert!(
+            got.iter().any(|e| e.timestamp == base
+                && e.duration == Duration::days(10)
+                && e.data == *short.as_object().unwrap()),
+            "short event lost: {got:?}"
+        );
+        assert!(
+            got.iter()
+                .any(|e| e.timestamp == base && e.duration == Duration::days(12)),
+            "long event truncated: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|e| e.timestamp == base
+                && e.duration == Duration::days(10)
+                && e.data != *short.as_object().unwrap()),
+            "clipped copy of the long event stored: {got:?}"
+        );
+    }
+}

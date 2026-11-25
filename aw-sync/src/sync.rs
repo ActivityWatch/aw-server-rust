@@ -980,9 +980,16 @@ fn reconcile_updated_events(
     // already holds the source's current payload. Leaving an edit of it
     // unreconciled would insert the clip with the edited data and spend the
     // old payload's dedup count on a genuine point at `resume` instead.
+    //
+    // Both fetches end at `resume`, which clips any event extending past it
+    // (e.g. a longer event sharing the newest start) to the newest event's
+    // identity. Inside the 7-day window that ambiguity predates this widening;
+    // for the widened part, reconcile only an unambiguous identity: exactly
+    // one row on each side.
+    let edit_window_start = resume - EDIT_RECONCILE_LOOKBACK;
     let lookback_start = match newest_timestamp {
-        Some(newest) => newest.min(resume - EDIT_RECONCILE_LOOKBACK),
-        None => resume - EDIT_RECONCILE_LOOKBACK,
+        Some(newest) => newest.min(edit_window_start),
+        None => edit_window_start,
     };
     // get_events clips an event straddling the start bound to start at that
     // bound. Querying from `lookback_start` would give a straddler the clipped
@@ -1043,6 +1050,9 @@ fn reconcile_updated_events(
             Some(dsts) if !dsts.is_empty() => dsts,
             _ => continue,
         };
+        if identity.0 < edit_window_start && (srcs.len() != 1 || dsts.len() != 1) {
+            continue;
+        }
         let mut to_insert = Vec::new();
         for src in srcs {
             if let Some(idx) = dsts.iter().position(|dst| dst.data == src.data) {

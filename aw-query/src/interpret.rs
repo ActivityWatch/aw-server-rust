@@ -31,6 +31,9 @@ pub fn interpret_prog(
         check_deadline(deadline, &format!("statement {} of {total}", i + 1))?;
         interpret_expr(&mut env, ds, expr, deadline)?;
     }
+    // The last statement may have overrun the budget inside a function that
+    // finished anyway; don't report that as a successful result.
+    check_deadline(deadline, "returning the result")?;
     match env.remove("RETURN") {
         Some(ret) => Ok(ret),
         None => Err(QueryError::EmptyQuery()),
@@ -38,9 +41,10 @@ pub fn interpret_prog(
 }
 
 /// Fail if `deadline` has passed. Called before every statement, at the top
-/// level and inside `if` blocks, so a budget overrun stops at the next
-/// statement boundary wherever it happens.
-fn check_deadline(deadline: Option<Instant>, what: &str) -> Result<(), QueryError> {
+/// level and inside `if` blocks, around every function call, and by
+/// long-running functions between units of work (events, rules, regex
+/// matches), so a budget overrun stops at the next such checkpoint.
+pub(crate) fn check_deadline(deadline: Option<Instant>, what: &str) -> Result<(), QueryError> {
     match deadline {
         Some(deadline) if Instant::now() >= deadline => {
             Err(QueryError::TimeBudgetExceeded(format!(
@@ -50,6 +54,21 @@ fn check_deadline(deadline: Option<Instant>, what: &str) -> Result<(), QueryErro
         }
         _ => Ok(()),
     }
+}
+
+/// Run a query function between two deadline checks. The function itself
+/// receives the deadline too; the check afterwards catches a function that
+/// has no internal checkpoints (or overshot inside one engine call) so its
+/// late result is not used.
+fn call_checked(
+    fname: &str,
+    deadline: Option<Instant>,
+    call: impl FnOnce() -> Result<DataType, QueryError>,
+) -> Result<DataType, QueryError> {
+    check_deadline(deadline, &format!("calling {fname}"))?;
+    let result = call()?;
+    check_deadline(deadline, &format!("using the result of {fname}"))?;
+    Ok(result)
 }
 
 fn interpret_expr(
@@ -270,7 +289,8 @@ fn interpret_expr(
                             .collect();
                         let args = args?;
                         let refs: Vec<_> = args.iter().map(|arg| arg.as_ref()).collect();
-                        return fun(&refs, env, ds);
+                        let fun = *fun;
+                        return call_checked(&fname, deadline, || fun(&refs, env, ds, deadline));
                     }
                 }
             }
@@ -283,10 +303,12 @@ fn interpret_expr(
                 None => return Err(QueryError::VariableNotDefined(fname.clone())),
             };
             match var {
-                DataType::Function(_, fun) => fun(args, env, ds),
+                DataType::Function(_, fun) => {
+                    call_checked(&fname, deadline, || fun(args, env, ds, deadline))
+                }
                 DataType::ReadOnlyFunction(_, fun) => {
                     let refs: Vec<_> = args.iter().collect();
-                    fun(&refs, env, ds)
+                    call_checked(&fname, deadline, || fun(&refs, env, ds, deadline))
                 }
                 _ => Err(QueryError::InvalidType(fname.to_string())),
             }
@@ -357,7 +379,12 @@ mod tests {
 
     #[test]
     fn read_only_arguments_borrow_the_original_value_and_support_aliases() {
-        fn check(args: &[&DataType], env: &VarEnv, _: &Datastore) -> Result<DataType, QueryError> {
+        fn check(
+            args: &[&DataType],
+            env: &VarEnv,
+            _: &Datastore,
+            _: Option<Instant>,
+        ) -> Result<DataType, QueryError> {
             assert!(std::ptr::eq(args[0], env.get("events").unwrap()));
             Ok(DataType::Bool(true))
         }
@@ -380,7 +407,12 @@ mod tests {
 
     #[test]
     fn side_effecting_arguments_keep_snapshots_and_resolve_the_function_after_evaluation() {
-        fn check(args: &[&DataType], env: &VarEnv, _: &Datastore) -> Result<DataType, QueryError> {
+        fn check(
+            args: &[&DataType],
+            env: &VarEnv,
+            _: &Datastore,
+            _: Option<Instant>,
+        ) -> Result<DataType, QueryError> {
             assert_eq!(args[0], &DataType::List(vec![DataType::Number(1.0)]));
             assert_eq!(env["items"], DataType::List(vec![DataType::Number(2.0)]));
             Ok(DataType::Bool(true))
@@ -457,6 +489,179 @@ mod tests {
                 DataType::Bool(true),
                 DataType::List(vec![DataType::Number(1.0), DataType::Number(2.0)])
             ])
+        );
+    }
+
+    fn expect_timeout(result: Result<DataType, QueryError>) -> String {
+        match result {
+            Err(QueryError::TimeBudgetExceeded(msg)) => msg,
+            other => panic!("expected TimeBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    /// Events whose titles each cost the backtracking VM its full backtrack
+    /// limit against `BACKTRACKING_RULE` (ActivityWatch/aw-server-rust#893).
+    fn slow_events(n: usize) -> DataType {
+        DataType::List(
+            (0..n)
+                .map(|i| {
+                    let mut e = aw_models::Event::default();
+                    e.data.insert(
+                        "title".into(),
+                        serde_json::json!(format!("{}b{i}", "a".repeat(100))),
+                    );
+                    DataType::Event(e)
+                })
+                .collect(),
+        )
+    }
+
+    const BACKTRACKING_RULE: &str = "^(a|aa|(?=a)a)*$";
+
+    fn regex_rule(pattern: &str) -> DataType {
+        DataType::Dict(HashMap::from([
+            ("type".to_string(), DataType::String("regex".into())),
+            ("regex".to_string(), DataType::String(pattern.into())),
+        ]))
+    }
+
+    #[test]
+    fn aliased_classifiers_stop_inside_the_final_statement() {
+        let ds = Datastore::new_in_memory(false);
+        let ti =
+            TimeInterval::new_from_string("2000-01-01T00:00:00Z/2000-01-02T00:00:00Z").unwrap();
+        // 2000 slow titles take seconds even in a release build, far longer
+        // than the budget, so the deadline always expires inside the function.
+        let cases = [
+            (
+                "f = categorize; RETURN = f(events, [[[\"c\"], rule]]);",
+                "before categorize",
+            ),
+            (
+                "f = tag; RETURN = f(events, [[\"t\", rule]]);",
+                "before tag",
+            ),
+            (
+                "f = filter_keyvals_regex; RETURN = f(events, \"title\", pattern);",
+                "before filter_keyvals_regex",
+            ),
+        ];
+        for (code, expected) in cases {
+            let program = crate::parser::parse(crate::lexer::Lexer::new(code)).unwrap();
+            let mut env = init_env(&ti);
+            env.insert("events".into(), slow_events(2000));
+            env.insert("rule".into(), regex_rule(BACKTRACKING_RULE));
+            env.insert("pattern".into(), DataType::String(BACKTRACKING_RULE.into()));
+            let started = Instant::now();
+            let deadline = Some(started + std::time::Duration::from_millis(500));
+            let result = program
+                .stmts
+                .into_iter()
+                .try_for_each(|expr| interpret_expr(&mut env, &ds, expr, deadline).map(drop));
+            // The alias reaches the function's own checkpoints, which name the
+            // function rather than the alias `f`.
+            let msg = expect_timeout(result.map(|_| DataType::None()));
+            assert!(msg.contains(expected), "{code}: {msg}");
+            assert!(
+                !env.contains_key("RETURN"),
+                "{code}: late result was stored"
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "{code}: ran {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn a_function_that_overruns_cannot_return_a_result() {
+        fn slow(_: &[&DataType], _: &VarEnv, _: &Datastore, _: Option<Instant>) -> QueryResult {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(DataType::Number(1.0))
+        }
+        type QueryResult = Result<DataType, QueryError>;
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        env.insert(
+            "slow".into(),
+            DataType::ReadOnlyFunction("slow".into(), slow),
+        );
+        let call = crate::parser::parse(crate::lexer::Lexer::new("RETURN = slow();"))
+            .unwrap()
+            .stmts
+            .remove(0);
+        let deadline = Some(Instant::now() + std::time::Duration::from_millis(20));
+        let msg = expect_timeout(interpret_expr(&mut env, &ds, call, deadline));
+        // Normally the check after the call fires; a stall of >20ms before
+        // the call is rejected by the check before it instead.
+        assert!(
+            msg.contains("using the result of slow") || msg.contains("calling slow"),
+            "{msg}"
+        );
+        assert!(!env.contains_key("RETURN"));
+    }
+
+    #[test]
+    fn rule_compilation_checks_before_each_rule() {
+        let rules = |n: usize| {
+            DataType::List(
+                (0..n)
+                    .map(|i| {
+                        DataType::List(vec![
+                            DataType::List(vec![DataType::String(format!("c{i}"))]),
+                            regex_rule(&format!("r{i}")),
+                        ])
+                    })
+                    .collect(),
+            )
+        };
+        let tag_rules = |n: usize| {
+            DataType::List(
+                (0..n)
+                    .map(|i| {
+                        DataType::List(vec![
+                            DataType::String(format!("t{i}")),
+                            regex_rule(&format!("r{i}")),
+                        ])
+                    })
+                    .collect(),
+            )
+        };
+        let stop_at = |fail_at: usize| {
+            let mut calls = 0;
+            move || {
+                calls += 1;
+                if calls == fail_at {
+                    Err(QueryError::TimeBudgetExceeded(format!("check {calls}")))
+                } else {
+                    Ok(())
+                }
+            }
+        };
+        // 3 rules: one check before each and one after the last.
+        for fail_at in 1..=4 {
+            let expected = format!("check {fail_at}");
+            match crate::datatype::category_rules_checked(rules(3), stop_at(fail_at)) {
+                Err(QueryError::TimeBudgetExceeded(msg)) => assert_eq!(msg, expected),
+                other => panic!(
+                    "expected cancellation at {fail_at}, got {:?}",
+                    other.is_ok()
+                ),
+            }
+            match crate::datatype::tag_rules_checked(tag_rules(3), stop_at(fail_at)) {
+                Err(QueryError::TimeBudgetExceeded(msg)) => assert_eq!(msg, expected),
+                other => panic!(
+                    "expected cancellation at {fail_at}, got {:?}",
+                    other.is_ok()
+                ),
+            }
+        }
+        assert_eq!(
+            crate::datatype::category_rules_checked(rules(3), stop_at(5))
+                .unwrap()
+                .len(),
+            3
         );
     }
 }

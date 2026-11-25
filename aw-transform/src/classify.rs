@@ -5,6 +5,7 @@ use aw_models::Event;
 use fancy_regex::Regex;
 use lru::LruCache;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -17,8 +18,26 @@ pub enum Rule {
     Regex(RegexRule),
 }
 
+/// The check the unchecked public APIs pass to their checked variants.
+fn no_check() -> Result<(), Infallible> {
+    Ok(())
+}
+
+fn into_ok<T>(result: Result<T, Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
+}
+
 trait RuleTrait {
-    fn matches(&self, event: &Event, values: &MatchValues) -> bool;
+    /// Calls `check` before every regex match, and stops with its error.
+    fn matches<E>(
+        &self,
+        event: &Event,
+        values: &MatchValues,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<bool, E>;
 
     /// Whether this rule reads the shared extracted values (i.e. matches
     /// against all of the event's values rather than `select_keys`).
@@ -26,10 +45,15 @@ trait RuleTrait {
 }
 
 impl RuleTrait for Rule {
-    fn matches(&self, event: &Event, values: &MatchValues) -> bool {
+    fn matches<E>(
+        &self,
+        event: &Event,
+        values: &MatchValues,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
         match self {
-            Rule::None => false,
-            Rule::Regex(rule) => rule.matches(event, values),
+            Rule::None => Ok(false),
+            Rule::Regex(rule) => rule.matches(event, values, check),
         }
     }
 
@@ -120,14 +144,13 @@ impl RegexRule {
         })
     }
 
-    fn value_matches(&self, value: &serde_json::Value) -> bool {
-        if self.never_matches {
-            return false;
-        }
-        match value.as_str() {
-            Some(value) => self.regex.is_match(value).unwrap_or(false),
-            None => false,
-        }
+    fn value_matches<E>(
+        &self,
+        value: &str,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        check()?;
+        Ok(self.regex.is_match(value).unwrap_or(false))
     }
 }
 
@@ -137,21 +160,38 @@ impl RegexRule {
 /// It's puropse is to make the API easy to extend in the future without having to break backwards
 /// compatibility (or have to maintain "old" query2 functions).
 impl RuleTrait for RegexRule {
-    fn matches(&self, event: &Event, values: &MatchValues) -> bool {
+    fn matches<E>(
+        &self,
+        event: &Event,
+        values: &MatchValues,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
         if self.never_matches {
-            return false;
+            return Ok(false);
         }
         match &self.select_keys {
-            Some(select_keys) => select_keys
-                .iter()
-                .filter_map(|key| event.data.get(key))
-                .any(|val| self.value_matches(val)),
+            Some(select_keys) => {
+                for value in select_keys
+                    .iter()
+                    .filter_map(|key| event.data.get(key))
+                    .filter_map(|value| value.as_str())
+                {
+                    if self.value_matches(value, check)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
             // `values` holds the same strings (in the same order) that the
             // previous `event.data.values()` iteration produced.
-            None => values
-                .0
-                .iter()
-                .any(|value| self.regex.is_match(value).unwrap_or(false)),
+            None => {
+                for value in &values.0 {
+                    if self.value_matches(value, check)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
         }
     }
 
@@ -228,26 +268,47 @@ impl From<(Vec<String>, Rule)> for CategoryRule {
 ///    identical data (same app/title — very common in practice) are only matched
 ///    against the rule set once. On a month's data with 50k+ events but only a
 ///    few hundred distinct app/title pairs this reduces regex work by >99%.
-pub fn categorize(mut events: Vec<Event>, rules: &[CategoryRule]) -> Vec<Event> {
+pub fn categorize(events: Vec<Event>, rules: &[CategoryRule]) -> Vec<Event> {
+    into_ok(categorize_checked(events, rules, no_check))
+}
+
+/// Like [`categorize`], but calls `check` before every event (cache hits
+/// included), every rule and every regex match, and once more at the end.
+/// The first error `check` returns stops the work and is returned unchanged.
+///
+/// This bounds the work between regex engine calls, not inside one: a single
+/// `fancy_regex` match or compilation cannot be interrupted, so a caller's
+/// deadline can be overshot by up to one engine call.
+pub fn categorize_checked<E>(
+    mut events: Vec<Event>,
+    rules: &[CategoryRule],
+    mut check: impl FnMut() -> Result<(), E>,
+) -> Result<Vec<Event>, E> {
     let ranked_rules = _ranked_rules(rules);
     // Cache: serialized event data → assigned category
     let mut category_cache: HashMap<String, Vec<String>> = HashMap::new();
     let mut classified_events = Vec::with_capacity(events.len());
     for mut event in events.drain(..) {
+        check()?;
         // Key on the full event data. serde_json::Map preserves insertion order, so
         // events with the same fields in the same order produce the same key — which
         // is the normal case for heartbeat-based watchers.
         let cache_key = serde_json::to_string(&event.data).unwrap_or_default();
-        let category = category_cache
-            .entry(cache_key)
-            .or_insert_with(|| _pick_category(&event, &ranked_rules))
-            .clone();
+        let category = match category_cache.get(&cache_key) {
+            Some(category) => category.clone(),
+            None => {
+                let category = _pick_category(&event, &ranked_rules, &mut check)?;
+                category_cache.insert(cache_key, category.clone());
+                category
+            }
+        };
         event
             .data
             .insert("$category".into(), serde_json::json!(category));
         classified_events.push(event);
     }
-    classified_events
+    check()?;
+    Ok(classified_events)
 }
 
 /// A [`CategoryRule`] with its rank precomputed, for ordered evaluation.
@@ -284,7 +345,11 @@ fn _ranked_rules(rules: &[CategoryRule]) -> Vec<RankedRule<'_>> {
     ranked
 }
 
-fn _pick_category(event: &Event, ranked_rules: &[RankedRule<'_>]) -> Vec<String> {
+fn _pick_category<E>(
+    event: &Event,
+    ranked_rules: &[RankedRule<'_>],
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Vec<String>, E> {
     // Rules with `select_keys` match against specific keys and never read the
     // shared values, so skip the extraction entirely when no rule needs it
     // (including the empty-rule-set case).
@@ -300,29 +365,48 @@ fn _pick_category(event: &Event, ranked_rules: &[RankedRule<'_>]) -> Vec<String>
     // low explicit priority, so no rank threshold is needed here — the first
     // match in rank order always wins.
     for ranked in ranked_rules {
-        if ranked.rule.rule.matches(event, &values) {
-            return ranked.rule.category.clone();
+        check()?;
+        if ranked.rule.rule.matches(event, &values, check)? {
+            return Ok(ranked.rule.category.clone());
         }
     }
-    vec!["Uncategorized".into()]
+    Ok(vec!["Uncategorized".into()])
 }
 
 /// Tags a list of events
 ///
 /// An event can have many tags (as opposed to only one category) which will be put into the `$tags` key of
 /// the event data object.
-pub fn tag(mut events: Vec<Event>, rules: &[(String, Rule)]) -> Vec<Event> {
+pub fn tag(events: Vec<Event>, rules: &[(String, Rule)]) -> Vec<Event> {
+    into_ok(tag_checked(events, rules, no_check))
+}
+
+/// Like [`tag`], but calls `check` before every event, every rule and every
+/// regex match, and once more at the end; see [`categorize_checked`] for the
+/// error and overshoot semantics.
+pub fn tag_checked<E>(
+    mut events: Vec<Event>,
+    rules: &[(String, Rule)],
+    mut check: impl FnMut() -> Result<(), E>,
+) -> Result<Vec<Event>, E> {
     // Whether any rule needs shared values does not depend on the event,
     // so compute it once instead of scanning the rule set per event.
     let needs_values = rules.iter().any(|(_, rule)| rule.needs_values());
     let mut events_tagged = Vec::new();
     for event in events.drain(..) {
-        events_tagged.push(tag_one(event, rules, needs_values));
+        check()?;
+        events_tagged.push(tag_one(event, rules, needs_values, &mut check)?);
     }
-    events_tagged
+    check()?;
+    Ok(events_tagged)
 }
 
-fn tag_one(mut event: Event, rules: &[(String, Rule)], needs_values: bool) -> Event {
+fn tag_one<E>(
+    mut event: Event,
+    rules: &[(String, Rule)],
+    needs_values: bool,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Event, E> {
     let values = if needs_values {
         MatchValues::from_event(&event)
     } else {
@@ -330,7 +414,8 @@ fn tag_one(mut event: Event, rules: &[(String, Rule)], needs_values: bool) -> Ev
     };
     let mut tags: Vec<String> = Vec::new();
     for (cls, rule) in rules {
-        if rule.matches(&event, &values) {
+        check()?;
+        if rule.matches(&event, &values, check)? {
             tags.push(cls.clone());
         }
     }
@@ -338,7 +423,7 @@ fn tag_one(mut event: Event, rules: &[(String, Rule)], needs_values: bool) -> Ev
     tags.sort_unstable();
     tags.dedup();
     event.data.insert("$tags".into(), serde_json::json!(tags));
-    event
+    Ok(event)
 }
 
 fn _effective_rank(category: &[String], priority: Option<i64>) -> i64 {
@@ -351,7 +436,7 @@ fn _effective_rank(category: &[String], priority: Option<i64>) -> i64 {
 
 #[cfg(test)]
 fn rule_matches(rule: &impl RuleTrait, event: &Event) -> bool {
-    rule.matches(event, &MatchValues::from_event(event))
+    into_ok(rule.matches(event, &MatchValues::from_event(event), &mut no_check))
 }
 
 #[test]
@@ -937,5 +1022,117 @@ fn test_categorize_matches_naive_best_of_all() {
             actual, expected,
             "case {case}: rank-ordered pick diverged from best-of-all"
         );
+    }
+}
+
+#[cfg(test)]
+mod checked_tests {
+    use super::*;
+
+    /// Counts calls and fails on call number `fail_at` (never, if 0).
+    fn counting_check(calls: &mut usize, fail_at: usize) -> impl FnMut() -> Result<(), usize> + '_ {
+        move || {
+            *calls += 1;
+            if *calls == fail_at {
+                Err(*calls)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn event(pairs: &[(&str, &str)]) -> Event {
+        let mut e = Event::default();
+        for (key, value) in pairs {
+            e.data.insert((*key).into(), serde_json::json!(value));
+        }
+        e
+    }
+
+    fn category_rules(select_keys: Option<Vec<String>>) -> Vec<CategoryRule> {
+        vec![
+            CategoryRule::new(
+                vec!["Never".into()],
+                Rule::Regex(RegexRule::new("nomatch", false, select_keys.clone()).unwrap()),
+            ),
+            CategoryRule::new(
+                vec!["Also".into(), "Never".into()],
+                Rule::Regex(RegexRule::new("nope", false, select_keys).unwrap()),
+            ),
+        ]
+    }
+
+    fn categorize_calls(events: Vec<Event>, rules: &[CategoryRule]) -> usize {
+        let mut calls = 0;
+        categorize_checked(events, rules, counting_check(&mut calls, 0)).unwrap();
+        calls
+    }
+
+    #[test]
+    fn categorize_checked_checks_every_event_rule_and_value() {
+        let e = event(&[("app", "a"), ("title", "b"), ("url", "c")]);
+        // All values: 1 event + 2 rules × (1 rule + 3 values) + 1 final.
+        assert_eq!(categorize_calls(vec![e.clone()], &category_rules(None)), 10);
+        // select_keys reads only the named string values that exist:
+        // 1 event + 2 rules × (1 rule + 2 values) + 1 final.
+        let keys = Some(vec!["app".into(), "missing".into(), "url".into()]);
+        assert_eq!(categorize_calls(vec![e.clone()], &category_rules(keys)), 8);
+        // Cache hits skip the matching but are still checked once each.
+        assert_eq!(
+            categorize_calls(vec![e.clone(), e.clone(), e], &category_rules(None)),
+            12
+        );
+    }
+
+    #[test]
+    fn categorize_checked_propagates_every_cancellation_point() {
+        let e = event(&[("app", "a"), ("title", "b")]);
+        let events = vec![e.clone(), e, event(&[("title", "other")])];
+        for keys in [None, Some(vec!["title".to_string()])] {
+            let rules = category_rules(keys);
+            let total = categorize_calls(events.clone(), &rules);
+            for fail_at in 1..=total {
+                let mut calls = 0;
+                let result =
+                    categorize_checked(events.clone(), &rules, counting_check(&mut calls, fail_at));
+                // Stops at the failing check: no later checks, no swallowed error.
+                assert_eq!(result.err(), Some(fail_at));
+                assert_eq!(calls, fail_at);
+            }
+        }
+    }
+
+    #[test]
+    fn tag_checked_propagates_every_cancellation_point() {
+        let events = vec![event(&[("app", "a"), ("title", "b")]), event(&[("x", "y")])];
+        let rules: Vec<(String, Rule)> = vec![
+            (
+                "t1".into(),
+                Rule::Regex(RegexRule::new("a", false, None).unwrap()),
+            ),
+            (
+                "t2".into(),
+                Rule::Regex(RegexRule::new("b", false, Some(vec!["title".into()])).unwrap()),
+            ),
+        ];
+        let mut total = 0;
+        let tagged = tag_checked(events.clone(), &rules, counting_check(&mut total, 0)).unwrap();
+        assert_eq!(tagged[0].data["$tags"], serde_json::json!(["t1", "t2"]));
+        // 2 events × (1 event + 2 rules) + the values each rule tries + 1 final.
+        assert!(total > 2 * 3 + 1, "{total}");
+        for fail_at in 1..=total {
+            let mut calls = 0;
+            let result = tag_checked(events.clone(), &rules, counting_check(&mut calls, fail_at));
+            assert_eq!(result.err(), Some(fail_at));
+            assert_eq!(calls, fail_at);
+        }
+    }
+
+    #[test]
+    fn unchecked_apis_match_checked_results() {
+        let events = vec![event(&[("app", "nomatch")]), event(&[("app", "other")])];
+        let rules = category_rules(None);
+        let checked = categorize_checked(events.clone(), &rules, || Ok::<(), ()>(())).unwrap();
+        assert_eq!(categorize(events, &rules), checked);
     }
 }

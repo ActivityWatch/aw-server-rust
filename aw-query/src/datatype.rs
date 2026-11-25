@@ -213,32 +213,43 @@ impl TryFrom<&DataType> for Vec<(String, Rule)> {
 impl TryFrom<DataType> for Vec<(String, Rule)> {
     type Error = QueryError;
     fn try_from(value: DataType) -> Result<Self, Self::Error> {
-        let tagged_lists: Vec<DataType> = value.try_into()?;
-        let mut lists: Vec<(String, Rule)> = Vec::with_capacity(tagged_lists.len());
-        for list in tagged_lists {
-            match list {
-                DataType::List(ref l) => {
-                    let tag: String = match l.first() {
-                        Some(tag) => tag.try_into()?,
-                        None => return Err(QueryError::InvalidFunctionParameters(
-                            format!("Expected function parameter of type list of (tag, rule) tuples, list contains {l:?}")))
-                    };
-                    let rule: Rule = match l.get(1) {
-                        Some(rule) => rule.try_into()?,
-                        None => return Err(QueryError::InvalidFunctionParameters(
-                            format!("Expected function parameter of type list of (tag, rule) tuples, list contains {l:?}")))
-                    };
-                    lists.push((tag, rule));
-                }
-                ref invalid_type => {
-                    return Err(QueryError::InvalidFunctionParameters(format!(
-                        "Expected function parameter of type list of (tag, rule) tuples, got {invalid_type:?}"
-                    )))
-                }
+        tag_rules_checked(value, || Ok(()))
+    }
+}
+
+/// Converts `tag` rules, calling `check` before compiling each rule and once
+/// after the last, so a long rule list stops at the caller's deadline.
+pub(crate) fn tag_rules_checked(
+    value: DataType,
+    mut check: impl FnMut() -> Result<(), QueryError>,
+) -> Result<Vec<(String, Rule)>, QueryError> {
+    let tagged_lists: Vec<DataType> = value.try_into()?;
+    let mut lists: Vec<(String, Rule)> = Vec::with_capacity(tagged_lists.len());
+    for list in tagged_lists {
+        check()?;
+        match list {
+            DataType::List(ref l) => {
+                let tag: String = match l.first() {
+                    Some(tag) => tag.try_into()?,
+                    None => return Err(QueryError::InvalidFunctionParameters(
+                        format!("Expected function parameter of type list of (tag, rule) tuples, list contains {l:?}")))
+                };
+                let rule: Rule = match l.get(1) {
+                    Some(rule) => rule.try_into()?,
+                    None => return Err(QueryError::InvalidFunctionParameters(
+                        format!("Expected function parameter of type list of (tag, rule) tuples, list contains {l:?}")))
+                };
+                lists.push((tag, rule));
+            }
+            ref invalid_type => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                    "Expected function parameter of type list of (tag, rule) tuples, got {invalid_type:?}"
+                )))
             }
         }
-        Ok(lists)
     }
+    check()?;
+    Ok(lists)
 }
 
 impl TryFrom<&DataType> for Vec<CategoryRule> {
@@ -281,38 +292,49 @@ fn parse_optional_priority(rule: &DataType) -> Result<Option<i64>, QueryError> {
 impl TryFrom<DataType> for Vec<CategoryRule> {
     type Error = QueryError;
     fn try_from(value: DataType) -> Result<Self, Self::Error> {
-        let tagged_lists: Vec<DataType> = value.try_into()?;
-        let mut lists: Vec<CategoryRule> = Vec::with_capacity(tagged_lists.len());
-        for list in tagged_lists {
-            match list {
-                DataType::List(ref l) => {
-                    let category: Vec<String> = match l.first() {
-                        Some(category) => category.try_into()?,
-                        None => return Err(QueryError::InvalidFunctionParameters(
-                            format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
-                    };
-                    let rule_data = match l.get(1) {
-                        Some(rule) => rule,
-                        None => return Err(QueryError::InvalidFunctionParameters(
-                            format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
-                    };
-                    let priority = parse_optional_priority(rule_data)?;
-                    let rule: Rule = rule_data.try_into()?;
-                    lists.push(CategoryRule {
-                        category,
-                        rule,
-                        priority,
-                    });
-                }
-                ref invalid_type => {
-                    return Err(QueryError::InvalidFunctionParameters(format!(
-                    "Expected function parameter of type list of (category, rule) tuples, got {invalid_type:?}"
-                )))
-                }
+        category_rules_checked(value, || Ok(()))
+    }
+}
+
+/// Converts `categorize` rules, calling `check` before compiling each rule and
+/// once after the last, so a long rule list stops at the caller's deadline.
+pub(crate) fn category_rules_checked(
+    value: DataType,
+    mut check: impl FnMut() -> Result<(), QueryError>,
+) -> Result<Vec<CategoryRule>, QueryError> {
+    let tagged_lists: Vec<DataType> = value.try_into()?;
+    let mut lists: Vec<CategoryRule> = Vec::with_capacity(tagged_lists.len());
+    for list in tagged_lists {
+        check()?;
+        match list {
+            DataType::List(ref l) => {
+                let category: Vec<String> = match l.first() {
+                    Some(category) => category.try_into()?,
+                    None => return Err(QueryError::InvalidFunctionParameters(
+                        format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
+                };
+                let rule_data = match l.get(1) {
+                    Some(rule) => rule,
+                    None => return Err(QueryError::InvalidFunctionParameters(
+                        format!("Expected function parameter of type list of (category, rule) tuples, list contains {l:?}")))
+                };
+                let priority = parse_optional_priority(rule_data)?;
+                let rule: Rule = rule_data.try_into()?;
+                lists.push(CategoryRule {
+                    category,
+                    rule,
+                    priority,
+                });
+            }
+            ref invalid_type => {
+                return Err(QueryError::InvalidFunctionParameters(format!(
+                "Expected function parameter of type list of (category, rule) tuples, got {invalid_type:?}"
+            )))
             }
         }
-        Ok(lists)
     }
+    check()?;
+    Ok(lists)
 }
 
 impl TryFrom<&DataType> for f64 {

@@ -186,3 +186,52 @@ fn negative_rhs_at_the_combined_limits_still_runs() {
     );
     assert!(matches!(run_on_small_stack(code), Ok(DataType::None())));
 }
+
+#[test]
+fn comma_separated_expressions_have_independent_operator_budgets() {
+    let items = vec!["1+1"; 100].join(",");
+    match run_on_small_stack(format!("return [{items}];")) {
+        Ok(DataType::List(values)) => {
+            assert_eq!(values.len(), 100);
+            assert!(values.iter().all(|v| matches!(v, DataType::Number(2.0))));
+        }
+        other => panic!("expected 100 calculated list items, got {other:?}"),
+    }
+    let entries = (0..100)
+        .map(|i| format!("\"key{i}\":1+1"))
+        .collect::<Vec<_>>()
+        .join(",");
+    match run_on_small_stack(format!("return {{{entries}}};")) {
+        Ok(DataType::Dict(values)) => {
+            assert_eq!(values.len(), 100);
+            assert!(values.values().all(|v| matches!(v, DataType::Number(2.0))));
+        }
+        other => panic!("expected 100 calculated dict values, got {other:?}"),
+    }
+    assert!(matches!(
+        run_on_small_stack(format!("return print({items});")),
+        Ok(DataType::None())
+    ));
+}
+
+#[test]
+fn commas_preserve_completed_sibling_depth_without_accumulating_it() {
+    let full_budget = vec!["1"; 65].join("+");
+    // A completed deep sibling must not consume the next sibling's budget,
+    // even when that next sibling has another bracket frame.
+    let code = format!("return [{full_budget}, ({full_budget})];");
+    assert!(matches!(run_on_small_stack(code), Ok(DataType::List(_))));
+    // The first element still contributes depth to its enclosing expression
+    // after a comma and closing bracket: 64 inner + 1 outer is over budget.
+    let code = format!("return [{full_budget}, 1]+[];");
+    assert!(matches!(
+        run_on_small_stack(code),
+        Err(QueryError::ParsingError(_))
+    ));
+    // A comma must not clear operators from enclosing expressions either.
+    let code = format!("return []+[1, {full_budget}];");
+    assert!(matches!(
+        run_on_small_stack(code),
+        Err(QueryError::ParsingError(_))
+    ));
+}

@@ -126,8 +126,10 @@ fn parse_bounded<I: Iterator<Item = (lexer::Token, lexer::Span)>>(
     use lexer::Token;
     // Keep the operators on the ancestor path, not in sibling expressions.
     // Semicolons and conditionals start independent statements in their scope.
-    // Each frame holds (operators here, deepest completed child expression).
-    let mut operators = vec![(0usize, 0usize)];
+    // Each frame holds (operators here, deepest completed child expression,
+    // deepest comma-separated sibling). Sibling depth is retained for the
+    // enclosing expression, but never added to the next sibling's operators.
+    let mut operators = vec![(0usize, 0usize, 0usize)];
     let mut ends_operand = false;
     let mut limit_error = None;
     let checked = std::iter::from_fn(|| {
@@ -143,23 +145,33 @@ fn parse_bounded<I: Iterator<Item = (lexer::Token, lexer::Span)>>(
             // A brace following an operand opens an if/elif body, not a dict
             // literal. Its condition and body are siblings in the AST.
             Token::LBrace if ends_operand => {
-                *operators.last_mut().unwrap() = (0, 0);
-                operators.push((0, 0));
+                *operators.last_mut().unwrap() = (0, 0, 0);
+                operators.push((0, 0, 0));
             }
-            Token::LParen | Token::LBracket | Token::LBrace => operators.push((0, 0)),
+            Token::LParen | Token::LBracket | Token::LBrace => operators.push((0, 0, 0)),
             // Unbalanced/mismatched closers are left for the parser to report.
             Token::RParen | Token::RBracket | Token::RBrace if operators.len() > 1 => {
-                let (own, child) = operators.pop().unwrap();
+                let (own, child, sibling) = operators.pop().unwrap();
                 let parent = operators.last_mut().unwrap();
-                parent.1 = parent.1.max(own + child);
+                parent.1 = parent.1.max((own + child).max(sibling));
+            }
+            Token::Comma => {
+                let frame = operators.last_mut().unwrap();
+                frame.2 = frame.2.max(frame.0 + frame.1);
+                frame.0 = 0;
+                frame.1 = 0;
             }
             Token::Semi | Token::If | Token::ElseIf | Token::Else => {
-                *operators.last_mut().unwrap() = (0, 0);
+                *operators.last_mut().unwrap() = (0, 0, 0);
             }
             _ => (),
         }
-        let path_operators = operators.iter().map(|frame| frame.0).sum::<usize>()
-            + operators.iter().map(|frame| frame.1).max().unwrap_or(0);
+        let path_operators = operators
+            .iter()
+            .rev()
+            .fold(0, |depth, &(own, child, sibling)| {
+                sibling.max(own + child.max(depth))
+            });
         let message = if path_operators > MAX_OPERATORS_PER_STATEMENT {
             Some(format!(
                 "an expression path has more than {MAX_OPERATORS_PER_STATEMENT} operators"

@@ -19,6 +19,20 @@ pub trait AccessMethod: std::fmt::Debug {
         end: Option<DateTime<Utc>>,
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String>;
+    /// Like [`Self::get_events`], but events are not clipped to the query range.
+    ///
+    /// `get_events` shrinks an event that extends past `end` (or starts before
+    /// `start`) so it fits the range. That is right for queries, which must not
+    /// count time outside the period, but wrong for copying events to another
+    /// store: a page fetched through `end = cut` would copy the event at `cut`
+    /// with duration 0 (#874). Sync must use this read.
+    fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, String>;
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String>;
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
@@ -52,6 +66,16 @@ impl AccessMethod for Datastore {
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
         Datastore::get_events(self, bucket_id, start, end, limit).map_err(|e| format!("{e:?}"))
+    }
+    fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, String> {
+        Datastore::get_events_unclipped(self, bucket_id, start, end, limit)
+            .map_err(|e| format!("{e:?}"))
     }
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String> {
         Datastore::heartbeat(self, bucket_id, event, duration).map_err(|e| format!("{e:?}"))?;
@@ -102,6 +126,16 @@ impl AccessMethod for AwClient {
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String> {
         AwClient::get_events(self, bucket_id, start, end, limit).map_err(|e| e.to_string())
+    }
+    fn get_events_unclipped(
+        &self,
+        bucket_id: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u64>,
+    ) -> Result<Vec<Event>, String> {
+        AwClient::get_events_unclipped(self, bucket_id, start, end, limit)
+            .map_err(|e| e.to_string())
     }
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
         AwClient::insert_events(self, bucket_id, events).map_err(|e| e.to_string())

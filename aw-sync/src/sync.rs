@@ -1183,7 +1183,11 @@ fn sync_one(
     let mut pages_written = 0u32;
 
     loop {
-        let raw = ds_from.get_events(
+        // Unclipped: the page is cut at its oldest timestamp and that run is
+        // re-fetched with `end = boundary_ts`. A clipped re-fetch returns every
+        // event starting at `boundary_ts` with duration 0, which was written to
+        // the destination permanently (#874).
+        let raw = ds_from.get_events_unclipped(
             bucket_from.id.as_str(),
             resume_sync_at,
             fetch_end,
@@ -1704,6 +1708,50 @@ mod boundary_dedup_multipage_tests {
             ds_dest.get_event_count(synced_id, None, None).unwrap(),
             8,
             "third sync must not re-import the boundary or the collider"
+        );
+    }
+
+    #[test]
+    fn page_boundary_event_keeps_its_duration() {
+        // Regression for ActivityWatch/aw-server-rust#874: a full page drops the
+        // run of events at its oldest timestamp and re-fetches it with
+        // `end = boundary_ts`. `get_events` clips events to the query end, so
+        // every event starting exactly at `boundary_ts` came back with duration
+        // 0 and was inserted that way — silently and permanently. The existing
+        // multipage tests only check counts and duplicates, which is why they
+        // passed.
+        //
+        // BATCH_SIZE is 5 under #[cfg(test)]; 12 events force two page cuts.
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-0", "type": "test", "hostname": "device-0", "client": "test"
+        }))
+        .unwrap();
+        ds_src.create_bucket(&bucket).unwrap();
+        let base_ts: DateTime<Utc> = Utc::now() - Duration::hours(1);
+        let events: Vec<Event> = (0..12)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "timestamp": (base_ts + Duration::seconds(i * 10)).to_rfc3339(),
+                    "duration": 10.0,
+                    "data": {"title": format!("w{i}")}
+                }))
+                .unwrap()
+            })
+            .collect();
+        ds_src.insert_events("bucket-0", &events).unwrap();
+        ds_src.force_commit().unwrap();
+
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+        let got = ds_dest
+            .get_events("bucket-0-synced-from-device-0", None, None, None)
+            .unwrap();
+        let total: i64 = got.iter().map(|e| e.duration.num_seconds()).sum();
+        assert_eq!(got.len(), 12);
+        assert_eq!(
+            total, 120,
+            "every event must keep its duration across page boundaries"
         );
     }
 }

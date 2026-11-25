@@ -902,6 +902,52 @@ mod api_tests {
     }
 
     #[test]
+    fn test_events_unclipped_param_keeps_the_stored_duration() {
+        // #874: the sync client copies events between stores by paging backwards
+        // through an inclusive `end`. The default read clips an event to that
+        // range, so a boundary event was copied with duration 0. `unclipped=true`
+        // must return the stored duration; the default must keep clipping.
+        let server = setup_testserver();
+        let client = Client::untracked(server).expect("valid instance");
+        let host = || Header::new("Host", "127.0.0.1:5600");
+
+        client
+            .post("/api/0/buckets/id")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"{"id":"id","type":"test","client":"test","hostname":"127.0.0.1"}"#)
+            .dispatch();
+        client
+            .post("/api/0/buckets/id/events")
+            .header(ContentType::JSON)
+            .header(host())
+            .body(r#"[{"timestamp":"2018-01-01T00:00:00Z","duration":60.0,"data":{}}]"#)
+            .dispatch();
+
+        let duration_of = |query: &str| -> f64 {
+            let body = client
+                .get(format!("/api/0/buckets/id/events{query}"))
+                .header(host())
+                .dispatch()
+                .into_json::<serde_json::Value>()
+                .unwrap();
+            body[0]["duration"].as_f64().unwrap()
+        };
+
+        let window = "start=2018-01-01T00:00:30Z&end=2018-01-01T00:00:40Z";
+        assert_eq!(
+            duration_of(&format!("?{window}")),
+            10.0,
+            "the default read must stay clipped to the queried range"
+        );
+        assert_eq!(
+            duration_of(&format!("?{window}&unclipped=true")),
+            60.0,
+            "unclipped=true must report the stored duration"
+        );
+    }
+
+    #[test]
     fn test_out_of_range_timestamp_rejected() {
         // Events are stored as nanoseconds since the epoch (1677-2262). An event
         // outside that range used to panic the datastore worker, after which

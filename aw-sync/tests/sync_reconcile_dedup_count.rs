@@ -112,3 +112,34 @@ fn reconcile_dedup_still_counts_new_events() {
     assert_eq!(got[2].data, new_event.data);
     assert_eq!(pull(&src, &dest).unwrap()[0].events_new, 0);
 }
+
+/// Reconcile can also add rows without deleting any: a source row sharing an
+/// existing row's `(timestamp, duration)` with different data is inserted.
+/// That pass imported data, so it must not report zero new events.
+#[test]
+fn rows_added_by_reconcile_are_counted() {
+    let src = Datastore::new_in_memory(false);
+    let dest = Datastore::new_in_memory(false);
+    let b = create_bucket(&src, "aw-watcher-window_laptop", "currentwindow", "laptop");
+    let t0 = Utc::now() - Duration::hours(3);
+    let t1 = t0 + Duration::minutes(10);
+    src.insert_events(
+        &b,
+        &[
+            ev(t0, Duration::minutes(10), json!({"title": "x"})),
+            ev(t1, Duration::minutes(5), json!({"title": "y"})),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    pull(&src, &dest).unwrap();
+    src.insert_events(&b, &[ev(t0, Duration::minutes(10), json!({"title": "z"}))])
+        .unwrap();
+    src.force_commit().unwrap();
+
+    let report = pull(&src, &dest).unwrap();
+    assert_eq!(report[0].events_new, 1, "{report:?}");
+    let dest_b = "aw-watcher-window_laptop-synced-from-laptop";
+    assert_eq!(all_sorted(&dest, dest_b).len(), 3);
+    assert_eq!(pull(&src, &dest).unwrap()[0].events_new, 0);
+}

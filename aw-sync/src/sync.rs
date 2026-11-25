@@ -1092,12 +1092,15 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
+    let eventcount_before_reconcile = ds_to.get_event_count(bucket_to.id.as_str())?;
     reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
     // Count after reconcile: it may legitimately delete rows (a stale copy of an
     // edited event, or a pre-existing duplicate), which must not trip the
     // "shrank" check below. That check guards the incremental copy, which
-    // only adds or extends events.
+    // only adds or extends events. Rows reconcile adds on net are still
+    // imported data and are reported below.
     let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
+    let reconcile_added = (eventcount_to_old - eventcount_before_reconcile).max(0);
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch
@@ -1314,13 +1317,14 @@ fn sync_one(
     }
 
     let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str())?;
-    let new_events_count = eventcount_to_new - eventcount_to_old;
-    if new_events_count < 0 {
+    let copied_events_count = eventcount_to_new - eventcount_to_old;
+    if copied_events_count < 0 {
         return Err(format!(
             "Event count of bucket '{}' shrank during sync ({eventcount_to_old} -> {eventcount_to_new})",
             bucket_to.id
         ));
     }
+    let new_events_count = copied_events_count + reconcile_added;
     if new_events_count > 0 {
         info!("  = Synced {} new events", new_events_count);
     } else {

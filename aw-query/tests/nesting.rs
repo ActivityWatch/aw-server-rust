@@ -172,3 +172,17 @@ fn conditional_condition_and_body_have_independent_budgets() {
         other => panic!("expected 65, got {other:?}"),
     }
 }
+
+#[test]
+fn negative_rhs_at_the_combined_limits_still_runs() {
+    // Minus Number is a single Number AST leaf, not a unary-expression node.
+    // 64 subtraction nodes plus 32 calls therefore have the same depth as
+    // the addition boundary test, despite the extra minus tokens.
+    let code = format!(
+        "return {}1{}{};",
+        "print(".repeat(32),
+        "--1".repeat(64),
+        ")".repeat(32)
+    );
+    assert!(matches!(run_on_small_stack(code), Ok(DataType::None())));
+}

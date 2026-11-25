@@ -948,6 +948,7 @@ fn sync_datastores_with_warnings(
             Ok(b) => b,
             Err(e) => {
                 warn!(" ! Skipping bucket '{}': {}", bucket_id, e);
+                warnings.push(e.clone());
                 last_err = Some(e);
                 continue;
             }
@@ -1858,34 +1859,36 @@ mod peer_isolation_tests {
 
     #[test]
     fn unknown_bucket_refusal_is_kept_in_successful_pull_report() {
-        let source = Datastore::new_in_memory(false);
-        source
-            .create_bucket(&bucket("bucket-unknown-host", "unknown"))
-            .unwrap();
-        source
-            .create_bucket(&bucket("bucket-healthy", "host-ok"))
-            .unwrap();
-        let dest = Datastore::new_in_memory(false);
-        let db = peer_db("dev-a", "host-ok", PathBuf::from("/peer.db"));
-        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = vec![(&db, &source)];
-        let mut report = dummy_report();
+        for hostname in ["unknown", " * ", "UNKNOWN"] {
+            let source = Datastore::new_in_memory(false);
+            source
+                .create_bucket(&bucket("bucket-unknown-host", hostname))
+                .unwrap();
+            source
+                .create_bucket(&bucket("bucket-healthy", "host-ok"))
+                .unwrap();
+            let dest = Datastore::new_in_memory(false);
+            let db = peer_db("dev-a", "host-ok", PathBuf::from("/peer.db"));
+            let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = vec![(&db, &source)];
+            let mut report = dummy_report();
 
-        pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, true)
-            .expect("a refused bucket must not abort healthy siblings");
+            pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, true)
+                .expect("a refused bucket must not abort healthy siblings");
 
-        assert_eq!(report.peers_imported(), 1);
-        assert_eq!(report.peers[0].buckets.len(), 1);
-        assert_eq!(report.warnings.len(), 1);
-        let warning = &report.warnings[0];
-        assert!(warning.contains("host-ok"), "{warning}");
-        assert!(warning.contains("bucket-unknown-host"), "{warning}");
-        assert!(warning.contains("without provenance"), "{warning}");
-        assert!(report.to_string().contains(warning));
-        assert!(report.summary_message().contains(warning));
-        let json: serde_json::Value = serde_json::from_str(&report.to_jni_json()).unwrap();
-        assert_eq!(json["warnings"][0], warning.as_str());
-        source.close();
-        dest.close();
+            assert_eq!(report.peers_imported(), 1);
+            assert_eq!(report.peers[0].buckets.len(), 1);
+            assert_eq!(report.warnings.len(), 1);
+            let warning = &report.warnings[0];
+            assert!(warning.contains("host-ok"), "{warning}");
+            assert!(warning.contains("bucket-unknown-host"), "{warning}");
+            assert!(warning.contains("without provenance"), "{warning}");
+            assert!(report.to_string().contains(warning));
+            assert!(report.summary_message().contains(warning));
+            let json: serde_json::Value = serde_json::from_str(&report.to_jni_json()).unwrap();
+            assert_eq!(json["warnings"][0], warning.as_str());
+            source.close();
+            dest.close();
+        }
     }
 
     #[test]

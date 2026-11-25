@@ -111,44 +111,91 @@ pub fn assigns_timeinterval(code: &str) -> bool {
 /// tree level, so a deep enough program overflows the thread stack and aborts
 /// the whole process, which `catch_unwind` cannot stop. The grammar is
 /// left-recursive, so each binary operator in a statement can add a level, and
-/// so can each bracket. Bounding both bounds the tree depth before a tree is
-/// built. Measured on a 2 MiB thread stack: a debug build overflows at about
+/// so can each bracket (calls add both a call and an argument-list node).
+/// Bounding both bounds the tree depth while the parser builds it.
+/// Measured on a 2 MiB thread stack: a debug build overflows at about
 /// 150 levels and a release build passes 3000, so these keep debug builds safe
 /// too. aw-webui's queries use functions such as `concat` rather than operators
 /// and nest brackets only a few levels deep.
 const MAX_OPERATORS_PER_STATEMENT: usize = 64;
 const MAX_BRACKET_DEPTH: usize = 32;
 
-fn check_nesting(tokens: &[(lexer::Token, lexer::Span)]) -> Result<(), QueryError> {
+fn parse_bounded<I: Iterator<Item = (lexer::Token, lexer::Span)>>(
+    mut tokens: I,
+) -> Result<ast::Program, QueryError> {
     use lexer::Token;
-    let mut operators = 0;
-    let mut depth: usize = 0;
-    for (token, _) in tokens {
-        match token {
-            Token::Plus
-            | Token::Minus
-            | Token::Star
-            | Token::Slash
-            | Token::Percent
-            | Token::Equals => operators += 1,
-            Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
-            // Unbalanced closers are left for the parser to report.
-            Token::RParen | Token::RBracket | Token::RBrace => depth = depth.saturating_sub(1),
-            Token::Semi if depth == 0 => operators = 0,
+    // Keep the operators on the ancestor path, not in sibling expressions.
+    // Semicolons and conditionals start independent statements in their scope.
+    // Each frame holds (operators here, deepest completed child expression).
+    let mut operators = vec![(0usize, 0usize)];
+    let mut ends_operand = false;
+    let mut limit_error = None;
+    let checked = std::iter::from_fn(|| {
+        if limit_error.is_some() {
+            return None;
+        }
+        let (token, span) = tokens.next()?;
+        match &token {
+            Token::Plus | Token::Star | Token::Slash | Token::Percent | Token::Equals => {
+                operators.last_mut().unwrap().0 += 1;
+            }
+            Token::Minus if ends_operand => operators.last_mut().unwrap().0 += 1,
+            // A brace following an operand opens an if/elif body, not a dict
+            // literal. Its condition and body are siblings in the AST.
+            Token::LBrace if ends_operand => {
+                *operators.last_mut().unwrap() = (0, 0);
+                operators.push((0, 0));
+            }
+            Token::LParen | Token::LBracket | Token::LBrace => operators.push((0, 0)),
+            // Unbalanced/mismatched closers are left for the parser to report.
+            Token::RParen | Token::RBracket | Token::RBrace if operators.len() > 1 => {
+                let (own, child) = operators.pop().unwrap();
+                let parent = operators.last_mut().unwrap();
+                parent.1 = parent.1.max(own + child);
+            }
+            Token::Semi | Token::If | Token::ElseIf | Token::Else => {
+                *operators.last_mut().unwrap() = (0, 0);
+            }
             _ => (),
         }
-        if operators > MAX_OPERATORS_PER_STATEMENT {
-            return Err(QueryError::ParsingError(format!(
-                "a statement has more than {MAX_OPERATORS_PER_STATEMENT} operators"
-            )));
-        }
-        if depth > MAX_BRACKET_DEPTH {
-            return Err(QueryError::ParsingError(format!(
+        let path_operators = operators.iter().map(|frame| frame.0).sum::<usize>()
+            + operators.iter().map(|frame| frame.1).max().unwrap_or(0);
+        let message = if path_operators > MAX_OPERATORS_PER_STATEMENT {
+            Some(format!(
+                "an expression path has more than {MAX_OPERATORS_PER_STATEMENT} operators"
+            ))
+        } else if operators.len() > MAX_BRACKET_DEPTH + 1 {
+            Some(format!(
                 "brackets are nested more than {MAX_BRACKET_DEPTH} deep"
-            )));
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            limit_error = Some(QueryError::ParsingError(message));
+            return None;
         }
+        ends_operand = matches!(
+            token,
+            Token::Ident(_)
+                | Token::Number(_)
+                | Token::Bool(_)
+                | Token::String(_)
+                | Token::RParen
+                | Token::RBracket
+                | Token::RBrace
+        );
+        Some((token, span))
+    });
+    let program = parser::parse(checked);
+    if let Some(error) = limit_error {
+        return Err(error);
     }
-    Ok(())
+    program.map_err(|e| {
+        // TODO: Improve parsing error message
+        warn!("ParsingError: {:?}", e);
+        QueryError::ParsingError(format!("{e:?}"))
+    })
 }
 
 pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {
@@ -165,16 +212,7 @@ pub fn query_with_deadline(
     ds: &Datastore,
     deadline: Option<Instant>,
 ) -> Result<DataType, QueryError> {
-    let tokens: Vec<_> = lexer::Lexer::new(code).collect();
-    check_nesting(&tokens)?;
-    let program = match parser::parse(tokens.into_iter()) {
-        Ok(p) => p,
-        Err(e) => {
-            // TODO: Improve parsing error message
-            warn!("ParsingError: {:?}", e);
-            return Err(QueryError::ParsingError(format!("{e:?}")));
-        }
-    };
+    let program = parse_bounded(lexer::Lexer::new(code))?;
     let result = interpret::interpret_prog(program, ti, ds, deadline)?;
     if result.contains_function() {
         return Err(QueryError::InvalidType(
@@ -182,4 +220,34 @@ pub fn query_with_deadline(
         ));
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod nesting_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn parser_stops_reading_at_the_first_syntax_error() {
+        let reads = Cell::new(0);
+        let tokens =
+            lexer::Lexer::new("return ; return 1;").inspect(|_| reads.set(reads.get() + 1));
+        assert!(matches!(
+            parse_bounded(tokens),
+            Err(QueryError::ParsingError(_))
+        ));
+        assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn parser_stops_reading_at_the_nesting_limit() {
+        let reads = Cell::new(0);
+        let code = format!("return {}1{};", "[".repeat(100_000), "]".repeat(100_000));
+        let tokens = lexer::Lexer::new(&code).inspect(|_| reads.set(reads.get() + 1));
+        assert!(matches!(
+            parse_bounded(tokens),
+            Err(QueryError::ParsingError(_))
+        ));
+        assert_eq!(reads.get(), MAX_BRACKET_DEPTH + 2);
+    }
 }

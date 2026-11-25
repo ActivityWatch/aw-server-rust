@@ -60,8 +60,8 @@ fn deep_brackets_are_a_parse_error() {
 
 #[test]
 fn programs_at_the_limits_still_run() {
-    // 64 operators in one statement, inside 32 nested lists: the deepest tree
-    // the limits admit.
+    // 64 operators inside 32 nested lists. Calls add an extra argument-list
+    // layer and are covered separately below.
     let code = format!(
         "return {}{}{};",
         "[".repeat(32),
@@ -85,6 +85,88 @@ fn programs_at_the_limits_still_run() {
 fn the_operator_limit_is_per_statement() {
     let stmt = format!("a = {};", vec!["1"; 65].join("+"));
     let code = format!("{}return a;", stmt.repeat(20));
+    match run_on_small_stack(code) {
+        Ok(DataType::Number(n)) => assert_eq!(n, 65.0),
+        other => panic!("expected 65, got {other:?}"),
+    }
+}
+
+#[test]
+fn negative_literals_do_not_consume_the_operator_budget() {
+    let rules = vec!["{\"priority\": -1}"; 100].join(",");
+    match run_on_small_stack(format!("return [{rules}];")) {
+        Ok(DataType::List(items)) => assert_eq!(items.len(), 100),
+        other => panic!("expected 100 rules, got {other:?}"),
+    }
+}
+
+#[test]
+fn sequential_conditionals_have_independent_operator_budgets() {
+    let code = format!("{}return a;", "if true { a = 1+1; }".repeat(100));
+    match run_on_small_stack(code) {
+        Ok(DataType::Number(n)) => assert_eq!(n, 2.0),
+        other => panic!("expected 2, got {other:?}"),
+    }
+}
+
+#[test]
+fn statements_inside_a_block_have_independent_operator_budgets() {
+    let stmt = format!("a = {};", vec!["1"; 65].join("+"));
+    let code = format!("if true {{ {} }} return a;", stmt.repeat(20));
+    match run_on_small_stack(code) {
+        Ok(DataType::Number(n)) => assert_eq!(n, 65.0),
+        other => panic!("expected 65, got {other:?}"),
+    }
+}
+
+#[test]
+fn nested_calls_at_the_combined_limits_still_run() {
+    let code = format!(
+        "return {}{}{};",
+        "print(".repeat(32),
+        vec!["1"; 65].join("+"),
+        ")".repeat(32)
+    );
+    match run_on_small_stack(code) {
+        Ok(DataType::None()) => (),
+        other => panic!("expected None, got {other:?}"),
+    }
+}
+
+#[test]
+fn closed_subexpressions_cannot_hide_operator_depth() {
+    // Each scope individually has one operator, but the left children form
+    // one deep tree even after their closing parentheses have been read.
+    let mut expr = "1".to_string();
+    for _ in 0..32 {
+        expr = format!("({expr}+1)");
+    }
+    let code = format!("return {expr}{};", "+1".repeat(33));
+    assert!(matches!(
+        run_on_small_stack(code),
+        Err(QueryError::ParsingError(_))
+    ));
+}
+
+#[test]
+fn subtraction_is_counted_but_negative_rhs_is_not() {
+    let code = format!("return 1{};", "--1".repeat(64));
+    match run_on_small_stack(code) {
+        Ok(DataType::Number(n)) => assert_eq!(n, 65.0),
+        other => panic!("expected 65, got {other:?}"),
+    }
+    let code = format!("return 1{};", "--1".repeat(65));
+    assert!(matches!(
+        run_on_small_stack(code),
+        Err(QueryError::ParsingError(_))
+    ));
+}
+
+#[test]
+fn conditional_condition_and_body_have_independent_budgets() {
+    let expr = vec!["1"; 65].join("+");
+    let condition = format!("{} == 64", vec!["1"; 64].join("+"));
+    let code = format!("if {condition} {{ a = {expr}; }} return a;");
     match run_on_small_stack(code) {
         Ok(DataType::Number(n)) => assert_eq!(n, 65.0),
         other => panic!("expected 65, got {other:?}"),

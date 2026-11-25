@@ -63,11 +63,11 @@ impl fmt::Display for QueryError {
 /// blocks. `query_bucket` reads its range from that variable, so a program that
 /// reassigns it can read events outside the requested timeperiod, and a cached
 /// result for the requested period would miss writes to the range it actually
-/// read (ActivityWatch/aw-server-rust#882 item 7). Code that doesn't parse
-/// returns `false`; running it fails anyway.
+/// read (ActivityWatch/aw-server-rust#882 item 7). Code that doesn't parse,
+/// or exceeds the nesting limits, returns `false`; running it fails anyway.
 pub fn assigns_timeinterval(code: &str) -> bool {
     use ast::Expr_;
-    let program = match parser::parse(lexer::Lexer::new(code)) {
+    let program = match parse_bounded(lexer::Lexer::new(code)) {
         Ok(p) => p,
         Err(_) => return false,
     };

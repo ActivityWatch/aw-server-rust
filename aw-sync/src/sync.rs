@@ -968,11 +968,22 @@ fn reconcile_updated_events(
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
+    newest_timestamp: Option<DateTime<Utc>>,
 ) -> Result<(), String> {
     let Some(resume) = resume_sync_at else {
         return Ok(());
     };
-    let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
+    // The window always covers dest's newest event (the one ending at
+    // `resume`), even when it starts before `resume - 7d`. The main pull
+    // re-fetches that event clipped to a zero-length row at `resume`, and the
+    // boundary dedup built after this function only absorbs that clip if dest
+    // already holds the source's current payload. Leaving an edit of it
+    // unreconciled would insert the clip with the edited data and spend the
+    // old payload's dedup count on a genuine point at `resume` instead.
+    let lookback_start = match newest_timestamp {
+        Some(newest) => newest.min(resume - EDIT_RECONCILE_LOOKBACK),
+        None => resume - EDIT_RECONCILE_LOOKBACK,
+    };
     // get_events clips an event straddling the start bound to start at that
     // bound. Querying from `lookback_start` would give a straddler the clipped
     // identity `(lookback_start, shortened)` on both sides, and an edit would
@@ -1097,7 +1108,14 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    reconcile_updated_events(
+        ds_from,
+        ds_to,
+        &bucket_from,
+        &bucket_to,
+        resume_sync_at,
+        newest_timestamp,
+    )?;
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch

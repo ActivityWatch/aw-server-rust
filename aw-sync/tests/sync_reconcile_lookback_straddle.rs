@@ -118,51 +118,36 @@ fn edit_of_event_straddling_lookback_start_does_not_truncate_it() {
     );
 }
 
-/// Known limitation, not fixed by this PR: when the edited straddler is also
-/// the bucket's newest event, the main pull clips it to a zero-length copy at
-/// `resume` with the edited data and stores that once. The row has no duration
-/// and does not grow on later syncs; master truncates the long event instead.
-/// Suppressing the clip soundly needs source-to-destination correspondence
-/// that survives heartbeat merges (see #890 discussion).
+/// An edit of the bucket's newest event propagates even when it starts before
+/// `resume - 7d`: reconcile always covers dest's newest row. Before, the main
+/// pull clipped the edited source copy to a zero-length row at `resume` and
+/// stored that fragment next to the untouched old row.
+///
+/// A genuine point at `resume` with the *same* payload as the edited event is
+/// not asserted here: it is heartbeat-merged in the single-page case, exactly
+/// as for an unedited event, since reconcile is a no-op once payloads match.
 #[test]
-#[ignore = "known limitation: zero-length clip of an edited newest straddler (#890)"]
-fn latest_long_edit_does_not_duplicate_or_drop_genuine_zero_length_events() {
-    for add_zero_length_event in [false, true] {
-        let src = Datastore::new_in_memory(false);
-        let dest = Datastore::new_in_memory(false);
-        let b = create_bucket(&src, "aw-watcher-afk_laptop", "afkstatus", "laptop");
-        let base = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
-        let resume = base + Duration::days(10);
-        let old_data = json!({"status": "afk", "note": "a"});
-        let edited_data = json!({"status": "afk", "note": "edited"});
-        src.insert_events(&b, &[ev(base, Duration::days(10), old_data.clone())])
-            .unwrap();
-        src.force_commit().unwrap();
-        pull(&src, &dest).unwrap();
-        let dest_b = "aw-watcher-afk_laptop-synced-from-laptop";
+fn latest_long_edit_propagates_without_a_zero_length_fragment() {
+    let src = Datastore::new_in_memory(false);
+    let dest = Datastore::new_in_memory(false);
+    let b = create_bucket(&src, "aw-watcher-afk_laptop", "afkstatus", "laptop");
+    let base = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    let old_data = json!({"status": "afk", "note": "a"});
+    let edited_data = json!({"status": "afk", "note": "edited"});
+    src.insert_events(&b, &[ev(base, Duration::days(10), old_data.clone())])
+        .unwrap();
+    src.force_commit().unwrap();
+    pull(&src, &dest).unwrap();
+    let dest_b = "aw-watcher-afk_laptop-synced-from-laptop";
 
-        edit_data(&src, &b, base, edited_data.clone());
-        if add_zero_length_event {
-            // The genuine point event deliberately has the edited long event's
-            // payload: only source identity distinguishes it from the clip.
-            src.insert_events(&b, &[ev(resume, Duration::zero(), edited_data.clone())])
-                .unwrap();
-            src.force_commit().unwrap();
-        }
-        for _ in 0..2 {
-            pull(&src, &dest).unwrap();
-            let got = all_sorted(&dest, dest_b);
-            assert_eq!(got.len(), 1 + usize::from(add_zero_length_event), "{got:?}");
-            // The old event lies outside the edit window and stays untouched.
-            assert_eq!(got[0].timestamp, base);
-            assert_eq!(got[0].duration, Duration::days(10));
-            assert_eq!(got[0].data, *old_data.as_object().unwrap());
-            if add_zero_length_event {
-                assert_eq!(got[1].timestamp, resume);
-                assert_eq!(got[1].duration, Duration::zero());
-                assert_eq!(got[1].data, *edited_data.as_object().unwrap());
-            }
-        }
+    edit_data(&src, &b, base, edited_data.clone());
+    for _ in 0..2 {
+        pull(&src, &dest).unwrap();
+        let got = all_sorted(&dest, dest_b);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].timestamp, base);
+        assert_eq!(got[0].duration, Duration::days(10));
+        assert_eq!(got[0].data, *edited_data.as_object().unwrap());
     }
 }
 
@@ -192,4 +177,42 @@ fn latest_long_event_duration_extension_still_syncs() {
     assert_eq!(got[0].timestamp, base);
     assert_eq!(got[0].duration, Duration::days(10) + Duration::hours(1));
     assert_eq!(got[0].data, *data.as_object().unwrap());
+}
+
+/// Greptile P1 on #890 (r4688969008): a genuine zero-length point at `resume`
+/// that carries the edited newest straddler's *old* payload must survive. The
+/// boundary dedup budget is built from dest after reconcile; if the straddler
+/// edit is not reconciled, dest still holds the old payload and its
+/// `(end, old data)` count is spent on the genuine point instead of the clip.
+#[test]
+fn edited_newest_straddler_does_not_consume_a_genuine_point_with_old_data() {
+    let src = Datastore::new_in_memory(false);
+    let dest = Datastore::new_in_memory(false);
+    let b = create_bucket(&src, "aw-watcher-afk_laptop", "afkstatus", "laptop");
+    let base = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    let resume = base + Duration::days(10);
+    let old_data = json!({"status": "afk", "note": "old"});
+    let edited_data = json!({"status": "afk", "note": "edited"});
+    src.insert_events(&b, &[ev(base, Duration::days(10), old_data.clone())])
+        .unwrap();
+    src.force_commit().unwrap();
+    pull(&src, &dest).unwrap();
+    let dest_b = "aw-watcher-afk_laptop-synced-from-laptop";
+
+    edit_data(&src, &b, base, edited_data.clone());
+    src.insert_events(&b, &[ev(resume, Duration::zero(), old_data.clone())])
+        .unwrap();
+    src.force_commit().unwrap();
+
+    for _ in 0..2 {
+        pull(&src, &dest).unwrap();
+        let got = all_sorted(&dest, dest_b);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].timestamp, base);
+        assert_eq!(got[0].duration, Duration::days(10));
+        assert_eq!(got[0].data, *edited_data.as_object().unwrap());
+        assert_eq!(got[1].timestamp, resume);
+        assert_eq!(got[1].duration, Duration::zero());
+        assert_eq!(got[1].data, *old_data.as_object().unwrap());
+    }
 }

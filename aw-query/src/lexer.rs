@@ -32,6 +32,10 @@ pub enum Token {
     Whitespace,
     Newline,
     Comment,
+
+    /// A character no other rule matches. No grammar rule accepts it, so it
+    /// becomes a parse error instead of silently ending the token stream.
+    Unknown,
 }
 
 lexer! {
@@ -83,6 +87,9 @@ lexer! {
     r#","# => (Token::Comma, text),
     r#":"# => (Token::Colon, text),
     r#";"# => (Token::Semi, text),
+
+    // Must stay last: plex breaks equal-length ties by rule order.
+    r#"."# => (Token::Unknown, text),
 }
 
 pub struct Lexer<'a> {

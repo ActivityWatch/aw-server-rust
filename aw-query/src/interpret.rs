@@ -54,7 +54,7 @@ fn check_deadline(deadline: Option<Instant>, what: &str) -> Result<(), QueryErro
 
 /// Upper bound, in approximate heap bytes, on any value the interpreter
 /// builds by combining others: `+` on strings and lists, list or dict
-/// literals, and `concat` (checked in the builtin, not its argument list).
+/// literals, and `concat` (checked while evaluating arguments and in the builtin).
 ///
 /// Without it `a = a + a;` (or `a = [a, a];`, or `a = concat(a, a);`) doubles
 /// a value per statement, so about 30 statements in a sub-1 KB query exhaust
@@ -182,6 +182,30 @@ pub(crate) fn charge_size(
             MAX_VALUE_SIZE >> 20
         ))),
     }
+}
+
+/// Parsed call arguments cannot assign, but internal AST callers can. Preserve
+/// their late function lookup instead of prevalidating a binding they may change.
+fn arguments_can_rebind(exprs: &[Expr]) -> bool {
+    let mut pending: Vec<_> = exprs.iter().collect();
+    while let Some(expr) = pending.pop() {
+        match &expr.node {
+            Expr_::Assign(..) | Expr_::Return(..) | Expr_::If(..) => return true,
+            Expr_::Add(a, b)
+            | Expr_::Sub(a, b)
+            | Expr_::Mul(a, b)
+            | Expr_::Div(a, b)
+            | Expr_::Mod(a, b)
+            | Expr_::Equal(a, b) => {
+                pending.extend([a.as_ref(), b.as_ref()]);
+            }
+            Expr_::Function(_, args) => pending.push(args),
+            Expr_::List(items) => pending.extend(items),
+            Expr_::Dict(items) => pending.extend(items.values()),
+            _ => (),
+        }
+    }
+    false
 }
 
 fn interpret_expr(
@@ -379,6 +403,20 @@ fn interpret_expr(
             Ok(DataType::None())
         }
         Function(fname, e) => {
+            let Expr_::List(exprs) = &e.node else {
+                unreachable!()
+            };
+            let bound_concat = if !arguments_can_rebind(exprs) {
+                match env.get(&fname) {
+                    Some(DataType::Function(name, _) | DataType::ReadOnlyFunction(name, _)) => {
+                        functions::validate_call_arity(name, exprs.len())?;
+                        name == "concat"
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
             // Borrow variables only when every argument is an atom. Evaluating
             // arbitrary arguments may assign to the environment, including the
             // function binding itself, so those retain the owned evaluation path.
@@ -414,17 +452,30 @@ fn interpret_expr(
                     }
                 }
             }
-            // An argument list is call plumbing, not a query-built value.
-            // Functions such as limit_events must be able to reduce a large
-            // datastore value. Builders such as concat charge their own input.
+            // Only concat builds one combined value from its arguments.
+            // Reducers must still accept datastore values larger than the bound.
             let Expr_::List(exprs) = e.node else {
                 unreachable!()
             };
-            let args: Result<Vec<_>, _> = exprs
-                .into_iter()
-                .map(|expr| interpret_expr(env, ds, expr, deadline))
-                .collect();
-            let args = args?;
+            let mut args = Vec::new();
+            let mut used = 0;
+            for expr in exprs {
+                if bound_concat {
+                    if let Expr_::Var(name) = &expr.node {
+                        let value = env
+                            .get(name)
+                            .ok_or_else(|| QueryError::VariableNotDefined(name.clone()))?;
+                        charge_size(&mut used, value, "the result of concat")?;
+                        args.push(value.clone());
+                        continue;
+                    }
+                }
+                let value = interpret_expr(env, ds, expr, deadline)?;
+                if bound_concat {
+                    charge_size(&mut used, &value, "the result of concat")?;
+                }
+                args.push(value);
+            }
             let var = match env.get(&fname[..]) {
                 Some(v) => v,
                 None => return Err(QueryError::VariableNotDefined(fname.clone())),
@@ -539,6 +590,7 @@ mod tests {
         }
         let ds = Datastore::new_in_memory(false);
         let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
         env.insert(
             "check".into(),
             DataType::ReadOnlyFunction("check".into(), check),
@@ -553,12 +605,14 @@ mod tests {
             },
             node,
         };
-        for rebind in [false, true] {
+        for rebind in [0, 1, 2] {
             env.insert("items".into(), DataType::List(vec![DataType::Number(1.0)]));
             env.insert(
                 "f".into(),
-                if rebind {
+                if rebind == 1 {
                     DataType::Number(0.0)
+                } else if rebind == 2 {
+                    env["query_bucket_names"].clone()
                 } else {
                     env["check"].clone()
                 },
@@ -570,7 +624,7 @@ mod tests {
                     Box::new(expr(Expr_::List(vec![expr(Expr_::Number(2.0))]))),
                 )),
             ];
-            if rebind {
+            if rebind > 0 {
                 args.push(expr(Expr_::Assign(
                     "f".into(),
                     Box::new(expr(Expr_::Var("check".into()))),
@@ -669,6 +723,7 @@ mod tests {
             "return limit_events(events, 1);",
             "return limit_events(events, 0 + 1);",
             "trim = limit_events; return trim(events, 1);",
+            "combine = concat; concat = limit_events; return concat(events, 1); concat = combine;",
         ] {
             assert!(try_run(code, &mut env, &ds).is_ok(), "{code}");
             match env.remove("RETURN").unwrap() {
@@ -685,6 +740,52 @@ mod tests {
                 try_run(code, &mut env, &ds),
                 Err(QueryError::ValueTooLarge(_))
             ));
+        }
+    }
+
+    #[test]
+    fn concat_rejects_accumulated_arguments_before_evaluating_the_rest() {
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
+        let mut event = aw_models::Event::default();
+        event.data.insert(
+            "title".into(),
+            serde_json::json!("x".repeat(MAX_VALUE_SIZE * 3 / 4)),
+        );
+        env.insert(
+            "events".into(),
+            DataType::List(vec![DataType::Event(event)]),
+        );
+        for code in [
+            "return concat(events, events, missing);",
+            "combine = concat; return combine(events, events, missing);",
+            "return concat(limit_events(events, 1), limit_events(events, 1), missing);",
+            "combine = concat; return combine(limit_events(events, 1), limit_events(events, 1), missing);",
+        ] {
+            let result = try_run(code, &mut env, &ds);
+            assert!(
+                matches!(result, Err(QueryError::ValueTooLarge(_))),
+                "{code}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_builtin_arity_is_rejected_before_materializing_arguments() {
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
+        for code in [
+            "return query_bucket_names(missing);",
+            "return flood(missing, missing, missing);",
+            "f = flood; return f(missing, missing, missing);",
+        ] {
+            let result = try_run(code, &mut env, &ds);
+            assert!(
+                matches!(result, Err(QueryError::InvalidFunctionParameters(_))),
+                "{code}: {result:?}"
+            );
         }
     }
 

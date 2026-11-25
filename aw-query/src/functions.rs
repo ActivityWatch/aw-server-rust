@@ -9,6 +9,39 @@ pub type QueryFn =
 pub type ReadOnlyQueryFn =
     fn(args: &[&DataType], env: &VarEnv, ds: &Datastore) -> Result<DataType, QueryError>;
 
+/// Reject invalid builtin calls before evaluating potentially large arguments.
+/// The stored function name survives aliases; unknown extension functions keep
+/// their own validation. The builtins still validate at their direct entrypoint.
+pub(crate) fn validate_call_arity(name: &str, count: usize) -> Result<(), QueryError> {
+    let allowed = match name {
+        "query_bucket_names" => 0..=0,
+        "query_bucket" | "sort_by_duration" | "sort_by_timestamp" | "sum_durations"
+        | "split_url_events" => 1..=1,
+        "find_bucket" | "flood" => 1..=2,
+        "contains"
+        | "categorize"
+        | "tag"
+        | "limit_events"
+        | "merge_events_by_keys"
+        | "chunk_events_by_key"
+        | "filter_period_intersect"
+        | "period_union"
+        | "union_no_overlap" => 2..=2,
+        "filter_keyvals" | "filter_keyvals_regex" | "exclude_keyvals" => 3..=3,
+        "merge_subwatcher_fields" => 3..=4,
+        _ => return Ok(()),
+    };
+    if allowed.contains(&count) {
+        Ok(())
+    } else {
+        Err(QueryError::InvalidFunctionParameters(format!(
+            "Expected {}..={} parameters in {name}, got {count}",
+            allowed.start(),
+            allowed.end()
+        )))
+    }
+}
+
 pub fn fill_env(env: &mut VarEnv) {
     env.insert(
         "print".to_string(),

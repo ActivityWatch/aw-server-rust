@@ -143,3 +143,63 @@ fn rows_added_by_reconcile_are_counted() {
     assert_eq!(all_sorted(&dest, dest_b).len(), 3);
     assert_eq!(pull(&src, &dest).unwrap()[0].events_new, 0);
 }
+
+/// An inserted source sibling must count even if cleanup removes a duplicate
+/// in the same pass, whether at the same identity or a different one.
+#[test]
+fn reconcile_insert_is_counted_alongside_duplicate_cleanup() {
+    for cleanup_same_identity in [true, false] {
+        let src = Datastore::new_in_memory(false);
+        let dest = Datastore::new_in_memory(false);
+        let b = create_bucket(&src, "aw-watcher-window_laptop", "currentwindow", "laptop");
+        let t0 = Utc::now() - Duration::hours(3);
+        let t1 = t0 + Duration::minutes(10);
+        let x = ev(t0, Duration::minutes(10), json!({"title": "x"}));
+        let y = ev(t1, Duration::minutes(5), json!({"title": "y"}));
+        src.insert_events(&b, &[x.clone(), y.clone()]).unwrap();
+        src.force_commit().unwrap();
+        pull(&src, &dest).unwrap();
+        let dest_b = "aw-watcher-window_laptop-synced-from-laptop";
+        dest.insert_events(dest_b, &[if cleanup_same_identity { x } else { y }])
+            .unwrap();
+        dest.force_commit().unwrap();
+        let z = ev(t0, Duration::minutes(10), json!({"title": "z"}));
+        src.insert_events(&b, &[z.clone()]).unwrap();
+        src.force_commit().unwrap();
+
+        let report = pull(&src, &dest).unwrap();
+        let got = all_sorted(&dest, dest_b);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got.iter().filter(|e| e.data == z.data).count(), 1);
+        assert_eq!(report[0].events_new, 1, "{report:?}");
+        assert_eq!(pull(&src, &dest).unwrap()[0].events_new, 0);
+    }
+}
+
+/// Replacing an edited payload imports a row even though bucket size is stable.
+#[test]
+fn reconcile_replacement_is_reported_as_imported() {
+    let src = Datastore::new_in_memory(false);
+    let dest = Datastore::new_in_memory(false);
+    let b = create_bucket(&src, "aw-watcher-window_laptop", "currentwindow", "laptop");
+    let t0 = Utc::now() - Duration::hours(3);
+    src.insert_events(
+        &b,
+        &[ev(t0, Duration::minutes(10), json!({"title": "old"}))],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    pull(&src, &dest).unwrap();
+    let old_id = all_sorted(&src, &b)[0].id.unwrap();
+    src.delete_events_by_id(&b, vec![old_id]).unwrap();
+    let edited = ev(t0, Duration::minutes(10), json!({"title": "edited"}));
+    src.insert_events(&b, &[edited.clone()]).unwrap();
+    src.force_commit().unwrap();
+
+    let report = pull(&src, &dest).unwrap();
+    let got = all_sorted(&dest, "aw-watcher-window_laptop-synced-from-laptop");
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].data, edited.data);
+    assert_eq!(report[0].events_new, 1, "{report:?}");
+    assert_eq!(pull(&src, &dest).unwrap()[0].events_new, 0);
+}

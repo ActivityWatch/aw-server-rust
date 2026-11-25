@@ -53,8 +53,8 @@ fn check_deadline(deadline: Option<Instant>, what: &str) -> Result<(), QueryErro
 }
 
 /// Upper bound, in approximate heap bytes, on any value the interpreter
-/// builds by combining others: `+` on strings and lists, and list or dict
-/// literals (which include function argument lists, so `concat` is covered).
+/// builds by combining others: `+` on strings and lists, list or dict
+/// literals, and `concat` (checked in the builtin, not its argument list).
 ///
 /// Without it `a = a + a;` (or `a = [a, a];`, or `a = concat(a, a);`) doubles
 /// a value per statement, so about 30 statements in a sub-1 KB query exhaust
@@ -88,10 +88,18 @@ fn approx_size_within(value: &DataType, limit: usize) -> Option<usize> {
         let extra = match v {
             DataType::String(s) => s.len(),
             DataType::List(l) => {
+                // Reject the minimum node cost before allocating references
+                // for every child, even when almost no budget remains.
+                if total.saturating_add(NODE.saturating_mul(l.len().saturating_add(1))) > limit {
+                    return None;
+                }
                 values.extend(l.iter());
                 0
             }
             DataType::Dict(d) => {
+                if total.saturating_add(NODE.saturating_mul(d.len().saturating_add(1))) > limit {
+                    return None;
+                }
                 let mut keys = 0usize;
                 for (k, v) in d {
                     keys = keys.saturating_add(k.len() + std::mem::size_of::<String>());
@@ -100,6 +108,13 @@ fn approx_size_within(value: &DataType, limit: usize) -> Option<usize> {
                 keys
             }
             DataType::Event(e) => {
+                if total
+                    .saturating_add(NODE)
+                    .saturating_add(JSON_NODE.saturating_mul(e.data.len()))
+                    > limit
+                {
+                    return None;
+                }
                 let mut keys = 0usize;
                 for (k, v) in e.data.iter() {
                     keys = keys.saturating_add(k.len() + std::mem::size_of::<String>());
@@ -117,10 +132,20 @@ fn approx_size_within(value: &DataType, limit: usize) -> Option<usize> {
             let extra = match j {
                 Value::String(s) => s.len(),
                 Value::Array(a) => {
+                    if total.saturating_add(JSON_NODE.saturating_mul(a.len().saturating_add(1)))
+                        > limit
+                    {
+                        return None;
+                    }
                     json.extend(a.iter());
                     0
                 }
                 Value::Object(o) => {
+                    if total.saturating_add(JSON_NODE.saturating_mul(o.len().saturating_add(1)))
+                        > limit
+                    {
+                        return None;
+                    }
                     let mut keys = 0usize;
                     for (k, v) in o {
                         keys = keys.saturating_add(k.len() + std::mem::size_of::<String>());
@@ -141,7 +166,11 @@ fn approx_size_within(value: &DataType, limit: usize) -> Option<usize> {
 /// Add `value`'s approximate size to `used`, failing with
 /// [`QueryError::ValueTooLarge`] once the result being built (`what`) would
 /// pass [`MAX_VALUE_SIZE`].
-fn charge_size(used: &mut usize, value: &DataType, what: &str) -> Result<(), QueryError> {
+pub(crate) fn charge_size(
+    used: &mut usize,
+    value: &DataType,
+    what: &str,
+) -> Result<(), QueryError> {
     let remaining = MAX_VALUE_SIZE.saturating_sub(*used);
     match approx_size_within(value, remaining) {
         Some(size) => {
@@ -385,10 +414,17 @@ fn interpret_expr(
                     }
                 }
             }
-            let args = match interpret_expr(env, ds, *e, deadline)? {
-                DataType::List(l) => l,
-                _ => unreachable!(),
+            // An argument list is call plumbing, not a query-built value.
+            // Functions such as limit_events must be able to reduce a large
+            // datastore value. Builders such as concat charge their own input.
+            let Expr_::List(exprs) = e.node else {
+                unreachable!()
             };
+            let args: Result<Vec<_>, _> = exprs
+                .into_iter()
+                .map(|expr| interpret_expr(env, ds, expr, deadline))
+                .collect();
+            let args = args?;
             let var = match env.get(&fname[..]) {
                 Some(v) => v,
                 None => return Err(QueryError::VariableNotDefined(fname.clone())),
@@ -407,7 +443,7 @@ fn interpret_expr(
             let mut used = 0;
             for entry in list {
                 let res = interpret_expr(env, ds, entry, deadline)?;
-                charge_size(&mut used, &res, "a list (or a function's arguments)")?;
+                charge_size(&mut used, &res, "a list")?;
                 l.push(res);
             }
             Ok(DataType::List(l))
@@ -582,6 +618,74 @@ mod tests {
             interpret_expr(env, ds, stmt, None)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn approximate_size_counts_wide_and_nested_values() {
+        use serde_json::json;
+        let node = std::mem::size_of::<DataType>();
+        let json_node = std::mem::size_of::<serde_json::Value>();
+        let key = std::mem::size_of::<String>();
+        let mut event = aw_models::Event::default();
+        event.data.insert("a".into(), json!([{"b": "xyz"}]));
+        let cases = [
+            (DataType::List(vec![DataType::None(); 1000]), 1001 * node),
+            (
+                DataType::Dict(HashMap::from([(
+                    "a".into(),
+                    DataType::String("xyz".into()),
+                )])),
+                2 * node + key + 1 + 3,
+            ),
+            (
+                DataType::Event(event),
+                node + 2 * (key + 1) + 3 * json_node + 3,
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(approx_size_within(&value, expected), Some(expected));
+            assert_eq!(approx_size_within(&value, expected - 1), None);
+            assert_eq!(approx_size_within(&value, node - 1), None);
+        }
+    }
+
+    #[test]
+    fn functions_can_reduce_datastore_values_larger_than_the_builder_limit() {
+        let ds = Datastore::new_in_memory(false);
+        let ti =
+            TimeInterval::new_from_string("2000-01-01T00:00:00Z/2000-01-02T00:00:00Z").unwrap();
+        let mut env = init_env(&ti);
+        let mut event = aw_models::Event::default();
+        event.data.insert(
+            "title".into(),
+            serde_json::json!("x".repeat(MAX_VALUE_SIZE / 2)),
+        );
+        env.insert(
+            "events".into(),
+            DataType::List(vec![DataType::Event(event); 3]),
+        );
+        assert!(approx_size_within(&env["events"], MAX_VALUE_SIZE).is_none());
+        for code in [
+            "return limit_events(events, 1);",
+            "return limit_events(events, 0 + 1);",
+            "trim = limit_events; return trim(events, 1);",
+        ] {
+            assert!(try_run(code, &mut env, &ds).is_ok(), "{code}");
+            match env.remove("RETURN").unwrap() {
+                DataType::List(events) => assert_eq!(events.len(), 1),
+                other => panic!("expected a list, got {other:?}"),
+            }
+        }
+        // The bound belongs to the builder itself, not its name or caller.
+        for code in [
+            "return concat(events);",
+            "combine = concat; return combine(events);",
+        ] {
+            assert!(matches!(
+                try_run(code, &mut env, &ds),
+                Err(QueryError::ValueTooLarge(_))
+            ));
+        }
     }
 
     /// Repeated self-concatenation used to double a value per statement with

@@ -639,7 +639,9 @@ mod qfunctions {
         _ds: &Datastore,
     ) -> Result<DataType, QueryError> {
         let mut event_list = Vec::new();
+        let mut used = 0;
         for arg in args {
+            crate::interpret::charge_size(&mut used, &arg, "the result of concat")?;
             let mut events: Vec<Event> = arg.try_into()?;
             for event in events.drain(..) {
                 event_list.push(DataType::Event(event));

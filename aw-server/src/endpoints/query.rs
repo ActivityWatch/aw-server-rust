@@ -53,6 +53,10 @@ mod tests {
             Status::BadRequest
         );
         assert_eq!(
+            query_error_status(&QueryError::ValueTooLarge("size bound".into())),
+            Status::BadRequest
+        );
+        assert_eq!(
             query_error_status(&QueryError::BucketQueryError("datastore failure".into())),
             Status::InternalServerError
         );

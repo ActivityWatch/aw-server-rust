@@ -184,7 +184,13 @@ fn cli_reports_errors_with_a_non_zero_exit() {
         .unwrap()
         .port();
     let output = Command::new(env!("CARGO_BIN_EXE_aw-client"))
-        .args(["--port", &port.to_string(), "buckets"])
+        .args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "buckets",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -196,12 +202,40 @@ fn cli_reports_errors_with_a_non_zero_exit() {
 #[test]
 fn cli_reads_the_server_from_aw_client_toml() {
     let (port, shutdown) = start_server_at("127.0.0.2");
-    let client = AwClient::new("127.0.0.2", port, "aw-client-rust-cli-config-test").unwrap();
+    // Keep setup local even when the developer's proxy excludes only 127.0.0.1.
+    // Do not change process-wide proxy variables: the tests run in parallel.
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let base = format!("http://127.0.0.2:{port}/api/0");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if client
+            .get(format!("{base}/info"))
+            .send()
+            .and_then(|response| response.error_for_status())
+            .is_ok()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "aw-server didn't start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     client
-        .wait_for_start()
-        .expect("aw-server didn't start; see stderr for a launch error");
-    client
-        .create_bucket_simple("aw-test-from-config", "test")
+        .post(format!("{base}/buckets/aw-test-from-config"))
+        .json(&serde_json::json!({
+            "type": "test",
+            "client": "aw-client-rust-cli-config-test",
+            "hostname": "clihost"
+        }))
+        .send()
+        .unwrap()
+        .error_for_status()
         .unwrap();
 
     let config_home =
@@ -216,6 +250,8 @@ fn cli_reads_the_server_from_aw_client_toml() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_aw-client"))
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("NO_PROXY", "127.0.0.2")
+        .env("no_proxy", "127.0.0.2")
         .arg("buckets")
         .output()
         .unwrap();

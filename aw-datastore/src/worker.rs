@@ -7,7 +7,6 @@ use std::{
 };
 
 use chrono::DateTime;
-use chrono::Duration;
 use chrono::Utc;
 
 use rusqlite::Connection;
@@ -21,12 +20,41 @@ use aw_models::Event;
 use aw_models::TryVec;
 
 use crate::privacy_filter::PrivacyFilterEngine;
+use crate::request_channel;
 use crate::DatastoreError;
 use crate::DatastoreInstance;
 use crate::DatastoreMethod;
 
-type RequestSender = mpsc_requests::RequestSender<Command, Result<Response, DatastoreError>>;
-type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>;
+type RequestSender = request_channel::RequestSender<Command, Result<Response, DatastoreError>>;
+type RequestReceiver = request_channel::RequestReceiver<Command, Result<Response, DatastoreError>>;
+
+/// Longest a write stays in the open batch before it is committed, including
+/// when the worker is idle.
+const COMMIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+// CLOCK_BOOTTIME is monotonic and includes device suspend on Linux/Android.
+// std::time::Instant uses CLOCK_MONOTONIC there, which stops during suspend.
+// A request on wake therefore commits an overdue batch immediately; the
+// channel timeout itself still waits in awake time when no request arrives.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+struct CommitInstant(rustix::time::Timespec);
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+impl CommitInstant {
+    fn now() -> Self {
+        Self(rustix::time::clock_gettime(rustix::time::ClockId::Boottime))
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        let now = Self::now();
+        (now.0 - self.0)
+            .try_into()
+            .expect("monotonic boot clock went backwards")
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+use std::time::Instant as CommitInstant;
 
 /// SQLite URI for a side-effect-free open: no `-wal`/`-shm`, no locks that
 /// fight a file syncer. `?`/`#`/`%` in the path are encoded so they cannot
@@ -318,10 +346,7 @@ struct DatastoreWorker {
 }
 
 impl DatastoreWorker {
-    pub fn new(
-        responder: mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>,
-        legacy_import_opts: LegacyImportOptions,
-    ) -> Self {
+    pub fn new(responder: RequestReceiver, legacy_import_opts: LegacyImportOptions) -> Self {
         DatastoreWorker {
             responder,
             legacy_import_opts,
@@ -492,7 +517,8 @@ impl DatastoreWorker {
 
         // Start handling and respond to requests
         loop {
-            let last_commit_time: DateTime<Utc> = Utc::now();
+            // Monotonic: a wall-clock correction must not stretch the window.
+            let last_commit_time = CommitInstant::now();
             let mut tx: Transaction = match conn.transaction_with_behavior(tx_behavior) {
                 Ok(tx) => tx,
                 Err(err) => {
@@ -516,9 +542,20 @@ impl DatastoreWorker {
             // Commands that force a commit are acknowledged only after it
             // succeeds. Other commands can return before the batch commits.
             let mut deferred_ack = None;
+            let mut batch_open = false;
             loop {
-                let (request, response_sender) = match self.responder.poll() {
-                    Ok((req, res_sender)) => (req, res_sender),
+                // Once the batch holds a request, wait no longer than the
+                // commit interval: with no further request the worker would
+                // otherwise sit on acknowledged writes indefinitely.
+                let polled = if batch_open {
+                    self.responder
+                        .poll_timeout(COMMIT_INTERVAL.saturating_sub(last_commit_time.elapsed()))
+                } else {
+                    self.responder.poll().map(Some)
+                };
+                let (request, response_sender) = match polled {
+                    Ok(Some((req, res_sender))) => (req, res_sender),
+                    Ok(None) => break,
                     Err(err) => {
                         // All references to responder is gone, quit
                         error!("DB worker quitting, error: {err:?}");
@@ -526,6 +563,7 @@ impl DatastoreWorker {
                         break;
                     }
                 };
+                batch_open = true;
                 let response = self.handle_request(request, &mut ds, &tx);
                 if self.commit || self.quit {
                     deferred_ack = Some((response_sender, response));
@@ -541,8 +579,7 @@ impl DatastoreWorker {
                     break;
                 }
 
-                let now: DateTime<Utc> = Utc::now();
-                let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
+                let commit_interval_passed: bool = last_commit_time.elapsed() > COMMIT_INTERVAL;
                 if self.commit
                     || commit_interval_passed
                     || self.uncommitted_events > 100
@@ -1018,7 +1055,7 @@ impl Datastore {
 
     fn _new_internal(method: DatastoreMethod, legacy_import_opts: LegacyImportOptions) -> Self {
         let (requester, responder) =
-            mpsc_requests::channel::<Command, Result<Response, DatastoreError>>();
+            request_channel::channel::<Command, Result<Response, DatastoreError>>();
         let _thread = thread::spawn(move || {
             let mut di = DatastoreWorker::new(responder, legacy_import_opts);
             di.work_loop(method);

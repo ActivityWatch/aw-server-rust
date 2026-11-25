@@ -286,6 +286,38 @@ mod datastore_tests {
     }
 
     #[test]
+    fn idle_writer_commits_its_open_batch_within_the_commit_interval() {
+        // The batch window (15 s) must bound how long an acknowledged write
+        // stays uncommitted even when no further request arrives: a process
+        // killed while idle (Android reclaiming the app, a power loss during
+        // sleep) otherwise loses it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idle.sqlite").to_str().unwrap().to_string();
+        let writer = Datastore::new(path.clone(), false);
+        let bucket = create_test_bucket(&writer);
+        let reader = Datastore::open_reader(path).unwrap();
+
+        let e = test_event(Utc::now(), Duration::seconds(1));
+        writer.heartbeat(&bucket.id, e, 5.0).unwrap();
+
+        // No request to the writer from here on: only an idle commit can make
+        // the heartbeat visible to the reader's independent connection.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        loop {
+            let events = reader.get_events(&bucket.id, None, None, None).unwrap();
+            if events.len() == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "acknowledged heartbeat still uncommitted after the writer idled for 25 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        drop(writer);
+    }
+
+    #[test]
     fn reader_sees_committed_writes_and_buckets_created_after_it_opened() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir

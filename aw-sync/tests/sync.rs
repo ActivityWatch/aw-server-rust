@@ -715,6 +715,69 @@ mod sync_tests {
         );
     }
 
+    /// The literal "unknown" sentinel on pull is refused like any other bucket
+    /// without provenance, but only that bucket: a healthy sibling from the same
+    /// peer must still sync (ActivityWatch/aw-server-rust#875 item 5).
+    #[test]
+    fn test_unknown_hostname_on_pull_does_not_block_sibling_buckets() {
+        let state = init_teststate();
+
+        for (id, hostname) in [
+            ("bucket-unknown-host", "unknown"),
+            ("bucket-healthy", "device-0"),
+        ] {
+            let bucket: Bucket = serde_json::from_value(serde_json::json!({
+                "id": id,
+                "type": "test",
+                "hostname": hostname,
+                "client": "test"
+            }))
+            .unwrap();
+            state.ds_src.create_bucket(&bucket).unwrap();
+        }
+        let event = create_event("42");
+        state
+            .ds_src
+            .insert_events("bucket-healthy", std::slice::from_ref(&event))
+            .unwrap();
+        state.ds_src.force_commit().unwrap();
+
+        let result = aw_sync::sync_datastores(
+            &state.ds_src,
+            &state.ds_dest,
+            false, // pull
+            None,
+            &SyncSpec::default(),
+        );
+        assert!(
+            result.is_ok(),
+            "one refused bucket must not abort the pass; got {result:?}"
+        );
+        assert_eq!(result.unwrap()[0].events_new, 1);
+        let events = state
+            .ds_dest
+            .get_events("bucket-healthy-synced-from-device-0", None, None, None)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp, event.timestamp);
+        assert_eq!(events[0].duration, event.duration);
+        assert_eq!(events[0].data, event.data);
+
+        let dest_buckets = state.ds_dest.get_buckets().unwrap();
+        assert!(
+            dest_buckets.contains_key("bucket-healthy-synced-from-device-0"),
+            "healthy sibling must still sync, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !dest_buckets
+                .keys()
+                .any(|k| k.contains("bucket-unknown-host")),
+            "the refused bucket must not be imported, got: {:?}",
+            dest_buckets.keys().collect::<Vec<_>>()
+        );
+    }
+
     /// Bucket metadata of an unexpected shape must not panic:
     /// `$aw.sync.origin` is read from data written by another host, so it is not
     /// under this host's control.

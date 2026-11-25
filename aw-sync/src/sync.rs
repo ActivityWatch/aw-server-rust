@@ -507,7 +507,15 @@ fn pull_from_remotes(
     let mut last_err: Option<String> = None;
     for (db, ds_from) in remotes {
         attempted += 1;
-        match sync_datastores(*ds_from, dest, false, None, sync_spec) {
+        let mut warnings = Vec::new();
+        let result =
+            sync_datastores_with_warnings(*ds_from, dest, false, None, sync_spec, &mut warnings);
+        report.warnings.extend(
+            warnings
+                .into_iter()
+                .map(|warning| format!("Peer '{}': {warning}", db.hostname)),
+        );
+        match result {
             Ok(buckets) => {
                 succeeded += 1;
                 if record_peers {
@@ -825,10 +833,27 @@ pub fn sync_datastores(
     src_did: Option<&str>,
     sync_spec: &SyncSpec,
 ) -> Result<Vec<BucketReport>, String> {
+    sync_datastores_with_warnings(ds_from, ds_to, is_push, src_did, sync_spec, &mut Vec::new())
+}
+
+// Keep the public datastore API unchanged while letting peer pulls retain
+// per-bucket provenance refusals in the status/JNI report.
+fn sync_datastores_with_warnings(
+    ds_from: &dyn AccessMethod,
+    ds_to: &dyn AccessMethod,
+    is_push: bool,
+    src_did: Option<&str>,
+    sync_spec: &SyncSpec,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<BucketReport>, String> {
     // FIXME: "-synced" should only be appended when synced to the local database, not to the
     // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
 
+    // A bucket refused for missing provenance is a per-bucket failure, like
+    // any other skip below: collecting it with `?` would abort every sibling
+    // bucket from the same peer (ActivityWatch/aw-server-rust#875 item 5).
+    let mut refused: Vec<(String, String)> = Vec::new();
     let mut buckets_from: Vec<Bucket> = ds_from
         .get_buckets()
         .map_err(|e| format!("Failed to list buckets in {ds_from:?}: {e}"))?
@@ -872,23 +897,35 @@ pub fn sync_datastores(
                 // Refuse the sync instead (the previous code unwrapped the None
                 // here, which on Android aborts the whole app).
                 let did = src_did.ok_or_else(|| {
-                    format!(
+                    let msg = format!(
                         "Bucket '{}' has an unknown hostname/device ID and there is no source \
                          device ID to substitute; refusing to sync it without provenance",
                         tup.1.id
-                    )
+                    );
+                    (tup.1.id.clone(), msg)
                 })?;
                 warn!(" ! Bucket hostname/device ID was invalid, setting to device ID/hostname");
                 tup.1.hostname = did.to_string();
             }
             Ok(tup.1.clone())
         })
-        .collect::<Result<Vec<Bucket>, String>>()?;
+        .filter_map(|res: Result<Bucket, (String, String)>| match res {
+            Ok(bucket) => Some(bucket),
+            Err(refusal) => {
+                warn!(" ! Skipping bucket: {}", refusal.1);
+                warnings.push(refusal.1.clone());
+                refused.push(refusal);
+                None
+            }
+        })
+        .collect();
 
     // Log warning for buckets requested but not found
     if let Some(buckets) = &sync_spec.buckets {
         for b_id in buckets {
-            if !buckets_from.iter().any(|b| b.id == *b_id) {
+            let found = buckets_from.iter().any(|b| b.id == *b_id)
+                || refused.iter().any(|(id, _)| id == b_id);
+            if !found {
                 error!(" ! Bucket \"{}\" not found in source datastore", b_id);
             }
         }
@@ -901,9 +938,9 @@ pub fn sync_datastores(
     // Total failure must still be Err: otherwise a destination that is down
     // reports success, which is the #682 silence reintroduced via #688's skip.
     let mut buckets = Vec::with_capacity(buckets_from.len());
-    let mut attempted = 0usize;
+    let mut attempted = refused.len();
     let mut succeeded = 0usize;
-    let mut last_err: Option<String> = None;
+    let mut last_err: Option<String> = refused.pop().map(|(_, e)| e);
     for bucket_from in buckets_from {
         attempted += 1;
         let bucket_id = bucket_from.id.clone();
@@ -911,6 +948,7 @@ pub fn sync_datastores(
             Ok(b) => b,
             Err(e) => {
                 warn!(" ! Skipping bucket '{}': {}", bucket_id, e);
+                warnings.push(e.clone());
                 last_err = Some(e);
                 continue;
             }
@@ -1817,6 +1855,40 @@ mod peer_isolation_tests {
         broken.close();
         healthy.close();
         dest.close();
+    }
+
+    #[test]
+    fn unknown_bucket_refusal_is_kept_in_successful_pull_report() {
+        for hostname in ["unknown", " * ", "UNKNOWN"] {
+            let source = Datastore::new_in_memory(false);
+            source
+                .create_bucket(&bucket("bucket-unknown-host", hostname))
+                .unwrap();
+            source
+                .create_bucket(&bucket("bucket-healthy", "host-ok"))
+                .unwrap();
+            let dest = Datastore::new_in_memory(false);
+            let db = peer_db("dev-a", "host-ok", PathBuf::from("/peer.db"));
+            let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = vec![(&db, &source)];
+            let mut report = dummy_report();
+
+            pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, true)
+                .expect("a refused bucket must not abort healthy siblings");
+
+            assert_eq!(report.peers_imported(), 1);
+            assert_eq!(report.peers[0].buckets.len(), 1);
+            assert_eq!(report.warnings.len(), 1);
+            let warning = &report.warnings[0];
+            assert!(warning.contains("host-ok"), "{warning}");
+            assert!(warning.contains("bucket-unknown-host"), "{warning}");
+            assert!(warning.contains("without provenance"), "{warning}");
+            assert!(report.to_string().contains(warning));
+            assert!(report.summary_message().contains(warning));
+            let json: serde_json::Value = serde_json::from_str(&report.to_jni_json()).unwrap();
+            assert_eq!(json["warnings"][0], warning.as_str());
+            source.close();
+            dest.close();
+        }
     }
 
     #[test]

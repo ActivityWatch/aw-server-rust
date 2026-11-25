@@ -981,6 +981,43 @@ mod api_tests {
     }
 
     #[test]
+    fn test_import_existing_bucket_rejects_out_of_range_event_times() {
+        let client = Client::untracked(setup_testserver()).expect("valid instance");
+        let host = Header::new("Host", "127.0.0.1:5600");
+        let response = client
+            .post("/api/0/buckets/existing")
+            .header(ContentType::JSON)
+            .header(host.clone())
+            .body(r#"{"type":"test","client":"test","hostname":"test"}"#)
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+
+        for timestamp in ["3000-01-01T00:00:00Z", "+262142-12-31T23:59:59Z"] {
+            let response = client
+                .post("/api/0/import")
+                .header(ContentType::JSON)
+                .header(host.clone())
+                .body(
+                    json!({"buckets": {"existing": {
+                        "id": "existing", "type": "test", "client": "test",
+                        "hostname": "test", "events": [{
+                            "timestamp": timestamp, "duration": 2, "data": {}
+                        }]
+                    }}})
+                    .to_string(),
+                )
+                .dispatch();
+            assert_eq!(response.status(), Status::BadRequest, "{timestamp}");
+            let response = client
+                .get("/api/0/buckets/existing/events")
+                .header(host.clone())
+                .dispatch();
+            assert_eq!(response.status(), Status::Ok);
+            assert_eq!(response.into_json::<Value>().unwrap(), json!([]));
+        }
+    }
+
+    #[test]
     fn test_import_does_not_overwrite_events_with_the_same_id() {
         let server = setup_testserver();
         let client = Client::untracked(server).expect("valid instance");

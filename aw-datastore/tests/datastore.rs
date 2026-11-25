@@ -59,6 +59,121 @@ mod datastore_tests {
     }
 
     #[test]
+    fn test_insert_event_with_other_buckets_id_is_rejected() {
+        // `INSERT OR REPLACE` on the global events.id key used to move another bucket's
+        // event into this one: the source bucket silently lost it.
+        let ds = Datastore::new_in_memory(false);
+        let a = create_named_test_bucket(&ds, "a");
+        let b = create_named_test_bucket(&ds, "b");
+        let t = "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let stored = ds
+            .insert_events(&a.id, &[test_event(t, Duration::seconds(1))])
+            .unwrap();
+        let foreign_id = stored[0].id.unwrap();
+
+        let mut hijack = test_event(t, Duration::seconds(5));
+        hijack.id = Some(foreign_id);
+        let valid = test_event(t, Duration::seconds(2));
+        assert!(matches!(
+            ds.insert_events(&b.id, &[valid, hijack]),
+            Err(DatastoreError::InvalidEvent(_))
+        ));
+
+        assert_eq!(ds.get_event_count(&a.id, None, None).unwrap(), 1);
+        assert_eq!(ds.get_event_count(&b.id, None, None).unwrap(), 0);
+        // Replacing within the owning bucket still works.
+        let mut update = test_event(t, Duration::seconds(7));
+        update.id = Some(foreign_id);
+        ds.insert_events(&a.id, &[update]).unwrap();
+        let events = ds.get_events(&a.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].duration, Duration::seconds(7));
+    }
+
+    #[test]
+    fn test_create_bucket_retry_with_explicit_event_id_returns_already_exists() {
+        let ds = Datastore::new_in_memory(false);
+        let t = "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut event = test_event(t, Duration::seconds(1));
+        event.id = Some(42);
+        let mut bucket = test_bucket();
+        bucket.events = Some(TryVec::new(vec![event.clone()]));
+        ds.create_bucket(&bucket).unwrap();
+
+        assert!(matches!(
+            ds.create_bucket(&bucket),
+            Err(DatastoreError::BucketAlreadyExists(id)) if id == bucket.id
+        ));
+        let events = ds.get_events(&bucket.id, None, None, None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, event.id);
+        assert_eq!(events[0].duration, event.duration);
+    }
+
+    #[test]
+    fn test_create_existing_bucket_validates_attached_event_times() {
+        let ds = Datastore::new_in_memory(false);
+        let t = "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut bucket = test_bucket();
+        bucket.events = Some(TryVec::new(vec![test_event(t, Duration::seconds(1))]));
+        ds.create_bucket(&bucket).unwrap();
+        let original = ds.get_events(&bucket.id, None, None, None).unwrap();
+
+        for bad in [
+            test_event(DateTime::<Utc>::MAX_UTC, Duration::seconds(1)),
+            test_event(t, Duration::seconds(9_223_372_036)),
+        ] {
+            bucket.events = Some(TryVec::new(vec![bad]));
+            assert!(matches!(
+                ds.create_bucket(&bucket),
+                Err(DatastoreError::InvalidEvent(_))
+            ));
+            let remaining = ds.get_events(&bucket.id, None, None, None).unwrap();
+            assert_eq!(remaining.len(), original.len());
+            assert_eq!(remaining[0].id, original[0].id);
+            assert_eq!(remaining[0].timestamp, original[0].timestamp);
+            assert_eq!(remaining[0].duration, original[0].duration);
+            assert_eq!(remaining[0].data, original[0].data);
+        }
+    }
+
+    #[test]
+    fn test_create_bucket_with_other_buckets_event_id_leaves_no_bucket() {
+        let ds = Datastore::new_in_memory(false);
+        let source = create_named_test_bucket(&ds, "source");
+        let t = "2018-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let stored = ds
+            .insert_events(&source.id, &[test_event(t, Duration::seconds(1))])
+            .unwrap();
+        let mut hijack = test_event(t, Duration::seconds(5));
+        hijack.id = stored[0].id;
+        let mut bucket = test_bucket();
+        bucket.events = Some(TryVec::new(vec![
+            test_event(t, Duration::seconds(2)),
+            hijack,
+        ]));
+
+        assert!(matches!(
+            ds.create_bucket(&bucket),
+            Err(DatastoreError::InvalidEvent(_))
+        ));
+        assert!(matches!(
+            ds.get_bucket(&bucket.id),
+            Err(DatastoreError::NoSuchBucket(_))
+        ));
+        assert!(!ds.get_buckets().unwrap().contains_key(&bucket.id));
+        let remaining = ds.get_events(&source.id, None, None, None).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, stored[0].id);
+        assert_eq!(remaining[0].duration, Duration::seconds(1));
+
+        // A corrected retry succeeds: neither a database row nor a cache entry remains.
+        bucket.events = Some(TryVec::new(vec![test_event(t, Duration::seconds(2))]));
+        ds.create_bucket(&bucket).unwrap();
+        assert_eq!(ds.get_event_count(&bucket.id, None, None).unwrap(), 1);
+    }
+
+    #[test]
     fn test_out_of_range_event_is_rejected_and_worker_survives() {
         let ds = Datastore::new_in_memory(false);
         create_test_bucket(&ds);

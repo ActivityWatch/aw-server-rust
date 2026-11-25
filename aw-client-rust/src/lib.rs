@@ -312,6 +312,8 @@ impl AwClient {
     /// Needed when copying events between stores: a clipped copy reports a
     /// shortened duration, which a sync would then persist. Query semantics
     /// (which must not count time outside the period) keep using `get_events`.
+    /// Requires a server supporting `/events/unclipped`; older servers fail
+    /// with an HTTP error rather than silently returning clipped events.
     pub async fn get_events_unclipped(
         &self,
         bucketname: &str,
@@ -331,7 +333,14 @@ impl AwClient {
         limit: Option<u64>,
         unclipped: bool,
     ) -> Result<Vec<Event>, reqwest::Error> {
-        let mut url = self.api_url(&["buckets", bucketname, "events"]);
+        // A distinct route makes unsupported servers fail closed. An unknown
+        // query parameter would be ignored by older servers, returning clipped
+        // events with HTTP 200 and silently corrupting a sync copy.
+        let mut url = if unclipped {
+            self.api_url(&["buckets", bucketname, "events", "unclipped"])
+        } else {
+            self.api_url(&["buckets", bucketname, "events"])
+        };
 
         // Must be a better way to build URLs
         if let Some(s) = start {
@@ -346,9 +355,6 @@ impl AwClient {
             url.query_pairs_mut()
                 .append_pair("limit", s.to_string().as_str());
         };
-        if unclipped {
-            url.query_pairs_mut().append_pair("unclipped", "true");
-        }
         Self::send_success(self.client.get(url)).await?.json().await
     }
 

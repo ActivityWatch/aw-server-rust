@@ -159,6 +159,19 @@ pub fn bucket_events_get(
     }
 }
 
+/// Copy-safe event read. Unlike an optional query flag, this route is rejected
+/// by older servers, so sync cannot silently copy clipped data from them.
+#[get("/<bucket_id>/events/unclipped?<start>&<end>&<limit>")]
+pub fn bucket_events_get_unclipped(
+    bucket_id: &str,
+    start: Option<String>,
+    end: Option<String>,
+    limit: Option<u64>,
+    state: &State<ServerState>,
+) -> Result<Json<Vec<Event>>, HttpErrorJson> {
+    bucket_events_get(bucket_id, start, end, limit, Some(true), state)
+}
+
 // Ranked below bucket_event_count so that `/events/count` isn't parsed as an event id;
 // both routes take query parameters, so they would otherwise collide.
 // See: https://api.rocket.rs/master/rocket/struct.Route.html#resolving-collisions

@@ -189,6 +189,43 @@ mod test {
     }
 
     #[test]
+    fn test_unclipped_read_preserves_duration_over_http() {
+        let port = reserve_port();
+        RESERVED_PORT.with(|cell| drop(cell.borrow_mut().take()));
+        let shutdown = setup_testserver(port, None);
+        let client = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            AwClient::new("127.0.0.1", port, "aw-client-unclipped-test").unwrap()
+        };
+        wait_for_server(20, &client);
+        client.create_bucket_simple("unclipped", "test").unwrap();
+        let timestamp = Utc::now() - Duration::hours(1);
+        client
+            .insert_event(
+                "unclipped",
+                &Event {
+                    id: None,
+                    timestamp,
+                    duration: Duration::seconds(60),
+                    data: Map::new(),
+                },
+            )
+            .unwrap();
+        let start = Some(timestamp + Duration::seconds(30));
+        let end = Some(timestamp + Duration::seconds(40));
+        let clipped = client.get_events("unclipped", start, end, Some(1)).unwrap();
+        let full = client
+            .get_events_unclipped("unclipped", start, end, Some(1))
+            .unwrap();
+        assert_eq!(clipped.len(), 1);
+        assert_eq!(clipped[0].duration, Duration::seconds(10));
+        assert_eq!(full.len(), 1);
+        assert_eq!(full[0].timestamp, timestamp);
+        assert_eq!(full[0].duration, Duration::seconds(60));
+        shutdown.notify();
+    }
+
+    #[test]
     fn test_full() {
         let clientname = "aw-client-rust-test";
 

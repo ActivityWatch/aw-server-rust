@@ -945,6 +945,17 @@ mod api_tests {
             60.0,
             "unclipped=true must report the stored duration"
         );
+        let response = client
+            .get(format!(
+                "/api/0/buckets/id/events/unclipped?{window}&limit=1"
+            ))
+            .header(host())
+            .dispatch();
+        assert_eq!(response.status(), rocket::http::Status::Ok);
+        let events = response.into_json::<serde_json::Value>().unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 1);
+        assert_eq!(events[0]["duration"], 60.0);
+        assert_eq!(events[0]["timestamp"], "2018-01-01T00:00:00Z");
     }
 
     #[test]

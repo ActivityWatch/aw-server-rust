@@ -280,6 +280,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 bucket::buckets_get,
                 bucket::bucket_get,
                 bucket::bucket_events_get,
+                bucket::bucket_events_get_unclipped,
                 bucket::bucket_events_get_csv,
                 bucket::bucket_events_create,
                 bucket::bucket_events_heartbeat,

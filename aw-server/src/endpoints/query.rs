@@ -76,8 +76,11 @@ pub fn query(
     cache: Option<bool>,
     state: &State<ServerState>,
 ) -> Result<RawJson<String>, HttpErrorJson> {
-    let query_code = query_req.0.query.join("\n");
     let intervals = &query_req.0.timeperiods;
+    if intervals.is_empty() {
+        return Ok(RawJson("[]".to_string()));
+    }
+    let query_code = query_req.0.query.join("\n");
     let use_cache = state.query_cache_enabled && cache.unwrap_or(true);
     let datastore = state.query_datastore();
     let request_start = Instant::now();

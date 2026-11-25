@@ -2114,6 +2114,56 @@ mod api_tests {
         assert_eq!(res.status(), rocket::http::Status::Ok);
     }
     #[test]
+    fn empty_query_periods_preserve_pending_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-periods.sqlite");
+        let server = setup_file_testserver(path.to_str().unwrap());
+        let state = server.state::<endpoints::ServerState>().unwrap();
+        assert!(state.reader.is_some());
+        let cache = std::sync::Arc::clone(&state.query_cache);
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "empty-periods", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        state.datastore.create_bucket(&bucket).unwrap();
+        state.datastore.force_commit().unwrap();
+        let client = Client::untracked(server).expect("valid instance");
+        let res = client
+            .post("/api/0/buckets/empty-periods/events")
+            .header(ContentType::JSON)
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .body(
+                json!([{
+                    "timestamp": "2010-01-01T12:00:00Z", "duration": 60, "data": {}
+                }])
+                .to_string(),
+            )
+            .dispatch();
+        assert_eq!(res.status(), Status::Ok);
+        let pending = cache.pending_generation();
+        assert!(pending.is_some());
+
+        for cache_enabled in [true, false] {
+            let res = client
+                .post(format!("/api/0/query?cache={cache_enabled}"))
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(
+                    json!({
+                        "timeperiods": [],
+                        "query": ["TIMEINTERVAL = 1; RETURN = 1;"]
+                    })
+                    .to_string(),
+                )
+                .dispatch();
+            assert_eq!(res.status(), Status::Ok);
+            assert_eq!(res.into_json::<Value>().unwrap(), json!([]));
+            assert_eq!(cache.pending_generation(), pending);
+            assert_eq!(cache.stats().entries, 0);
+        }
+    }
+
+    #[test]
     fn query_cache_skips_queries_that_reassign_timeinterval() {
         use std::sync::Arc;
 

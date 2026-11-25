@@ -946,6 +946,12 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
     )
 }
 
+#[derive(Default)]
+struct ReconcileReport {
+    inserted: i64,
+    wrote: bool,
+}
+
 /// Replace dest events whose timestamp+duration still exist on the source but
 /// whose data changed.
 ///
@@ -962,15 +968,17 @@ fn event_identity(event: &Event) -> (DateTime<Utc>, i64) {
 /// also re-fetched as a start-clipped fragment, and heartbeat() refuses to
 /// merge different data, which would insert a duplicate unless dest already
 /// holds the new payload.
+///
+/// Reports inserted rows independently of deletions, and whether any rows changed.
 fn reconcile_updated_events(
     ds_from: &dyn AccessMethod,
     ds_to: &dyn AccessMethod,
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
-) -> Result<(), String> {
+) -> Result<ReconcileReport, String> {
     let Some(resume) = resume_sync_at else {
-        return Ok(());
+        return Ok(ReconcileReport::default());
     };
     let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
 
@@ -1023,6 +1031,7 @@ fn reconcile_updated_events(
             .push(src);
     }
 
+    let mut report = ReconcileReport::default();
     for (identity, srcs) in src_by_identity {
         let mut dsts = match dest_by_identity.remove(&identity) {
             Some(dsts) if !dsts.is_empty() => dsts,
@@ -1052,15 +1061,19 @@ fn reconcile_updated_events(
                     src
                 })
                 .collect();
+            let inserted = replacements.len() as i64;
             ds_to.insert_events(bucket_to.id.as_str(), replacements)?;
+            report.inserted += inserted;
+            report.wrote = true;
         }
         let stale: Vec<i64> = dsts.into_iter().filter_map(|dst| dst.id).collect();
         if !stale.is_empty() {
             ds_to.delete_events_by_id(bucket_to.id.as_str(), stale)?;
+            report.wrote = true;
         }
         info!("   ~ Reconciled edited event at {:?}", ts);
     }
-    Ok(())
+    Ok(report)
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -1071,7 +1084,6 @@ fn sync_one(
     bucket_to: Bucket,
     sync_spec: &SyncSpec,
 ) -> Result<BucketReport, String> {
-    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str())?;
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
     // Sync events
@@ -1093,7 +1105,19 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    let eventcount_before_reconcile = ds_to.get_event_count(bucket_to.id.as_str())?;
+    let reconcile =
+        reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    // Count after reconcile: it may legitimately delete rows (a stale copy of an
+    // edited event, or a pre-existing duplicate), which must not trip the
+    // "shrank" check below. That check guards the incremental copy, which
+    // only adds or extends events. Reconcile's inserted rows (including edited
+    // replacements) are reported separately, so cleanup cannot cancel them out.
+    let eventcount_to_old = if reconcile.wrote {
+        ds_to.get_event_count(bucket_to.id.as_str())?
+    } else {
+        eventcount_before_reconcile
+    };
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch
@@ -1310,13 +1334,14 @@ fn sync_one(
     }
 
     let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str())?;
-    let new_events_count = eventcount_to_new - eventcount_to_old;
-    if new_events_count < 0 {
+    let copied_events_count = eventcount_to_new - eventcount_to_old;
+    if copied_events_count < 0 {
         return Err(format!(
             "Event count of bucket '{}' shrank during sync ({eventcount_to_old} -> {eventcount_to_new})",
             bucket_to.id
         ));
     }
+    let new_events_count = copied_events_count + reconcile.inserted;
     if new_events_count > 0 {
         info!("  = Synced {} new events", new_events_count);
     } else {

@@ -510,6 +510,12 @@ fn pull_from_remotes(
         let mut warnings = Vec::new();
         let result =
             sync_datastores_with_warnings(*ds_from, dest, false, None, sync_spec, &mut warnings);
+        // A failed peer's error already carries its last bucket error, which
+        // can be one of these refusals. Keep only refusals it does not repeat,
+        // so one problem is not reported twice.
+        if let Err(e) = &result {
+            warnings.retain(|warning| !e.contains(warning.as_str()));
+        }
         report.warnings.extend(
             warnings
                 .into_iter()
@@ -1853,6 +1859,42 @@ mod peer_isolation_tests {
         );
         broken.close();
         healthy.close();
+        dest.close();
+    }
+
+    #[test]
+    fn failed_peer_does_not_repeat_its_error_as_a_warning() {
+        let source = Datastore::new_in_memory(false);
+        source
+            .create_bucket(&bucket("bucket-a-unknown", "unknown"))
+            .unwrap();
+        source
+            .create_bucket(&bucket("bucket-b-unknown", "unknown"))
+            .unwrap();
+        let dest = Datastore::new_in_memory(false);
+        let db = peer_db("dev-a", "host-a", PathBuf::from("/peer.db"));
+        let remotes: Vec<(&RemoteDb, &dyn AccessMethod)> = vec![(&db, &source)];
+        let mut report = dummy_report();
+
+        assert!(
+            pull_from_remotes(&remotes, &dest, &SyncSpec::default(), &mut report, true).is_err()
+        );
+
+        assert_eq!(report.peers.len(), 1);
+        let error = match &report.peers[0].outcome {
+            crate::report::PeerOutcome::Failed { error } => error.clone(),
+            other => panic!("peer must be failed, got {other:?}"),
+        };
+        // Only the refusal the peer error does not already carry stays a warning.
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        let warning = &report.warnings[0];
+        assert!(warning.contains("host-a"), "{warning}");
+        let refused_in_warning = ["bucket-a-unknown", "bucket-b-unknown"]
+            .into_iter()
+            .find(|id| warning.contains(id))
+            .expect("warning names a refused bucket");
+        assert!(!error.contains(refused_in_warning), "{error} / {warning}");
+        source.close();
         dest.close();
     }
 

@@ -4,8 +4,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 // Max duration of a i64 nanosecond is 2562047.7880152157 hours
 // ((2**64)/2)/1000000000/60/60
 
-fn get_nanos(duration: &chrono::Duration) -> f64 {
-    (duration.num_nanoseconds().unwrap() as f64) / 1_000_000_000.0
+/// Seconds as f64, or `None` if the duration doesn't fit in i64 nanoseconds (about ±292 years).
+///
+/// Transforms that add durations (`merge_events_by_keys`, `period_union`, `flood`) can produce
+/// such a value from valid inputs, so this must not panic (ActivityWatch/aw-server-rust#882 item 8).
+fn get_seconds(duration: &chrono::Duration) -> Option<f64> {
+    duration
+        .num_nanoseconds()
+        .map(|nanos| nanos as f64 / 1_000_000_000.0)
 }
 
 /// (De)serializes a `chrono::Duration` as a floating point number of seconds.
@@ -23,10 +29,15 @@ impl DurationSerialization {
         duration: &chrono::Duration,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        Seconds(get_nanos(duration)).serialize(serializer)
+        let seconds = get_seconds(duration).ok_or_else(|| {
+            <S::Error as serde::ser::Error>::custom(format!(
+                "duration {duration} is out of range (at most ±{MAX_SECONDS:.0} s)"
+            ))
+        })?;
+        Seconds(seconds).serialize(serializer)
     }
 
-    /// Fails for durations that are not finite or don't fit in i64 nanoseconds (about ±292
+    /// Fails, symmetrically with `serialize`, for durations that are not finite or don't fit in i64 nanoseconds (about ±292
     /// years), instead of silently turning them into a different duration.
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
@@ -178,5 +189,30 @@ mod tests {
                 "{duration}: {err}"
             );
         }
+    }
+
+    /// Two valid ~200-year events merged by a transform sum past i64 nanoseconds. Serializing that
+    /// event and computing its end used to panic (`num_nanoseconds().unwrap()`); now serializing
+    /// is an error and the end time is exact (ActivityWatch/aw-server-rust#882 item 8).
+    #[test]
+    fn test_merged_duration_past_i64_nanos_does_not_panic() {
+        let two_hundred_years = chrono::Duration::days(200 * 365);
+        let timestamp = chrono::DateTime::parse_from_rfc3339("1900-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let event = Event {
+            id: None,
+            timestamp,
+            duration: two_hundred_years + two_hundred_years,
+            data: serde_json::Map::new(),
+        };
+        assert_eq!(event.duration.num_nanoseconds(), None);
+
+        assert_eq!(
+            event.calculate_endtime(),
+            timestamp + chrono::Duration::days(400 * 365)
+        );
+        let err = serde_json::to_string(&event).unwrap_err().to_string();
+        assert!(err.contains("out of range"), "{err}");
     }
 }

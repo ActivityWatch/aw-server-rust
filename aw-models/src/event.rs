@@ -40,7 +40,7 @@ impl Event {
         }
     }
     pub fn calculate_endtime(&self) -> DateTime<Utc> {
-        self.timestamp + chrono::Duration::nanoseconds(self.duration.num_nanoseconds().unwrap())
+        self.timestamp + self.duration
     }
     pub fn interval(&self) -> TimeInterval {
         TimeInterval::new(self.timestamp, self.calculate_endtime())

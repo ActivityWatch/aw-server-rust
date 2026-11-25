@@ -984,8 +984,9 @@ fn reconcile_updated_events(
     // Both fetches end at `resume`, which clips any event extending past it
     // (e.g. a longer event sharing the newest start) to the newest event's
     // identity. Inside the 7-day window that ambiguity predates this widening;
-    // for the widened part, reconcile only an unambiguous identity: exactly
-    // one row on each side.
+    // for the widened part, reconcile only when exactly one source row has the
+    // identity. Dest may hold several: an interrupted earlier pass leaves the
+    // inserted replacement next to the stale copy, and the retry must delete it.
     let edit_window_start = resume - EDIT_RECONCILE_LOOKBACK;
     let lookback_start = match newest_timestamp {
         Some(newest) => newest.min(edit_window_start),
@@ -1050,7 +1051,7 @@ fn reconcile_updated_events(
             Some(dsts) if !dsts.is_empty() => dsts,
             _ => continue,
         };
-        if identity.0 < edit_window_start && (srcs.len() != 1 || dsts.len() != 1) {
+        if identity.0 < edit_window_start && srcs.len() != 1 {
             continue;
         }
         let mut to_insert = Vec::new();

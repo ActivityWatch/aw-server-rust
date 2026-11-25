@@ -276,3 +276,42 @@ fn edit_of_longer_same_start_event_is_not_truncated_to_resume() {
         );
     }
 }
+
+/// Greptile P1 on #890 at `5f4da41`: reconcile inserts before it deletes. If
+/// a pass stops between the two, dest holds the edited newest straddler and
+/// its stale copy under one identity. The retry must remove the stale copy.
+#[test]
+fn retry_after_interrupted_newest_straddler_edit_removes_stale_copy() {
+    let src = Datastore::new_in_memory(false);
+    let dest = Datastore::new_in_memory(false);
+    let b = create_bucket(&src, "aw-watcher-afk_laptop", "afkstatus", "laptop");
+    let base = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    let old_data = json!({"status": "afk", "note": "old"});
+    let edited_data = json!({"status": "afk", "note": "edited"});
+    src.insert_events(&b, &[ev(base, Duration::days(10), old_data.clone())])
+        .unwrap();
+    src.force_commit().unwrap();
+    pull(&src, &dest).unwrap();
+    let dest_b = "aw-watcher-afk_laptop-synced-from-laptop";
+
+    edit_data(&src, &b, base, edited_data.clone());
+    // The interrupted pass's insert landed; its delete did not.
+    dest.insert_events(dest_b, &[ev(base, Duration::days(10), edited_data.clone())])
+        .unwrap();
+    dest.force_commit().unwrap();
+
+    for pass in 0..2 {
+        let result = pull(&src, &dest);
+        // Deleting the stale copy shrinks the bucket, which master's shrink
+        // check reports as a failure (fixed separately in #891). The cleanup
+        // has already happened by then; the next pass must succeed.
+        if pass > 0 {
+            result.unwrap();
+        }
+        let got = all_sorted(&dest, dest_b);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].timestamp, base);
+        assert_eq!(got[0].duration, Duration::days(10));
+        assert_eq!(got[0].data, *edited_data.as_object().unwrap());
+    }
+}

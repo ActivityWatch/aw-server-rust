@@ -1083,12 +1083,11 @@ mod query_tests {
         // Run in a child process: a stack overflow aborts rather than unwinds.
         const CHILD: &str = "AW_TEST_ASSIGNMENT_DEEP_TREE";
         if std::env::var_os(CHILD).is_some() {
-            for assignment in [false, true] {
-                // The last statement is visited first, so the assignment case
-                // also covers cleanup after what used to be an early return.
-                let suffix = if assignment { "TIMEINTERVAL = 1;" } else { "" };
+            // Over the nesting limit, with and without a trailing syntax
+            // error: no deep tree may be built, as dropping one overflows.
+            for suffix in ["TIMEINTERVAL = 1;", "("] {
                 let code = format!("RETURN = {}1; {suffix}", "1 + ".repeat(100_000));
-                assert_eq!(aw_query::assigns_timeinterval(&code), assignment);
+                assert!(!aw_query::assigns_timeinterval(&code));
             }
             return;
         }

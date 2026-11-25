@@ -2117,17 +2117,21 @@ mod api_tests {
     fn query_cache_skips_queries_that_reassign_timeinterval() {
         use std::sync::Arc;
 
-        let state = endpoints::ServerState::new(
-            aw_datastore::Datastore::new_in_memory(false),
-            endpoints::AssetResolver::new(None),
-            "test_id".to_string(),
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reassigned.sqlite");
+        let server = setup_file_testserver(path.to_str().unwrap());
+        let state = server.state::<endpoints::ServerState>().unwrap();
         let cache: Arc<endpoints::query_cache::QueryCache> = Arc::clone(&state.query_cache);
-        let server = endpoints::build_rocket(state, config::AWConfig::default());
+        let bucket: Bucket = serde_json::from_value(json!({
+            "id": "reassigned", "type": "test", "client": "test", "hostname": "test"
+        }))
+        .unwrap();
+        state.datastore.create_bucket(&bucket).unwrap();
+        state.datastore.force_commit().unwrap();
         let client = Client::untracked(server).expect("valid instance");
-        let post_query = |query: &str| {
+        let post_query = |query: &str, cache_enabled: bool| {
             client
-                .post("/api/0/query")
+                .post(format!("/api/0/query?cache={cache_enabled}"))
                 .header(ContentType::JSON)
                 .header(Header::new("Host", "127.0.0.1:5600"))
                 .body(
@@ -2142,14 +2146,37 @@ mod api_tests {
 
         // Reads a range other than the requested period, so a write there
         // could never invalidate a cached result: don't store it.
-        let res = post_query(
-            "TIMEINTERVAL = \"2010-01-01T00:00:00Z/2011-01-01T00:00:00Z\"; RETURN = TIMEINTERVAL;",
-        );
+        let query = "TIMEINTERVAL = \"2010-01-01T00:00:00Z/2011-01-01T00:00:00Z\"; RETURN = query_bucket(\"reassigned\");";
+        let res = post_query(query, true);
         assert_eq!(res.status(), Status::Ok);
+        assert_eq!(res.into_json::<Value>().unwrap(), json!([[]]));
         assert_eq!(cache.stats().entries, 0);
 
+        // Writes in 2010 do not overlap the requested 2000 period. They must
+        // still be flushed to the reader, even when caching is disabled.
+        for (i, cache_enabled) in [true, false].into_iter().enumerate() {
+            let res = client
+                .post("/api/0/buckets/reassigned/events")
+                .header(ContentType::JSON)
+                .header(Header::new("Host", "127.0.0.1:5600"))
+                .body(
+                    json!([{
+                        "timestamp": format!("2010-01-0{}T12:00:00Z", i + 1),
+                        "duration": 60, "data": {"insert": i}
+                    }])
+                    .to_string(),
+                )
+                .dispatch();
+            assert_eq!(res.status(), Status::Ok);
+            let res = post_query(query, cache_enabled);
+            assert_eq!(res.status(), Status::Ok);
+            let body = res.into_json::<Value>().unwrap();
+            assert_eq!(body[0].as_array().unwrap().len(), i + 1);
+            assert_eq!(cache.stats().entries, 0);
+        }
+
         // An ordinary query for the same past period is still cached.
-        let res = post_query("RETURN = TIMEINTERVAL;");
+        let res = post_query("RETURN = TIMEINTERVAL;", true);
         assert_eq!(res.status(), Status::Ok);
         assert_eq!(cache.stats().entries, 1);
     }

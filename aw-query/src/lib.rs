@@ -71,33 +71,38 @@ pub fn assigns_timeinterval(code: &str) -> bool {
         Ok(p) => p,
         Err(_) => return false,
     };
-    // Iterative, so a deeply nested program can't overflow the stack here.
-    let mut stack: Vec<&ast::Expr> = program.stmts.iter().collect();
+    // Consume the children as we walk: borrowing them would leave recursive
+    // AST destruction on return. Drain the whole tree even after a match.
+    let mut assigns = false;
+    let mut stack = program.stmts;
     while let Some(expr) = stack.pop() {
-        match &expr.node {
-            Expr_::Assign(var, _) if var == "TIMEINTERVAL" => return true,
+        match expr.node {
             Expr_::Add(a, b)
             | Expr_::Sub(a, b)
             | Expr_::Mul(a, b)
             | Expr_::Div(a, b)
             | Expr_::Mod(a, b)
             | Expr_::Equal(a, b) => {
-                stack.push(a);
-                stack.push(b);
+                stack.push(*a);
+                stack.push(*b);
             }
-            Expr_::Assign(_, e) | Expr_::Function(_, e) | Expr_::Return(e) => stack.push(e),
+            Expr_::Assign(var, e) => {
+                assigns |= var == "TIMEINTERVAL";
+                stack.push(*e);
+            }
+            Expr_::Function(_, e) | Expr_::Return(e) => stack.push(*e),
             Expr_::If(branches) => {
                 for (cond, block) in branches {
-                    stack.push(cond);
-                    stack.extend(block.iter());
+                    stack.push(*cond);
+                    stack.extend(block);
                 }
             }
-            Expr_::List(items) => stack.extend(items.iter()),
-            Expr_::Dict(d) => stack.extend(d.values()),
+            Expr_::List(items) => stack.extend(items),
+            Expr_::Dict(d) => stack.extend(d.into_values()),
             Expr_::Var(_) | Expr_::Bool(_) | Expr_::Number(_) | Expr_::String(_) => (),
         }
     }
-    false
+    assigns
 }
 
 pub fn query(code: &str, ti: &TimeInterval, ds: &Datastore) -> Result<DataType, QueryError> {

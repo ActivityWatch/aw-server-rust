@@ -339,6 +339,13 @@ impl QueryCache {
         hit.then_some(inner.generation)
     }
 
+    /// Any pending write may affect a query whose read range is not known.
+    pub fn pending_generation(&self) -> Option<u64> {
+        let inner = self.inner.lock().unwrap();
+        (inner.pending_flush_overflow || !inner.pending_flush.is_empty())
+            .then_some(inner.generation)
+    }
+
     /// Forget pending writes recorded at or before `generation`: a flush that
     /// started after them has succeeded. Later writes stay pending.
     pub fn clear_pending_through(&self, generation: u64) {
@@ -618,9 +625,14 @@ mod tests {
         let gen2 = cache.pending_overlapping(&[period]).unwrap();
         cache.clear_pending_through(gen2);
         assert_eq!(cache.pending_overlapping(&[period]), None);
-        // Non-overlapping periods never trigger a flush.
+        assert_eq!(cache.pending_generation(), None);
+        // Non-overlapping periods never trigger a flush for ordinary queries,
+        // but queries with unknown read ranges still need those writes.
         cache.invalidate(vec![(t(5), t(6))]);
         assert_eq!(cache.pending_overlapping(&[period]), None);
+        let generation = cache.pending_generation().unwrap();
+        cache.clear_pending_through(generation);
+        assert_eq!(cache.pending_generation(), None);
     }
 
     #[test]

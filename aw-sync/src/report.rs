@@ -124,7 +124,7 @@ impl SyncReport {
 
     /// Record a per-host pull abort on an aggregate report.
     ///
-    /// Simple host-based sync (`aw-sync sync --host a --host b`) merges each
+    /// Simple host-based sync (`aw-sync sync --host a,b`) merges each
     /// host's report. If a later host fails, the `?` would drop earlier hosts
     /// from `last-sync-report.json`. The caller records this, persists, then
     /// returns the `Err`.
@@ -613,7 +613,7 @@ mod tests {
     }
 
     /// A later host's pull abort must keep earlier hosts on disk. The
-    /// `--host a --host b` path merges into one report; dropping it on `?`
+    /// `--host a,b` path merges into one report; dropping it on `?`
     /// would leave only the failing host's inner persist.
     #[test]
     fn later_host_pull_failure_keeps_earlier_hosts_on_disk() {

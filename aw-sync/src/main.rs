@@ -87,7 +87,7 @@ enum Commands {
         /// Specify buckets to sync using a comma-separated list.
         /// By default, all buckets are synced.
         #[clap(long, value_parser=parse_list)]
-        buckets: Option<Vec<String>>,
+        buckets: Option<::std::vec::Vec<String>>,
 
         /// Mode to sync in. Can be "push", "pull", or "both".
         /// If not given, follows aw-sync's own config.toml: push-only unless
@@ -110,7 +110,7 @@ enum Commands {
     Sync {
         /// Host(s) to pull from, comma separated. Will pull from all hosts if not specified.
         #[clap(long, value_parser=parse_list)]
-        host: Option<Vec<String>>,
+        host: Option<::std::vec::Vec<String>>,
 
         /// Date to start syncing from.
         /// If not specified, start from beginning.
@@ -121,7 +121,7 @@ enum Commands {
         /// Specify buckets to sync using a comma-separated list.
         /// By default, all buckets are synced.
         #[clap(long, value_parser=parse_list)]
-        buckets: Option<Vec<String>>,
+        buckets: Option<::std::vec::Vec<String>>,
 
         /// Mode to sync in. Can be "push", "pull", or "both".
         /// Defaults to "both". Implies advanced sync mode (see below),
@@ -176,7 +176,7 @@ enum Commands {
         /// `-synced-from-` bucket is checked with `--dry-run`; deleting
         /// requires naming buckets here explicitly.
         #[clap(long, value_parser=parse_list)]
-        bucket: Option<Vec<String>>,
+        bucket: Option<::std::vec::Vec<String>>,
 
         /// Report duplicate counts without deleting anything.
         #[clap(long)]
@@ -480,4 +480,42 @@ fn daemon(
 
 fn aw_sync_persist(report: &sync::SyncReport) {
     crate::report::persist_last_report_warn(report);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `value_parser=parse_list` already returns a Vec, so these fields must not
+    // be treated by clap as multi-value `Vec<String>` (that panics on access with
+    // "Mismatch between definition and access").
+    #[test]
+    fn list_valued_flags_parse() {
+        let opts =
+            Opts::try_parse_from(["aw-sync", "sync", "--buckets", "a, b", "--host", "h1,h2"])
+                .unwrap();
+        match opts.command {
+            Some(Commands::Sync { buckets, host, .. }) => {
+                assert_eq!(buckets, Some(vec!["a".to_string(), "b".to_string()]));
+                assert_eq!(host, Some(vec!["h1".to_string(), "h2".to_string()]));
+            }
+            _ => panic!("expected sync"),
+        }
+
+        let opts = Opts::try_parse_from(["aw-sync", "daemon", "--buckets", "x"]).unwrap();
+        match opts.command {
+            Some(Commands::Daemon { buckets, .. }) => {
+                assert_eq!(buckets, Some(vec!["x".to_string()]))
+            }
+            _ => panic!("expected daemon"),
+        }
+
+        let opts = Opts::try_parse_from(["aw-sync", "dedupe", "--bucket", "y,z"]).unwrap();
+        match opts.command {
+            Some(Commands::Dedupe { bucket, .. }) => {
+                assert_eq!(bucket, Some(vec!["y".to_string(), "z".to_string()]))
+            }
+            _ => panic!("expected dedupe"),
+        }
+    }
 }

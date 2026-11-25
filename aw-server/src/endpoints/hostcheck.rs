@@ -11,6 +11,7 @@ use rocket::http::uri::Origin;
 use rocket::http::{Method, Status};
 use rocket::route::Outcome;
 use rocket::{Data, Request, Rocket, Route};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::config::AWConfig;
 use crate::endpoints::HttpErrorJson;
@@ -19,13 +20,53 @@ static FAIRING_ROUTE_BASE: &str = "/checkheader_fairing";
 
 pub struct HostCheck {
     validate: bool,
+    /// The bound address, accepted as a Host in addition to the loopback names
+    /// (a server bound to 127.0.0.2 is reached as http://127.0.0.2:5600).
+    bound_host: Option<IpAddr>,
 }
 
 impl HostCheck {
     pub fn new(config: &AWConfig) -> HostCheck {
-        // We only validate requests if the server binds a local address
-        let validate = config.address == "127.0.0.1" || config.address == "localhost";
-        HostCheck { validate }
+        // We only validate requests if the server binds a local address. Any
+        // loopback address counts (127.0.0.0/8 and ::1), not just 127.0.0.1:
+        // a DNS-rebinding page reaches ::1 or 127.0.0.2 just as easily.
+        let validate = match config.address.parse::<IpAddr>() {
+            // to_canonical: ::ffff:127.0.0.1 is the IPv4 loopback too
+            Ok(ip) => ip.to_canonical().is_loopback(),
+            Err(_) => config.address == "localhost",
+        };
+        HostCheck {
+            validate,
+            bound_host: config
+                .address
+                .parse::<IpAddr>()
+                .ok()
+                .map(|ip| ip.to_canonical()),
+        }
+    }
+}
+
+/// Strip the port from a Host header value, keeping IPv6 literals intact:
+/// `[::1]:5600` -> `::1`, `localhost:5600` -> `localhost`.
+fn host_without_port(hostheader: &str) -> Option<&str> {
+    match hostheader.strip_prefix('[') {
+        Some(rest) => {
+            let (host, after) = rest.split_once(']')?;
+            host.parse::<Ipv6Addr>().ok()?;
+            if !after.is_empty() {
+                let port = after.strip_prefix(':')?;
+                if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+            }
+            Some(host)
+        }
+        None => match hostheader.split_once(':') {
+            Some((host, port)) => {
+                (!port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())).then_some(host)
+            }
+            None => Some(hostheader),
+        },
     }
 }
 
@@ -93,7 +134,7 @@ impl Fairing for HostCheck {
         // Parse hostname from host header
         // hostname contains port, which we don't care about and filter out
         let hostheader = hostheader_opt.unwrap();
-        let host_opt = hostheader.split(':').next();
+        let host_opt = host_without_port(hostheader);
         if host_opt.is_none() {
             info!("Host header '{}' not allowed, denying request", hostheader);
             redirect_bad_request(request);
@@ -101,9 +142,14 @@ impl Fairing for HostCheck {
         }
 
         // Deny requests to hosts that are not localhost
-        let valid_hosts: Vec<&str> = vec!["127.0.0.1", "localhost"];
         let host = host_opt.unwrap();
-        if !valid_hosts.contains(&host) {
+        let valid_ip = host.parse::<IpAddr>().is_ok_and(|ip| {
+            let ip = ip.to_canonical();
+            ip == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                || ip == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                || Some(ip) == self.bound_host
+        });
+        if host != "localhost" && !valid_ip {
             info!("Host header '{}' not allowed, denying request", hostheader);
             redirect_bad_request(request);
         }

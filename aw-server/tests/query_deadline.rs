@@ -39,7 +39,7 @@ mod query_deadline {
         let budget = Duration::from_secs(1);
 
         let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let client = Client::untracked(setup_testserver(budget)).expect("valid instance");
             let res = client
                 .post("/api/0/buckets/b")
@@ -94,6 +94,9 @@ mod query_deadline {
 
         match receiver.recv_timeout(Duration::from_secs(120)) {
             Ok((elapsed, status, body)) => {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
                 println!(
                     "query took {:.1}s with a {}s budget, status {status}, body {:.200}",
                     elapsed.as_secs_f64(),
@@ -110,7 +113,17 @@ mod query_deadline {
                     budget.as_secs()
                 );
             }
-            Err(_) => panic!("query did not return within 120s (budget was 1s)"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // Preserve the worker's actual setup/query panic rather than
+                // misreporting a dropped sender as a two-minute timeout.
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                panic!("query thread exited without reporting a result");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("query did not return within 120s (budget was 1s)");
+            }
         }
     }
 }

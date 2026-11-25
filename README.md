@@ -7,6 +7,10 @@ aw-server-rust
 
 A reimplementation of aw-server in Rust.
 
+In the bundled dashboard, use the device selector on the **Activity** page to
+switch between hosts. The selector uses light text for unselected hosts in dark
+mode, so the available devices remain readable.
+
 Features missing compared to the Python implementation of aw-server:
 
  - API explorer (Swagger/OpenAPI)

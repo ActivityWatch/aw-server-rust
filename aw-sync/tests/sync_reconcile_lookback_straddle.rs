@@ -277,6 +277,63 @@ fn edit_of_longer_same_start_event_is_not_truncated_to_resume() {
     }
 }
 
+/// A destination row extending beyond resume must not be deleted as a stale
+/// sibling of the newest event. Duration shortening is not reconciled, so keep
+/// the old full extent rather than deleting the event altogether.
+#[test]
+fn shortened_same_start_event_is_not_deleted_as_a_clipped_sibling() {
+    let src = Datastore::new_in_memory(false);
+    let dest = Datastore::new_in_memory(false);
+    let b = create_bucket(&src, "aw-watcher-afk_laptop", "afkstatus", "laptop");
+    let base = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    let short = json!({"note": "short"});
+    let edited = json!({"note": "short-edited"});
+    let long = json!({"note": "long"});
+    src.insert_events(
+        &b,
+        &[
+            ev(base, Duration::days(10), short.clone()),
+            ev(base, Duration::days(12), long.clone()),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+    pull(&src, &dest).unwrap();
+    let dest_b = "aw-watcher-afk_laptop-synced-from-laptop";
+    let ids = all_sorted(&src, &b)
+        .into_iter()
+        .map(|e| e.id.unwrap())
+        .collect();
+    src.delete_events_by_id(&b, ids).unwrap();
+    src.insert_events(
+        &b,
+        &[
+            ev(base, Duration::days(10), edited.clone()),
+            ev(base, Duration::days(9), long.clone()),
+        ],
+    )
+    .unwrap();
+    src.force_commit().unwrap();
+
+    for _ in 0..2 {
+        pull(&src, &dest).unwrap();
+        let got = all_sorted(&dest, dest_b);
+        assert!(
+            got.iter().any(|e| e.timestamp == base
+                && e.duration == Duration::days(12)
+                && e.data == *long.as_object().unwrap()),
+            "long event deleted through its clipped identity: {got:?}"
+        );
+        assert!(
+            got.iter().any(|e| e.timestamp == base
+                && e.duration == Duration::days(10)
+                && e.data == *edited.as_object().unwrap()),
+            "newest event edit not reconciled: {got:?}"
+        );
+        assert_eq!(got.len(), 2, "{got:?}");
+    }
+}
+
 /// Greptile P1 on #890 at `5f4da41`: reconcile inserts before it deletes. If
 /// a pass stops between the two, dest holds the edited newest straddler and
 /// its stale copy under one identity. The retry must remove the stale copy.

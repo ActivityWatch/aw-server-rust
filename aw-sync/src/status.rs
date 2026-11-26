@@ -174,6 +174,7 @@ pub fn collect_status(
         &imported_origins,
         pull,
         &config_label,
+        device_id.as_deref(),
     );
     out.push('\n');
     if warnings.is_empty() {
@@ -217,6 +218,7 @@ fn collect_warnings(
     imported_origins: &HashSet<String>,
     pull: bool,
     config_label: &str,
+    local_device_id: Option<&str>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
 
@@ -268,21 +270,13 @@ fn collect_warnings(
             ));
         }
 
-        // Orphaned 2-level staging db: the daemon switched to the 3-level
-        // layout but the old {device_id}/*.db is still replicating via
-        // Syncthing. It wastes disk and will never be pulled by the daemon.
-        // Prune is an explicit user action — delete the file and Syncthing
-        // will propagate (ActivityWatch/aw-server-rust#689 item 1).
+        // A duplicate 3-level entry does not make a 2-level db obsolete:
+        // both local and peer daemons still write the 2-level layout. File
+        // sizes cannot prove that staging has been retired (#887 / #689).
         let has_three = group
             .iter()
             .any(|e| e.layout == Some(SyncLayout::ThreeLevel));
         if has_three {
-            // Largest 3-level size for this device_id.
-            let three_max: Option<u64> = group
-                .iter()
-                .filter(|e| e.layout == Some(SyncLayout::ThreeLevel))
-                .filter_map(|e| e.db_size)
-                .max();
             for orphan in group
                 .iter()
                 .filter(|e| e.layout == Some(SyncLayout::TwoLevel))
@@ -291,31 +285,41 @@ fn collect_warnings(
                     .db_size
                     .map(crate::util::format_bytes)
                     .unwrap_or_else(|| "?".to_string());
-                // If the 2-level file is larger than the 3-level counterpart
-                // the daemon (discover_peers) would still prefer the 2-level
-                // file, so its history is not yet absorbed — do not call it
-                // safe to delete.
-                let two_larger = match (orphan.db_size, three_max) {
-                    (Some(two), Some(three)) => two > three,
-                    _ => true, // unknown sizes: assume potentially unsafe
-                };
-                if two_larger {
+                // This device's own 2-level db is not a leftover: `aw-sync
+                // daemon` still stages at {sync_dir}/{device_id}/ (sync_run ->
+                // setup_local_remote), while plain `aw-sync sync` writes the
+                // 3-level entry. Deleting it forces a full re-export and
+                // Syncthing propagates the delete to every peer (#887).
+                if orphan.kind == SyncEntryKind::OwnStaging {
                     warnings.push(format!(
-                        "{} ({size}) is a 2-level staging db that is LARGER than its \
-                         3-level counterpart for device_id {did} — its history may not \
-                         yet be fully present in the 3-level entry; do NOT delete until \
-                         the sizes equalise (ActivityWatch/aw-server-rust#689)",
+                        "{} ({size}) is this device's 2-level staging db, which `aw-sync \
+                         daemon` still writes (plain `aw-sync sync` writes the 3-level \
+                         entry); it is not orphaned — do NOT delete it. Deleting it forces \
+                         a full re-export, and Syncthing can spread the deletion to peers \
+                         even while the daemon is stopped (ActivityWatch/aw-server-rust#887)",
                         orphan.path.display(),
                     ));
-                } else {
-                    warnings.push(format!(
-                        "{} ({size}) is an orphaned 2-level staging db — device_id {did} \
-                         already has a larger 3-level entry; safe to delete \
-                         (Syncthing will propagate the delete) \
-                         (ActivityWatch/aw-server-rust#689)",
-                        orphan.path.display(),
-                    ));
+                    continue;
                 }
+                if local_device_id.is_none() {
+                    warnings.push(format!(
+                        "{} ({size}) is a 2-level staging db for device_id {did}, but the \
+                         local device_id is unknown — this may be this device's own \
+                         daemon staging db; do NOT delete it. Restore access to the \
+                         local server and rerun `aw-sync status` before considering \
+                         cleanup (ActivityWatch/aw-server-rust#887)",
+                        orphan.path.display(),
+                    ));
+                    continue;
+                }
+                warnings.push(format!(
+                    "{} ({size}) is a peer's 2-level staging db for device_id {did}; \
+                     the peer's daemon may still write it even when a 3-level entry \
+                     exists. File sizes do not establish that it is obsolete — do NOT \
+                     delete it. Syncthing can propagate the deletion to the owning \
+                     peer and force a full re-export (ActivityWatch/aw-server-rust#887)",
+                    orphan.path.display(),
+                ));
             }
         }
     }
@@ -427,10 +431,9 @@ mod tests {
     }
 
     #[test]
-    fn collect_warnings_detects_orphaned_two_level_staging() {
-        // Issue #689 item 1: a 2-level leftover ({device_id}/*.db) plus a
-        // 3-level entry for the same device_id where the 3-level is LARGER —
-        // so the 2-level is truly orphaned and safe to delete.
+    fn collect_warnings_peer_two_level_staging_is_not_safe_to_delete() {
+        // #887 applies to peers too: their daemon can still write the 2-level
+        // db, and neither an equal nor a larger 3-level file proves otherwise.
         use crate::util::{SyncDirEntry, SyncEntryKind, SyncLayout};
         use std::path::PathBuf;
 
@@ -438,45 +441,54 @@ mod tests {
         let two_level = SyncDirEntry {
             path: PathBuf::from(format!("/sync/{did}/test.db")),
             db_path: Some(PathBuf::from(format!("/sync/{did}/test.db"))),
-            db_size: Some(273_000_000), // smaller than the 3-level — safe case
+            db_size: Some(273_000_000),
             layout: Some(SyncLayout::TwoLevel),
-            kind: SyncEntryKind::OwnStaging,
+            kind: SyncEntryKind::Peer,
             hostname_folder: None,
             device_id: Some(did.to_string()),
-            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+            not_visible_to_daemon: None,
         };
         let three_level = SyncDirEntry {
             path: PathBuf::from(format!("/sync/my-host/{did}/test.db")),
             db_path: Some(PathBuf::from(format!("/sync/my-host/{did}/test.db"))),
-            db_size: Some(1_200_000_000), // larger — 3-level has absorbed history
+            db_size: Some(1_200_000_000),
             layout: Some(SyncLayout::ThreeLevel),
-            kind: SyncEntryKind::OwnStaging,
+            kind: SyncEntryKind::Peer,
             hostname_folder: Some("my-host".to_string()),
             device_id: Some(did.to_string()),
-            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+            not_visible_to_daemon: None,
         };
 
-        let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
+        let mut inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
             vec![(two_level, None), (three_level, None)];
 
-        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
-        let joined = warnings.join("\n");
-        assert!(
-            joined.contains("orphaned 2-level"),
-            "expected orphaned-2-level warning, got: {joined}"
-        );
-        assert!(
-            joined.contains(did),
-            "warning must name the device_id: {joined}"
-        );
-        assert!(
-            joined.contains("safe to delete"),
-            "warning must say safe to delete: {joined}"
-        );
-        assert!(
-            !joined.contains("do NOT delete"),
-            "safe case must not say do NOT delete: {joined}"
-        );
+        // Smaller, equal, larger, and unknown peer staging sizes. File size
+        // cannot establish that the owning peer has retired its daemon db.
+        for size in [
+            Some(273_000_000),
+            Some(1_200_000_000),
+            Some(2_000_000_000),
+            None,
+        ] {
+            inspected[0].0.db_size = size;
+            let joined =
+                collect_warnings(&inspected, None, &HashSet::new(), false, "", Some("local"))
+                    .join("\n");
+            assert!(
+                !joined.contains("safe to delete") && !joined.contains("orphaned 2-level"),
+                "peer daemon staging must not be called orphaned/safe to delete: {joined}"
+            );
+            assert!(
+                joined.contains(did)
+                    && joined.contains("do NOT delete")
+                    && joined.contains("peer's daemon"),
+                "must identify the peer and explain why its staging db stays: {joined}"
+            );
+            assert!(
+                !joined.contains("until the sizes equalise"),
+                "equalising sizes must not imply deletion becomes safe: {joined}"
+            );
+        }
     }
 
     #[test]
@@ -493,30 +505,31 @@ mod tests {
             db_path: Some(PathBuf::from(format!("/sync/{did}/test.db"))),
             db_size: Some(1_200_000_000), // ~1.19 GB — the real-world case from #689
             layout: Some(SyncLayout::TwoLevel),
-            kind: SyncEntryKind::OwnStaging,
+            kind: SyncEntryKind::Peer,
             hostname_folder: None,
             device_id: Some(did.to_string()),
-            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+            not_visible_to_daemon: None,
         };
         let three_level = SyncDirEntry {
             path: PathBuf::from(format!("/sync/my-host/{did}/test.db")),
             db_path: Some(PathBuf::from(format!("/sync/my-host/{did}/test.db"))),
             db_size: Some(273_000_000), // smaller — history not yet absorbed
             layout: Some(SyncLayout::ThreeLevel),
-            kind: SyncEntryKind::OwnStaging,
+            kind: SyncEntryKind::Peer,
             hostname_folder: Some("my-host".to_string()),
             device_id: Some(did.to_string()),
-            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+            not_visible_to_daemon: None,
         };
 
         let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
             vec![(two_level, None), (three_level, None)];
 
-        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let warnings =
+            collect_warnings(&inspected, None, &HashSet::new(), false, "", Some("local"));
         let joined = warnings.join("\n");
         assert!(
-            joined.contains("LARGER"),
-            "expected LARGER warning for unsafe case, got: {joined}"
+            joined.contains("peer's daemon"),
+            "must explain that the peer's staging db may still be live: {joined}"
         );
         assert!(
             joined.contains("do NOT delete"),
@@ -530,6 +543,90 @@ mod tests {
             joined.contains("1.1 GB") || joined.contains("1.2 GB"),
             "warning must include size: {joined}"
         );
+    }
+
+    #[test]
+    fn collect_warnings_own_two_level_staging_is_not_orphaned() {
+        // #887: the daemon stages at the 2-level path while plain `aw-sync
+        // sync` writes the 3-level layout, so this device's own 2-level db is
+        // live even when an equal-size 3-level entry exists.
+        use crate::util::{SyncDirEntry, SyncEntryKind, SyncLayout};
+        use std::path::PathBuf;
+
+        let did = "d7bc68e7-aaaa-bbbb-cccc-dddddddddddd";
+        let entry = |path: String, layout, folder: Option<&str>| SyncDirEntry {
+            path: PathBuf::from(&path),
+            db_path: Some(PathBuf::from(&path)),
+            db_size: Some(200_000_000),
+            layout: Some(layout),
+            kind: SyncEntryKind::OwnStaging,
+            hostname_folder: folder.map(str::to_string),
+            device_id: Some(did.to_string()),
+            not_visible_to_daemon: Some("own device_id, excluded from pull".to_string()),
+        };
+        let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> = vec![
+            (
+                entry(format!("/sync/{did}/test.db"), SyncLayout::TwoLevel, None),
+                None,
+            ),
+            (
+                entry(
+                    format!("/sync/my-host/{did}/test.db"),
+                    SyncLayout::ThreeLevel,
+                    Some("my-host"),
+                ),
+                None,
+            ),
+        ];
+
+        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "", Some(did));
+        let joined = warnings.join("\n");
+        assert!(
+            !joined.contains("safe to delete") && !joined.contains("orphaned 2-level"),
+            "own daemon staging db must not be called orphaned/safe to delete: {joined}"
+        );
+        assert!(
+            joined.contains("do NOT delete") && joined.contains("aw-sync daemon"),
+            "own 2-level db must be explained as the daemon's live staging: {joined}"
+        );
+        assert!(
+            !joined.contains("while the daemon runs")
+                && joined.contains("even while the daemon is stopped"),
+            "stopping the daemon must not imply deletion is safe: {joined}"
+        );
+    }
+
+    #[test]
+    fn collect_warnings_unknown_device_never_recommends_deletion() {
+        let root = tempfile::tempdir().unwrap();
+        let did = "d7bc68e7-aaaa-bbbb-cccc-dddddddddddd";
+        let two = root.path().join(did);
+        let three = root.path().join("my-host").join(did);
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::create_dir_all(&three).unwrap();
+        std::fs::write(two.join("test.db"), b"db").unwrap();
+
+        // Without a local device ID, scan_sync_dir classifies even our own
+        // staging db as a peer. Exercise both equal and larger 3-level copies.
+        for contents in [b"db".as_slice(), b"larger db".as_slice()] {
+            std::fs::write(three.join("test.db"), contents).unwrap();
+            let inspected: Vec<_> = scan_sync_dir(root.path(), None)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry, None))
+                .collect();
+            assert!(inspected.iter().all(|(e, _)| e.kind == SyncEntryKind::Peer));
+            let joined =
+                collect_warnings(&inspected, None, &HashSet::new(), false, "", None).join("\n");
+            assert!(
+                !joined.contains("safe to delete") && !joined.contains("orphaned 2-level"),
+                "unknown ownership must not allow deletion advice: {joined}"
+            );
+            assert!(
+                joined.contains("local device_id is unknown") && joined.contains("do NOT delete"),
+                "must explain why cleanup advice is withheld: {joined}"
+            );
+        }
     }
 
     #[test]
@@ -554,7 +651,7 @@ mod tests {
         let inspected: Vec<(SyncDirEntry, Option<Result<crate::util::DbInspect, String>>)> =
             vec![(two_level, None)];
 
-        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "");
+        let warnings = collect_warnings(&inspected, None, &HashSet::new(), false, "", Some(did));
         let joined = warnings.join("\n");
         assert!(
             !joined.contains("orphaned"),

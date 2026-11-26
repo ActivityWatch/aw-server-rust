@@ -1,7 +1,33 @@
 use fancy_regex::Regex;
-use serde_json::value::Value;
+use serde_json::value::{Number, Value};
 
 use aw_models::Event;
+
+/// Like `a == b`, but numbers are compared by value, also inside lists.
+///
+/// serde_json treats the integer `1` and the float `1.0` as different values,
+/// and numbers in a query are always floats while watchers usually store integers.
+fn value_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) => match (a.is_f64(), b.is_f64()) {
+            (true, true) => a.as_f64() == b.as_f64(),
+            (true, false) => a.as_f64().is_some_and(|f| float_eq_int(f, b)),
+            (false, true) => b.as_f64().is_some_and(|f| float_eq_int(f, a)),
+            (false, false) => a == b,
+        },
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| value_eq(a, b))
+        }
+        _ => a == b,
+    }
+}
+
+/// Compares without converting the integer to f64, which would round integers above 2^53.
+fn float_eq_int(f: f64, n: &Number) -> bool {
+    let int = n.as_i64().map(i128::from).or(n.as_u64().map(i128::from));
+    // fract() is NaN for NaN and infinities, and the bound keeps the cast exact
+    f.fract() == 0.0 && f.abs() < 2f64.powi(64) && int == Some(f as i128)
+}
 
 /// Drops events not matching the specified key and value(s)
 ///
@@ -17,7 +43,7 @@ pub fn filter_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec<
     for event in events.drain(..) {
         if let Some(v) = event.data.get(key) {
             for val in vals {
-                if val == v {
+                if value_eq(val, v) {
                     filtered_events.push(event);
                     break;
                 }
@@ -66,7 +92,7 @@ pub fn exclude_keyvals(mut events: Vec<Event>, key: &str, vals: &[Value]) -> Vec
     'events: for event in events.drain(..) {
         if let Some(v) = event.data.get(key) {
             for val in vals {
-                if val == v {
+                if value_eq(val, v) {
                     continue 'events;
                 }
             }

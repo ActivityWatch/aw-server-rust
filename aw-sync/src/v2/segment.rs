@@ -43,23 +43,23 @@ type SegmentWriteResult = (
 );
 
 /// Segment header (line 1 of each segment JSONL).
-#[derive(Debug, Serialize, Deserialize)]
-struct SegmentHeader {
-    v: u32,
-    device_id: String,
-    bucket_id: String,
-    bucket_type: String,
-    bucket_client: String,
-    bucket_hostname: String,
-    bucket_created: Option<DateTime<Utc>>,
-    generation: u64,
-    written_at: DateTime<Utc>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentHeader {
+    pub v: u32,
+    pub device_id: String,
+    pub bucket_id: String,
+    pub bucket_type: String,
+    pub bucket_client: String,
+    pub bucket_hostname: String,
+    pub bucket_created: Option<DateTime<Utc>>,
+    pub generation: u64,
+    pub written_at: DateTime<Utc>,
     /// `null` for append-only; `{from, to}` for a range-replace segment.
-    replaces: Option<ReplaceRange>,
+    pub replaces: Option<ReplaceRange>,
 }
 
 /// Range-replace marker — reserved for future use; writer always emits null.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ReplaceRange {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,

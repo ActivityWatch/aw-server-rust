@@ -8,10 +8,15 @@
 //! modified; this module is entirely additive.
 
 pub mod manifest;
+pub mod reader;
 pub mod segment;
 
-pub use manifest::Manifest;
-pub use segment::SegmentWriter;
+pub use manifest::{BucketEntry, Manifest, SegmentEntry};
+pub use reader::{
+    BucketSegmentIter, DecodedSegment, ReadError, ReadOutcome, ReaderLimits, RetryReason,
+    SegmentReader,
+};
+pub use segment::{ReplaceRange, SegmentHeader, SegmentWriter};
 
 /// Maximum format version this build understands.
 pub const MAX_V: u32 = 1;

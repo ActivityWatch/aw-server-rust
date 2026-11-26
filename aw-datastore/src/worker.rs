@@ -414,6 +414,11 @@ impl DatastoreWorker {
             }
         };
 
+        // System SQLite may default to foreign keys off; match the bundled build
+        // explicitly before opening any transaction.
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("Failed to enable foreign key enforcement");
+
         // Set busy timeout to handle concurrent access on systems with strict file locking (e.g., Windows)
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .expect("Failed to set busy timeout");

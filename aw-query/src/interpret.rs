@@ -52,6 +52,162 @@ fn check_deadline(deadline: Option<Instant>, what: &str) -> Result<(), QueryErro
     }
 }
 
+/// Upper bound, in approximate heap bytes, on any value the interpreter
+/// builds by combining others: `+` on strings and lists, list or dict
+/// literals, and `concat` (checked while evaluating arguments and in the builtin).
+///
+/// Without it `a = a + a;` (or `a = [a, a];`, or `a = concat(a, a);`) doubles
+/// a value per statement, so about 30 statements in a sub-1 KB query exhaust
+/// the server's memory long before the per-statement time budget is checked
+/// (ActivityWatch/aw-server-rust#882 item 6). Values read from the datastore
+/// are only limited where they are combined; 1 GiB is several million events,
+/// far beyond any real query result. Unit tests use 1 MiB so they can drive a
+/// value past the bound quickly.
+#[cfg(not(test))]
+pub(crate) const MAX_VALUE_SIZE: usize = 1 << 30;
+#[cfg(test)]
+pub(crate) const MAX_VALUE_SIZE: usize = 1 << 20;
+
+/// Approximate heap size of `value`, or `None` once it exceeds `limit`.
+///
+/// Iterative, so a deeply nested value can't overflow the stack here, and it
+/// stops as soon as `limit` is passed, so checking a huge value costs at most
+/// `limit` worth of walking.
+fn approx_size_within(value: &DataType, limit: usize) -> Option<usize> {
+    use serde_json::Value;
+    const NODE: usize = std::mem::size_of::<DataType>();
+    const JSON_NODE: usize = std::mem::size_of::<Value>();
+    let mut total = 0usize;
+    let mut values = vec![value];
+    let mut json: Vec<&Value> = Vec::new();
+    let add = |n: usize, total: &mut usize| -> bool {
+        *total = total.saturating_add(n);
+        *total <= limit
+    };
+    while let Some(v) = values.pop() {
+        let extra = match v {
+            DataType::String(s) => s.len(),
+            DataType::List(l) => {
+                // Reject the minimum node cost before allocating references
+                // for every child, even when almost no budget remains.
+                if total.saturating_add(NODE.saturating_mul(l.len().saturating_add(1))) > limit {
+                    return None;
+                }
+                values.extend(l.iter());
+                0
+            }
+            DataType::Dict(d) => {
+                if total.saturating_add(NODE.saturating_mul(d.len().saturating_add(1))) > limit {
+                    return None;
+                }
+                let mut keys = 0usize;
+                for (k, v) in d {
+                    keys = keys.saturating_add(k.len() + std::mem::size_of::<String>());
+                    values.push(v);
+                }
+                keys
+            }
+            DataType::Event(e) => {
+                if total
+                    .saturating_add(NODE)
+                    .saturating_add(JSON_NODE.saturating_mul(e.data.len()))
+                    > limit
+                {
+                    return None;
+                }
+                let mut keys = 0usize;
+                for (k, v) in e.data.iter() {
+                    keys = keys.saturating_add(k.len() + std::mem::size_of::<String>());
+                    json.push(v);
+                }
+                keys
+            }
+            DataType::Function(name, _) | DataType::ReadOnlyFunction(name, _) => name.len(),
+            DataType::None() | DataType::Bool(_) | DataType::Number(_) => 0,
+        };
+        if !add(NODE + extra, &mut total) {
+            return None;
+        }
+        while let Some(j) = json.pop() {
+            let extra = match j {
+                Value::String(s) => s.len(),
+                Value::Array(a) => {
+                    if total.saturating_add(JSON_NODE.saturating_mul(a.len().saturating_add(1)))
+                        > limit
+                    {
+                        return None;
+                    }
+                    json.extend(a.iter());
+                    0
+                }
+                Value::Object(o) => {
+                    if total.saturating_add(JSON_NODE.saturating_mul(o.len().saturating_add(1)))
+                        > limit
+                    {
+                        return None;
+                    }
+                    let mut keys = 0usize;
+                    for (k, v) in o {
+                        keys = keys.saturating_add(k.len() + std::mem::size_of::<String>());
+                        json.push(v);
+                    }
+                    keys
+                }
+                Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+            };
+            if !add(JSON_NODE + extra, &mut total) {
+                return None;
+            }
+        }
+    }
+    Some(total)
+}
+
+/// Add `value`'s approximate size to `used`, failing with
+/// [`QueryError::ValueTooLarge`] once the result being built (`what`) would
+/// pass [`MAX_VALUE_SIZE`].
+pub(crate) fn charge_size(
+    used: &mut usize,
+    value: &DataType,
+    what: &str,
+) -> Result<(), QueryError> {
+    let remaining = MAX_VALUE_SIZE.saturating_sub(*used);
+    match approx_size_within(value, remaining) {
+        Some(size) => {
+            *used += size;
+            Ok(())
+        }
+        None => Err(QueryError::ValueTooLarge(format!(
+            "{what} would be larger than {} MiB",
+            MAX_VALUE_SIZE >> 20
+        ))),
+    }
+}
+
+/// Parsed call arguments cannot assign, but internal AST callers can. Preserve
+/// their late function lookup instead of prevalidating a binding they may change.
+fn arguments_can_rebind(exprs: &[Expr]) -> bool {
+    let mut pending: Vec<_> = exprs.iter().collect();
+    while let Some(expr) = pending.pop() {
+        match &expr.node {
+            Expr_::Assign(..) | Expr_::Return(..) | Expr_::If(..) => return true,
+            Expr_::Add(a, b)
+            | Expr_::Sub(a, b)
+            | Expr_::Mul(a, b)
+            | Expr_::Div(a, b)
+            | Expr_::Mod(a, b)
+            | Expr_::Equal(a, b) => {
+                pending.extend([a.as_ref(), b.as_ref()]);
+            }
+            Expr_::Function(_, args) => pending.push(args),
+            Expr_::List(items) => pending.extend(items),
+            Expr_::Dict(items) => pending.extend(items.values()),
+            _ => (),
+        }
+    }
+    false
+}
+
 fn interpret_expr(
     env: &mut HashMap<String, DataType>,
     ds: &Datastore,
@@ -63,6 +219,14 @@ fn interpret_expr(
         Add(a, b) => {
             let a_res = interpret_expr(env, ds, *a, deadline)?;
             let b_res = interpret_expr(env, ds, *b, deadline)?;
+            if matches!(
+                (&a_res, &b_res),
+                (DataType::List(_), DataType::List(_)) | (DataType::String(_), DataType::String(_))
+            ) {
+                let mut used = 0;
+                charge_size(&mut used, &a_res, "the result of +")?;
+                charge_size(&mut used, &b_res, "the result of +")?;
+            }
             let res = match a_res {
                 DataType::Number(n1) => match b_res {
                     DataType::Number(n2) => DataType::Number(n1 + n2),
@@ -239,6 +403,20 @@ fn interpret_expr(
             Ok(DataType::None())
         }
         Function(fname, e) => {
+            let Expr_::List(exprs) = &e.node else {
+                unreachable!()
+            };
+            let bound_concat = if !arguments_can_rebind(exprs) {
+                match env.get(&fname) {
+                    Some(DataType::Function(name, _) | DataType::ReadOnlyFunction(name, _)) => {
+                        functions::validate_call_arity(name, exprs.len())?;
+                        name == "concat"
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
             // Borrow variables only when every argument is an atom. Evaluating
             // arbitrary arguments may assign to the environment, including the
             // function binding itself, so those retain the owned evaluation path.
@@ -274,10 +452,30 @@ fn interpret_expr(
                     }
                 }
             }
-            let args = match interpret_expr(env, ds, *e, deadline)? {
-                DataType::List(l) => l,
-                _ => unreachable!(),
+            // Only concat builds one combined value from its arguments.
+            // Reducers must still accept datastore values larger than the bound.
+            let Expr_::List(exprs) = e.node else {
+                unreachable!()
             };
+            let mut args = Vec::new();
+            let mut used = 0;
+            for expr in exprs {
+                if bound_concat {
+                    if let Expr_::Var(name) = &expr.node {
+                        let value = env
+                            .get(name)
+                            .ok_or_else(|| QueryError::VariableNotDefined(name.clone()))?;
+                        charge_size(&mut used, value, "the result of concat")?;
+                        args.push(value.clone());
+                        continue;
+                    }
+                }
+                let value = interpret_expr(env, ds, expr, deadline)?;
+                if bound_concat {
+                    charge_size(&mut used, &value, "the result of concat")?;
+                }
+                args.push(value);
+            }
             let var = match env.get(&fname[..]) {
                 Some(v) => v,
                 None => return Err(QueryError::VariableNotDefined(fname.clone())),
@@ -293,16 +491,21 @@ fn interpret_expr(
         }
         List(list) => {
             let mut l = Vec::new();
+            let mut used = 0;
             for entry in list {
                 let res = interpret_expr(env, ds, entry, deadline)?;
+                charge_size(&mut used, &res, "a list")?;
                 l.push(res);
             }
             Ok(DataType::List(l))
         }
         Dict(d) => {
             let mut dict = HashMap::new();
+            let mut used: usize = 0;
             for (key, val_uninterpreted) in d {
                 let val = interpret_expr(env, ds, val_uninterpreted, deadline)?;
+                used = used.saturating_add(key.len());
+                charge_size(&mut used, &val, "a dict")?;
                 dict.insert(key, val);
             }
             Ok(DataType::Dict(dict))
@@ -387,6 +590,7 @@ mod tests {
         }
         let ds = Datastore::new_in_memory(false);
         let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
         env.insert(
             "check".into(),
             DataType::ReadOnlyFunction("check".into(), check),
@@ -401,12 +605,14 @@ mod tests {
             },
             node,
         };
-        for rebind in [false, true] {
+        for rebind in [0, 1, 2] {
             env.insert("items".into(), DataType::List(vec![DataType::Number(1.0)]));
             env.insert(
                 "f".into(),
-                if rebind {
+                if rebind == 1 {
                     DataType::Number(0.0)
+                } else if rebind == 2 {
+                    env["query_bucket_names"].clone()
                 } else {
                     env["check"].clone()
                 },
@@ -418,7 +624,7 @@ mod tests {
                     Box::new(expr(Expr_::List(vec![expr(Expr_::Number(2.0))]))),
                 )),
             ];
-            if rebind {
+            if rebind > 0 {
                 args.push(expr(Expr_::Assign(
                     "f".into(),
                     Box::new(expr(Expr_::Var("check".into()))),
@@ -458,5 +664,180 @@ mod tests {
                 DataType::List(vec![DataType::Number(1.0), DataType::Number(2.0)])
             ])
         );
+    }
+
+    fn try_run(code: &str, env: &mut VarEnv, ds: &Datastore) -> Result<(), QueryError> {
+        let program = crate::parser::parse(crate::lexer::Lexer::new(code)).unwrap();
+        for stmt in program.stmts {
+            interpret_expr(env, ds, stmt, None)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn approximate_size_counts_wide_and_nested_values() {
+        use serde_json::json;
+        let node = std::mem::size_of::<DataType>();
+        let json_node = std::mem::size_of::<serde_json::Value>();
+        let key = std::mem::size_of::<String>();
+        let mut event = aw_models::Event::default();
+        event.data.insert("a".into(), json!([{"b": "xyz"}]));
+        let cases = [
+            (DataType::List(vec![DataType::None(); 1000]), 1001 * node),
+            (
+                DataType::Dict(HashMap::from([(
+                    "a".into(),
+                    DataType::String("xyz".into()),
+                )])),
+                2 * node + key + 1 + 3,
+            ),
+            (
+                DataType::Event(event),
+                node + 2 * (key + 1) + 3 * json_node + 3,
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(approx_size_within(&value, expected), Some(expected));
+            assert_eq!(approx_size_within(&value, expected - 1), None);
+            assert_eq!(approx_size_within(&value, node - 1), None);
+        }
+    }
+
+    #[test]
+    fn functions_can_reduce_datastore_values_larger_than_the_builder_limit() {
+        let ds = Datastore::new_in_memory(false);
+        let ti =
+            TimeInterval::new_from_string("2000-01-01T00:00:00Z/2000-01-02T00:00:00Z").unwrap();
+        let mut env = init_env(&ti);
+        let mut event = aw_models::Event::default();
+        event.data.insert(
+            "title".into(),
+            serde_json::json!("x".repeat(MAX_VALUE_SIZE / 2)),
+        );
+        env.insert(
+            "events".into(),
+            DataType::List(vec![DataType::Event(event); 3]),
+        );
+        assert!(approx_size_within(&env["events"], MAX_VALUE_SIZE).is_none());
+        for code in [
+            "return limit_events(events, 1);",
+            "return limit_events(events, 0 + 1);",
+            "trim = limit_events; return trim(events, 1);",
+            "combine = concat; concat = limit_events; return concat(events, 1); concat = combine;",
+        ] {
+            assert!(try_run(code, &mut env, &ds).is_ok(), "{code}");
+            match env.remove("RETURN").unwrap() {
+                DataType::List(events) => assert_eq!(events.len(), 1),
+                other => panic!("expected a list, got {other:?}"),
+            }
+        }
+        // The bound belongs to the builder itself, not its name or caller.
+        for code in [
+            "return concat(events);",
+            "combine = concat; return combine(events);",
+        ] {
+            assert!(matches!(
+                try_run(code, &mut env, &ds),
+                Err(QueryError::ValueTooLarge(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn concat_rejects_accumulated_arguments_before_evaluating_the_rest() {
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
+        let mut event = aw_models::Event::default();
+        event.data.insert(
+            "title".into(),
+            serde_json::json!("x".repeat(MAX_VALUE_SIZE * 3 / 4)),
+        );
+        env.insert(
+            "events".into(),
+            DataType::List(vec![DataType::Event(event)]),
+        );
+        for code in [
+            "return concat(events, events, missing);",
+            "combine = concat; return combine(events, events, missing);",
+            "return concat(limit_events(events, 1), limit_events(events, 1), missing);",
+            "combine = concat; return combine(limit_events(events, 1), limit_events(events, 1), missing);",
+        ] {
+            let result = try_run(code, &mut env, &ds);
+            assert!(
+                matches!(result, Err(QueryError::ValueTooLarge(_))),
+                "{code}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_builtin_arity_is_rejected_before_materializing_arguments() {
+        let ds = Datastore::new_in_memory(false);
+        let mut env = VarEnv::new();
+        functions::fill_env(&mut env);
+        for code in [
+            "return query_bucket_names(missing);",
+            "return flood(missing, missing, missing);",
+            "f = flood; return f(missing, missing, missing);",
+        ] {
+            let result = try_run(code, &mut env, &ds);
+            assert!(
+                matches!(result, Err(QueryError::InvalidFunctionParameters(_))),
+                "{code}: {result:?}"
+            );
+        }
+    }
+
+    /// Repeated self-concatenation used to double a value per statement with
+    /// no bound, so a sub-1 KB query could exhaust the server's memory
+    /// (ActivityWatch/aw-server-rust#882 item 6). Every growth form must stop
+    /// with ValueTooLarge long before the 40th doubling (2^40 copies).
+    #[test]
+    fn self_concatenation_is_bounded() {
+        let ds = Datastore::new_in_memory(false);
+        let ti =
+            TimeInterval::new_from_string("2000-01-01T00:00:00Z/2000-01-02T00:00:00Z").unwrap();
+        let mut event = aw_models::Event::default();
+        event
+            .data
+            .insert("title".to_string(), serde_json::json!("some window"));
+        let cases = [
+            ("a = \"x\";", "a = a + a;"),
+            ("a = [1];", "a = a + a;"),
+            ("a = [1];", "a = [a, a];"),
+            ("a = {\"k\": 1};", "a = {\"l\": a, \"r\": a};"),
+            ("a = events;", "a = concat(a, a);"),
+        ];
+        for (init, step) in cases {
+            let mut env = init_env(&ti);
+            env.insert(
+                "events".to_string(),
+                DataType::List(vec![DataType::Event(event.clone())]),
+            );
+            let code = format!("{init} {}", step.repeat(40));
+            match try_run(&code, &mut env, &ds) {
+                Err(QueryError::ValueTooLarge(_)) => (),
+                other => panic!("{step}: expected ValueTooLarge, got {other:?}"),
+            }
+            let a = env.get("a").unwrap();
+            assert!(
+                approx_size_within(a, MAX_VALUE_SIZE).is_some(),
+                "{step}: stored value passed the bound"
+            );
+        }
+
+        // Ordinary growth under the bound still works.
+        let mut env = init_env(&ti);
+        try_run(
+            &format!("a = [1]; {}", "a = a + a;".repeat(10)),
+            &mut env,
+            &ds,
+        )
+        .unwrap();
+        match env.get("a") {
+            Some(DataType::List(l)) => assert_eq!(l.len(), 1024),
+            other => panic!("expected a list, got {other:?}"),
+        }
     }
 }

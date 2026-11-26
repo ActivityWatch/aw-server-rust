@@ -33,7 +33,8 @@ fn query_error_status(e: &QueryError) -> Status {
         | QueryError::InvalidType(_)
         | QueryError::InvalidFunctionParameters(_)
         | QueryError::TimeIntervalError(_)
-        | QueryError::RegexCompileError(_) => Status::BadRequest,
+        | QueryError::RegexCompileError(_)
+        | QueryError::ValueTooLarge(_) => Status::BadRequest,
     }
 }
 
@@ -49,6 +50,10 @@ mod tests {
         );
         assert_eq!(
             query_error_status(&QueryError::BucketNotFound("missing bucket".into())),
+            Status::BadRequest
+        );
+        assert_eq!(
+            query_error_status(&QueryError::ValueTooLarge("size bound".into())),
             Status::BadRequest
         );
         assert_eq!(

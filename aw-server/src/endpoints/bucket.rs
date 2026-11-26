@@ -132,22 +132,44 @@ fn parse_time_param(
     }
 }
 
-#[get("/<bucket_id>/events?<start>&<end>&<limit>")]
+#[get("/<bucket_id>/events?<start>&<end>&<limit>&<unclipped>")]
 pub fn bucket_events_get(
+    bucket_id: &str,
+    start: Option<String>,
+    end: Option<String>,
+    limit: Option<u64>,
+    unclipped: Option<bool>,
+    state: &State<ServerState>,
+) -> Result<Json<Vec<Event>>, HttpErrorJson> {
+    let starttime = parse_time_param("starttime", start)?;
+    let endtime = parse_time_param("endtime", end)?;
+    let datastore = &state.datastore;
+    // Query-style reads clip an event to the requested range so a period never
+    // counts time outside itself. Copying events to another store needs the
+    // stored duration instead: a page fetched through `end = cut` would
+    // otherwise carry the event at `cut` with duration 0 (#874).
+    let res = if unclipped.unwrap_or(false) {
+        datastore.get_events_unclipped(bucket_id, starttime, endtime, limit)
+    } else {
+        datastore.get_events(bucket_id, starttime, endtime, limit)
+    };
+    match res {
+        Ok(events) => Ok(Json(events)),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Copy-safe event read. Unlike an optional query flag, this route is rejected
+/// by older servers, so sync cannot silently copy clipped data from them.
+#[get("/<bucket_id>/events/unclipped?<start>&<end>&<limit>")]
+pub fn bucket_events_get_unclipped(
     bucket_id: &str,
     start: Option<String>,
     end: Option<String>,
     limit: Option<u64>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
-    let starttime = parse_time_param("starttime", start)?;
-    let endtime = parse_time_param("endtime", end)?;
-    let datastore = &state.datastore;
-    let res = datastore.get_events(bucket_id, starttime, endtime, limit);
-    match res {
-        Ok(events) => Ok(Json(events)),
-        Err(err) => Err(err.into()),
-    }
+    bucket_events_get(bucket_id, start, end, limit, Some(true), state)
 }
 
 // Ranked below bucket_event_count so that `/events/count` isn't parsed as an event id;

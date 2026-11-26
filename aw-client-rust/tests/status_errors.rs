@@ -404,3 +404,22 @@ fn get_classes_uses_server_setting_and_falls_back_to_defaults() {
 
     handle.join().expect("join mock server");
 }
+
+#[test]
+fn unclipped_read_uses_a_distinct_route_and_rejects_unsupported_servers() {
+    // Old servers ignore unknown query parameters, so ?unclipped=true can
+    // silently return clipped data. A dedicated route fails closed instead.
+    let (port, handle) = spawn_mock_server(vec![MockResponse {
+        status_line: "404 Not Found",
+        content_type: "application/json",
+        body: r#"{"message":"unsupported route"}"#,
+    }]);
+    let client = AwClient::new("127.0.0.1", port, "aw-client-rust-test").unwrap();
+    let err = block_on(client.get_events_unclipped("bucket", None, None, Some(5)))
+        .expect_err("an unsupported server must fail, not return clipped events");
+    assert_eq!(err.status(), Some(reqwest::StatusCode::NOT_FOUND));
+    assert_eq!(
+        handle.join().unwrap(),
+        vec!["GET /api/0/buckets/bucket/events/unclipped?limit=5 HTTP/1.1"]
+    );
+}

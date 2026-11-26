@@ -1102,9 +1102,8 @@ fn sync_one(
     //   - duration=0 events at resume_sync_at (Symptom 1: re-imported every pass)
     //   - events at newest.timestamp with duration > 0 whose end == resume_sync_at
     //     (Symptom 2: timestamp-tie — a different event at the same timestamp)
-    //   - events that started before resume_sync_at and straddle it (Symptom 3: the source
-    //     query clips such an event's returned start forward to resume_sync_at, zeroing its
-    //     returned duration)
+    //   - events that started before resume_sync_at and straddle it (Symptom 3: sync
+    //     clips their start forward to resume_sync_at, keeping only the unsynced suffix)
     //
     // Fetch by LIMIT rather than a start-time filter: an unfiltered get_events() cannot clip
     // anything (clipping only triggers when a start/end bound cuts into an event), so these
@@ -1129,7 +1128,8 @@ fn sync_one(
     // Bounded by LIMIT rather than a start/end filter: any bound on this fetch would let
     // clip_to_query_range clip events straddling it (the same failure mode this fingerprint
     // scheme exists to route around — see the source-fetch comment above), and the AccessMethod
-    // trait has no HTTP-safe unclipped variant to page backward with instead. A page this large
+    // trait now has an unclipped variant, but this existing bounded tail read is sufficient.
+    // A page this large
     // covers every observed real-world tie run (see #711 — up to ~550 duplicate rows at one
     // timestamp) with over an order of magnitude of margin; a bucket with a longer unresolved
     // tie than this is already corrupted well beyond what a resume-boundary dedup can repair —
@@ -1183,7 +1183,11 @@ fn sync_one(
     let mut pages_written = 0u32;
 
     loop {
-        let raw = ds_from.get_events(
+        // Unclipped: the page is cut at its oldest timestamp and that run is
+        // re-fetched with `end = boundary_ts`. A clipped re-fetch returns every
+        // event starting at `boundary_ts` with duration 0, which was written to
+        // the destination permanently (#874).
+        let raw = ds_from.get_events_unclipped(
             bucket_from.id.as_str(),
             resume_sync_at,
             fetch_end,
@@ -1200,6 +1204,18 @@ fn sync_one(
         let mut chunk: Vec<Event> = raw
             .into_iter()
             .map(|mut e| {
+                // Keep start clipping at the resume cursor: an event that grew
+                // since the last sync must only copy its unsynced suffix. Do
+                // this before choosing the next page boundary, too, so a
+                // straddling event cannot move fetch_end before resume_sync_at.
+                // Never clip at fetch_end: that would lose page-edge duration.
+                if let Some(start) = resume_sync_at {
+                    if e.timestamp < start {
+                        let end = e.timestamp + e.duration;
+                        e.timestamp = start;
+                        e.duration = end - start;
+                    }
+                }
                 // Unset ID on events, as they are not globally unique
                 e.id = None;
                 e
@@ -1704,6 +1720,112 @@ mod boundary_dedup_multipage_tests {
             ds_dest.get_event_count(synced_id, None, None).unwrap(),
             8,
             "third sync must not re-import the boundary or the collider"
+        );
+    }
+
+    #[test]
+    fn growing_resume_event_does_not_double_count_across_multiple_pages() {
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-0", "type": "test", "hostname": "device-0", "client": "test"
+        }))
+        .unwrap();
+        ds_src.create_bucket(&bucket).unwrap();
+        let base_ts = Utc::now() - Duration::hours(1);
+        let mut live: Event = serde_json::from_value(serde_json::json!({
+            "timestamp": base_ts.to_rfc3339(), "duration": 10,
+            "data": {"label": "live"}
+        }))
+        .unwrap();
+        live = ds_src.insert_events("bucket-0", &[live]).unwrap().remove(0);
+        ds_src.force_commit().unwrap();
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+
+        // The last synced event grows, then enough new events arrive to put
+        // its remaining 20 seconds on a later page (not the heartbeat path).
+        live.duration = Duration::seconds(30);
+        ds_src.insert_events("bucket-0", &[live]).unwrap();
+        let new_events: Vec<Event> = (0..12)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "timestamp": (base_ts + Duration::seconds(40 + i * 10)).to_rfc3339(),
+                    "duration": 10, "data": {"label": format!("new-{i}")}
+                }))
+                .unwrap()
+            })
+            .collect();
+        ds_src.insert_events("bucket-0", &new_events).unwrap();
+        ds_src.force_commit().unwrap();
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+        let got = ds_dest
+            .get_events("bucket-0-synced-from-device-0", None, None, None)
+            .unwrap();
+
+        assert_eq!(
+            got.iter().map(|e| e.duration.num_seconds()).sum::<i64>(),
+            150,
+            "the growing event must contribute 30s, not its old 10s plus the full 30s"
+        );
+        let live_rows: Vec<_> = got.iter().filter(|e| e.data["label"] == "live").collect();
+        assert_eq!(live_rows.len(), 2);
+        assert_eq!(live_rows[0].timestamp, base_ts + Duration::seconds(10));
+        assert_eq!(live_rows[0].duration, Duration::seconds(20));
+        assert_eq!(
+            live_rows[1].timestamp + live_rows[1].duration,
+            live_rows[0].timestamp
+        );
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+        assert_eq!(
+            ds_dest
+                .get_events("bucket-0-synced-from-device-0", None, None, None)
+                .unwrap(),
+            got,
+            "a repeat sync must not add the growing event or page boundaries again"
+        );
+    }
+
+    #[test]
+    fn page_boundary_event_keeps_its_duration() {
+        // Regression for ActivityWatch/aw-server-rust#874: a full page drops the
+        // run of events at its oldest timestamp and re-fetches it with
+        // `end = boundary_ts`. `get_events` clips events to the query end, so
+        // every event starting exactly at `boundary_ts` came back with duration
+        // 0 and was inserted that way — silently and permanently. The existing
+        // multipage tests only check counts and duplicates, which is why they
+        // passed.
+        //
+        // BATCH_SIZE is 5 under #[cfg(test)]; 12 events force two page cuts.
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = Datastore::new_in_memory(false);
+        let bucket: Bucket = serde_json::from_value(serde_json::json!({
+            "id": "bucket-0", "type": "test", "hostname": "device-0", "client": "test"
+        }))
+        .unwrap();
+        ds_src.create_bucket(&bucket).unwrap();
+        let base_ts: DateTime<Utc> = Utc::now() - Duration::hours(1);
+        let events: Vec<Event> = (0..12)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "timestamp": (base_ts + Duration::seconds(i * 10)).to_rfc3339(),
+                    "duration": 10.0,
+                    "data": {"title": format!("w{i}")}
+                }))
+                .unwrap()
+            })
+            .collect();
+        ds_src.insert_events("bucket-0", &events).unwrap();
+        ds_src.force_commit().unwrap();
+
+        sync_datastores(&ds_src, &ds_dest, false, None, &SyncSpec::default()).unwrap();
+        let got = ds_dest
+            .get_events("bucket-0-synced-from-device-0", None, None, None)
+            .unwrap();
+        let total: i64 = got.iter().map(|e| e.duration.num_seconds()).sum();
+        assert_eq!(got.len(), 12);
+        assert_eq!(
+            total, 120,
+            "every event must keep its duration across page boundaries"
         );
     }
 }

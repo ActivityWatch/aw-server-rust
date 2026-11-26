@@ -17,7 +17,7 @@ use rocket::State;
 
 use crate::endpoints::query_cache::event_range;
 use crate::endpoints::util::{ApiJson, BucketEventsCsvRocket, BucketsExportRocket};
-use crate::endpoints::{HttpErrorJson, ServerState};
+use crate::endpoints::{lock_ignoring_poison, HttpErrorJson, ServerState};
 
 #[get("/")]
 pub fn buckets_get(
@@ -176,7 +176,7 @@ pub fn bucket_events_create(
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
     // Hold the write lock across (read old ranges + write + invalidate) so a
     // concurrent replacement cannot move an event to a range we never record.
-    let _guard = state.write_lock.lock().unwrap();
+    let _guard = lock_ignoring_poison(&state.write_lock);
     // Reject events with negative duration; they cannot represent a valid time span
     // and silently corrupt totals in the Activity view (#602, #239).
     for event in events.iter() {
@@ -221,7 +221,7 @@ pub fn bucket_events_heartbeat(
     pulsetime: f64,
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
-    let _guard = state.write_lock.lock().unwrap();
+    let _guard = lock_ignoring_poison(&state.write_lock);
     // Reject negative pulsetime; it has no meaningful interpretation and is
     // almost always a client bug (negated constant, sign-flip on subtraction).
     // NaN compares false against everything, so check finiteness first.
@@ -292,7 +292,7 @@ pub fn bucket_events_delete_by_id(
     event_id: i64,
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
-    let _guard = state.write_lock.lock().unwrap();
+    let _guard = lock_ignoring_poison(&state.write_lock);
     let datastore = &state.datastore;
     let old = datastore.get_event(bucket_id, event_id).ok();
     match datastore.delete_events_by_id(bucket_id, vec![event_id]) {
@@ -338,7 +338,7 @@ pub fn bucket_events_delete_many(
     // with one of the same id at a different range; the delete would remove
     // that new event while only the stale range was invalidated, and the
     // returned count could include ids another request had already deleted.
-    let _guard = state.write_lock.lock().unwrap();
+    let _guard = lock_ignoring_poison(&state.write_lock);
     let datastore = &state.datastore;
 
     // Validate bucket exists before iterating (handles empty-ids case too).

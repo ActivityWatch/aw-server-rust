@@ -295,6 +295,7 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
     fs::create_dir_all(path)?;
 
     let remotedir = path.join(device_id);
+    refuse_symlink(&remotedir)?;
     fs::create_dir_all(&remotedir)?;
 
     let dbfile = local_staging_db_path(&remotedir)?;
@@ -308,9 +309,35 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
     Ok(ds_localremote)
 }
 
+/// Fail if `path` itself is a symlink; a missing path is fine.
+pub(crate) fn refuse_symlink(path: &Path) -> Result<(), Box<dyn Error>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(format!(
+            "refusing to use staging path {}: it is a symlink",
+            path.display()
+        )
+        .into()),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn local_staging_db_path(remotedir: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let legacy = remotedir.join("test.db");
     let current = remotedir.join("sync.db");
+
+    // Validate both names and all SQLite sidecars before moving anything.
+    // A peer can replicate symlinks here; checking after the rename can strand
+    // committed WAL frames under test.db-wal when sync.db-wal is a symlink.
+    for dbfile in [&legacy, &current] {
+        refuse_symlink(dbfile)?;
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = dbfile.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            refuse_symlink(Path::new(&sidecar))?;
+        }
+    }
 
     if legacy.exists() && current.exists() {
         // Both names present: leave BOTH databases and their sidecars untouched.
@@ -1400,6 +1427,117 @@ mod pull_only_staging_tests {
         let remotes = crate::util::find_remotes_nonlocal(&dir, "device-local", None).unwrap();
         assert!(remotes.is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A peer can replicate a symlink into our own staging dir (Syncthing does
+    /// on Unix). Push must not open whatever it points at read-write.
+    #[cfg(unix)]
+    fn assert_symlinked_staging_refused(plant: impl FnOnce(&Path, &Path)) {
+        let dir = temp_dir();
+        let outside = temp_dir();
+        let foreign = outside.join("places.sqlite");
+        fs::write(&foreign, b"not an aw-sync database").unwrap();
+        let device_dir = dir.join("device-local");
+        plant(&device_dir, &foreign);
+
+        let result = setup_local_remote(&dir, "device-local");
+        let err = match result {
+            Ok(ds) => {
+                ds.close();
+                panic!("push opened a symlinked staging path");
+            }
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("symlink"), "{err}");
+        assert_eq!(fs::read(&foreign).unwrap(), b"not an aw-sync database");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_refuses_symlinked_staging_db() {
+        assert_symlinked_staging_refused(|device_dir, foreign| {
+            fs::create_dir_all(device_dir).unwrap();
+            std::os::unix::fs::symlink(foreign, device_dir.join("sync.db")).unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_refuses_symlinked_legacy_staging_db() {
+        assert_symlinked_staging_refused(|device_dir, foreign| {
+            fs::create_dir_all(device_dir).unwrap();
+            std::os::unix::fs::symlink(foreign, device_dir.join("test.db")).unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_refuses_symlinked_staging_sidecar() {
+        assert_symlinked_staging_refused(|device_dir, foreign| {
+            fs::create_dir_all(device_dir).unwrap();
+            std::os::unix::fs::symlink(foreign, device_dir.join("sync.db-wal")).unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_refuses_symlinked_device_dir() {
+        assert_symlinked_staging_refused(|device_dir, foreign| {
+            let target = foreign.parent().unwrap().join("elsewhere");
+            fs::create_dir_all(&target).unwrap();
+            std::os::unix::fs::symlink(&target, device_dir).unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_rejection_leaves_legacy_migration_untouched() {
+        for name in [
+            "sync.db-wal",
+            "sync.db-shm",
+            "sync.db-journal",
+            "test.db-wal",
+            "test.db-shm",
+        ] {
+            let dir = temp_dir();
+            let device_dir = dir.join("device-local");
+            fs::create_dir_all(&device_dir).unwrap();
+            fs::write(device_dir.join("test.db"), b"legacy-db").unwrap();
+            fs::write(device_dir.join("test.db-wal"), b"committed-wal").unwrap();
+            fs::write(device_dir.join("test.db-shm"), b"legacy-shm").unwrap();
+            let foreign = dir.join("foreign");
+            fs::write(&foreign, b"foreign-bytes").unwrap();
+            let planted = device_dir.join(name);
+            if planted.exists() {
+                fs::remove_file(&planted).unwrap();
+            }
+            std::os::unix::fs::symlink(&foreign, &planted).unwrap();
+
+            let result = setup_local_remote(&dir, "device-local");
+            if let Ok(ds) = &result {
+                ds.close();
+            }
+            assert!(result.is_err(), "must refuse {name}");
+            assert_eq!(
+                fs::read(device_dir.join("test.db")).unwrap(),
+                b"legacy-db",
+                "must not rename the main db before rejecting {name}"
+            );
+            for (sidecar, contents) in [
+                ("test.db-wal", b"committed-wal".as_slice()),
+                ("test.db-shm", b"legacy-shm".as_slice()),
+            ] {
+                if sidecar != name {
+                    assert_eq!(fs::read(device_dir.join(sidecar)).unwrap(), contents);
+                }
+            }
+            assert!(fs::symlink_metadata(&planted).unwrap().is_symlink());
+            assert!(!device_dir.join("sync.db").exists());
+            assert_eq!(fs::read(&foreign).unwrap(), b"foreign-bytes");
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

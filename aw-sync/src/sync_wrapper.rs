@@ -154,9 +154,8 @@ pub fn push(client: &AwClient) -> Result<SyncReport, Box<dyn Error>> {
 }
 
 pub fn push_with_hostname(client: &AwClient, hostname: &str) -> Result<SyncReport, Box<dyn Error>> {
-    let sync_dir = crate::dirs::get_sync_dir()
-        .map_err(|_| "Could not get sync dir")?
-        .join(hostname);
+    let sync_root = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
+    let sync_dir = push_sync_dir(&sync_root, hostname)?;
 
     let sync_spec = SyncSpec {
         path: sync_dir,
@@ -165,4 +164,43 @@ pub fn push_with_hostname(client: &AwClient, hostname: &str) -> Result<SyncRepor
         start: None,
     };
     sync_run(client, &sync_spec, SyncMode::Push)
+}
+
+fn push_sync_dir(sync_root: &Path, hostname: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let sync_dir = sync_root.join(hostname);
+    // The configured root may be a user-owned symlink, but this child is
+    // replicated by peers and must not redirect push outside that root.
+    crate::sync::refuse_symlink(&sync_dir)?;
+    Ok(sync_dir)
+}
+
+#[cfg(all(test, unix))]
+mod staging_path_tests {
+    use super::*;
+
+    #[test]
+    fn push_refuses_symlinked_hostname_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let host = root.path().join("my-host");
+        std::os::unix::fs::symlink(outside.path(), &host).unwrap();
+
+        let result = push_sync_dir(root.path(), "my-host");
+        assert!(result.unwrap_err().to_string().contains("symlink"));
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn push_allows_symlinked_configured_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_root = dir.path().join("real-root");
+        fs::create_dir(&real_root).unwrap();
+        let root = dir.path().join("configured-root");
+        std::os::unix::fs::symlink(&real_root, &root).unwrap();
+
+        let host = push_sync_dir(&root, "my-host").unwrap();
+        assert_eq!(host, root.join("my-host"));
+        fs::create_dir_all(&host).unwrap();
+        assert!(real_root.join("my-host").is_dir());
+    }
 }

@@ -61,7 +61,7 @@ For more options, see `aw-sync --help`. Some notable options:
 
 Share the sync directory with Syncthing, Dropbox, Drive, or rsync **before** running aw-sync. aw-sync only reads and writes files in that folder; it does not transport them between devices.
 
-Default directory: `~/ActivityWatchSync` (`--sync-dir` or `AW_SYNC_DIR`).
+Default directory: `~/ActivityWatchSync`. Override with `--sync-dir`, `AW_SYNC_DIR`, or `sync_dir` in `aw-sync/config.toml` (absolute path). Precedence: CLI > env > config file > default. The default stays in `$HOME` so Syncthing/Dropbox can see it.
 
 Working paths (bare `aw-sync sync`, Android) write:
 

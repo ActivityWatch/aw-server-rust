@@ -968,13 +968,43 @@ fn reconcile_updated_events(
     bucket_from: &Bucket,
     bucket_to: &Bucket,
     resume_sync_at: Option<DateTime<Utc>>,
+    newest_timestamp: Option<DateTime<Utc>>,
 ) -> Result<(), String> {
     let Some(resume) = resume_sync_at else {
         return Ok(());
     };
-    let lookback_start = resume - EDIT_RECONCILE_LOOKBACK;
+    // The window covers dest's newest positive-duration event (ending at
+    // `resume`), even when it starts before `resume - 7d`. A zero-duration
+    // newest event starts at `resume` and is excluded by the filters below;
+    // edits to that point are not reconciled here. The main pull
+    // re-fetches that event clipped to a zero-length row at `resume`, and the
+    // boundary dedup built after this function only absorbs that clip if dest
+    // already holds the source's current payload. Leaving an edit of it
+    // unreconciled would insert the clip with the edited data and spend the
+    // old payload's dedup count on a genuine point at `resume` instead.
+    //
+    // End-clipped rows must not participate either: a longer event sharing
+    // the newest start can otherwise acquire the newest event's identity and
+    // be deleted as its stale sibling. Fetch 1ns past resume and skip anything
+    // ending after resume on both sides. True same-identity destination copies
+    // remain eligible for cleanup after an interrupted insert-before-delete.
+    let edit_window_start = resume - EDIT_RECONCILE_LOOKBACK;
+    let lookback_start = match newest_timestamp {
+        Some(newest) => newest.min(edit_window_start),
+        None => edit_window_start,
+    };
+    // get_events clips an event straddling the start bound to start at that
+    // bound. Querying from `lookback_start` would give a straddler the clipped
+    // identity `(lookback_start, shortened)` on both sides, and an edit would
+    // then replace the full dest row with the clipped copy, permanently
+    // dropping its earlier part. Query 1ns earlier instead: straddlers come back
+    // at `fetch_start` and the `>= lookback_start` filters below skip them.
+    // Their start lies outside the edit window, like any older event.
+    let fetch_start = lookback_start - Duration::nanoseconds(1);
 
-    // Bound both fetches to the lookback window ending at `resume`.
+    let fetch_end = resume + Duration::nanoseconds(1);
+
+    // Bound both fetches to the lookback window ending 1ns past `resume`.
     // end=None would load every newer source event when dest is far behind,
     // exhausting Android RAM and bypassing the paginated incremental copy.
     // get_events clips to the query range; dest-latest ends at `resume`, so
@@ -988,20 +1018,23 @@ fn reconcile_updated_events(
     // ActivityWatch/aw-server-rust#697 then drops this bucket, not the daemon.
     let source_events = ds_from.get_events(
         bucket_from.id.as_str(),
-        Some(lookback_start),
-        Some(resume),
+        Some(fetch_start),
+        Some(fetch_end),
         None,
     )?;
     let dest_events = ds_to.get_events(
         bucket_to.id.as_str(),
-        Some(lookback_start),
-        Some(resume),
+        Some(fetch_start),
+        Some(fetch_end),
         None,
     )?;
 
     let mut dest_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for event in dest_events {
-        if event.timestamp >= lookback_start && event.timestamp < resume {
+        if event.timestamp >= lookback_start
+            && event.timestamp < resume
+            && event.timestamp + event.duration <= resume
+        {
             dest_by_identity
                 .entry(event_identity(&event))
                 .or_default()
@@ -1012,9 +1045,12 @@ fn reconcile_updated_events(
     let mut src_by_identity: HashMap<(DateTime<Utc>, i64), Vec<Event>> = HashMap::new();
     for src in source_events {
         // Skip events that start at/after the dest cursor; the incremental
-        // copy owns those. Do not use end>resume: the dest-latest event starts
-        // before resume and must still be title-reconciled.
-        if src.timestamp < lookback_start || src.timestamp >= resume {
+        // copy owns those. Rows ending after resume may be end-clipped; leave
+        // them to the incremental path rather than using a shortened identity.
+        if src.timestamp < lookback_start
+            || src.timestamp >= resume
+            || src.timestamp + src.duration > resume
+        {
             continue;
         }
         src_by_identity
@@ -1028,6 +1064,9 @@ fn reconcile_updated_events(
             Some(dsts) if !dsts.is_empty() => dsts,
             _ => continue,
         };
+        if identity.0 < edit_window_start && srcs.len() != 1 {
+            continue;
+        }
         let mut to_insert = Vec::new();
         for src in srcs {
             if let Some(idx) = dsts.iter().position(|dst| dst.data == src.data) {
@@ -1093,7 +1132,14 @@ fn sync_one(
         info!("   + Starting from beginning");
     }
 
-    reconcile_updated_events(ds_from, ds_to, &bucket_from, &bucket_to, resume_sync_at)?;
+    reconcile_updated_events(
+        ds_from,
+        ds_to,
+        &bucket_from,
+        &bucket_to,
+        resume_sync_at,
+        newest_timestamp,
+    )?;
 
     // Build a fingerprint set of events already at the tail of the destination, to dedup
     // the source fetch against events that overlap the resume boundary. The source fetch

@@ -45,6 +45,29 @@ fn null_settings_value_returns_error_without_killing_worker() {
 }
 
 #[test]
+fn corrupt_non_settings_value_is_ignored_by_settings_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.db");
+    let ds = Datastore::new(path.to_str().unwrap().to_owned(), false);
+    ds.set_key_value_and_commit("other.broken", "1").unwrap();
+    ds.set_key_value_and_commit("settings.valid", "2").unwrap();
+    ds.close();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE key_value SET value = NULL WHERE key = 'other.broken'",
+        [],
+    )
+    .unwrap();
+    let ds = Datastore::new(path.to_str().unwrap().to_owned(), false);
+
+    let settings = ds.get_key_values("%").unwrap();
+    assert_eq!(settings.len(), 1);
+    assert_eq!(settings["settings.valid"], "2");
+    assert!(ds.get_key_values("other%").unwrap().is_empty());
+    ds.close();
+}
+
+#[test]
 fn failed_settings_delete_returns_error_without_killing_worker() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.db");

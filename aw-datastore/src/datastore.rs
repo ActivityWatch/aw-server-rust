@@ -1580,15 +1580,15 @@ impl DatastoreInstance {
                     let (key, value) = row.map_err(|err| {
                         DatastoreError::InternalError(format!("Failed to read settings row: {err}"))
                     })?;
+                    // Only return keys starting with "settings.".
+                    if !key.starts_with("settings.") {
+                        continue;
+                    }
                     let value = value.map_err(|err| {
                         DatastoreError::InternalError(format!(
                             "Failed to read settings value for key {key:?}: {err}"
                         ))
                     })?;
-                    // Only return keys starting with "settings.".
-                    if !key.starts_with("settings.") {
-                        continue;
-                    }
                     output.insert(key, value);
                 }
                 Ok(output)

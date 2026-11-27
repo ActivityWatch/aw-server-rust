@@ -116,6 +116,7 @@ impl AwClient {
     );
     proxy_method!(insert_event, (), bucketname: &str, event: &Event);
     proxy_method!(insert_events, (), bucketname: &str, events: Vec<Event>);
+    proxy_method!(flush, (),);
     proxy_method!(
         heartbeat,
         (),

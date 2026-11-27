@@ -384,6 +384,16 @@ impl AwClient {
         Ok(())
     }
 
+    /// Wait until the server has committed acknowledged writes.
+    ///
+    /// Inserts and heartbeats can return before the datastore worker commits
+    /// (15s / 100-event window). Sync uses this before recording a rowid cursor.
+    pub async fn flush(&self) -> Result<(), reqwest::Error> {
+        let url = self.api_url(&["flush"]);
+        Self::send_success(self.client.post(url)).await?;
+        Ok(())
+    }
+
     pub async fn heartbeat(
         &self,
         bucketname: &str,

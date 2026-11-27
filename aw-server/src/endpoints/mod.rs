@@ -212,6 +212,21 @@ fn root_manifest(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
     get_file("manifest.json".into(), state)
 }
 
+/// Make acknowledged datastore writes durable.
+///
+/// Heartbeats and inserts return before the worker commits (15s / 100-event
+/// window). aw-sync calls this before advancing a rowid cursor so a crash
+/// cannot skip source rows whose dest copies never landed.
+#[post("/")]
+fn datastore_flush(state: &State<ServerState>) -> Result<Status, HttpErrorJson> {
+    let _flushing = state.flush_lock.lock().unwrap();
+    state
+        .datastore
+        .force_commit()
+        .map_err(|e| HttpErrorJson::new(Status::InternalServerError, format!("{e:?}")))?;
+    Ok(Status::NoContent)
+}
+
 #[get("/")]
 fn server_info(config: &State<AWConfig>, state: &State<ServerState>) -> Json<Info> {
     Json(Info {
@@ -272,6 +287,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             ],
         )
         .mount("/api/0/info", routes![server_info])
+        .mount("/api/0/flush", routes![datastore_flush])
         .mount(
             "/api/0/buckets",
             routes![

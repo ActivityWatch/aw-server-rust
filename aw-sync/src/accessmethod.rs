@@ -62,6 +62,16 @@ pub trait AccessMethod: std::fmt::Debug {
     fn get_max_event_rowid(&self, _bucket_id: &str) -> Option<Result<i64, String>> {
         None
     }
+
+    /// Make acknowledged writes durable before the caller records progress.
+    ///
+    /// Datastore inserts already force-commit in this trait. AwClient talks to
+    /// aw-server, which acks inserts before the worker commits (15s / 100-event
+    /// window). A no-op here would let a crash skip source rows whose dest
+    /// copies never landed.
+    fn flush(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Every method here returns a `Result`, so a datastore failure must be reported
@@ -147,6 +157,10 @@ impl AccessMethod for Datastore {
     fn get_max_event_rowid(&self, bucket_id: &str) -> Option<Result<i64, String>> {
         Some(Datastore::get_max_event_rowid(self, bucket_id).map_err(|e| format!("{e:?}")))
     }
+
+    fn flush(&self) -> Result<(), String> {
+        self.force_commit().map_err(|e| format!("{e:?}"))
+    }
 }
 
 impl AccessMethod for AwClient {
@@ -215,5 +229,9 @@ impl AccessMethod for AwClient {
             AwClient::delete_event(self, bucket_id, event_id).map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    fn flush(&self) -> Result<(), String> {
+        AwClient::flush(self).map_err(|e| e.to_string())
     }
 }

@@ -128,6 +128,28 @@ fn cursor_key(src_device_id: &str, bucket_id: &str) -> String {
     format!("sync.cursor.{}\u{1f}{}", enc(src_device_id), enc(bucket_id))
 }
 
+/// Persist the rowid cursor only after destination writes are durable.
+///
+/// Production `ds_to` is AwClient: aw-server acks inserts before its worker
+/// commits. Recording the cursor first permanently skips those source rows
+/// if the dest process dies in that window.
+fn persist_rowid_cursor(
+    ds_to: &dyn AccessMethod,
+    cds: &Datastore,
+    ck: &str,
+    max_rowid: i64,
+    bucket_id: &str,
+) -> Result<(), String> {
+    ds_to.flush().map_err(|e| {
+        format!("Failed to flush destination before persisting sync cursor for '{bucket_id}': {e}")
+    })?;
+    cds.set_key_value(ck, &max_rowid.to_string())
+        .map_err(|e| format!("Failed to persist sync cursor for '{bucket_id}': {e:?}"))?;
+    cds.force_commit()
+        .map_err(|e| format!("Failed to commit sync cursor for '{bucket_id}': {e:?}"))?;
+    Ok(())
+}
+
 /// Discover all sync peers reachable from `sync_root`, excluding `own_device_id`.
 ///
 /// Unions the 3-level Android/new-desktop walker (`list_remote_dbs`) with the
@@ -1154,12 +1176,25 @@ fn reconcile_updated_events(
             None,
         )?
     };
-    let mut dest_events = ds_to.get_events(
-        bucket_to.id.as_str(),
-        Some(lookback_start),
-        Some(resume),
-        None,
-    )?;
+    // Unclipped dest matches unclipped source for in-place heartbeat
+    // refresh: a long AFK/window event that started before lookback_start
+    // still has its original timestamp. Clipping would shift dest to
+    // lookback_start and miss the duration update.
+    let mut dest_events = if use_unclipped_source {
+        ds_to.get_events_unclipped(
+            bucket_to.id.as_str(),
+            Some(lookback_start),
+            Some(resume),
+            None,
+        )?
+    } else {
+        ds_to.get_events(
+            bucket_to.id.as_str(),
+            Some(lookback_start),
+            Some(resume),
+            None,
+        )?
+    };
 
     if use_unclipped_source {
         let mut existing: HashSet<_> = dest_events
@@ -1170,7 +1205,11 @@ fn reconcile_updated_events(
         // cursor. Refresh a uniquely identified duration edit here rather
         // than expecting the incremental rowid query to return it again.
         for src in &source_events {
-            if src.timestamp < lookback_start || src.timestamp >= resume {
+            // Overlap the lookback window. A ten-day AFK event starts before
+            // lookback_start; skipping on start time leaves heartbeat
+            // extensions stale forever because the rowid path never re-fetches
+            // the same id.
+            if src.timestamp >= resume || src.timestamp + src.duration <= lookback_start {
                 continue;
             }
             if source_events
@@ -1372,30 +1411,31 @@ fn sync_one(
             // sequence at 1. A stored cursor above the current source max rowid
             // therefore means the cursor refers to a previous incarnation of the
             // bucket: keep it and every new row below it would be skipped forever.
-            // Reset to 0; the empty-destination and bootstrap logic below then
-            // re-establishes a sane position.
+            // Reset to 0 and copy from the start of the new incarnation. Do not
+            // treat that reset as an upgrade bootstrap: bootstrap skips source
+            // history the dest already has, which is wrong when the source was
+            // restored with new ids and old timestamps.
             let source_max_rowid = ds_from
                 .get_max_event_rowid(bucket_from.id.as_str())
                 .and_then(|r| r.ok())
                 .unwrap_or(i64::MAX);
-            let stored_rowid: i64 = if eventcount_to_old == 0 {
-                0
-            } else {
-                let stored: i64 = cds
-                    .get_key_value(&ck)
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                if stored > source_max_rowid {
+            let stored: i64 = cds
+                .get_key_value(&ck)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let source_recreated = eventcount_to_old > 0 && stored > source_max_rowid;
+            let stored_rowid: i64 = if eventcount_to_old == 0 || source_recreated {
+                if source_recreated {
                     warn!(
                         "Stored cursor {} for '{}' is above source max rowid {}; \
                          source bucket was likely recreated — resetting cursor",
                         stored, bucket_from.id, source_max_rowid
                     );
-                    0
-                } else {
-                    stored
                 }
+                0
+            } else {
+                stored
             };
 
             // P1 (upgrade bootstrap): saved_rowid == 0 but the destination already
@@ -1405,7 +1445,8 @@ fn sync_one(
             // max rowid so subsequent passes only fetch genuinely new events — and
             // fall through to the timestamp path for *this* pass so new events since
             // the last timestamp-based sync are still caught.
-            let bootstrap_pass = stored_rowid == 0 && eventcount_to_old > 0;
+            // A cursor reset from source recreation is not an upgrade.
+            let bootstrap_pass = stored_rowid == 0 && eventcount_to_old > 0 && !source_recreated;
             Some((cds, ck, stored_rowid, bootstrap_pass))
         } else {
             None
@@ -1483,19 +1524,7 @@ fn sync_one(
                 if max_rowid <= previous_scanned {
                     // No rows were scanned. Persist even for an empty initial
                     // query, so a fresh empty source establishes its cursor.
-                    cds.set_key_value(&ck, &max_rowid.to_string())
-                        .map_err(|e| {
-                            format!(
-                                "Failed to persist sync cursor for '{}': {e:?}",
-                                bucket_from.id
-                            )
-                        })?;
-                    cds.force_commit().map_err(|e| {
-                        format!(
-                            "Failed to commit sync cursor for '{}': {e:?}",
-                            bucket_from.id
-                        )
-                    })?;
+                    persist_rowid_cursor(ds_to, cds, &ck, max_rowid, bucket_from.id.as_str())?;
                     break;
                 }
                 // A short parsed page can still be a full scanned page containing
@@ -1655,26 +1684,10 @@ fn sync_one(
                 for batch in to_insert.chunks(BATCH_SIZE) {
                     ds_to.insert_events(bucket_to.id.as_str(), batch.to_vec())?;
                 }
-                // P1 retry-safety: persist the cursor after every page so that a
-                // failure on a later page does not replay already-inserted pages;
-                // combined with the (timestamp, end_time, data) replay dedup
-                // above, a crash between insert and persist is safe to retry.
-                // The cursor datastore commits asynchronously, so force the
-                // commit here: otherwise a crash after set_key_value returns
-                // can still lose the cursor and widen the replay window.
-                cds.set_key_value(&ck, &max_rowid.to_string())
-                    .map_err(|e| {
-                        format!(
-                            "Failed to persist sync cursor for '{}': {e:?}",
-                            bucket_from.id
-                        )
-                    })?;
-                cds.force_commit().map_err(|e| {
-                    format!(
-                        "Failed to commit sync cursor for '{}': {e:?}",
-                        bucket_from.id
-                    )
-                })?;
+                // Persist after dest flush so a crash cannot advance the
+                // cursor past events the dest worker has not committed.
+                // Replay dedup still covers insert-then-crash-before-cursor.
+                persist_rowid_cursor(ds_to, cds, &ck, max_rowid, bucket_from.id.as_str())?;
                 let (next_batch, next_scanned) = ds_from
                     .get_events_since_rowid(
                         bucket_from.id.as_str(),
@@ -1952,12 +1965,7 @@ fn sync_one(
     // finished successfully; on any `?` error above it stays unpersisted and
     // the next pass re-bootstraps (retry-safe).
     if let Some((cds, ck, max_rowid)) = deferred_bootstrap_cursor {
-        if let Err(e) = cds.set_key_value(&ck, &max_rowid.to_string()) {
-            warn!(
-                "Failed to persist bootstrapped sync cursor for '{}': {e:?}",
-                bucket_to.id
-            );
-        }
+        persist_rowid_cursor(ds_to, cds, &ck, max_rowid, bucket_from.id.as_str())?;
     }
 
     Ok(BucketReport {
@@ -4203,6 +4211,323 @@ mod rowid_cursor_tests {
         ds_src.close();
         ds_dest.close();
         let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    /// The success-path test above cannot catch a persist-before-timestamp-path
+    /// regression: both orderings leave the same final cursor. Inject a failure
+    /// into dest writes so a premature persist would still be visible.
+    #[test]
+    fn bootstrap_cursor_is_absent_when_timestamp_path_fails() {
+        #[derive(Debug)]
+        struct FailWrites(Datastore);
+        impl AccessMethod for FailWrites {
+            fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
+                AccessMethod::get_buckets(&self.0)
+            }
+            fn get_bucket(&self, id: &str) -> Result<Bucket, aw_datastore::DatastoreError> {
+                self.0.get_bucket(id)
+            }
+            fn create_bucket(&self, bucket: &Bucket) -> Result<(), aw_datastore::DatastoreError> {
+                AccessMethod::create_bucket(&self.0, bucket)
+            }
+            fn get_events(
+                &self,
+                id: &str,
+                start: Option<DateTime<Utc>>,
+                end: Option<DateTime<Utc>>,
+                limit: Option<u64>,
+            ) -> Result<Vec<Event>, String> {
+                AccessMethod::get_events(&self.0, id, start, end, limit)
+            }
+            fn insert_events(&self, _id: &str, _events: Vec<Event>) -> Result<(), String> {
+                Err("injected timestamp-path failure".into())
+            }
+            fn get_event_count(&self, id: &str) -> Result<i64, String> {
+                AccessMethod::get_event_count(&self.0, id)
+            }
+            fn heartbeat(&self, _id: &str, _event: Event, _duration: f64) -> Result<(), String> {
+                Err("injected timestamp-path failure".into())
+            }
+            fn delete_events_by_id(&self, id: &str, ids: Vec<i64>) -> Result<(), String> {
+                AccessMethod::delete_events_by_id(&self.0, id, ids)
+            }
+            fn get_stored_event(&self, id: &str, event_id: i64) -> Result<Option<Event>, String> {
+                AccessMethod::get_stored_event(&self.0, id, event_id)
+            }
+        }
+
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = FailWrites(Datastore::new_in_memory(false));
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-bootstrap-fail-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
+
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        let dest_bucket_id = format!("{}-synced-from-{}", bucket_id, src_hostname);
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        let initial: Vec<Event> = [10i64, 20, 30].iter().map(|&s| make_event(s)).collect();
+        ds_src.insert_events(bucket_id, &initial).unwrap();
+        ds_src.force_commit().unwrap();
+        ds_dest
+            .0
+            .create_bucket(&make_bucket(&dest_bucket_id, "dest-host"))
+            .unwrap();
+        ds_dest
+            .0
+            .insert_events(&dest_bucket_id, &[make_event(10)])
+            .unwrap();
+        ds_dest.0.force_commit().unwrap();
+
+        let err = sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect_err("timestamp path must fail");
+        assert!(
+            err.contains("injected timestamp-path failure"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            cursor_ds
+                .get_key_value(&cursor_key(src_hostname, bucket_id))
+                .is_err(),
+            "bootstrap cursor must not be persisted when the timestamp path fails"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.0.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    #[test]
+    fn cursor_is_not_persisted_when_destination_flush_fails() {
+        #[derive(Debug)]
+        struct FlushFailDest(Datastore);
+        impl AccessMethod for FlushFailDest {
+            fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
+                AccessMethod::get_buckets(&self.0)
+            }
+            fn get_bucket(&self, id: &str) -> Result<Bucket, aw_datastore::DatastoreError> {
+                self.0.get_bucket(id)
+            }
+            fn create_bucket(&self, bucket: &Bucket) -> Result<(), aw_datastore::DatastoreError> {
+                AccessMethod::create_bucket(&self.0, bucket)
+            }
+            fn get_events(
+                &self,
+                id: &str,
+                start: Option<DateTime<Utc>>,
+                end: Option<DateTime<Utc>>,
+                limit: Option<u64>,
+            ) -> Result<Vec<Event>, String> {
+                AccessMethod::get_events(&self.0, id, start, end, limit)
+            }
+            fn insert_events(&self, id: &str, events: Vec<Event>) -> Result<(), String> {
+                AccessMethod::insert_events(&self.0, id, events)
+            }
+            fn get_event_count(&self, id: &str) -> Result<i64, String> {
+                AccessMethod::get_event_count(&self.0, id)
+            }
+            fn heartbeat(&self, id: &str, event: Event, duration: f64) -> Result<(), String> {
+                AccessMethod::heartbeat(&self.0, id, event, duration)
+            }
+            fn delete_events_by_id(&self, id: &str, ids: Vec<i64>) -> Result<(), String> {
+                AccessMethod::delete_events_by_id(&self.0, id, ids)
+            }
+            fn get_stored_event(&self, id: &str, event_id: i64) -> Result<Option<Event>, String> {
+                AccessMethod::get_stored_event(&self.0, id, event_id)
+            }
+            fn flush(&self) -> Result<(), String> {
+                Err("injected dest crash before commit".into())
+            }
+        }
+
+        let ds_src = Datastore::new_in_memory(false);
+        let ds_dest = FlushFailDest(Datastore::new_in_memory(false));
+        let cursor_root = std::env::temp_dir().join(format!(
+            "aw-sync-cursor-flush-fail-{}",
+            crate::util::unique_test_suffix(),
+        ));
+        fs::create_dir_all(&cursor_root).unwrap();
+        let cursor_ds =
+            open_or_create_cursor_ds(&cursor_root.join("cursors.db")).expect("cursor_ds must open");
+        let src_hostname = "test-device";
+        let bucket_id = "aw-watcher-test";
+        ds_src
+            .create_bucket(&make_bucket(bucket_id, src_hostname))
+            .unwrap();
+        ds_src
+            .insert_events(bucket_id, &[make_event(10), make_event(20)])
+            .unwrap();
+        ds_src.force_commit().unwrap();
+
+        let err = sync_datastores_with_cursor(
+            &ds_src,
+            &ds_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect_err("flush failure must abort the pull");
+        assert!(
+            err.contains("injected dest crash before commit"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            cursor_ds
+                .get_key_value(&cursor_key(src_hostname, bucket_id))
+                .is_err(),
+            "cursor must not advance past dest writes that were never flushed"
+        );
+
+        cursor_ds.close();
+        ds_src.close();
+        ds_dest.0.close();
+        let _ = fs::remove_dir_all(&cursor_root);
+    }
+
+    #[test]
+    fn long_afk_heartbeat_extension_reaches_destination() {
+        let source = Datastore::new_in_memory(false);
+        let dest = Datastore::new_in_memory(false);
+        let cursors = Datastore::new_in_memory(false);
+        let bucket_id = "aw-watcher-afk";
+        let device = "afk-device";
+        let dest_id = format!("{bucket_id}-synced-from-{device}");
+        source
+            .create_bucket(&make_bucket(bucket_id, device))
+            .unwrap();
+        let start = Utc::now() - Duration::days(10);
+        let event = make_event_full(start, 0, 10 * 86400, serde_json::json!({"status": "afk"}));
+        source.insert_events(bucket_id, &[event]).unwrap();
+        source.force_commit().unwrap();
+        let spec = SyncSpec::default();
+        let pull = || {
+            sync_datastores_with_cursor(
+                &source,
+                &dest,
+                false,
+                None,
+                &spec,
+                Some(&cursors),
+                Some(device),
+            )
+            .unwrap()
+        };
+        pull();
+        let before = source.get_events(bucket_id, None, None, None).unwrap()[0].id;
+        let heartbeat =
+            make_event_full(start, 10 * 86400, 60, serde_json::json!({"status": "afk"}));
+        source.heartbeat(bucket_id, heartbeat, 120.0).unwrap();
+        source.force_commit().unwrap();
+        let updated = source.get_events(bucket_id, None, None, None).unwrap();
+        assert_eq!(updated[0].id, before, "heartbeat must update in place");
+        assert_eq!(updated[0].duration, Duration::seconds(10 * 86400 + 60));
+        pull();
+        let copied = dest.get_events(&dest_id, None, None, None).unwrap();
+        assert_eq!(
+            copied.len(),
+            1,
+            "dest must keep a single AFK row: {copied:?}"
+        );
+        assert_eq!(
+            copied[0].duration,
+            Duration::seconds(10 * 86400 + 60),
+            "heartbeat extension past lookback_start must reach dest"
+        );
+        source.close();
+        dest.close();
+        cursors.close();
+    }
+
+    #[test]
+    fn restored_source_is_not_treated_as_upgrade_bootstrap() {
+        let dest = Datastore::new_in_memory(false);
+        let cursors = Datastore::new_in_memory(false);
+        let bucket_id = "aw-watcher-test";
+        let device = "restore-device";
+        let dest_id = format!("{bucket_id}-synced-from-{device}");
+        let spec = SyncSpec::default();
+
+        let src_old = Datastore::new_in_memory(false);
+        src_old
+            .create_bucket(&make_bucket(bucket_id, device))
+            .unwrap();
+        let recent: Vec<Event> = (0..20).map(|i| make_event(100 + i * 10)).collect();
+        src_old.insert_events(bucket_id, &recent).unwrap();
+        src_old.force_commit().unwrap();
+        sync_datastores_with_cursor(
+            &src_old,
+            &dest,
+            false,
+            None,
+            &spec,
+            Some(&cursors),
+            Some(device),
+        )
+        .unwrap();
+        assert_eq!(dest.get_event_count(&dest_id, None, None).unwrap(), 20);
+        src_old.close();
+
+        let src_restored = Datastore::new_in_memory(false);
+        src_restored
+            .create_bucket(&make_bucket(bucket_id, device))
+            .unwrap();
+        let ancient_base = Utc::now() - Duration::days(20);
+        let restored: Vec<Event> = (0..10)
+            .map(|i| {
+                make_event_full(
+                    ancient_base,
+                    i * 60,
+                    1,
+                    serde_json::json!({"seq": format!("old-{i}")}),
+                )
+            })
+            .collect();
+        src_restored.insert_events(bucket_id, &restored).unwrap();
+        src_restored.force_commit().unwrap();
+        sync_datastores_with_cursor(
+            &src_restored,
+            &dest,
+            false,
+            None,
+            &spec,
+            Some(&cursors),
+            Some(device),
+        )
+        .unwrap();
+        let dest_events = dest.get_events(&dest_id, None, None, None).unwrap();
+        let restored_copied = dest_events
+            .iter()
+            .filter(|e| {
+                e.data
+                    .get("seq")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s.starts_with("old-"))
+            })
+            .count();
+        assert_eq!(
+            restored_copied, 10,
+            "restored historical source rows must be copied, not skipped by upgrade bootstrap: {dest_events:?}"
+        );
+        src_restored.close();
+        dest.close();
+        cursors.close();
     }
 
     /// A timestamp-path sync (no rowid cursor) must replace an event whose

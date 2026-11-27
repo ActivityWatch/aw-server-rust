@@ -63,6 +63,12 @@ pub trait AccessMethod: std::fmt::Debug {
         None
     }
 
+    /// Whether this destination can durably acknowledge cursor progress.
+    /// HTTP implementations probe the flush endpoint before any pull writes.
+    fn supports_durable_cursors(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+
     /// Make acknowledged writes durable before the caller records progress.
     ///
     /// Datastore inserts already force-commit in this trait. AwClient talks to
@@ -231,7 +237,69 @@ impl AccessMethod for AwClient {
         Ok(())
     }
 
+    fn supports_durable_cursors(&self) -> Result<bool, String> {
+        match AwClient::flush(self) {
+            Ok(()) => Ok(true),
+            // Older Rust servers and aw-server-python have no flush route.
+            // Keep their timestamp path; do not assume an HTTP ack is durable.
+            Err(e)
+                if matches!(
+                    e.status(),
+                    Some(StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED)
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     fn flush(&self) -> Result<(), String> {
         AwClient::flush(self).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    #[test]
+    fn http_durable_cursor_support_requires_a_successful_flush() {
+        for (status, expected) in [
+            (204, Some(true)),
+            (404, Some(false)),
+            (405, Some(false)),
+            (500, None),
+            (401, None),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let mut buf = [0; 1024];
+                    let n = stream.read(&mut buf).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buf[..n]);
+                }
+                assert!(request.starts_with(b"POST /api/0/flush "));
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            });
+            let client = AwClient::new("127.0.0.1", port, "cursor-support-test").unwrap();
+            let result = AccessMethod::supports_durable_cursors(&client);
+            assert_eq!(result.ok(), expected, "HTTP status {status}");
+            server.join().unwrap();
+        }
     }
 }

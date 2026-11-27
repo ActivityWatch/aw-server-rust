@@ -111,7 +111,17 @@ fn open_or_create_cursor_ds(path: &Path) -> Result<Datastore, String> {
         fs::create_dir_all(dir)
             .map_err(|e| format!("Failed to create cursor dir {}: {e}", dir.display()))?;
     }
-    create_datastore(path)
+    let ds = create_datastore(path)?;
+    // Datastore opens SQLite lazily on its worker. Probe it before handing the
+    // store to sync, so a dead worker takes the advertised timestamp fallback.
+    if let Err(e) = ds.force_commit() {
+        ds.close();
+        return Err(format!(
+            "Failed to open cursor datastore {}: {e:?}",
+            path.display()
+        ));
+    }
+    Ok(ds)
 }
 
 /// Key identifying the last-synced source rowid for a given (device, bucket) pair.
@@ -178,7 +188,7 @@ pub(crate) fn discover_peers(
 /// peers already imported) is persisted so `aw-sync status` can show the
 /// failure without the process having to stay alive.
 ///
-/// Pull cursors are stored under `sync_spec.path`, which must be the sync root.
+/// Pull cursors are stored locally and keyed by `sync_spec.path`, the sync root.
 /// Callers whose `path` is a host subfolder use [`sync_run_with_cursor_root`].
 pub fn sync_run(
     client: &AwClient,
@@ -309,8 +319,8 @@ pub(crate) fn sync_run_with_cursor_root(
         // source rowid rather than the destination's newest timestamp — fixing
         // late-arriving backfill blindness (#696). It lives in aw-sync's own
         // state dir, root-scoped, never in the (shared) sync root (#789).
-        // Non-fatal: if cursor_ds creation fails we fall back to the
-        // timestamp-based path silently.
+        // Non-fatal: an unavailable cursor store or legacy destination takes
+        // the timestamp path. Real flush errors still fail closed.
         let cursor_ds = cursor_store_path(cursor_root)
             .and_then(|path| open_or_create_cursor_ds(&path))
             .map_err(|e| {
@@ -991,6 +1001,15 @@ fn sync_datastores_with_cursor(
     src_device_id: Option<&str>,
 ) -> Result<Vec<BucketReport>, String> {
     info!("Syncing {:?} to {:?} (cursor path)", ds_from, ds_to);
+    // Probe before any bucket writes. Only an absent route downgrades to the
+    // legacy path; auth, network and server failures remain errors. Never
+    // persist rowid progress on a destination without a durability barrier.
+    let cursor_ds = if cursor_ds.is_some() && !ds_to.supports_durable_cursors()? {
+        warn!("Destination has no flush endpoint; using timestamp-based sync without durable rowid cursors");
+        None
+    } else {
+        cursor_ds
+    };
     let mut buckets_from: Vec<Bucket> = ds_from
         .get_buckets()
         .map_err(|e| format!("Failed to list buckets in {ds_from:?}: {e}"))?
@@ -2976,6 +2995,20 @@ mod rowid_cursor_tests {
     use chrono::{Duration, Utc};
 
     #[test]
+    fn corrupt_cursor_store_is_rejected_before_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cursors.db");
+        fs::write(&path, b"not a sqlite database").unwrap();
+        match open_or_create_cursor_ds(&path) {
+            Ok(ds) => {
+                ds.close();
+                panic!("a broken cursor store must trigger timestamp fallback");
+            }
+            Err(_) => {}
+        }
+    }
+
+    #[test]
     fn get_stored_event_missing_event_is_none_not_error() {
         // Regression: a missing event must come back as Ok(None) per the
         // AccessMethod contract, not Err(NoSuchEvent) — reconcile callers use
@@ -4315,7 +4348,7 @@ mod rowid_cursor_tests {
     #[test]
     fn cursor_is_not_persisted_when_destination_flush_fails() {
         #[derive(Debug)]
-        struct FlushFailDest(Datastore);
+        struct FlushFailDest(Datastore, bool);
         impl AccessMethod for FlushFailDest {
             fn get_buckets(&self) -> Result<HashMap<String, Bucket>, String> {
                 AccessMethod::get_buckets(&self.0)
@@ -4350,13 +4383,16 @@ mod rowid_cursor_tests {
             fn get_stored_event(&self, id: &str, event_id: i64) -> Result<Option<Event>, String> {
                 AccessMethod::get_stored_event(&self.0, id, event_id)
             }
+            fn supports_durable_cursors(&self) -> Result<bool, String> {
+                Ok(!self.1)
+            }
             fn flush(&self) -> Result<(), String> {
                 Err("injected dest crash before commit".into())
             }
         }
 
         let ds_src = Datastore::new_in_memory(false);
-        let ds_dest = FlushFailDest(Datastore::new_in_memory(false));
+        let ds_dest = FlushFailDest(Datastore::new_in_memory(false), false);
         let cursor_root = std::env::temp_dir().join(format!(
             "aw-sync-cursor-flush-fail-{}",
             crate::util::unique_test_suffix(),
@@ -4394,6 +4430,29 @@ mod rowid_cursor_tests {
                 .is_err(),
             "cursor must not advance past dest writes that were never flushed"
         );
+
+        // A legacy destination with no durability barrier must still pull via
+        // the timestamp path, never call flush, and never save a rowid cursor.
+        let legacy_dest = FlushFailDest(Datastore::new_in_memory(false), true);
+        sync_datastores_with_cursor(
+            &ds_src,
+            &legacy_dest,
+            false,
+            None,
+            &SyncSpec::default(),
+            Some(&cursor_ds),
+            Some(src_hostname),
+        )
+        .expect("legacy destination must retain timestamp-path compatibility");
+        let dest_id = format!("{bucket_id}-synced-from-{src_hostname}");
+        assert_eq!(
+            legacy_dest.0.get_event_count(&dest_id, None, None).unwrap(),
+            2
+        );
+        assert!(cursor_ds
+            .get_key_value(&cursor_key(src_hostname, bucket_id))
+            .is_err());
+        legacy_dest.0.close();
 
         cursor_ds.close();
         ds_src.close();
@@ -4724,11 +4783,25 @@ mod rowid_cursor_tests {
         let _ = fs::remove_dir_all(&cursor_root);
     }
 
-    /// #789: the cursor store must live in aw-sync's local state dir, never in
-    /// the sync root. The root is shared state (Dropbox/Syncthing/NFS/USB), so
-    /// a live sqlite file there is replicated to every peer.
+    /// Exercise the production directory resolver, not just the path builder.
+    /// Read the environment without changing it so parallel tests remain safe.
     #[test]
-    fn cursor_store_is_outside_the_sync_root() {
+    fn production_cursor_store_uses_local_state_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let expected_dir = std::env::var("AW_SYNC_CURSORS_DIR")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| aw_server::dirs::data_dir_path().unwrap().join("aw-sync"));
+        let path = cursor_store_path(root.path()).unwrap();
+        assert_eq!(path.parent(), Some(expected_dir.as_path()));
+        assert!(!path.starts_with(root.path()));
+    }
+
+    /// The path builder must preserve its explicitly supplied local directory
+    /// and root-scoped filename; production directory selection is tested above.
+    #[test]
+    fn cursor_store_path_builder_preserves_local_directory() {
         let local_state = std::env::temp_dir().join(format!(
             "aw-sync-local-state-{}",
             crate::util::unique_test_suffix(),

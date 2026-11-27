@@ -1572,13 +1572,18 @@ impl DatastoreInstance {
         let mut output = HashMap::<String, String>::new();
         // Rusqlite's get wants index and item type as parameters.
         let result = stmt.query_map([pattern], |row| {
-            Ok((row.get::<usize, String>(0)?, row.get::<usize, String>(1)?))
+            Ok((row.get::<usize, String>(0)?, row.get::<usize, String>(1)))
         });
         match result {
             Ok(settings) => {
                 for row in settings {
                     let (key, value) = row.map_err(|err| {
                         DatastoreError::InternalError(format!("Failed to read settings row: {err}"))
+                    })?;
+                    let value = value.map_err(|err| {
+                        DatastoreError::InternalError(format!(
+                            "Failed to read settings value for key {key:?}: {err}"
+                        ))
                     })?;
                     // Only return keys starting with "settings.".
                     if !key.starts_with("settings.") {

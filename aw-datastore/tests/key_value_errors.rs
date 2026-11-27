@@ -22,6 +22,10 @@ fn null_settings_value_returns_error_without_killing_worker() {
         matches!(error, DatastoreError::InternalError(_)),
         "{error:?}"
     );
+    assert!(
+        matches!(&error, DatastoreError::InternalError(message) if message.contains("settings.broken")),
+        "the error must identify the key to repair: {error:?}"
+    );
     assert!(ds.get_buckets().is_ok(), "a bad setting killed the worker");
     assert_eq!(ds.get_key_value("settings.valid").unwrap(), "2");
     let value: Option<String> = conn
